@@ -29860,6 +29860,146 @@ fn distinct_xy_pump_without_paired_binding_is_unsupported() {
     );
 }
 
+/// CR 118.9 + CR 601.2b: "Once during each of your turns, you may cast an
+/// enchantment spell by paying life equal to its mana value rather than paying
+/// its mana cost." (Demon of Fate's Design) lowers to a once-per-turn
+/// `CastWithAlternativeCost` with a `PayLife { SelfManaValue }` cost scoped to
+/// enchantment spells.
+#[test]
+fn cast_by_paying_life_alt_cost_demon_of_fates_design() {
+    use crate::types::ability::{AbilityCost, QuantityExpr, QuantityRef};
+    let text = "Once during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.";
+    let def = parse_static_line(text).expect("Demon of Fate's Design static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::SelfManaValue,
+                },
+            },
+            timing_permission: None,
+            frequency: CastFrequency::OncePerTurn,
+        },
+        "expected CastWithAlternativeCost with PayLife/SelfManaValue and OncePerTurn, got {:?}",
+        def.mode
+    );
+
+    // The "once during each of your turns" prefix must gate on DuringYourTurn.
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "expected DuringYourTurn condition, got {:?}",
+        def.condition
+    );
+
+    // Affected filter must scope to enchantment spells.
+    let filter_str = format!("{:?}", def.affected);
+    assert!(
+        filter_str.contains("Enchantment"),
+        "affected filter must include Enchantment type, got {:?}",
+        def.affected
+    );
+
+    // Full Oracle dispatch (with the real card name normalization) must route
+    // the line to the same static, leaving no Unimplemented node behind.
+    let card_text = "Once during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Demon of Fate's Design",
+        &[],
+        &["Creature".to_string()],
+        &["Demon".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode),
+        "full Oracle dispatch must route Demon's line to the alt-cost static, got {:?}",
+        parsed.statics
+    );
+}
+
+/// Negative guard: the "by paying life" parser must NOT intercept the
+/// "without paying" free-cast class (Omniscience/Zaffai/Dracogenesis).
+#[test]
+fn cast_by_paying_life_does_not_intercept_free_cast() {
+    // Zaffai: "Once during each of your turns, you may cast an instant or
+    // sorcery spell from your hand without paying its mana cost."
+    let text = "Once during each of your turns, you may cast an instant or sorcery spell from your hand without paying its mana cost.";
+    let def = parse_static_line(text).expect("Zaffai static must parse");
+    // Must NOT be CastWithAlternativeCost — it should be CastFreePermission
+    // or similar. The key assertion is that it is NOT our new variant.
+    assert!(
+        !matches!(
+            def.mode,
+            StaticMode::CastWithAlternativeCost {
+                cost: AbilityCost::PayLife { .. },
+                ..
+            }
+        ),
+        "free-cast permission must not be intercepted by pay-life alt-cost parser, got {:?}",
+        def.mode
+    );
+}
+
+/// Regression: Access Maze — "a spell from your hand" must parse with InZone::Hand
+/// zone qualifier and no type restriction (card filter), gated on DuringYourTurn.
+#[test]
+fn cast_by_paying_life_access_maze_from_hand() {
+    use crate::types::ability::{AbilityCost, QuantityExpr, QuantityRef};
+    let text = "Once during each of your turns, you may cast a spell from your hand by paying life equal to its mana value rather than paying its mana cost.";
+    let def = parse_static_line(text).expect("Access Maze static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::SelfManaValue,
+                },
+            },
+            timing_permission: None,
+            frequency: CastFrequency::OncePerTurn,
+        },
+        "expected CastWithAlternativeCost with PayLife/SelfManaValue and OncePerTurn, got {:?}",
+        def.mode
+    );
+
+    // Must carry DuringYourTurn condition.
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "expected DuringYourTurn condition for Access Maze, got {:?}",
+        def.condition
+    );
+
+    // Affected filter must include InZone::Hand (the "from your hand" qualifier).
+    let filter_str = format!("{:?}", def.affected);
+    assert!(
+        filter_str.contains("Hand"),
+        "affected filter must include InZone::Hand for Access Maze, got {:?}",
+        def.affected
+    );
+
+    // Full Oracle dispatch round-trip.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        text,
+        "Cramped Vents // Access Maze",
+        &[],
+        &["Enchantment".to_string(), "Room".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode),
+        "full Oracle dispatch must route Access Maze to the alt-cost static, got {:?}",
+        parsed.statics
+    );
+}
+
 // CR 508.1c + CR 509.1b: the defensive-flyer compound "Creatures with flying
 // can't attack you or block creatures you control" (Storm, Windrider). It must
 // NOT collapse to a self-scoped blanket CantAttack (which stops the source from

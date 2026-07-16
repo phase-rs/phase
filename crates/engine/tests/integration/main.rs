@@ -93,6 +93,7 @@ mod daretti_emblem_simultaneous_death;
 mod dark_confidant_upkeep;
 mod dark_depths_thespian_stage;
 mod death_priest_myrkul_oxford_anthem;
+mod demon_of_fates_design;
 mod descendants_fury_sacrificed_referent_4795;
 mod destroy_redirect_to_battlefield_delivery_tail;
 mod deterministic_blocker_prompt_order;
