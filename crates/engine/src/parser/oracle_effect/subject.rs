@@ -5850,14 +5850,13 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
         alt((
             value((), tag::<_, _, OracleError<'_>>("its owner ")),
             value((), tag("~'s owner ")),
-            // "another target X" mirrors the bare "target " arm below; the
-            // "another" source-exclusion is applied downstream in
-            // parse_subject_application (add_another_property). Without this arm,
-            // an imperative predicate on an "another target ..." subject (e.g.
-            // "another target nonland permanent phases out", The Phasing of
-            // Zhalfir) is not subject-stripped and falls through to first-word
-            // dispatch on "another", lowering to Unimplemented instead of
-            // reaching the existing effect.
+            // CR 115.1 + CR 109.1: "another target X" declares a target, and
+            // the downstream Another property identifies an object distinct from
+            // the source. Without this arm, an imperative predicate on an
+            // "another target ..." subject (for example, "another target nonland
+            // permanent phases out") is not subject-stripped and falls through
+            // to first-word dispatch on "another", lowering to Unimplemented
+            // instead of reaching the existing effect.
             value((), tag("another target ")),
             value((), tag("target ")),
             value((), tag("that ")),
