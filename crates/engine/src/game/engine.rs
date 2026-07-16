@@ -4601,6 +4601,7 @@ fn apply_action(
                 player,
                 candidates,
                 pending_cast,
+                ..
             },
             GameAction::ChooseAnnouncingOpponent { opponent },
         ) => {
