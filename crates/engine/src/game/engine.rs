@@ -2174,31 +2174,113 @@ fn apply_as_current_with_mode(
     apply_action_boundary(state, actor, action, mode)
 }
 
+/// The action boundary at which a typed cost-move root is allowed to resume.
+/// Keeping this finite boundary vocabulary prevents a cost payment from being
+/// drained by an unrelated effect continuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CostMoveDrainBoundary {
+    ReplacementDelivered { action_event_start: usize },
+    ReplacementPrevented { action_event_start: usize },
+    PriorityBoundary,
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: Drain the one typed cost-move
+/// root eligible at this exact reducer boundary. Replacement delivery happens
+/// before ordinary continuations; the common Priority boundary only resumes
+/// Delve and mana-ability cursors after those continuations have settled.
+pub(crate) fn drain_pending_cost_move_resume(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    boundary: CostMoveDrainBoundary,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let eligible = match boundary {
+        CostMoveDrainBoundary::ReplacementDelivered { .. } => matches!(
+            state.pending_cost_move_resume,
+            Some(
+                PendingCostMoveResume::Cast { .. }
+                    | PendingCostMoveResume::SacrificeForCost { .. }
+                    | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::DelveManaPayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+            )
+        ),
+        CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
+            state.pending_cost_move_resume,
+            Some(
+                PendingCostMoveResume::Cast { .. }
+                    | PendingCostMoveResume::SacrificeForCost { .. }
+                    | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::Foretell { .. }
+                    | PendingCostMoveResume::DelveManaPayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+            )
+        ),
+        CostMoveDrainBoundary::PriorityBoundary => matches!(
+            state.pending_cost_move_resume,
+            Some(
+                PendingCostMoveResume::DelveManaPayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+            )
+        ),
+    };
+    if !eligible {
+        return Ok(None);
+    }
+
+    let action_event_start = match boundary {
+        CostMoveDrainBoundary::ReplacementDelivered { action_event_start }
+        | CostMoveDrainBoundary::ReplacementPrevented { action_event_start } => {
+            Some(action_event_start)
+        }
+        CostMoveDrainBoundary::PriorityBoundary => None,
+    };
+    let waiting_for = if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::Cast { .. } | PendingCostMoveResume::SacrificeForCost { .. })
+    ) {
+        casting_costs::resume_interrupted_cost_payment(state, events, action_event_start)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ReplacementMayCost { .. })
+    ) {
+        super::costs::resume_replacement_may_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::Foretell { .. })
+    ) {
+        super::casting::resume_foretell_cost_move(state, events)
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::DelveManaPayment { .. })
+    ) {
+        resume_delve_mana_payment(state)
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+    ) {
+        mana_abilities::resume_mana_ability_cost_move(state, events)?
+    } else {
+        unreachable!("eligible cost-move root must remain parked")
+    };
+    state.waiting_for = waiting_for.clone();
+    Ok(Some(waiting_for))
+}
+
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         effects::drain_pending_continuation(state, events);
-        // CR 605.3b + CR 616.1: Any interactive replacement post-effect may
-        // finish at this common prompt boundary. Once ordinary effect
-        // continuations have drained, resume a parked mana-cost cursor exactly
-        // once; do not depend on a particular choice handler or effect shape.
-        if matches!(state.waiting_for, WaitingFor::Priority { .. })
-            && matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::DelveManaPayment { .. })
-            )
-        {
-            state.waiting_for = resume_delve_mana_payment(state);
-        }
-        if matches!(state.waiting_for, WaitingFor::Priority { .. })
-            && matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
-            )
-        {
-            state.waiting_for = mana_abilities::resume_mana_ability_cost_move(state, events)?;
+        // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
+        // boundary only after ordinary continuations drain. The shared typed
+        // dispatcher owns the remaining eligible payment roots.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let _ = drain_pending_cost_move_resume(
+                state,
+                events,
+                CostMoveDrainBoundary::PriorityBoundary,
+            )?;
         }
     }
     Ok(())

@@ -2645,6 +2645,11 @@ pub struct ManaAbilityCostCursor {
     /// advances to the next component.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_exile_remaining: Option<Vec<ObjectId>>,
+    /// The current selected-sacrifice component, after the sacrifice that
+    /// paused has been consumed. Its remaining objects must be sacrificed
+    /// before the cost cursor advances to the next component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_sacrifice_remaining: Option<Vec<ObjectId>>,
     /// CR 603.2 + CR 603.3b: Cost events produced before a replacement-choice
     /// pause cannot reach the ordinary post-action pipeline. Keep them with
     /// their typed payment root so observers are collected exactly once when
@@ -2665,6 +2670,17 @@ pub struct ManaAbilityCostCursor {
     pub parent: Option<Box<ManaAbilityCostParent>>,
 }
 
+/// CR 601.2h + CR 602.2b + CR 616.1: The typed terminal path for a
+/// replacement-paused sacrifice cost. Selected sacrifices remove their
+/// activation-cost component; a SelfRef sacrifice resumes the automatic
+/// additional-cost path without replaying the sacrifice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PendingSacrificeCostCompletion {
+    SelectedNonSelf,
+    SelfRef,
+}
+
 /// CR 601.2h + CR 614.1 + CR 616.1: A cost move paused for a replacement
 /// choice. `Cast` resumes a cast or activation after its next object is
 /// delivered. `ReplacementMayCost` keeps the outer optional replacement parked
@@ -2674,6 +2690,9 @@ pub struct ManaAbilityCostCursor {
 /// activation and unpaid payment cursor until the move has settled.
 /// `DelveManaPayment` owns the single Delve fuel's post-move payment state;
 /// the zone pipeline's delivery tail owns its delivered-only exile link.
+/// `SacrificeForCost` owns a full selected sacrifice component across one or
+/// more replacement-choice action boundaries, including its event span and
+/// LKI record identities.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PendingCostMoveResume {
     Cast {
@@ -2685,6 +2704,24 @@ pub enum PendingCostMoveResume {
         paused_at_index: usize,
         destination: Zone,
         completion: PendingCostMoveCompletion,
+    },
+    SacrificeForCost {
+        player: PlayerId,
+        pending: Box<PendingCast>,
+        chosen: Vec<ObjectId>,
+        /// Index into `chosen` whose sacrifice completes or is prevented by
+        /// the replacement action. Resumption continues at the next index.
+        paused_at_index: usize,
+        completion: PendingSacrificeCostCompletion,
+        /// CR 603.2 + CR 603.10a: Cost events emitted in earlier actions of
+        /// this one logical sacrifice payment. They are stamped and settled
+        /// only when every selected sacrifice has completed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deferred_cost_events: Vec<GameEvent>,
+        /// CR 603.10a: Per-turn LKI record identities emitted by completed
+        /// sacrifices before a replacement-choice boundary.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        departure_record_indices: Vec<usize>,
     },
     ReplacementMayCost {
         source_id: ObjectId,

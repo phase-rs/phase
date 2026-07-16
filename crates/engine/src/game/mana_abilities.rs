@@ -1710,6 +1710,7 @@ fn mana_ability_cost_cursor(
         next_exiled: 0,
         next_sacrificed: 0,
         selected_exile_remaining: None,
+        selected_sacrifice_remaining: None,
         // CR 603.2 + CR 603.3b: A nested child takes over every unscanned
         // event already owned by its suspended parent.  It appends only newly
         // emitted events if it pauses, then hands the one batch back on
@@ -1961,6 +1962,77 @@ fn pay_selected_mana_ability_exile_cost(
     Ok(ManaAbilityPaymentProgress::Complete)
 }
 
+/// CR 601.2h + CR 605.3b + CR 616.1: Pay a selected sacrifice component from
+/// the mana-ability cursor. The selected list is consumed before proposing each
+/// sacrifice, so a replacement-choice resume cannot re-sacrifice the object
+/// whose move the replacement action just settled.
+#[allow(clippy::too_many_arguments)]
+fn pay_selected_mana_ability_sacrifice_cost(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    cursor: &mut ManaAbilityCostCursor,
+    count: u32,
+    filter: &TargetFilter,
+    events: &mut Vec<GameEvent>,
+    cost_event_start: usize,
+) -> Result<ManaAbilityPaymentProgress, EngineError> {
+    if cursor.selected_sacrifice_remaining.is_none() {
+        let end = cursor.next_sacrificed + count as usize;
+        let selected = pending
+            .chosen_sacrificed_battlefield
+            .get(cursor.next_sacrificed..end)
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Missing sacrificed permanent selection for mana ability".to_string(),
+                )
+            })?;
+        if contains_duplicate_object_id(selected) {
+            return Err(EngineError::InvalidAction(
+                "Cannot sacrifice the same permanent more than once for a mana ability cost"
+                    .to_string(),
+            ));
+        }
+        cursor.next_sacrificed = end;
+        cursor.selected_sacrifice_remaining = Some(selected.to_vec());
+    }
+
+    while let Some(object_id) = cursor
+        .selected_sacrifice_remaining
+        .as_ref()
+        .and_then(|remaining| remaining.first())
+        .copied()
+    {
+        cursor
+            .selected_sacrifice_remaining
+            .as_mut()
+            .expect("selected sacrifice cursor was checked above")
+            .remove(0);
+        match sacrifice_selected_permanent_for_mana_cost(
+            state,
+            pending.source_id,
+            pending.player,
+            object_id,
+            filter,
+            events,
+        )? {
+            sacrifice::SacrificeOutcome::Complete => {}
+            sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                pause_mana_ability_cost_payment(
+                    state,
+                    Some(choice_player),
+                    pending,
+                    cursor.clone(),
+                    events,
+                    cost_event_start,
+                );
+                return Ok(ManaAbilityPaymentProgress::Paused);
+            }
+        }
+    }
+    cursor.selected_sacrifice_remaining = None;
+    Ok(ManaAbilityPaymentProgress::Complete)
+}
+
 fn pay_mana_ability_cost_component(
     state: &mut GameState,
     pending: PendingManaAbility,
@@ -2019,6 +2091,61 @@ fn pay_mana_ability_cost_component(
                 *count,
                 *zone,
                 filter.as_ref(),
+                events,
+                cost_event_start,
+            )
+        }
+        AbilityCost::Sacrifice(cost)
+            if matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement == crate::types::ability::SacrificeRequirement::count(1) =>
+        {
+            if deferred_spell_sacrifice_reserved(state, pending.source_id) {
+                return Err(EngineError::ActionNotAllowed(
+                    "This permanent is already committed to a spell sacrifice cost".to_string(),
+                ));
+            }
+            if super::static_abilities::player_cant_sacrifice_as_cost(
+                state,
+                pending.player,
+                pending.source_id,
+            ) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
+            match sacrifice::sacrifice_permanent(state, pending.source_id, pending.player, events)?
+            {
+                sacrifice::SacrificeOutcome::Complete => Ok(ManaAbilityPaymentProgress::Complete),
+                sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                    pause_mana_ability_cost_payment(
+                        state,
+                        Some(choice_player),
+                        pending,
+                        mana_ability_cursor_after_current_component(cursor),
+                        events,
+                        cost_event_start,
+                    );
+                    Ok(ManaAbilityPaymentProgress::Paused)
+                }
+            }
+        }
+        AbilityCost::Sacrifice(cost)
+            if !matches!(cost.target, TargetFilter::SelfRef)
+                && matches!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count { .. }
+                ) =>
+        {
+            let crate::types::ability::SacrificeRequirement::Count { count } = cost.requirement
+            else {
+                unreachable!("guarded above");
+            };
+            pay_selected_mana_ability_sacrifice_cost(
+                state,
+                pending,
+                cursor,
+                count,
+                &cost.target,
                 events,
                 cost_event_start,
             )
@@ -2601,7 +2728,15 @@ where
                     "Cannot sacrifice this permanent as a cost".to_string(),
                 ));
             }
-            let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
+            if matches!(
+                sacrifice::sacrifice_permanent(state, source_id, player, events)?,
+                sacrifice::SacrificeOutcome::NeedsReplacementChoice(_)
+            ) {
+                return Err(EngineError::InvalidAction(
+                    "Mana ability sacrifice replacement pause must be owned by the activation cursor"
+                        .to_string(),
+                ));
+            }
         }
         // CR 117.1 + CR 118.3 + CR 605.3b: Non-self sacrifice-from-battlefield
         // as a mana ability cost (Phyrexian Altar class). The interactive flow
@@ -2625,9 +2760,17 @@ where
                         "Missing sacrificed permanent selection for mana ability".to_string(),
                     )
                 })?;
-                sacrifice_selected_permanent_for_mana_cost(
-                    state, source_id, player, chosen_id, target, events,
-                )?;
+                if matches!(
+                    sacrifice_selected_permanent_for_mana_cost(
+                        state, source_id, player, chosen_id, target, events,
+                    )?,
+                    sacrifice::SacrificeOutcome::NeedsReplacementChoice(_)
+                ) {
+                    return Err(EngineError::InvalidAction(
+                        "Mana ability sacrifice replacement pause must be owned by the activation cursor"
+                            .to_string(),
+                    ));
+                }
             }
         }
         Some(AbilityCost::Exile { .. }) => {
@@ -3518,7 +3661,7 @@ fn sacrifice_selected_permanent_for_mana_cost(
     chosen_id: ObjectId,
     filter: &TargetFilter,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+) -> Result<sacrifice::SacrificeOutcome, EngineError> {
     let obj = state.objects.get(&chosen_id).ok_or_else(|| {
         EngineError::InvalidAction("Selected permanent for sacrifice cost not found".to_string())
     })?;
@@ -3542,10 +3685,7 @@ fn sacrifice_selected_permanent_for_mana_cost(
             "Selected permanent cannot be sacrificed as a cost".to_string(),
         ));
     }
-    match sacrifice::sacrifice_permanent(state, chosen_id, player, events)? {
-        sacrifice::SacrificeOutcome::Complete => Ok(()),
-        sacrifice::SacrificeOutcome::NeedsReplacementChoice(_) => Ok(()),
-    }
+    sacrifice::sacrifice_permanent(state, chosen_id, player, events)
 }
 
 fn cost_has_source_tap_component(cost: &Option<AbilityCost>) -> bool {
