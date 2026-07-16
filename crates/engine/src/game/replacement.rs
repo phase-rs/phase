@@ -3407,8 +3407,20 @@ fn counter_applier(
 
 fn attached_matcher(event: &ProposedEvent, _source: ObjectId, state: &GameState) -> bool {
     let attachment_id = match event {
-        ProposedEvent::ZoneChange { object_id, to, .. } => {
-            if *to != Zone::Battlefield {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            attach_to,
+            ..
+        } => {
+            // CR 303.4f + CR 301.5b: an Aura/Equipment/Fortification entering
+            // the battlefield is only "becoming attached" (and thus only then
+            // eligible to trigger an "as ~ becomes attached, choose …"
+            // replacement) when this zone change actually carries an attach
+            // target. Equipment enters the battlefield like other artifacts —
+            // NOT attached to a creature (CR 301.5b) — so a bare Equipment
+            // ETB must NOT fire the attach-time replacement.
+            if *to != Zone::Battlefield || attach_to.is_none() {
                 return false;
             }
             *object_id

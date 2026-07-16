@@ -133,3 +133,45 @@ fn psychic_paper_equip_prompts_name_then_type_and_binds_both_on_attach() {
         "equipped creature must gain \"can't be blocked\""
     );
 }
+
+// CR 301.5b: Equipment enters the battlefield like other artifacts — it does
+// NOT enter attached to a creature. Casting bare Psychic Paper must NOT
+// prompt the "as it becomes attached, choose …" replacement, since no
+// attachment has occurred yet. The driver silently halts (does not panic) at
+// any `NamedChoice` it has no declared policy for, so the regression check
+// is on `final_waiting_for()` settling back at `Priority` rather than
+// stalling on a stray name/type prompt.
+#[test]
+fn psychic_paper_casting_unattached_does_not_prompt_attach_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let paper = scenario
+        .add_creature_to_hand(P0, "Psychic Paper", 0, 0)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text(PSYCHIC_PAPER_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(paper).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "casting unattached Psychic Paper must settle back at Priority, not stall on \
+         an errant attach-time choice prompt: {:?}",
+        outcome.final_waiting_for()
+    );
+
+    let state = outcome.state();
+    assert_eq!(
+        state.objects[&paper].zone,
+        engine::types::zones::Zone::Battlefield,
+        "Psychic Paper must resolve onto the battlefield"
+    );
+    assert_eq!(
+        state.objects[&paper].attached_to, None,
+        "Psychic Paper must enter unattached — Equipment doesn't enter attached (CR 301.5b)"
+    );
+}
