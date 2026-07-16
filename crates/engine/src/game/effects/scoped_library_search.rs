@@ -233,29 +233,22 @@ pub(crate) fn submit_selection(
         ));
     }
 
-    if reveal {
-        state.last_revealed_ids = chosen.to_vec();
-        for id in chosen {
-            state.revealed_cards.insert(*id);
-        }
-        let card_names = chosen
-            .iter()
-            .filter_map(|id| state.objects.get(id).map(|obj| obj.name.clone()))
-            .collect();
-        events.push(GameEvent::CardsRevealed {
-            player,
-            card_ids: chosen.to_vec(),
-            card_names,
-        });
-    } else {
-        state.last_revealed_ids.clear();
-    }
-
+    let chosen = match crate::game::engine_resolution_choices::apply_search_found_replacements(
+        state,
+        player,
+        chosen,
+        crate::types::game_state::PendingSearchFoundContinuation::Scoped,
+        reveal,
+        events,
+    ) {
+        Ok(survivors) => survivors,
+        Err(_) => return Ok(true),
+    };
     let mut pending = state
         .pending_scoped_library_search
         .take()
         .expect("pending scoped search checked above");
-    pending.selections.push((player, chosen.to_vec()));
+    pending.selections.push((player, chosen));
     pending.current_player = None;
     state.pending_scoped_library_search = Some(pending);
     set_priority(state, player);
@@ -296,6 +289,25 @@ fn advance_to_next_player(
         return Ok(());
     }
     begin_accepted_search(state, events)
+}
+
+/// CR 701.23a + CR 614.6: Record the cards whose original found events survived
+/// replacement, then resume the exact scoped-search continuation.
+pub(crate) fn complete_replaced_selection(
+    state: &mut GameState,
+    player: PlayerId,
+    survivors: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut pending = state
+        .pending_scoped_library_search
+        .take()
+        .ok_or_else(|| EffectError::InvalidParam("missing scoped search resume".to_string()))?;
+    pending.selections.push((player, survivors));
+    pending.current_player = None;
+    state.pending_scoped_library_search = Some(pending);
+    set_priority(state, player);
+    advance_to_next_player(state, events)
 }
 
 /// CR 701.23a/i: Begin one accepted search using the existing search resolver

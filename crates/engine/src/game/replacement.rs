@@ -21,12 +21,13 @@ use crate::types::game_state::{
     DrainStatus, GameState, PendingReplacement, PostReplacementDrain, ReplacementCandidateSummary,
     ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    AppliedReplacementKey, CounterMoveStage, CounterPlacement, EtbTapState, ProposedEvent,
-    ReplacementId,
+    AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
+    CounterMoveStage, CounterPlacement, EtbTapState, ProposedEvent, ReplacementId,
+    SearchFoundDisposition,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -407,6 +408,41 @@ pub struct ReplacementHandlerEntry {
     pub applier: ReplacementApplier,
 }
 
+/// Number of indices accepted by the parked replacement prompt.
+///
+/// Most prompts expose one option per candidate. A single optional replacement
+/// exposes accept/decline, while a SearchFound ordering prompt exposes one
+/// additional original-delivery branch only when every frozen candidate is
+/// optional. Keeping this count next to both prompt construction and resume
+/// validation prevents a hostile index from bypassing a mandatory replacement.
+pub(crate) fn pending_replacement_option_count(
+    state: &GameState,
+    pending: &PendingReplacement,
+) -> usize {
+    if matches!(pending.proposed, ProposedEvent::EmptyManaPool { .. }) {
+        return pending
+            .candidates
+            .iter()
+            .filter(|rid| {
+                state
+                    .pending_step_end_mana_handlers
+                    .get(rid.index)
+                    .is_some()
+            })
+            .count();
+    }
+    let all_search_found_candidates_optional = !pending.search_found_candidates.is_empty()
+        && pending
+            .search_found_candidates
+            .iter()
+            .all(|candidate| candidate.is_optional);
+    if pending.is_optional || all_search_found_candidates_optional {
+        pending.candidates.len() + 1
+    } else {
+        pending.candidates.len()
+    }
+}
+
 /// Build a `WaitingFor::ReplacementChoice` from the current `pending_replacement` state.
 /// Centralizes candidate count and description extraction so callers don't repeat this logic.
 ///
@@ -453,89 +489,128 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                 (cands.len(), cands)
             }
             _ => {
-                let count = if p.is_optional { 2 } else { p.candidates.len() };
-                let cands: Vec<ReplacementCandidateSummary> = if p.is_optional {
-                    // CR 614.12a / CR 616.1: an optional "you may" is one source
-                    // shown as two branches — both carry `candidates[0].source`.
-                    let source_id = p.candidates.first().map(|rid| rid.source);
-                    let (accept_desc, decline_desc) = p
-                        .candidates
-                        .first()
-                        .and_then(|rid| replacement_definition_for_id(state, *rid))
-                        .map(|repl| match &repl.mode {
-                            ReplacementMode::MayCost { cost, .. } => {
-                                (replacement_cost_description(cost), "Decline".to_string())
-                            }
-                            // CR 702.136a (Riot) / CR 702.98a (Unleash): label an
-                            // Optional replacement's accept branch by the
-                            // replacement's own `description` (which names its source
-                            // keyword, e.g. "Riot — ..." / "Unleash — ..."), falling
-                            // back to the `execute` effect text when there is none.
-                            // The decline branch, when it is a distinct outcome
-                            // (e.g. Riot's "It gains haste"), is labeled by that
-                            // outcome rather than a bare "Decline" — the reported
-                            // bug was that declining silently granted haste with no
-                            // indication; a decline-less Optional (Unleash) keeps a
-                            // plain "Decline".
-                            ReplacementMode::Optional { decline } => {
-                                let accept = if repl.event
-                                    == crate::types::replacements::ReplacementEvent::Draw
-                                {
-                                    "Accept".to_string()
-                                } else {
+                let all_search_found_candidates_optional = !p.search_found_candidates.is_empty()
+                    && p.search_found_candidates
+                        .iter()
+                        .all(|candidate| candidate.is_optional);
+                let count = pending_replacement_option_count(state, p);
+                let cands: Vec<ReplacementCandidateSummary> =
+                    if p.is_optional && !p.search_found_candidates.is_empty() {
+                        let candidate = &p.search_found_candidates[0];
+                        vec![
+                            ReplacementCandidateSummary {
+                                source_id: candidate.disposition.source.object_id,
+                                source_name: candidate.source_name.clone(),
+                                description: candidate.description.clone(),
+                            },
+                            ReplacementCandidateSummary {
+                                source_id: candidate.disposition.source.object_id,
+                                source_name: candidate.source_name.clone(),
+                                description: "Decline".to_string(),
+                            },
+                        ]
+                    } else if !p.search_found_candidates.is_empty() {
+                        let mut candidates: Vec<_> = p
+                            .search_found_candidates
+                            .iter()
+                            .map(|candidate| ReplacementCandidateSummary {
+                                source_id: candidate.disposition.source.object_id,
+                                source_name: candidate.source_name.clone(),
+                                description: candidate.description.clone(),
+                            })
+                            .collect();
+                        if all_search_found_candidates_optional {
+                            candidates.push(ReplacementCandidateSummary {
+                                source_id: ObjectId(0),
+                                source_name: String::new(),
+                                description: "Use the original found-card destination".to_string(),
+                            });
+                        }
+                        candidates
+                    } else if p.is_optional {
+                        // CR 616.1: replacement-effect choices belong to the affected
+                        // object's controller/owner or the affected player. An optional
+                        // "you may" is one source shown as two branches — both carry
+                        // `candidates[0].source`.
+                        let source_id = p.candidates.first().map(|rid| rid.source);
+                        let (accept_desc, decline_desc) = p
+                            .candidates
+                            .first()
+                            .and_then(|rid| replacement_definition_for_id(state, *rid))
+                            .map(|repl| match &repl.mode {
+                                ReplacementMode::MayCost { cost, .. } => {
+                                    (replacement_cost_description(cost), "Decline".to_string())
+                                }
+                                // CR 702.136a (Riot) / CR 702.98a (Unleash): label an
+                                // Optional replacement's accept branch by the
+                                // replacement's own `description` (which names its source
+                                // keyword, e.g. "Riot — ..." / "Unleash — ..."), falling
+                                // back to the `execute` effect text when there is none.
+                                // The decline branch, when it is a distinct outcome
+                                // (e.g. Riot's "It gains haste"), is labeled by that
+                                // outcome rather than a bare "Decline" — the reported
+                                // bug was that declining silently granted haste with no
+                                // indication; a decline-less Optional (Unleash) keeps a
+                                // plain "Decline".
+                                ReplacementMode::Optional { decline } => {
+                                    let accept = if repl.event
+                                        == crate::types::replacements::ReplacementEvent::Draw
+                                    {
+                                        "Accept".to_string()
+                                    } else {
+                                        repl.description
+                                            .clone()
+                                            .or_else(|| {
+                                                repl.execute
+                                                    .as_ref()
+                                                    .and_then(|e| e.description.clone())
+                                            })
+                                            .unwrap_or_else(|| "Accept".to_string())
+                                    };
+                                    let decline_label = decline
+                                        .as_ref()
+                                        .and_then(|d| d.description.clone())
+                                        .unwrap_or_else(|| "Decline".to_string());
+                                    (accept, decline_label)
+                                }
+                                ReplacementMode::Mandatory => (
                                     repl.description
                                         .clone()
-                                        .or_else(|| {
-                                            repl.execute
-                                                .as_ref()
-                                                .and_then(|e| e.description.clone())
-                                        })
-                                        .unwrap_or_else(|| "Accept".to_string())
-                                };
-                                let decline_label = decline
-                                    .as_ref()
-                                    .and_then(|d| d.description.clone())
-                                    .unwrap_or_else(|| "Decline".to_string());
-                                (accept, decline_label)
-                            }
-                            ReplacementMode::Mandatory => (
-                                repl.description
-                                    .clone()
-                                    .unwrap_or_else(|| "Accept".to_string()),
-                                "Decline".to_string(),
-                            ),
-                        })
-                        .unwrap_or_else(|| ("Accept".to_string(), "Decline".to_string()));
-                    let source_id = source_id.unwrap_or(ObjectId(0));
-                    let source_name = name_of(source_id);
-                    vec![
-                        ReplacementCandidateSummary {
-                            source_id,
-                            source_name: source_name.clone(),
-                            description: accept_desc,
-                        },
-                        ReplacementCandidateSummary {
-                            source_id,
-                            source_name,
-                            description: decline_desc,
-                        },
-                    ]
-                } else {
-                    // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
-                    // outcome-descriptive label derived from its `execute`
-                    // effect, or from its synthetic shield-counter kind.
-                    // `map` (not `filter_map`) guarantees the vec is never
-                    // shorter than `candidate_count`, so the frontend index
-                    // lookup stays aligned.
-                    p.candidates
-                        .iter()
-                        .map(|rid| ReplacementCandidateSummary {
-                            source_id: rid.source,
-                            source_name: name_of(rid.source),
-                            description: replacement_choice_label_for_rid(state, *rid),
-                        })
-                        .collect()
-                };
+                                        .unwrap_or_else(|| "Accept".to_string()),
+                                    "Decline".to_string(),
+                                ),
+                            })
+                            .unwrap_or_else(|| ("Accept".to_string(), "Decline".to_string()));
+                        let source_id = source_id.unwrap_or(ObjectId(0));
+                        let source_name = name_of(source_id);
+                        vec![
+                            ReplacementCandidateSummary {
+                                source_id,
+                                source_name: source_name.clone(),
+                                description: accept_desc,
+                            },
+                            ReplacementCandidateSummary {
+                                source_id,
+                                source_name,
+                                description: decline_desc,
+                            },
+                        ]
+                    } else {
+                        // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
+                        // outcome-descriptive label derived from its `execute`
+                        // effect, or from its synthetic shield-counter kind.
+                        // `map` (not `filter_map`) guarantees the vec is never
+                        // shorter than `candidate_count`, so the frontend index
+                        // lookup stays aligned.
+                        p.candidates
+                            .iter()
+                            .map(|rid| ReplacementCandidateSummary {
+                                source_id: rid.source,
+                                source_name: name_of(rid.source),
+                                description: replacement_choice_label_for_rid(state, *rid),
+                            })
+                            .collect()
+                    };
                 (count, cands)
             }
         })
@@ -3773,6 +3848,171 @@ fn planeswalk_applier(
     ApplyResult::Prevented
 }
 
+// --- SearchFound: per-card search replacement (CR 701.23 + CR 614.1) ---
+
+fn search_found_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    let ProposedEvent::SearchFound {
+        library_owner: Some(_),
+        disposition: SearchFoundDisposition::Original,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    // The event is generic to every card found in a searched library. Player
+    // relation and own-library predicates belong on the replacement definition,
+    // not in this event matcher.
+    true
+}
+
+/// CR 614.1 + CR 701.23a: Lower the existing `ChangeZone` building block into
+/// the destination of one found-card event. The optional suffix is snapshotted
+/// as a resolved post-effect with the replacement source/controller and found
+/// object already bound; a CR 616.1 resume never re-reads live card data.
+fn bind_search_found_definition(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<BoundSearchFoundDisposition> {
+    let source = state.objects.get(&rid.source)?;
+    let definition = source.replacement_definitions.get(rid.index)?;
+    if definition.event != ReplacementEvent::SearchFound {
+        return None;
+    }
+    let execute = definition.execute.as_deref()?;
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        owner_library,
+        enter_transformed,
+        enters_under,
+        enter_tapped,
+        enters_attacking,
+        up_to,
+        enter_with_counters,
+        conditional_enter_with_counters,
+        face_down_profile,
+        enters_modified_if,
+    } = execute.effect.as_ref()
+    else {
+        return None;
+    };
+    if origin.is_some()
+        || *target != TargetFilter::ParentTarget
+        || *owner_library
+        || *enter_transformed
+        || enters_under.is_some()
+        || !enter_tapped.is_unspecified()
+        || *enters_attacking
+        || *up_to
+        || !enter_with_counters.is_empty()
+        || !conditional_enter_with_counters.is_empty()
+        || face_down_profile.is_some()
+        || enters_modified_if.is_some()
+    {
+        return None;
+    }
+
+    let canonical_shell = AbilityDefinition::new(execute.kind, execute.effect.as_ref().clone());
+    if *execute != canonical_shell {
+        return None;
+    }
+    Some(BoundSearchFoundDisposition {
+        destination: *destination,
+        source: ObjectIncarnationRef::from_object(source),
+    })
+}
+
+fn search_found_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::SearchFound {
+        searcher,
+        library_owner,
+        object_id,
+        applied,
+        ..
+    } = event
+    else {
+        return ApplyResult::Modified(event);
+    };
+    let Some(disposition) = bind_search_found_definition(state, rid) else {
+        return ApplyResult::Modified(ProposedEvent::SearchFound {
+            searcher,
+            library_owner,
+            object_id,
+            disposition: SearchFoundDisposition::Original,
+            applied,
+        });
+    };
+
+    // CR 614.6: once the original event is replaced, its modified event occurs.
+    // Both the disposition and any suffix were bound before state mutation.
+    ApplyResult::Modified(ProposedEvent::SearchFound {
+        searcher,
+        library_owner,
+        object_id,
+        disposition: SearchFoundDisposition::Modified(disposition),
+        applied,
+    })
+}
+
+fn snapshot_search_found_candidates(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    candidates: &[ReplacementId],
+) -> Vec<BoundSearchFoundCandidate> {
+    let ProposedEvent::SearchFound { .. } = proposed else {
+        return Vec::new();
+    };
+
+    candidates
+        .iter()
+        .filter_map(|rid| {
+            let source = state.objects.get(&rid.source)?;
+            let definition = source.replacement_definitions.get(rid.index)?;
+            let disposition = bind_search_found_definition(state, *rid)?;
+            Some(BoundSearchFoundCandidate {
+                replacement_id: *rid,
+                disposition,
+                source_name: source.name.clone(),
+                description: definition
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "Modify the found card".to_string()),
+                is_optional: replacement_mode_is_optional(&definition.mode),
+            })
+        })
+        .collect()
+}
+
+/// CR 614.6 + CR 616.1: Apply the exact SearchFound candidate frozen when an
+/// ordering or optionality prompt was offered. This intentionally performs no
+/// live source lookup: the bound modifier owns the source incarnation and
+/// grantee, while the ordinary replacement bookkeeping still records the
+/// applied key, invalidates the replacement index, and emits the public event.
+fn apply_bound_search_found_candidate(
+    state: &mut GameState,
+    mut proposed: ProposedEvent,
+    candidate: &BoundSearchFoundCandidate,
+    events: &mut Vec<GameEvent>,
+) -> ProposedEvent {
+    proposed.mark_applied(candidate.replacement_id);
+    let ProposedEvent::SearchFound { disposition, .. } = &mut proposed else {
+        return proposed;
+    };
+    *disposition = SearchFoundDisposition::Modified(candidate.disposition.clone());
+    dirty_replacement_index(state);
+    events.push(GameEvent::ReplacementApplied {
+        source_id: candidate.disposition.source.object_id,
+        event_type: ReplacementEvent::SearchFound.to_string(),
+    });
+    proposed
+}
+
 // --- Registry ---
 
 /// CR 614.1: Build the registry of applicable replacement effects.
@@ -3825,6 +4065,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         ReplacementHandlerEntry {
             matcher: draw_matcher,
             applier: draw_applier,
+        },
+    );
+    registry.insert(
+        ReplacementEvent::SearchFound,
+        ReplacementHandlerEntry {
+            matcher: search_found_matcher,
+            applier: search_found_applier,
         },
     );
     registry.insert(
@@ -4884,6 +5131,9 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
             push_replacement_event_key(&mut keys, ReplacementEvent::DealtDamage);
         }
         ProposedEvent::Draw { .. } => push_replacement_event_key(&mut keys, ReplacementEvent::Draw),
+        ProposedEvent::SearchFound { .. } => {
+            push_replacement_event_key(&mut keys, ReplacementEvent::SearchFound);
+        }
         ProposedEvent::Scry { .. } => push_replacement_event_key(&mut keys, ReplacementEvent::Scry),
         ProposedEvent::Mill { .. } => push_replacement_event_key(&mut keys, ReplacementEvent::Mill),
         ProposedEvent::CoinFlip { .. } => {
@@ -5095,6 +5345,17 @@ fn object_replacement_candidate_applies(
     if event.already_applied(&rid) {
         return false;
     }
+    // CR 614.1: SearchFound definitions use the existing ChangeZone building
+    // block as their event modifier. Validate the exact indexed definition so
+    // a malformed sibling on the same source cannot become applicable.
+    if repl_def.event == ReplacementEvent::SearchFound {
+        let ProposedEvent::SearchFound { .. } = event else {
+            return false;
+        };
+        if bind_search_found_definition(state, rid).is_none() {
+            return false;
+        }
+    }
 
     let Some(handler) = registry.get(&repl_def.event) else {
         return false;
@@ -5244,6 +5505,21 @@ fn object_replacement_candidate_applies(
             }
             Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer) => true,
             None => *player_id == replacement_player,
+        };
+        if !player_ok {
+            return false;
+        }
+    }
+    if let ProposedEvent::SearchFound { searcher, .. } = event {
+        let player_ok = match &repl_def.valid_player {
+            Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
+                *searcher != replacement_player
+            }
+            Some(crate::types::ability::ReplacementPlayerScope::You) => {
+                *searcher == replacement_player
+            }
+            Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer) => true,
+            None => *searcher == replacement_player,
         };
         if !player_ok {
             return false;
@@ -7036,6 +7312,12 @@ fn candidate_materiality(
             commute: CommuteClass::NonCommuting,
         };
     }
+    if repl_def.event == ReplacementEvent::SearchFound {
+        // CR 616.1: applying one found-card replacement changes the event out
+        // of the `Original` state, making the others inapplicable. Which source
+        // wins determines the bound grantee and permission provenance.
+        return CandidateMateriality::Unconditional;
+    }
     let Some(execute) = repl_def.execute.as_deref() else {
         // CR 616.1: a `null` `execute` is not a guaranteed no-op. A count-event
         // replacement (Doubling Season, Hardened Scales) modifies the count via
@@ -7260,10 +7542,13 @@ fn pipeline_loop(
 
             if is_optional {
                 let affected = proposed.affected_player(state);
+                let search_found_candidates =
+                    snapshot_search_found_candidates(state, &proposed, &candidates);
                 state.pending_replacement = Some(PendingReplacement {
                     proposed,
                     sacrifice_provenance: None,
                     candidates,
+                    search_found_candidates,
                     depth,
                     is_optional: true,
                     // CR 701.24a: set by the W3 library-placement arm after parking
@@ -7299,10 +7584,13 @@ fn pipeline_loop(
             // or controller of the affected object chooses which one to apply first,
             // even when every candidate is mandatory.
             let affected = proposed.affected_player(state);
+            let search_found_candidates =
+                snapshot_search_found_candidates(state, &proposed, &candidates);
             state.pending_replacement = Some(PendingReplacement {
                 proposed,
                 sacrifice_provenance: None,
                 candidates,
+                search_found_candidates,
                 depth,
                 is_optional: false,
                 // CR 701.24a: set by the W3 library-placement arm after parking.
@@ -7450,12 +7738,48 @@ fn continue_replacement_impl(
         }
     };
 
+    let option_count = pending_replacement_option_count(state, &pending);
+    if chosen_index >= option_count {
+        let affected = pending.proposed.affected_player(state);
+        state.pending_replacement = Some(pending);
+        return ReplacementResult::NeedsChoice(affected);
+    }
+
     let registry = replacement_registry();
     prepare_replacement_index_for_pipeline(state);
 
     // Optional replacement: index 0 = accept, index 1 = decline
     if pending.is_optional {
         let rid = pending.candidates[0];
+        if matches!(pending.proposed, ProposedEvent::SearchFound { .. }) {
+            let mut proposed = pending.proposed;
+            // CR 614.5: this replacement gets one opportunity to affect this
+            // event. Accept uses the candidate frozen when the prompt was
+            // created; the definition's `may` makes decline legal, and decline
+            // retains the applied key so the same effect is not offered again.
+            if chosen_index == 0 {
+                let Some(bound) = pending
+                    .search_found_candidates
+                    .iter()
+                    .find(|candidate| candidate.replacement_id == rid)
+                else {
+                    debug_assert!(
+                        false,
+                        "optional SearchFound choice resumed without a bound candidate"
+                    );
+                    return ReplacementResult::Prevented;
+                };
+                proposed = apply_bound_search_found_candidate(state, proposed, bound, events);
+            } else {
+                proposed.mark_applied(rid);
+                let ProposedEvent::SearchFound { disposition, .. } = &mut proposed else {
+                    unreachable!();
+                };
+                *disposition = SearchFoundDisposition::Original;
+                dirty_replacement_index(state);
+            }
+            return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+        }
         let payer = pending.proposed.affected_player(state);
         // CR 614.12a: a `true` flag means this is the post-choice resume of an
         // accept whose `MayCost` payment paused for an interactive sub-choice
@@ -7524,6 +7848,7 @@ fn continue_replacement_impl(
                     proposed: proposed.clone(),
                     sacrifice_provenance: reparked_sacrifice_provenance,
                     candidates: reparked_candidates,
+                    search_found_candidates: Vec::new(),
                     depth: reparked_depth,
                     is_optional: true,
                     library_placement: reparked_library_placement,
@@ -7663,11 +7988,46 @@ fn continue_replacement_impl(
     }
 
     if chosen_index >= pending.candidates.len() {
+        if matches!(pending.proposed, ProposedEvent::SearchFound { .. })
+            && chosen_index == pending.candidates.len()
+            && !pending.search_found_candidates.is_empty()
+            && pending
+                .search_found_candidates
+                .iter()
+                .all(|candidate| candidate.is_optional)
+        {
+            let mut proposed = pending.proposed;
+            // CR 616.1: the affected player orders the applicable effects. Each
+            // definition's `may` makes declining it legal; CR 614.5 gives each
+            // effect one opportunity to affect this event, so record every exact
+            // offered identity and reach the unchanged original event without
+            // offering the declined set again.
+            for candidate in &pending.search_found_candidates {
+                proposed.mark_applied(candidate.replacement_id);
+            }
+            dirty_replacement_index(state);
+            return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+        }
         return ReplacementResult::Execute(pending.proposed);
     }
 
     let rid = pending.candidates[chosen_index];
     let mut proposed = pending.proposed;
+    if matches!(proposed, ProposedEvent::SearchFound { .. }) {
+        let Some(bound) = pending
+            .search_found_candidates
+            .iter()
+            .find(|candidate| candidate.replacement_id == rid)
+        else {
+            debug_assert!(
+                false,
+                "SearchFound choice resumed without a bound candidate"
+            );
+            return ReplacementResult::Prevented;
+        };
+        proposed = apply_bound_search_found_candidate(state, proposed, bound, events);
+        return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
+    }
     proposed.mark_applied(rid);
     // CR 614.1a: per-player "first time each turn" window is consumed by
     // `record_token_created` on the created tokens; no per-source bookkeeping here.
@@ -7725,6 +8085,27 @@ mod tests {
         ReplacementDefinition::new(event)
     }
 
+    fn search_found_execute(destination: Zone) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+    }
+
     /// Placeholder event for `evaluate_replacement_condition` callers that
     /// aren't exercising event-contextual conditions (`OnlyExtraTurn`). A
     /// natural-turn BeginTurn is inert against all state-based conditions.
@@ -7744,6 +8125,39 @@ mod tests {
             first.keys().collect::<Vec<_>>(),
             fresh.keys().collect::<Vec<_>>()
         );
+    }
+
+    /// CR 614.1a + CR 701.23a: SearchFound's intrinsic matcher recognizes an
+    /// original event from a searched library. Generic `valid_player`
+    /// applicability independently admits You/AnyPlayer scopes and rejects a
+    /// mismatched You.
+    #[test]
+    fn search_found_matcher_composes_with_generic_player_scopes() {
+        for (scope, searcher, expected) in [
+            (ReplacementPlayerScope::You, PlayerId(0), true),
+            (ReplacementPlayerScope::You, PlayerId(1), false),
+            (ReplacementPlayerScope::AnyPlayer, PlayerId(1), true),
+        ] {
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::SearchFound)
+                .execute(search_found_execute(Zone::Exile));
+            replacement.valid_player = Some(scope.clone());
+            let source = ObjectId(10);
+            let found = ObjectId(20);
+            let state = test_state_with_object(source, Zone::Battlefield, vec![replacement]);
+            let proposed = ProposedEvent::SearchFound {
+                searcher,
+                library_owner: Some(PlayerId(1)),
+                object_id: found,
+                disposition: SearchFoundDisposition::Original,
+                applied: HashSet::new(),
+            };
+
+            assert_eq!(
+                !find_applicable_replacements(&state, &proposed, replacement_registry()).is_empty(),
+                expected,
+                "unexpected SearchFound applicability for {scope:?} and {searcher:?}"
+            );
+        }
     }
 
     #[test]
@@ -8437,6 +8851,16 @@ mod tests {
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::DamageDone, ReplacementEvent::DealtDamage],
+            ),
+            (
+                ProposedEvent::SearchFound {
+                    searcher: PlayerId(0),
+                    library_owner: Some(PlayerId(0)),
+                    object_id: ObjectId(1),
+                    disposition: SearchFoundDisposition::Original,
+                    applied: HashSet::new(),
+                },
+                vec![ReplacementEvent::SearchFound],
             ),
             (
                 ProposedEvent::LifeLoss {
@@ -9902,6 +10326,7 @@ mod tests {
                 source: ObjectId(20),
                 index: 0,
             }],
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: true,
             library_placement: None,
@@ -9986,6 +10411,7 @@ mod tests {
                 source: ObjectId(0),
                 index: 0,
             }],
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -13164,6 +13590,7 @@ mod tests {
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
             candidates: vec![],
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
