@@ -476,6 +476,11 @@ pub fn parse_target_with_syntax<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str, TargetSyntax) {
+    // CR 601.2c + CR 115.1: The announcing-player override belongs to exactly
+    // the target phrase that supplies it. Compound clauses share a ParseContext,
+    // so clear the previous phrase's override before parsing this independent
+    // target; an "of an opponent's choice" suffix below will set it again.
+    ctx.target_chooser = None;
     let mut syntax = TargetSyntax::Descriptor;
     let text = text.trim_start();
     let lower = text.to_lowercase();
