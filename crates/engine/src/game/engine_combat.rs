@@ -601,6 +601,19 @@ pub(super) fn handle_assign_combat_damage(
         if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
             return Ok(waiting_for);
         }
+        // CR 603.3b: resolve_combat_damage's regular sub-step processes
+        // DamageReceived triggers internally and may set `waiting_for` to
+        // OrderTriggers (2+ simultaneous triggers controlled by the same
+        // player) without returning Some(..) — mirror the guard used at every
+        // other trigger-processing call site in this file (finish_declare_attackers,
+        // finish_declare_blockers) so this interactive re-entry point doesn't
+        // strand the ordering prompt under Priority.
+        if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            return Ok(state.waiting_for.clone());
+        }
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return Ok(state.waiting_for.clone());
+        }
 
         priority::reset_priority(state);
         return Ok(WaitingFor::Priority { player });
@@ -745,6 +758,15 @@ pub(super) fn handle_assign_combat_damage(
     if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
         return Ok(waiting_for);
     }
+    // CR 603.3b: see the AsThoughUnblocked branch above — resolve_combat_damage's
+    // regular sub-step can set `waiting_for` to OrderTriggers/GameOver internally
+    // without returning Some(..); propagate it instead of clobbering with Priority.
+    if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
 
     priority::reset_priority(state);
     Ok(WaitingFor::Priority { player })
@@ -814,6 +836,15 @@ pub(super) fn handle_assign_blocker_damage(
 
     if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
         return Ok(waiting_for);
+    }
+    // CR 603.3b: see handle_assign_combat_damage above — resolve_combat_damage's
+    // regular sub-step can set `waiting_for` to OrderTriggers/GameOver internally
+    // without returning Some(..); propagate it instead of clobbering with Priority.
+    if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        return Ok(state.waiting_for.clone());
     }
 
     priority::reset_priority(state);
