@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoMayChoice, GameState, PendingContinuation, WaitingFor,
+    ActionResult, AutoMayChoice, GameState, PendingContinuation, PendingCostMoveResume, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -23,7 +23,7 @@ use super::engine::{
 };
 use super::engine_priority;
 use super::mana_abilities;
-use super::zones;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 pub(super) fn handle_optional_effect_choice(
     state: &mut GameState,
@@ -1708,12 +1708,52 @@ pub(super) fn handle_unless_bounce_choice(
         ));
     }
 
-    zones::move_to_zone(state, chosen[0], Zone::Hand, events);
+    let moved = chosen[0];
+    match zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::cost(moved, Zone::Hand, pending_effect.source_id),
+        events,
+    ) {
+        ZoneMoveResult::Done => finish_unless_bounce_payment(
+            state,
+            player,
+            moved,
+            permanents,
+            pending_effect,
+            remaining,
+            events,
+        ),
+        ZoneMoveResult::NeedsChoice(_) => {
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::UnlessBouncePayment {
+                player,
+                moved,
+                permanents,
+                pending_effect,
+                remaining,
+            });
+            Ok(state.waiting_for.clone())
+        }
+        ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            unreachable!("an unless return-to-hand cost cannot require an Aura attachment")
+        }
+    }
+}
 
+/// CR 118.11 + CR 118.12 + CR 616.1: Complete the paid unless-return tail
+/// after the replacement-aware cost move was delivered or fully substituted.
+fn finish_unless_bounce_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    moved: ObjectId,
+    permanents: Vec<ObjectId>,
+    pending_effect: Box<ResolvedAbility>,
+    remaining: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     if remaining > 1 {
         let eligible: Vec<ObjectId> = permanents
             .into_iter()
-            .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
+            .filter(|&id| id != moved && state.objects.contains_key(&id))
             .collect();
         state.waiting_for = WaitingFor::UnlessBounceChoice {
             player,
@@ -1733,6 +1773,34 @@ pub(super) fn handle_unless_bounce_choice(
     set_active_priority(state);
     resume_pending_continuation_if_priority(state, events)?;
     Ok(state.waiting_for.clone())
+}
+
+/// CR 118.11 + CR 118.12 + CR 616.1: Resume the typed unless-return cost
+/// root after its selected permanent's replacement event settles.
+pub(super) fn resume_unless_bounce_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::UnlessBouncePayment {
+        player,
+        moved,
+        permanents,
+        pending_effect,
+        remaining,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("unless bounce cost-move resume requires its typed continuation")
+    };
+
+    finish_unless_bounce_payment(
+        state,
+        player,
+        moved,
+        permanents,
+        pending_effect,
+        remaining,
+        events,
+    )
 }
 
 fn set_active_priority(state: &mut GameState) {

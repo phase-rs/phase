@@ -16,9 +16,9 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode,
-    ManaAbilityResume, PayCostKind, PendingCast, PendingCostMoveResume, PendingReplacement,
-    StackEntryKind, WaitingFor,
+    CastPaymentMode, CollectEvidenceResume, GameState, ManaAbilityCostParentLifecycle,
+    ManaAbilityCostResolutionMode, ManaAbilityResume, PayCostKind, PendingCast,
+    PendingCostMoveResume, PendingReplacement, StackEntryKind, WaitingFor,
 };
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -175,14 +175,11 @@ fn mana_self_exile_cost_redirect_witness() -> (GameScenario, engine::types::iden
 }
 
 /// Drives the real replacement-choice dispatcher through its `Prevented` arm
-/// while retaining the paused mana-cost root created by the normal cost-move
-/// pipeline. Zone-change prevention is not yet an engine replacement outcome,
-/// so this uses the existing one-shot prevention producer to exercise the
-/// shared dispatcher seam.
-fn stage_prevented_mana_cost_move(
-    state: &mut GameState,
-    source: engine::types::identifiers::ObjectId,
-) {
+/// while retaining the paused typed cost-move root created by the normal
+/// cost-move pipeline. Zone-change prevention is not yet an engine replacement
+/// outcome, so this uses the existing one-shot prevention producer to exercise
+/// the shared dispatcher seam.
+fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::identifiers::ObjectId) {
     state
         .objects
         .get_mut(&source)
@@ -214,6 +211,376 @@ fn stage_prevented_mana_cost_move(
         candidate_count: 1,
         candidates: vec![],
     };
+}
+
+#[test]
+fn collect_evidence_cost_pauses_for_moved_redirect_before_resuming_its_effect() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Collect Evidence Redirect Source", 1, 1)
+        .id();
+    let evidence = scenario
+        .add_creature_to_graveyard(P0, "Collect Evidence Redirect Fuel", 1, 1)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    for name in [
+        "First Collect Evidence Redirect",
+        "Second Collect Evidence Redirect",
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::CollectEvidenceChoice {
+        player: P0,
+        minimum_mana_value: 3,
+        cards: vec![evidence],
+        resume: Box::new(CollectEvidenceResume::Effect {
+            pending_ability: Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+        }),
+    };
+
+    let result = runner
+        .act(GameAction::SelectCards {
+            cards: vec![evidence],
+        })
+        .expect("collect-evidence payment should inspect Moved replacements");
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the selected graveyard-to-exile cost move must pause for competing Moved replacements"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        20,
+        "the linked effect must not resolve before the selected cost move settles"
+    );
+    assert!(matches!(
+        runner.state().pending_cost_move_resume.as_ref(),
+        Some(PendingCostMoveResume::CollectEvidencePayment {
+            player,
+            chosen,
+            paused_at_index: 0,
+            ..
+        }) if *player == P0 && chosen == &vec![evidence]
+    ));
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected evidence move resumes its typed payment root");
+    assert!(matches!(resumed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&evidence].zone, Zone::Hand);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id: P0,
+                    action: engine::types::events::PlayerActionKind::CollectEvidence,
+                }
+            ))
+            .count(),
+        1,
+        "the selected evidence payment completes exactly once after the replacement choice"
+    );
+}
+
+#[test]
+fn collect_evidence_cost_completes_when_the_replacement_dispatcher_prevents_its_move() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Prevented Collect Evidence Source", 1, 1)
+        .id();
+    let evidence = scenario
+        .add_creature_to_graveyard(P0, "Prevented Collect Evidence Fuel", 1, 1)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    for name in [
+        "First Prevented Collect Evidence Redirect",
+        "Second Prevented Collect Evidence Redirect",
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::CollectEvidenceChoice {
+        player: P0,
+        minimum_mana_value: 3,
+        cards: vec![evidence],
+        resume: Box::new(CollectEvidenceResume::Effect {
+            pending_ability: Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+        }),
+    };
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![evidence],
+        })
+        .expect("collect-evidence payment reaches its replacement pause");
+    assert!(matches!(
+        runner.state().pending_cost_move_resume.as_ref(),
+        Some(PendingCostMoveResume::CollectEvidencePayment { .. })
+    ));
+
+    // A Moved event has no natural prevention producer in the current engine.
+    // Re-stage the existing one-shot prevention witness while the typed cost
+    // root is parked, exercising the shared `ReplacementPrevented` drain.
+    stage_prevented_cost_move(runner.state_mut(), source);
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("a fully substituted cost event still resumes collect evidence");
+
+    assert!(matches!(resumed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&evidence].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id: P0,
+                    action: engine::types::events::PlayerActionKind::CollectEvidence,
+                }
+            ))
+            .count(),
+        1,
+        "the prevented cost event still completes the evidence payment once"
+    );
+}
+
+#[test]
+fn unless_bounce_cost_pauses_for_moved_redirect_before_avoiding_the_effect() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bounced = scenario
+        .add_creature(P0, "Unless Bounce Redirect Witness", 1, 1)
+        .id();
+    for name in [
+        "First Unless Bounce Redirect",
+        "Second Unless Bounce Redirect",
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::UnlessBounceChoice {
+        player: P0,
+        permanents: vec![bounced],
+        pending_effect: Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            bounced,
+            P0,
+        )),
+        remaining: 1,
+    };
+
+    let result = runner
+        .act(GameAction::SelectCards {
+            cards: vec![bounced],
+        })
+        .expect("unless bounce payment should inspect Moved replacements");
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the selected battlefield-to-hand cost move must pause for competing Moved replacements"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        20,
+        "the paid unless cost must keep the pending effect avoided while replacement choice is open"
+    );
+    assert!(matches!(
+        runner.state().pending_cost_move_resume.as_ref(),
+        Some(PendingCostMoveResume::UnlessBouncePayment {
+            player,
+            moved,
+            remaining: 1,
+            ..
+        }) if *player == P0 && *moved == bounced
+    ));
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected return resumes its typed unless-payment root");
+    assert!(matches!(resumed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&bounced].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        20,
+        "the redirected unless cost remains paid, so its avoided effect must not fire"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+}
+
+#[test]
+fn unless_bounce_cost_remains_paid_when_the_replacement_dispatcher_prevents_its_move() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bounced = scenario
+        .add_creature(P0, "Prevented Unless Bounce Witness", 1, 1)
+        .id();
+    for name in [
+        "First Prevented Unless Bounce Redirect",
+        "Second Prevented Unless Bounce Redirect",
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::UnlessBounceChoice {
+        player: P0,
+        permanents: vec![bounced],
+        pending_effect: Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            bounced,
+            P0,
+        )),
+        remaining: 1,
+    };
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![bounced],
+        })
+        .expect("unless-bounce payment reaches its replacement pause");
+    assert!(matches!(
+        runner.state().pending_cost_move_resume.as_ref(),
+        Some(PendingCostMoveResume::UnlessBouncePayment { .. })
+    ));
+
+    stage_prevented_cost_move(runner.state_mut(), bounced);
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("a fully substituted return-to-hand cost still avoids the unless effect");
+
+    assert!(matches!(resumed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&bounced].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        20,
+        "the prevented return was still a paid unless cost, so the effect remains avoided"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+}
+
+#[test]
+fn collect_evidence_and_unless_bounce_costs_complete_synchronously_without_replacements() {
+    let mut evidence_scenario = GameScenario::new();
+    evidence_scenario.at_phase(Phase::PreCombatMain);
+    let evidence_source = evidence_scenario
+        .add_creature(P0, "Uninterrupted Collect Evidence Source", 1, 1)
+        .id();
+    let evidence = evidence_scenario
+        .add_creature_to_graveyard(P0, "Uninterrupted Collect Evidence Fuel", 1, 1)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let mut evidence_runner = evidence_scenario.build();
+    evidence_runner.state_mut().waiting_for = WaitingFor::CollectEvidenceChoice {
+        player: P0,
+        minimum_mana_value: 3,
+        cards: vec![evidence],
+        resume: Box::new(CollectEvidenceResume::Effect {
+            pending_ability: Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                evidence_source,
+                P0,
+            )),
+        }),
+    };
+    let evidence_result = evidence_runner
+        .act(GameAction::SelectCards {
+            cards: vec![evidence],
+        })
+        .expect("uninterrupted evidence cost resolves synchronously");
+    assert!(matches!(
+        evidence_result.waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(evidence_runner.state().objects[&evidence].zone, Zone::Exile);
+    assert_eq!(evidence_runner.state().players[P0.0 as usize].life, 21);
+    assert!(evidence_runner.state().pending_cost_move_resume.is_none());
+
+    let mut bounce_scenario = GameScenario::new();
+    bounce_scenario.at_phase(Phase::PreCombatMain);
+    let bounced = bounce_scenario
+        .add_creature(P0, "Uninterrupted Unless Bounce Witness", 1, 1)
+        .id();
+    let mut bounce_runner = bounce_scenario.build();
+    bounce_runner.state_mut().waiting_for = WaitingFor::UnlessBounceChoice {
+        player: P0,
+        permanents: vec![bounced],
+        pending_effect: Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            bounced,
+            P0,
+        )),
+        remaining: 1,
+    };
+    let bounce_result = bounce_runner
+        .act(GameAction::SelectCards {
+            cards: vec![bounced],
+        })
+        .expect("uninterrupted unless-bounce cost resolves synchronously");
+    assert!(matches!(
+        bounce_result.waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(bounce_runner.state().objects[&bounced].zone, Zone::Hand);
+    assert_eq!(bounce_runner.state().players[P0.0 as usize].life, 20);
+    assert!(bounce_runner.state().pending_cost_move_resume.is_none());
 }
 
 #[test]
@@ -4481,7 +4848,7 @@ fn prevented_mana_cost_move_serializes_and_restores_mana_payment_root() {
     )
     .expect("the mana payment root pauses on its source cost move");
     assert!(matches!(paused, WaitingFor::ReplacementChoice { .. }));
-    stage_prevented_mana_cost_move(runner.state_mut(), source);
+    stage_prevented_cost_move(runner.state_mut(), source);
 
     let json = serde_json::to_string(runner.state())
         .expect("the staged prevented mana-payment root serializes");
@@ -4561,7 +4928,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
     )
     .expect("the unless-payment root pauses on its source cost move");
     assert!(matches!(paused, WaitingFor::ReplacementChoice { .. }));
-    stage_prevented_mana_cost_move(runner.state_mut(), source);
+    stage_prevented_cost_move(runner.state_mut(), source);
 
     let json = serde_json::to_string(runner.state())
         .expect("the staged prevented unless-payment root serializes");
