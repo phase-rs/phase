@@ -352,6 +352,10 @@ fn parse_class_level_trigger(line: &str, card_name: &str, level: u8) -> Option<T
 fn wrap_trigger_with_class_level(trigger: &mut TriggerDefinition, level: u8) {
     let level_cond = TriggerCondition::ClassLevelGE { level };
     trigger.condition = Some(match trigger.condition.take() {
+        Some(TriggerCondition::And { mut conditions }) => {
+            conditions.insert(0, level_cond);
+            TriggerCondition::And { conditions }
+        }
         Some(existing) => TriggerCondition::And {
             conditions: vec![level_cond, existing],
         },
@@ -394,6 +398,8 @@ fn wrap_replacement_with_class_level(
 mod tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{ContinuousModification, Effect, TriggerCondition};
+    use crate::types::phase::Phase;
+    use crate::types::triggers::TriggerMode;
 
     /// CR 716.2a: A level-3+ trigger that already carries a printed
     /// intervening-if ("if a modified creature died under your control this
@@ -421,11 +427,7 @@ mod tests {
         let level_3_trigger = result
             .triggers
             .iter()
-            .find(|t| {
-                t.description
-                    .as_deref()
-                    .is_some_and(|d| d.contains("end step"))
-            })
+            .find(|t| t.mode == TriggerMode::Phase && t.phase == Some(Phase::End))
             .expect("level-3 end-step trigger should be present");
 
         match level_3_trigger
