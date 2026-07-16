@@ -14777,6 +14777,12 @@ fn try_parse_reanimate_self_and_target(
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
 /// parent's resolved targets at resolution time.
 fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    // CR 601.2c + CR 115.1: A chooser override belongs to the target phrase in
+    // the current compound instruction. This parser can recurse after a prior
+    // "of an opponent's choice" conjunct, so begin each new instruction with
+    // the controller default; its own target parser will stamp an override when
+    // the current phrase supplies one.
+    ctx.target_chooser = None;
     let lower = text.to_lowercase();
 
     // Quick bail: no "and" means no compound connector possible
@@ -15561,6 +15567,10 @@ fn try_parse_multi_target_damage_chain(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
+    // CR 601.2c + CR 115.1: A bare-damage chain is a fresh instruction even
+    // when reached through a compound continuation. Do not let the preceding
+    // target phrase's announcing-player override leak into its first recipient.
+    ctx.target_chooser = None;
     let lower = text.to_lowercase();
     let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
     // Each segment parses through the shared context, so retain the primary
