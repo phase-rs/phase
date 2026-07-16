@@ -504,6 +504,7 @@ mod issue_566_ragavan_dash_cast;
 mod issue_5760_us_agent_equipment_attach;
 mod issue_580_solitude_evoke_prompt;
 mod issue_581_mystic_remora_cumulative_upkeep;
+mod issue_5821_psychic_paper_attach_choice;
 mod issue_583_vivi_ornitier_mana_source;
 mod issue_629_fractured_sanity_cycling;
 mod issue_654_stridehangar_automaton;

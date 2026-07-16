@@ -1299,6 +1299,81 @@ fn parse_keyword_grant_from_exiled_object_static(text: &str) -> Option<Vec<Stati
     Some(defs)
 }
 
+/// CR 508.1c + CR 509.1b: predicate combinator for the defensive-flyer compound
+/// "can't attack you or block creatures you control" (Storm, Windrider). Returns
+/// the attack-defender scope (the `you`/`you or …` filter) and the block-target
+/// filter (the creatures the subject may not block). Requires a defender scope —
+/// a bare "can't attack" (no `you`) is a blanket restriction, not this template.
+fn parse_cant_attack_you_or_block_predicate(
+    input: &str,
+) -> OracleResult<
+    '_,
+    (
+        Option<crate::types::triggers::AttackTargetFilter>,
+        TargetFilter,
+    ),
+> {
+    let (input, _) = tag("can't attack").parse(input)?;
+    let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
+    // CR 508.1c: the defended scope ("you") is what keeps this from being a
+    // blanket "can't attack" — bail out to the existing single-clause parsers
+    // when the attack half has no defender.
+    if defended.is_none() {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    let (input, _) = tag(" or block ").parse(input)?;
+    // CR 509.1b: the block target ("creatures you control") is parsed by the
+    // full type-phrase grammar so the class covers any "block <filter>" object.
+    let (block_filter, rest) = parse_type_phrase(input);
+    if rest.len() >= input.len() || matches!(block_filter, TargetFilter::Any) {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    Ok((rest, (defended, block_filter)))
+}
+
+/// CR 508.1c + CR 509.1b: "<subject> can't attack you or block creatures you
+/// control" (Storm, Windrider). The single-clause "<subject> can't attack you"
+/// already parses (`parse_subject_combat_rule_static`); the trailing "or block
+/// …" made that parser reject, and the line then collapsed to a self-scoped
+/// blanket `CantAttack` in the generic dispatch arm — so the source creature
+/// itself could not attack. Emit the two correctly-scoped statics instead:
+///
+///  1. a defender-scoped `CantAttack` (the subject can't attack the source's
+///     controller, per `attack_defended`, but may still attack anyone else); and
+///  2. a `BlockRestriction` whose filter is the negation of the block target —
+///     "can block only things that are NOT creatures you control" is exactly
+///     "can't block creatures you control" (CR 509.1b enforcement in
+///     `combat.rs` allows a block only when the attacker matches the filter).
+///
+/// Both are scoped to the subject filter, so this is a building block for the
+/// defensive-flyer class, not a single card.
+fn parse_subject_cant_attack_you_or_block_static(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (subject_lower, (defended, block_filter), rest) =
+        nom_primitives::scan_preceded(lower, parse_cant_attack_you_or_block_predicate)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+
+    let attack = StaticDefinition::new(StaticMode::CantAttack)
+        .affected(affected.clone())
+        .attack_defended(defended)
+        .description(text.to_string());
+    let block = StaticDefinition::new(StaticMode::BlockRestriction {
+        filter: TargetFilter::Not {
+            filter: Box::new(block_filter),
+        },
+    })
+    .affected(affected)
+    .description(text.to_string());
+    Some(vec![attack, block])
+}
+
 /// CR 613.1f (Layer 6) + CR 105.2: a per-recipient COLOR-qualified keyword grant —
 /// "[subject] has <K0> if it's <C0>, <K1> if it's <C1>, …, and <Kn> if it's <Cn>."
 /// (Scion of Draco: "Each creature you control has vigilance if it's white, hexproof
@@ -1382,6 +1457,14 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
+
+    // CR 508.1c + CR 509.1b: "<subject> can't attack you or block creatures you
+    // control" — two scoped statics (defender-scoped CantAttack + BlockRestriction).
+    // Must precede generic combat-rule dispatch, which would collapse the whole
+    // line to a self-scoped blanket CantAttack (Storm, Windrider).
+    if let Some(defs) = parse_subject_cant_attack_you_or_block_static(&stripped, &lower) {
+        return defs;
+    }
 
     // CR 604.1 + CR 614.1c + CR 122.1 + CR 202.3: Tiered ETB-counter
     // replacement static. The otherwise sentence is a semantic companion to

@@ -12,7 +12,7 @@ use nom::Parser;
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{
     parse_effect_chain, parse_effect_chain_with_context, parse_effect_clause,
-    try_parse_named_choice,
+    try_parse_named_choice, try_parse_named_choice_conjunction,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
@@ -106,6 +106,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- "As ~ enters, choose a [type]" → Moved replacement with persisted Choose ---
     // Must be checked BEFORE shock lands, which may contain this as a sub-pattern.
     if let Some(def) = parse_as_enters_choose(&norm_lower, &text) {
+        return Some(def);
+    }
+
+    // --- "As ~ becomes attached, choose a [type]" → Attached replacement with
+    //     persisted Choose (Psychic Paper). The attach-time analogue of the
+    //     enters-choose handler above. ---
+    if let Some(def) = parse_as_becomes_attached_choose(&norm_lower, &text) {
         return Some(def);
     }
 
@@ -2019,6 +2026,67 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             .valid_card(TargetFilter::SelfRef)
             // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
             .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
+/// Parse "As ~ becomes attached [to a creature/permanent], choose …" into an
+/// `Attached`-event replacement with a persisted `Choose` (Psychic Paper: "As
+/// this Equipment becomes attached to a creature, choose a creature card name
+/// and a creature type."). The attach-time analogue of `parse_as_enters_choose`
+/// — the choice is bound generically from `Effect::Attach`'s single resolver
+/// (`game/effects/attach.rs`), so it fires regardless of which ability moves
+/// the attachment (Equip, or any other "attach ~ to" effect), not just this
+/// card's own Equip cost. Unlike the enters-choose sibling, no zone change is
+/// involved, so there is no `destination_zone` and no enters-tapped/leading-
+/// imperative composition — no printed card needs either for this shape yet.
+fn parse_as_becomes_attached_choose(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let has_phrase = |phrase: &'static str| {
+        nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
+            tag::<_, _, OracleError<'_>>(phrase).parse(input)
+        })
+        .is_some()
+    };
+
+    if !has_phrase("as ") || !has_phrase("becomes attached") {
+        return None;
+    }
+
+    let (_, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+        tag::<_, _, OracleError<'_>>("choose ").parse(i)
+    })?;
+
+    // CR 608.2d: a conjunction ("choose a creature card name and a creature
+    // type") binds every conjunct as its own persisted `Choose`; a bare choice
+    // falls back to the single-`ChoiceType` parse.
+    let choice_types = try_parse_named_choice_conjunction(choose_text)
+        .or_else(|| try_parse_named_choice(choose_text).map(|choice_type| vec![choice_type]))?;
+
+    let execute = choice_types
+        .into_iter()
+        .rev()
+        .fold(None, |acc, choice_type| {
+            let step = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Choose {
+                    choice_type,
+                    persist: true,
+                    selection: crate::types::ability::TargetSelectionMode::Chosen,
+                },
+            );
+            Some(match acc {
+                Some(next) => step.sub_ability(next),
+                None => step,
+            })
+        })?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Attached)
+            .execute(execute)
+            .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
     )
 }

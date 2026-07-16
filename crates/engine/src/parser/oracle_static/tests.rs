@@ -29859,3 +29859,64 @@ fn distinct_xy_pump_without_paired_binding_is_unsupported() {
         "+Y/+Y must stay unsupported rather than treating Y as cost-X"
     );
 }
+
+// CR 508.1c + CR 509.1b: the defensive-flyer compound "Creatures with flying
+// can't attack you or block creatures you control" (Storm, Windrider). It must
+// NOT collapse to a self-scoped blanket CantAttack (which stops the source from
+// attacking) — it is two subject-scoped statics: a defender-scoped CantAttack
+// and a BlockRestriction that negates the block target.
+#[test]
+fn flying_cant_attack_you_or_block_your_creatures_is_two_scoped_statics() {
+    use crate::types::statics::StaticMode;
+    let defs = super::shared::parse_static_line_multi(
+        "Creatures with flying can't attack you or block creatures you control.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected attack + block statics, got: {defs:?}"
+    );
+
+    let attack = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::CantAttack))
+        .expect("a CantAttack static");
+    // Defender-scoped: the subject can't attack YOU, but can still attack others.
+    assert!(
+        attack.attack_defended.is_some(),
+        "CantAttack must be defender-scoped (not a blanket restriction): {attack:?}"
+    );
+    // Scoped to the flying-creatures subject, never SelfRef.
+    assert!(
+        !matches!(attack.affected, Some(TargetFilter::SelfRef)),
+        "must not collapse to SelfRef: {:?}",
+        attack.affected
+    );
+
+    let block = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::BlockRestriction { .. }))
+        .expect("a BlockRestriction static");
+    let StaticMode::BlockRestriction { filter } = &block.mode else {
+        unreachable!()
+    };
+    // "can't block creatures you control" == "can block only NOT(your creatures)".
+    assert!(
+        matches!(filter, TargetFilter::Not { .. }),
+        "block restriction must negate the block target: {filter:?}"
+    );
+}
+
+// A plain single-clause "Creatures with flying can't attack you." must be
+// untouched by the new compound path (no block clause → one attack static).
+#[test]
+fn flying_cant_attack_you_alone_is_unchanged() {
+    use crate::types::statics::StaticMode;
+    let defs = super::shared::parse_static_line_multi("Creatures with flying can't attack you.");
+    assert!(
+        defs.iter().any(|d| matches!(d.mode, StaticMode::CantAttack)
+            && d.attack_defended.is_some()
+            && !matches!(d.affected, Some(TargetFilter::SelfRef))),
+        "single-clause can't-attack-you must stay a defender-scoped subject static: {defs:?}"
+    );
+}

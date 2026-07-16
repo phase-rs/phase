@@ -3535,27 +3535,49 @@ fn counter_applier(
     ApplyResult::Modified(event)
 }
 
-// --- 15. Attached (ZoneChange to Battlefield for attachments) ---
+// --- 15. Attached (ZoneChange to Battlefield for attachments; Effect::Attach becoming attached) ---
 
 fn attached_matcher(event: &ProposedEvent, _source: ObjectId, state: &GameState) -> bool {
-    if let ProposedEvent::ZoneChange { object_id, to, .. } = event {
-        if *to != Zone::Battlefield {
-            return false;
+    let attachment_id = match event {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            attach_to,
+            ..
+        } => {
+            // CR 303.4f + CR 301.5b: an Aura/Equipment/Fortification entering
+            // the battlefield is only "becoming attached" (and thus only then
+            // eligible to trigger an "as ~ becomes attached, choose …"
+            // replacement) when this zone change actually carries an attach
+            // target. Equipment enters the battlefield like other artifacts —
+            // NOT attached to a creature (CR 301.5b) — so a bare Equipment
+            // ETB must NOT fire the attach-time replacement.
+            if *to != Zone::Battlefield || attach_to.is_none() {
+                return false;
+            }
+            *object_id
         }
-        // Check if the entering object is an attachment (Aura or Equipment)
-        state
-            .objects
-            .get(object_id)
-            .map(|obj| {
-                obj.card_types
-                    .subtypes
-                    .iter()
-                    .any(|s| s == "Aura" || s == "Equipment")
-            })
-            .unwrap_or(false)
-    } else {
-        false
-    }
+        // CR 701.3a: An already-battlefield Aura/Equipment/Fortification
+        // becoming attached via `Effect::Attach` (Equip, or any other "attach
+        // ~ to" effect) is the same "becomes attached" event as an Aura
+        // entering already attached — just without the accompanying zone
+        // change. `valid_card` (typically `SelfRef`) scopes this to the
+        // specific attachment's own "as it becomes attached, choose …"
+        // definition (Psychic Paper).
+        ProposedEvent::Attach { attachment_id, .. } => *attachment_id,
+        _ => return false,
+    };
+    // Check if the (would-be) attached object is an attachment (Aura or Equipment)
+    state
+        .objects
+        .get(&attachment_id)
+        .map(|obj| {
+            obj.card_types
+                .subtypes
+                .iter()
+                .any(|s| s == "Aura" || s == "Equipment")
+        })
+        .unwrap_or(false)
 }
 
 fn attached_applier(
@@ -4952,6 +4974,9 @@ fn replacement_event_keys_for_event(event: &ProposedEvent) -> Vec<ReplacementEve
         }
         ProposedEvent::Planeswalk { .. } => {
             push_replacement_event_key(&mut keys, ReplacementEvent::Planeswalk);
+        }
+        ProposedEvent::Attach { .. } => {
+            push_replacement_event_key(&mut keys, ReplacementEvent::Attached);
         }
         ProposedEvent::Sacrifice { .. } | ProposedEvent::EmptyManaPool { .. } => {}
     }

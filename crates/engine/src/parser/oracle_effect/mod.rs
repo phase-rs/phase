@@ -66,7 +66,7 @@ use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1, space1};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value};
 use nom::multi::{many1, many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -21486,6 +21486,16 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     ))
     .parse(lower)
     .ok()?;
+    parse_named_choice_object(rest)
+}
+
+/// The object phrase of a named choice, with any leading "choose "/"secretly
+/// choose " already stripped (e.g. "a creature type", "a creature card name").
+/// Factored out of `try_parse_named_choice` so a conjunction of choices sharing
+/// one "choose" ("choose a creature card name and a creature type" — Psychic
+/// Paper) can re-dispatch each conjunct through this same phrase table instead
+/// of duplicating it or reconstructing a "choose "-prefixed string.
+pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
     type E<'a> = OracleError<'a>;
     if tag::<_, _, E>("a creature type").parse(rest).is_ok() {
         Some(ChoiceType::creature_type())
@@ -21621,6 +21631,38 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         // semantics.
         try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
+}
+
+/// CR 608.2d + CR 614.1c: A conjunction of named-choice phrases sharing one
+/// "choose" ("choose a creature card name and a creature type" — Psychic
+/// Paper). Strips the same "choose "/"secretly choose " prefix
+/// `try_parse_named_choice` strips, then splits on top-level " and " and
+/// re-dispatches each conjunct through `parse_named_choice_object` (the same
+/// phrase table `try_parse_named_choice` itself delegates to), so this stays
+/// additive rather than duplicating tags. `separated_list1` naturally extends
+/// to a future 3+-way conjunction. Returns `None` for a bare (non-conjunction)
+/// choice — callers fall back to `try_parse_named_choice` for that case.
+pub(crate) fn try_parse_named_choice_conjunction(choose_text: &str) -> Option<Vec<ChoiceType>> {
+    let (after_choose, _) = alt((
+        tag::<_, _, OracleError<'_>>("choose "),
+        nom::sequence::preceded(tag("secretly "), tag("choose ")),
+    ))
+    .parse(choose_text)
+    .ok()?;
+    let trimmed = after_choose.trim_end_matches('.').trim();
+
+    fn conjunct(input: &str) -> nom::IResult<&str, ChoiceType, OracleError<'_>> {
+        map_opt(
+            alt((take_until::<_, _, OracleError<'_>>(" and "), rest)),
+            parse_named_choice_object,
+        )
+        .parse(input)
+    }
+
+    let (_, choices) = all_consuming(separated_list1(tag(" and "), conjunct))
+        .parse(trimmed)
+        .ok()?;
+    (choices.len() >= 2).then_some(choices)
 }
 
 /// CR 608.2d + CR 113.3: Parse a typed keyword enumeration following "choose "
