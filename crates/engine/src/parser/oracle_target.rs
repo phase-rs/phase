@@ -1387,6 +1387,57 @@ pub fn parse_target_with_syntax<'a>(
         );
     }
 
+    // CR 608.2c: "[each] <noun> NOT chosen this way" — the NEGATED anaphor
+    // (Thunderwave 10—19: "each creature not chosen this way"). Unlike the
+    // affirmative arm just below (which collapses to the bare `TrackedSet`), the
+    // negation keeps the head TYPE constraint and excludes the chosen set via
+    // `Not(InTrackedSet)`, so "each creature not chosen" = creatures MINUS the
+    // just-chosen creature. Sentinel id 0 resolves chain-first to the head's
+    // published set (empty set ⇒ no exclusion ⇒ every creature). Must precede the
+    // affirmative arm, whose head-noun tag would otherwise consume "creature" and
+    // leave " not chosen this way" dangling.
+    if let Ok((rest_lower, (_, noun, _, _))) = (
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("each "),
+            tag::<_, _, OracleError<'_>>("the "),
+        ))),
+        alt((
+            value(
+                TypeFilter::Permanent,
+                alt((tag::<_, _, OracleError<'_>>("permanents"), tag("permanent"))),
+            ),
+            value(
+                TypeFilter::Creature,
+                alt((tag::<_, _, OracleError<'_>>("creatures"), tag("creature"))),
+            ),
+            value(
+                TypeFilter::Artifact,
+                alt((tag::<_, _, OracleError<'_>>("artifacts"), tag("artifact"))),
+            ),
+            value(
+                TypeFilter::Enchantment,
+                alt((
+                    tag::<_, _, OracleError<'_>>("enchantments"),
+                    tag("enchantment"),
+                )),
+            ),
+        )),
+        tag::<_, _, OracleError<'_>>(" not"),
+        tag::<_, _, OracleError<'_>>(" chosen this way"),
+    )
+        .parse(lower.as_str())
+    {
+        return (
+            TargetFilter::Typed(TypedFilter::new(noun).properties(vec![FilterProp::Not {
+                prop: Box::new(FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                }),
+            }])),
+            &text[lower.len() - rest_lower.len()..],
+            syntax,
+        );
+    }
+
     // CR 608.2c: "[each] <noun> chosen this way" is an anaphor over the exact set
     // of objects a prior "[each player may] choose …" step selected, NOT a fresh
     // board-wide type filter. Without this arm "destroy each permanent chosen this

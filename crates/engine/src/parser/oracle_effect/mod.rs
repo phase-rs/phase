@@ -24851,7 +24851,101 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
     sequence::rewrite_reorder_dig_backref_reveal_to_top(def);
     fold_speed_floor_sentences(def);
     rewrite_choose_tracked_set_exclusion(def);
+    maybe_convert_singular_choose_with_exclusion_sub(def);
     fold_additional_combat_attacker_restriction(def);
+}
+
+/// CR 608.2c: Convert a SINGULAR "[you may] choose a &lt;filter&gt;" head
+/// (Thunderwave 10—19: "You may choose a creature") into
+/// `Effect::ChooseObjectsIntoTrackedSet` — but ONLY when a following sub-ability
+/// affects "each &lt;filter&gt; NOT chosen this way", i.e. its target already
+/// carries `Not(InTrackedSet)` (emitted by the `oracle_target` negation arm).
+///
+/// The "not chosen this way" sibling is what makes this class semantically
+/// uniform and controller-owned: the head is the controller's own single
+/// selection whose complement a mass effect then hits. Gating on that sibling
+/// deliberately leaves EVERY other bare "choose a X" head as its honest prior
+/// parse — random choices ("choose a creature at random"), per-player/opponent
+/// choices ("each player chooses"), and named-value choices ("choose a basic
+/// land type", "choose an Artist") have no such sibling and are NOT captured,
+/// so their distinct semantics are preserved rather than collapsed onto one
+/// controller-owned tracked set. Defensively also refuses a "choose … at random"
+/// head. `min` is 0 for the peeled "you may" (optional) form else 1; `max` is
+/// `Some(1)` (the singular article). The `optional` flag is cleared: the runtime
+/// always surfaces the selection prompt and publishes a fresh — possibly empty —
+/// set (empty submission = decline), so the sibling `Not(InTrackedSet)` never
+/// reads a stale set.
+fn maybe_convert_singular_choose_with_exclusion_sub(def: &mut AbilityDefinition) {
+    let description = match &*def.effect {
+        Effect::Unimplemented { name, description } if name == "choose" => description.clone(),
+        _ => return,
+    };
+    let Some(description) = description else {
+        return;
+    };
+    // Singular only: an "up to N" head carries `multi_target` and is owned by
+    // `maybe_convert_choose_head_into_tracked_set`.
+    if def.multi_target.is_some() {
+        return;
+    }
+    if !sub_chain_has_mass_effect_with_not_in_tracked_set(def) {
+        return;
+    }
+    let desc_lower = description.to_ascii_lowercase();
+    // CR 608.2d: a random selection is not the controller's choice.
+    if scan_contains_phrase(&desc_lower, "at random") {
+        return;
+    }
+    let Some((_, after_choose)) = nom_on_lower(&description, &desc_lower, |input| {
+        value((), tag("choose ")).parse(input)
+    }) else {
+        return;
+    };
+    let mut ctx = ParseContext::default();
+    let Some(filter) = parse_choose_object_selection_filter(after_choose, &mut ctx) else {
+        return;
+    };
+    let min = if def.optional { 0 } else { 1 };
+    *def.effect = Effect::ChooseObjectsIntoTrackedSet {
+        chooser: TargetFilter::Controller,
+        filter,
+        min,
+        max: Some(1),
+    };
+    def.optional = false;
+}
+
+/// True when the sub-ability chain of `def` contains a mass effect
+/// (`DamageAll` / `DestroyAll` / `ChangeZoneAll`) whose target filter carries
+/// `Not(InTrackedSet)` — the "affect each X not chosen this way" signature.
+fn sub_chain_has_mass_effect_with_not_in_tracked_set(def: &AbilityDefinition) -> bool {
+    let mut node = def.sub_ability.as_deref();
+    while let Some(sub) = node {
+        let target = match &*sub.effect {
+            Effect::DamageAll { target, .. }
+            | Effect::DestroyAll { target, .. }
+            | Effect::ChangeZoneAll { target, .. } => Some(target),
+            _ => None,
+        };
+        if target.is_some_and(target_filter_has_not_in_tracked_set) {
+            return true;
+        }
+        node = sub.sub_ability.as_deref();
+    }
+    false
+}
+
+fn target_filter_has_not_in_tracked_set(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(p, FilterProp::Not { prop } if matches!(**prop, FilterProp::InTrackedSet { .. }))
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_has_not_in_tracked_set)
+        }
+        TargetFilter::Not { filter } => target_filter_has_not_in_tracked_set(filter),
+        _ => false,
+    }
 }
 
 fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {

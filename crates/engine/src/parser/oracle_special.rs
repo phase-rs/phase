@@ -537,6 +537,116 @@ pub(super) fn parse_cumulative_upkeep_keyword(line: &str) -> Option<Keyword> {
 }
 
 #[cfg(test)]
+mod thunderwave_d20_choose_tests {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, Effect, FilterProp, TargetFilter, TypeFilter};
+
+    const THUNDERWAVE: &str = "Roll a d20.\n\
+1—9 | Thunderwave deals 3 damage to each creature.\n\
+10—19 | You may choose a creature. Thunderwave deals 3 damage to each creature not chosen this way.\n\
+20 | Thunderwave deals 6 damage to each creature your opponents control.";
+
+    fn has_choose_into_tracked_set(text: &str) -> bool {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        // allow-noncombinator: test assertion scanning a Debug dump, not parse dispatch
+        format!("{def:#?}").contains("ChooseObjectsIntoTrackedSet")
+    }
+
+    /// The singular-choose → tracked-set conversion is gated on a "not chosen
+    /// this way" sibling AND rejects modalities it cannot faithfully represent.
+    /// These sibling forms (surfaced by CI's parse-diff) must NOT be captured:
+    /// a RANDOM selection is not the controller's choice, and a PER-PLAYER /
+    /// controller-scoped choice cannot be one controller-owned tracked set.
+    #[test]
+    fn random_choice_is_not_converted_to_controller_selection() {
+        // Last One Standing / The Nipton Lottery class.
+        assert!(
+            !has_choose_into_tracked_set(
+                "Choose a creature at random. Deals 3 damage to each creature not chosen this way."
+            ),
+            "'choose a creature at random' must stay honest, not a controller selection"
+        );
+    }
+
+    #[test]
+    fn per_player_and_controller_scoped_choice_is_not_converted() {
+        // Consuming Tide / The Eternal Wanderer class: a controller-scoped filter
+        // ("they control") is not a bare battlefield selection.
+        assert!(
+            !has_choose_into_tracked_set(
+                "Each player chooses a creature they control. Destroy each creature not chosen this way."
+            ),
+            "a per-player / 'they control' choice must not collapse to one controller-owned set"
+        );
+    }
+
+    /// Issue #1153: the 10—19 branch must parse to an optional
+    /// `ChooseObjectsIntoTrackedSet` head (min 0, max 1, creature) followed by a
+    /// `DamageAll` whose filter excludes the chosen creature via `Not(InTrackedSet)`.
+    /// It previously dropped an unimplemented "choose" effect for that branch.
+    #[test]
+    fn thunderwave_10_19_branch_parses_choose_and_exclude() {
+        let parsed =
+            crate::parser::oracle::parse_oracle_text(THUNDERWAVE, "Thunderwave", &[], &[], &[]);
+        let dump = format!("{parsed:#?}");
+        assert!(
+            // allow-noncombinator: test assertion scanning a Debug dump, not parse dispatch
+            !dump.contains("Unimplemented"),
+            "no branch may drop an unimplemented effect: {dump}"
+        );
+
+        let Effect::RollDie { results, .. } = &*parsed.abilities[0].effect else {
+            panic!("Thunderwave's ability must be a RollDie table");
+        };
+        let branch = results
+            .iter()
+            .find(|b| b.min == 10 && b.max == 19)
+            .expect("the 10—19 branch must exist");
+
+        // Head: optional single-creature selection into the chain's tracked set.
+        assert!(
+            !branch.effect.optional,
+            "'may' must be encoded as min:0, not the optional flag"
+        );
+        match &*branch.effect.effect {
+            Effect::ChooseObjectsIntoTrackedSet {
+                filter, min, max, ..
+            } => {
+                assert_eq!(*min, 0, "'You may choose' → min 0");
+                assert_eq!(*max, Some(1), "'a creature' → max 1");
+                assert!(
+                    matches!(filter, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
+                    "the selection filter must be a creature: {filter:?}"
+                );
+            }
+            other => panic!("10—19 head must be ChooseObjectsIntoTrackedSet, got {other:?}"),
+        }
+
+        // Sub: 3 damage to each creature NOT chosen this way.
+        let sub = branch
+            .effect
+            .sub_ability
+            .as_ref()
+            .expect("damage sub-ability");
+        match &*sub.effect {
+            Effect::DamageAll { target, .. } => {
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("damage target must be a Typed creature filter, got {target:?}");
+                };
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Not { prop } if matches!(**prop, FilterProp::InTrackedSet { .. })
+                    )),
+                    "damage must exclude the chosen creature via Not(InTrackedSet): {tf:?}"
+                );
+            }
+            other => panic!("10—19 sub must be DamageAll, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod solve_condition_tests {
     use super::parse_solve_condition;
     use crate::types::ability::{
