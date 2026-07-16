@@ -1931,8 +1931,25 @@ fn filter_inner_for_object(
             .is_some_and(|attached| attached == object_id),
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
         TargetFilter::LastRevealed => state.last_revealed_ids.contains(&object_id),
+        // CR 608.2k: "the sacrificed/exiled/discarded <noun>" — the specific
+        // untargeted object previously referred to by this ability. Resolve
+        // through the documented `cost_paid_object → effect_context_object`
+        // ladder (mirroring `ObjectScope::CostPaidObject`'s P/T and mana-value
+        // arms in `game/quantity.rs`): slot 1 is the canonical cost-paid
+        // referent (activated/cast sacrifice-as-cost); slot 2 is an object a
+        // *Sacrifice effect* moved earlier in the SAME resolution (Descendants'
+        // Fury — "you may sacrifice one of them … shares a creature type with
+        // the sacrificed creature"), captured into `effect_context_object` by
+        // the chain resolver, never into `cost_paid_object`. Without the slot-2
+        // fallback the `SharesQuality { reference: CostPaidObject }` reference
+        // matched nothing and the reveal dug past the shared-type card.
         TargetFilter::CostPaidObject => ability
-            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .and_then(|ability| {
+                ability
+                    .cost_paid_object
+                    .as_ref()
+                    .or(ability.effect_context_object.as_ref())
+            })
             .is_some_and(|snapshot| snapshot.object_id == object_id),
         // CR 613.1f + CR 611.2c + CR 400.7: the FILTER source's last-remembered
         // card (`ChosenAttribute::Card`, written by `Effect::RememberCard`). Read
