@@ -184,11 +184,13 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
     }
 }
 
-/// CR 107.3a + CR 118.9: Until the player chooses the pitched/sacrificed
-/// object, relax the CMC=X constraint for 601.2b eligibility on Shoal-style
-/// costs. Zone-agnostic — used by hand/graveyard exile costs (Shoal
-/// creatures) and by sacrifice costs (Sidisi, Regent of the Mire: "Sacrifice
-/// a creature you control with mana value X").
+/// CR 107.3c: X in these costs is defined by the spell/ability's own text
+/// rather than announced by the controller, so until the player chooses the
+/// pitched/sacrificed object, the CMC=X constraint is relaxed for cost
+/// eligibility. Zone-agnostic — used by hand/graveyard exile costs paid as an
+/// alternative cost to casting (CR 118.9 + CR 601.2b, Shoal creatures) and by
+/// sacrifice costs paid as part of an activation cost (CR 602.2b, Sidisi,
+/// Regent of the Mire: "Sacrifice a creature you control with mana value X").
 pub(crate) fn pitch_bound_x_effective_filter(
     filter: Option<&TargetFilter>,
 ) -> Option<TargetFilter> {

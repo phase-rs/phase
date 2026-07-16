@@ -568,12 +568,14 @@ pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr>
         map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
     ))
     .parse(input)?;
-    // CR 107.1b + CR 107.3a: "X plus N" / "X minus N" — a literal integer
-    // offset over the threshold itself ("mana value X plus 1", Sidisi,
-    // Regent of the Mire). Mirrors the count-position offset arm in
-    // `oracle_util::parse_count_expr`; filter thresholds need the same
-    // arithmetic composition. Optional — a base value with no "plus"/"minus"
-    // tail parses exactly as before.
+    // "X plus N" / "X minus N" — a literal integer offset over the threshold
+    // itself ("mana value X plus 1", Sidisi, Regent of the Mire). Mirrors the
+    // count-position offset arm in `oracle_util::parse_count_expr`; filter
+    // thresholds need the same arithmetic composition. This is grammar
+    // composition, not an X-definition rule — see the `chosen_x` binding
+    // seam in `casting_costs.rs` (CR 107.3c) for where X's value is actually
+    // determined. Optional — a base value with no "plus"/"minus" tail parses
+    // exactly as before.
     if let Ok((after_op, sign)) = alt((
         value(1i32, tag::<_, _, OracleError<'_>>(" plus ")),
         value(-1i32, tag(" minus ")),

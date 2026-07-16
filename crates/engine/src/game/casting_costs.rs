@@ -2301,12 +2301,15 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
-    // CR 107.3a + CR 118.9: Shoal-style "with mana value X" sacrifice costs on
+    // CR 107.3c + CR 602.2b: Shoal-style "with mana value X" sacrifice costs on
     // activated abilities (Sidisi, Regent of the Mire: "Sacrifice a creature
-    // you control with mana value X") define X from the sacrificed
-    // permanent's own mana value rather than a prior announcement. Bind
-    // `chosen_x` here, mirroring the analogous exile-pitch binding for
-    // Shoal-style alternative casting costs above.
+    // you control with mana value X") define X within the text of the
+    // ability itself, so the controller doesn't announce a value — X is
+    // instead the sacrificed permanent's own mana value (CR 107.3c).
+    // Activation costs follow the same announce-and-pay steps as casting
+    // costs (CR 602.2b bridges to CR 601.2b-i), so this binding happens at
+    // the same seam as the analogous exile-pitch binding for Shoal-style
+    // alternative casting costs above. Bind `chosen_x` here.
     if pending.ability.chosen_x.is_none() {
         if let Some(&first) = chosen.first() {
             let sac_filter = pending

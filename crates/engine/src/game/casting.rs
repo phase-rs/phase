@@ -14960,9 +14960,10 @@ fn find_pay_life_cost(
 /// The source is eligible when it matches the printed filter; "another" is
 /// represented by `FilterProp::Another` and enforced by `matches_target_filter`.
 ///
-/// CR 107.3a + CR 118.9: `filter` is relaxed via `pitch_bound_x_effective_filter`
+/// CR 107.3c + CR 602.2b: `filter` is relaxed via `pitch_bound_x_effective_filter`
 /// first, so a Shoal-style "with mana value X" sacrifice constraint (Sidisi,
-/// Regent of the Mire) does not require X to already be announced — any
+/// Regent of the Mire) does not require X to already be chosen — X is defined
+/// by the ability's own text rather than announced (CR 107.3c), so any
 /// otherwise-matching permanent is eligible, and `X` is bound from the chosen
 /// permanent's own mana value once the sacrifice is made (`handle_sacrifice_for_cost`).
 pub(super) fn find_eligible_sacrifice_targets(
