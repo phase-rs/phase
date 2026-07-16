@@ -11729,6 +11729,14 @@ fn parse_spells_quoted_ability_grant_declines() {
             .any(|d| matches!(d.mode, StaticMode::CastWithKeyword { .. })),
         "a quoted ability grant must not be misread as a keyword grant: {defs:?}"
     );
+    assert!(
+        defs.iter().any(|def| {
+            def.modifications.iter().any(|modification| {
+                matches!(modification, ContinuousModification::GrantTrigger { .. })
+            })
+        }),
+        "a quoted triggered ability must reach the granted-trigger path, not be dropped: {defs:?}"
+    );
 }
 
 // Regression: the ordinary UNQUOTED single-keyword grant stays owned by
