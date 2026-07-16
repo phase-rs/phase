@@ -8308,6 +8308,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_resolution_cast_success(
     state: &mut GameState,
     player: PlayerId,

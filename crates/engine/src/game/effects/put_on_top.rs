@@ -344,10 +344,11 @@ pub fn resolve(
                 .at_library_position(position.clone())
         })
         .collect();
-    let removed_exile_links = target_filter
-        .references_exiled_by_source()
-        .then(|| to_place.to_vec())
-        .unwrap_or_default();
+    let removed_exile_links = if target_filter.references_exiled_by_source() {
+        to_place.to_vec()
+    } else {
+        Vec::new()
+    };
     zone_pipeline::move_objects_simultaneously_then(
         state,
         requests,
