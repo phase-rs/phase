@@ -1526,6 +1526,9 @@ fn census_of_typed(tf: &TypedFilter) -> Census {
             FilterProp::NonToken => {
                 tags.insert("nontoken".into());
             }
+            FilterProp::RepresentedByCard => {
+                tags.insert("represented-card".into());
+            }
             _ => {}
         }
     }
@@ -2308,6 +2311,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => false,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2565,6 +2569,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => true,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2693,7 +2698,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
+        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
@@ -3297,7 +3302,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::SolveCase
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -3607,7 +3612,8 @@ fn walk_ability(
         optional_for: _,
         target_choice_timing: _,
         description: _,
-        min_x_value: _, // u32, no read
+        selected_mode_labels: _, // display snapshots, no game-state read/write
+        min_x_value: _,          // u32, no read
         cant_be_copied: _,
         copy_count_status: _,
         forward_result: _,
@@ -3622,8 +3628,7 @@ fn walk_ability(
         chosen_players: _,
         sub_link: _,
         replacement_applied: _,
-        dig_found_nothing_for_parent_target: _,
-        choose_from_zone_found_nothing_for_parent_target: _,
+        parent_target_missing_reason: _,
     } = a;
 
     // §4.3.2: a definition's own `player_scope` overrides the inherited scope for
@@ -4652,10 +4657,15 @@ fn rw_effect(
             source: _,
             partner: _,
             result: _,
+            source_filter,
+            partner_filter,
+            entry: _,
         } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_target_filter(source_filter));
+            p.merge(rw_target_filter(partner_filter));
             (p, None)
         }
         Effect::PhaseOut { target } => obj_membership_scope(target, chain_root),
@@ -5019,7 +5029,9 @@ fn rw_effect(
             p.writes_external.set(StateKind::StackShape);
             (p, None)
         }
-        Effect::ExileResolvingSpellInsteadOfGraveyard => (ext_write(StateKind::StackShape), None),
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => {
+            (ext_write(StateKind::StackShape), None)
+        }
 
         // ---- Pool ----
         Effect::Mana {

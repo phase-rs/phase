@@ -288,11 +288,11 @@ pub fn handle_activate_loyalty(
         pending.activation_ability_index = Some(ability_index);
         pending.target_constraints = target_constraints;
         // CR 606.4: Loyalty cost is paid after targets are chosen.
-        // Stored here so handle_select_targets can call pay_ability_cost.
+        // Stored here so handle_select_targets can call pay_ability_cost and
+        // record the CR 606.3 activation only after target selection completes.
         pending.activation_cost = Some(crate::types::ability::AbilityCost::Loyalty {
             amount: loyalty_cost,
         });
-        record_loyalty_activation(state, pw_id, player);
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending),
@@ -358,7 +358,7 @@ fn build_pw_resolved(
 /// CR 606.4: Pay the loyalty cost, push the ability onto the stack, and return Priority.
 /// Single exit point for non-targeted (and auto-target-resolved) loyalty activations.
 ///
-/// Loyalty counter adjustment is delegated to `casting::pay_ability_cost` — the single
+/// Loyalty counter adjustment is delegated to `casting::pay_ability_cost_for_activation` — the single
 /// authority for all ability cost resolution — to avoid duplicating counter logic here.
 fn finalize_loyalty_activation(
     state: &mut GameState,
@@ -373,8 +373,15 @@ fn finalize_loyalty_activation(
     let cost = crate::types::ability::AbilityCost::Loyalty {
         amount: loyalty_cost,
     };
-    super::casting::pay_ability_cost(state, player, pw_id, &cost, events)
-        .expect("loyalty validation passed in handle_activate_loyalty");
+    match super::casting::pay_ability_cost_for_activation(state, player, pw_id, &cost, None, events)
+        .expect("loyalty validation passed in handle_activate_loyalty")
+    {
+        super::casting::PaymentOutcome::Paid => {}
+        super::casting::PaymentOutcome::Paused { .. }
+        | super::casting::PaymentOutcome::Failed { .. } => {
+            unreachable!("a loyalty cost cannot pause on a self zone move")
+        }
+    }
     record_loyalty_activation(state, pw_id, player);
 
     let assigned_targets = flatten_targets_in_chain(&resolved);
@@ -982,8 +989,9 @@ mod tests {
             Some(4),
             "loyalty unchanged before target selection"
         );
-        // But activation is marked to prevent re-activation this turn.
-        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
+        // Activation is recorded only after target selection completes and the
+        // loyalty cost is paid.
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
         // Engine waits for the player to select a target.
         assert!(
             matches!(result, WaitingFor::TargetSelection { .. }),

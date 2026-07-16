@@ -198,7 +198,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
+        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }

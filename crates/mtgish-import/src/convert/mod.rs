@@ -2736,7 +2736,7 @@ fn convert_settable_color_to_mods(
     c: &crate::schema::types::SettableColor,
 ) -> ConvResult<Vec<engine::types::ability::ContinuousModification>> {
     use crate::schema::types::SettableColor as S;
-    use engine::types::ability::ContinuousModification as M;
+    use engine::types::ability::{ColorChangeMode, ContinuousModification as M};
     Ok(match c {
         // CR 105.2: "is all colors" — set the object's color to all five.
         S::AllColors => vec![M::SetColor {
@@ -2754,7 +2754,9 @@ fn convert_settable_color_to_mods(
             vec![M::SetColor { colors }]
         }
         // CR 105.3 + CR 700.7: Chosen-color CDAs read from `chosen_attributes`.
-        S::TheChosenColor | S::TheChosenColors => vec![M::AddChosenColor],
+        S::TheChosenColor | S::TheChosenColors => vec![M::AddChosenColor {
+            mode: ColorChangeMode::Set,
+        }],
         // CR 700.7: "the mana color chosen this way" — engine has no
         // distinct primitive yet; surface as engine prerequisite.
         S::TheManaColorChosenThisWay => {

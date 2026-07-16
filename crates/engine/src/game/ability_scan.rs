@@ -94,10 +94,10 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
     CountScope, Duration, EachDamageRecipient, Effect, FilterProp, ForEachCategoryAction,
-    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility,
-    StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
-    TypedFilter,
+    GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition,
+    ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource,
+    TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::Keyword;
@@ -187,6 +187,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         optional_for: _,          // OpponentMayScope: AnyOpponent/AnyPlayer, no read
         target_choice_timing: _,  // Stack/Resolution tag
         description: _,           // display string
+        selected_mode_labels: _,  // display strings, no dynamic read
         min_x_value: _,           // u32
         cant_be_copied: _,        // bool
         copy_count_status: _,     // status tag
@@ -202,8 +203,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         chosen_players: _,        // concrete chosen player ids
         replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
-        dig_found_nothing_for_parent_target: _, // bool seam flag
-        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
+        parent_target_missing_reason: _, // seam flag
     } = a;
 
     let mut acc = scan_effect(effect);
@@ -739,7 +739,10 @@ fn scan_effect(x: &Effect) -> Axes {
             source: _,
             partner: _,
             result: _,
-        } => Axes::NONE,
+            source_filter,
+            partner_filter,
+            entry: _,
+        } => scan_target_filter(source_filter).or(scan_target_filter(partner_filter)),
         Effect::ExileHaunting { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));
@@ -1067,7 +1070,10 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
-        Effect::ExileResolvingSpellInsteadOfGraveyard => Axes::NONE,
+        // The `on_exile` rider is fixed at parse time and only read by the
+        // stack-resolution router when the replacement applies — no game-state
+        // read happens at scan time, so NONE stays correct.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => Axes::NONE,
         Effect::PreventDamage {
             amount_dynamic,
             target,
@@ -1225,6 +1231,7 @@ fn scan_effect(x: &Effect) -> Axes {
             choose_filter,
             sacrifice_filter,
             total_power_cap,
+            keeper_constraint,
             categories: _,
             chooser_scope: _,
         } => {
@@ -1233,6 +1240,9 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(sacrifice_filter));
             if let Some(x) = total_power_cap {
                 acc = acc.or(scan_quantity_expr(x));
+            }
+            if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
+                acc = acc.or(scan_quantity_expr(count));
             }
             acc
         }
@@ -3099,6 +3109,7 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         // Their drift breaks the board-equality gate (item 1), not the item-4 scan.
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -4290,7 +4301,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -4553,7 +4564,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -4706,6 +4717,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         kind: _,      // AbilityKind tag (no payload)
         context: _,   // SpellContext: cast-time fact snapshot, not a live choice
         description: _, // display string
+        selected_mode_labels: _, // display strings, no resolution-time choice
         min_x_value: _, // u32
         cant_be_copied: _, // bool
         copy_count_status: _, // status tag
@@ -4720,8 +4732,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
-        dig_found_nothing_for_parent_target: _, // bool seam flag
-        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
+        parent_target_missing_reason: _, // seam flag
     } = a;
 
     // CR 608.2d: an optional effect / optional targeting / opponent-may

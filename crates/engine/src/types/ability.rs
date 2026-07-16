@@ -220,6 +220,22 @@ pub enum CategoryChooserScope {
     ControllerForAll,
 }
 
+/// CR 101.4 + CR 701.21a: Constraint on the permanents a player protects from
+/// a "choose … and sacrifice the rest" instruction.
+///
+/// This is deliberately separate from the legacy category and total-power
+/// fields on [`Effect::ChooseAndSacrificeRest`]. Those fields remain readable
+/// for existing card data and saved games; new cardinality-only wordings use a
+/// typed constraint rather than a one-off boolean or card-name branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum KeeperConstraint {
+    /// The chooser must protect exactly this many eligible permanents. If fewer
+    /// are eligible, the instruction does as much as possible and protects all
+    /// of them (CR 609.3).
+    ExactCount { count: QuantityExpr },
+}
+
 /// Additional selection constraints for tracked-set card picks during resolution.
 ///
 /// Internally tagged (`{ "type": "DistinctCardTypes", "categories": [...] }`) to
@@ -1351,6 +1367,21 @@ impl ChoiceValue {
 pub enum ChosenSubtypeKind {
     CreatureType,
     BasicLandType,
+}
+
+/// CR 105.3: set-versus-add axis for chosen-color continuous modifications —
+/// the typed counterpart of the fixed-color `SetColor` / `AddColor` pair.
+/// Parameterizes [`ContinuousModification::AddChosenColor`] so bare
+/// "…is/are the chosen color" (set / replace) and "…in addition to their other
+/// colors" (add / retain) share one primitive instead of a boolean flag or a
+/// sibling-variant cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ColorChangeMode {
+    /// CR 105.3 default: the new color replaces all previous colors.
+    #[default]
+    Set,
+    /// CR 105.3 "in addition": retain prior colors and gain the chosen color.
+    Add,
 }
 
 /// Which players' zones to count across for zone-based quantity references.
@@ -3350,6 +3381,10 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
+    /// CR 108.2 + CR 108.2b: Matches an object represented by a Magic card,
+    /// excluding tokens and object copies. This is distinct from `NonToken`:
+    /// a non-token copy is not represented by a card.
+    RepresentedByCard,
     /// CR 607.2d / CR 607.2m (by analogy) + CR 611.2c: matches objects whose
     /// CONTROLLER's durable per-player choice records the anchor `label`
     /// ("creatures controlled by players who last chose red waterfall …", Two
@@ -9342,6 +9377,74 @@ pub enum ControlWindow {
     NextCombatPhase,
 }
 
+/// CR 508.4: How a permanent put onto the battlefield by an effect enters
+/// combat. This is a typed axis because attacking entry has a destination
+/// choice and validation contract that ordinary entry does not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PermanentEntryMode {
+    #[default]
+    Normal,
+    /// The permanent enters tapped and attacking a destination chosen under
+    /// CR 508.4. It was not declared as an attacker.
+    TappedAndAttacking {
+        #[serde(default)]
+        destination: EntryAttackDestination,
+    },
+}
+
+/// CR 508.4a: Domain from which an attacking-entry destination is selected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EntryAttackDestination {
+    /// Any defending player, planeswalker they control, or battle they protect.
+    #[default]
+    AnyDefender,
+    /// A defending player or planeswalker they control (battle excluded).
+    PlayerOrPlaneswalker,
+    /// The instruction fixes a single destination.
+    Exact {
+        target: crate::game::combat::AttackTarget,
+    },
+}
+
+/// CR 603.7a + CR 702.170c: the "If you do, ..." consequence of the
+/// "exile [the resolving spell] instead of putting it into a graveyard as it
+/// resolves" replacement (`Effect::ExileResolvingSpellInsteadOfGraveyard`),
+/// applied ONLY at the moment the replacement is actually applied — i.e. when
+/// the spell lands in exile during its own stack resolution. A spell countered
+/// or fizzled in response never reaches the exile-instead move, so it never
+/// takes the rider (CR 603.7a: a consequence created "as the result of a
+/// replacement effect being applied" exists only once the replacement applies).
+///
+/// `None` on the carrier = plain exile with no consequence (Rod of Absorption).
+/// The two members are distinct post-application actions on the exiled card, so
+/// they are a sum type, not a struct with more fields — but both live within the
+/// same CR 603.7a application moment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExiledSpellRider {
+    /// CR 603.7a + CR 603.7b: Feather, the Redeemed — "return it to your hand
+    /// at the beginning of the next end step". Arms a one-shot delayed trigger
+    /// returning the exiled card to `destination` at `timing`. The two axes are
+    /// typed so a future class member ("return it to the battlefield" / "at the
+    /// beginning of the next upkeep") is a parameter value, not a new variant.
+    ReturnTo {
+        /// CR 603.7a: zone the exiled card is returned to when the delayed
+        /// trigger fires (Feather: its owner's hand).
+        destination: Zone,
+        /// CR 603.7b: when the one-shot return trigger fires (Feather: at the
+        /// beginning of the next end step).
+        timing: DelayedTriggerCondition,
+    },
+    /// CR 702.170c: Lilah, Undefeated Slickshot — "it becomes plotted". Grants
+    /// the Plotted casting permission to the exiled card's owner and emits
+    /// `BecomesPlotted`, so the card is castable from exile without paying its
+    /// mana cost on a later turn (CR 702.170d). Because plotting requires the
+    /// card to already be in exile (CR 702.170c), this too must run only at
+    /// replacement-application time — never when the trigger resolves.
+    BecomePlotted,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -10329,17 +10432,28 @@ pub enum Effect {
         filter: Box<TargetFilter>,
         host: Box<TargetFilter>,
     },
-    /// CR 701.42a / CR 712.4a: Meld — exile both the real meld instigator
-    /// (`source`) and a battlefield object named `partner` that the controller
-    /// both owns and controls, then put a single melded permanent onto the
-    /// battlefield whose characteristics are the `result` card (the combined back
-    /// faces, exposed in card-data as the named result). No player-selectable
-    /// target — the partner is found by name + ownership at resolution. Resolver:
-    /// `game/meld.rs`.
+    /// CR 701.42: Meld the chosen pair after both objects are exiled.
+    ///
+    /// The string fields retain the stable card-data representation and identify
+    /// the canonical physical pair/result. The filters describe the live Oracle
+    /// referents used before exile: copies, tokens, and name-changing effects can
+    /// therefore affect which objects are offered without changing which printed
+    /// cards can actually meld after exile (CR 701.42b).
     Meld {
         source: String,
         partner: String,
         result: String,
+        /// Live characteristics required of the instigator at resolution.
+        #[serde(default = "default_target_filter_self_ref")]
+        source_filter: TargetFilter,
+        /// Live characteristics required of a possible partner at resolution.
+        /// `Any` is the legacy serialized shape; the resolver derives the named,
+        /// owned, and controlled filter from `partner` in that case.
+        #[serde(default = "default_target_filter_any")]
+        partner_filter: TargetFilter,
+        /// Entry modifiers printed after the meld instruction.
+        #[serde(default)]
+        entry: PermanentEntryMode,
     },
     /// CR 702.55a: Haunt — exile the source card (currently in a graveyard, put
     /// there by dying or by resolving) from the graveyard, *haunting* the target
@@ -11268,7 +11382,22 @@ pub enum Effect {
     /// (which stamps the same rider on a spell *cast during resolution*, with no
     /// linked-exile payoff). This effect is the trigger-driven, link-establishing
     /// form for the resolving spell itself.
-    ExileResolvingSpellInsteadOfGraveyard,
+    ExileResolvingSpellInsteadOfGraveyard {
+        /// CR 614.1a + CR 603.7a + CR 702.170c: the "If you do, ..."
+        /// consequence of the exile-instead replacement (Feather, the
+        /// Redeemed's "return it to your hand at the beginning of the next end
+        /// step"; Lilah, Undefeated Slickshot's "it becomes plotted"). When
+        /// `Some`, the stamped rider also marks the spell so that — at the
+        /// moment the replacement is actually applied and the spell lands in
+        /// exile — the stack router applies the rider (arming Feather's return
+        /// delayed trigger, or granting Lilah's plotted permission). The
+        /// consequence is applied when the replacement is APPLIED (CR 603.7a),
+        /// not when this effect resolves, so a spell countered or fizzled in
+        /// response never takes it. `None` = plain exile, no consequence
+        /// (Rod of Absorption).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_exile: Option<ExiledSpellRider>,
+    },
     /// CR 615: Prevent damage to a target.
     PreventDamage {
         amount: PreventionAmount,
@@ -11693,6 +11822,11 @@ pub enum Effect {
         /// entry. `categories` is empty in this mode.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_power_cap: Option<QuantityExpr>,
+        /// CR 101.4 + CR 701.21a: Explicit keeper-cardinality mode (Natural
+        /// Balance class). `None` preserves the pre-existing category and
+        /// total-power modes on the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keeper_constraint: Option<KeeperConstraint>,
     },
     /// CR 101.4 + CR 707.2 + CR 122.1: Each player, in APNAP order, chooses an
     /// ordered `min..=max` selection of objects they control matching
@@ -13820,7 +13954,7 @@ impl Effect {
             | Effect::FreeCastFromZones { .. }
             // CR 614.1a: acts on the triggering spell (the trigger source), not a
             // player-declared target.
-            | Effect::ExileResolvingSpellInsteadOfGraveyard
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::Manifest { .. }
             | Effect::ManifestDread
             | Effect::Cloak { .. }
@@ -14166,7 +14300,7 @@ impl Effect {
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
-            | Effect::ExileResolvingSpellInsteadOfGraveyard
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
@@ -14418,7 +14552,7 @@ impl Effect {
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExchangeLifeTotals { .. }
             | Effect::ExileFromTopUntil { .. }
-            | Effect::ExileResolvingSpellInsteadOfGraveyard
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
@@ -14606,7 +14740,9 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PayCost { .. } => "PayCost",
         Effect::CastFromZone { .. } => "CastFromZone",
         Effect::FreeCastFromZones { .. } => "FreeCastFromZones",
-        Effect::ExileResolvingSpellInsteadOfGraveyard => "ExileResolvingSpellInsteadOfGraveyard",
+        Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {
+            "ExileResolvingSpellInsteadOfGraveyard"
+        }
         Effect::PreventDamage { .. } => "PreventDamage",
         Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
         Effect::CreateDrawReplacement { .. } => "CreateDrawReplacement",
@@ -15107,7 +15243,7 @@ impl From<&Effect> for EffectKind {
             Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
             Effect::FreeCastFromZones { .. } => EffectKind::FreeCastFromZones,
-            Effect::ExileResolvingSpellInsteadOfGraveyard => {
+            Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {
                 EffectKind::ExileResolvingSpellInsteadOfGraveyard
             }
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
@@ -19544,9 +19680,16 @@ pub enum ContinuousModification {
     AddChosenSubtype {
         kind: ChosenSubtypeKind,
     },
-    /// CR 105.3: Set the object's color to the chosen color.
-    /// Reads from `chosen_attributes` at layer evaluation time.
-    AddChosenColor,
+    /// CR 105.3 + CR 613.1e: Apply the source's chosen color to the affected
+    /// object. Reads from `chosen_attributes` at layer evaluation time.
+    /// `mode` selects set-versus-add along the same axis as `SetColor` /
+    /// `AddColor` (not a boolean): bare "the chosen color" uses [`ColorChangeMode::Set`];
+    /// Painter's Servant–class "in addition to their other colors" uses
+    /// [`ColorChangeMode::Add`].
+    AddChosenColor {
+        #[serde(default)]
+        mode: ColorChangeMode,
+    },
     /// CR 608.2d + CR 613.1f: Strip the chosen keyword (read from the granting
     /// source's `chosen_attributes`) from the affected object. Mirrors
     /// `RemoveKeyword`'s discriminant-based stripping so parameterized
@@ -19794,6 +19937,42 @@ impl CopyCountStatus {
     }
 }
 
+/// CR 608.2c: Distinguishes WHY an immediately-chained `ParentTarget` child
+/// ability was handed off with nothing to act on. The three sources are
+/// mutually exclusive per hand-off (only one effect can be the immediate
+/// parent of a given child), and each is consulted by exactly one downstream
+/// site, so they used to be three parallel boolean fields on `ResolvedAbility`
+/// / `GameState` before being consolidated here (see the PR #5834/#5836
+/// review that requested this).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParentTargetMissingReason {
+    /// CR 401.5 (issue #1365): A `Dig` looked at an empty library. Consulted
+    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
+    /// to resolve a `target: ParentTarget` with no selection to NO target
+    /// instead of the generic self-fallback, which would otherwise move the
+    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
+    /// it just found empty.
+    Dig,
+    /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
+    /// that name the missing choice through `ParentTarget` (e.g. a chained
+    /// perpetual rider, `perpetual.rs`) must no-op instead of using the
+    /// shared source fallback.
+    ChooseFromZone,
+    /// CR 608.2c (issue #4950, Thoughtseize): A `RevealHand` reveal-choice
+    /// ("choose a nonland card from it") came up with an empty eligible set —
+    /// there was nothing to choose, so no object was ever bound as
+    /// `ParentTarget`. Distinct from a `Discard`/`DiscardCard` whose OWN
+    /// target is player-scoped (Tinybones' "target player discards a card",
+    /// Sonic Shrieker's "they discard a card" forwarding a damaged PLAYER,
+    /// not a chosen card): those never produce this reason, since no
+    /// reveal-choice ran, and must still fall back to the generic
+    /// hand-choice/random discard path. Consulted by `effects::discard::
+    /// resolve` to resolve a `ParentTarget`-bound discard with zero forwarded
+    /// objects to a hard no-op (CR 608.2c: nothing to choose) instead of the
+    /// whole-hand fallback.
+    RevealHandChoice,
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
@@ -19872,6 +20051,12 @@ pub struct ResolvedAbility {
     /// Used by `OptionalEffectChoice` to tell the player what they're choosing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// CR 700.2a + CR 700.2b + CR 700.2d + CR 608.2c: The selected modal
+    /// descriptions, in the printed instruction order used to resolve them. This
+    /// belongs to the stack ability as a whole; sub-ability chains remain the
+    /// individual instructions selected from those modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_mode_labels: Vec<String>,
     /// CR 608.2c: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
@@ -20002,25 +20187,17 @@ pub struct ResolvedAbility {
     /// CR 700.2b: One AbilityDefinition per mode for the reflexive modal trigger.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_abilities: Vec<AbilityDefinition>,
-    /// CR 401.5 + CR 608.2c (issue #1365): Stamped ONLY by
-    /// `effects::apply_parent_chain_context` at the exact moment this ability
-    /// is handed off as the immediate sub_ability of a `Dig` that just looked
-    /// at an empty library — never set any other way, so it cannot be
-    /// confused with a stale value from an unrelated resolution. Consulted
-    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
-    /// to resolve a `target: ParentTarget` with no selection to NO target
-    /// instead of the generic self-fallback, which would otherwise move the
-    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
-    /// it just found empty.
+    /// CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
+    /// (Thoughtseize): Stamped ONLY by `effects::apply_parent_chain_context`
+    /// at the exact moment this ability is handed off as the immediate
+    /// sub_ability of a `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice that
+    /// came up with nothing (empty library, no eligible card to choose, or an
+    /// empty reveal-choice eligible set respectively) — never set any other
+    /// way, so it cannot be confused with a stale value from an unrelated
+    /// resolution. See [`ParentTargetMissingReason`] for what each variant
+    /// gates and who consults it.
     #[serde(skip)]
-    pub dig_found_nothing_for_parent_target: bool,
-    /// CR 609.3 + CR 608.2c: Stamped only by
-    /// `effects::apply_parent_chain_context` when this ability is the immediate
-    /// child of a `ChooseFromZone` that had no cards to choose. Consumers that
-    /// name the missing choice through `ParentTarget` must no-op instead of
-    /// using the shared source fallback.
-    #[serde(skip)]
-    pub choose_from_zone_found_nothing_for_parent_target: bool,
+    pub parent_target_missing_reason: Option<ParentTargetMissingReason>,
 }
 
 impl ResolvedAbility {
@@ -20051,6 +20228,7 @@ impl ResolvedAbility {
             target_constraints: Vec::new(),
             target_choice_timing: TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -20077,8 +20255,7 @@ impl ResolvedAbility {
             source_card_id: None,
             modal: None,
             mode_abilities: Vec::new(),
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         }
     }
 
@@ -22014,6 +22191,7 @@ mod tests {
     fn filter_prop_roundtrip() {
         let props = vec![
             FilterProp::Token,
+            FilterProp::RepresentedByCard,
             FilterProp::Attacking { defender: None },
             FilterProp::Attacking {
                 defender: Some(ControllerRef::You),
@@ -22134,6 +22312,34 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn selected_mode_labels_are_legacy_compatible_and_preserved_by_clone() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let legacy_json = serde_json::to_string(&ability).expect("serialize empty ability");
+        assert!(
+            !legacy_json.contains("selected_mode_labels"),
+            "empty labels must not change saved-game or client wire shape",
+        );
+        let legacy: ResolvedAbility =
+            serde_json::from_str(&legacy_json).expect("legacy ability without labels deserializes");
+        assert!(legacy.selected_mode_labels.is_empty());
+
+        ability.selected_mode_labels = vec!["Draw a card.".to_string()];
+        let copied = ability.clone();
+        let json = serde_json::to_string(&ability).expect("serialize selected mode");
+        assert!(json.contains("selected_mode_labels"));
+        let deserialized: ResolvedAbility = serde_json::from_str(&json).expect("deserialize mode");
+        assert_eq!(copied, deserialized);
     }
 
     #[test]

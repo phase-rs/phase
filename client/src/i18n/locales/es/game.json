@@ -245,10 +245,14 @@
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_one": "Mostrar {{count}} carta anexa oculta",
+    "hiddenAttachmentsAria_other": "Mostrar {{count}} cartas anexas ocultas",
     "fanPick": "Elegir",
     "fanConfirm": "Confirmar ({{count}})",
     "viewAttachments_one": "Ver carta anexada",
     "viewAttachments_other": "Ver {{count}} cartas anexadas",
+    "viewAttachmentsFor_one": "Ver carta anexada de {{name}}",
+    "viewAttachmentsFor_other": "Ver {{count}} cartas anexadas de {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -289,6 +293,11 @@
     "creatureFallback": "Criatura n.º {{id}}",
     "planeswalkerFallback": "Planeswalker n.º {{id}}",
     "objectFallback": "Object #{{id}}",
+    "playerTarget": "{{name}} (Jugador — {{life}} vidas)",
+    "playerTargetProjected": "{{name}} (Jugador — {{life}} → {{projectedLife}})",
+    "playerTargetLethal": "{{name}} (Jugador — {{life}} → {{projectedLife}} · Letal)",
+    "planeswalkerTarget": "{{name}} (Planeswalker)",
+    "battleTarget": "{{name}} (Batalla)",
     "you": "Tú",
     "ally": "Aliado",
     "restoreDialog": "Restaurar diálogo",
@@ -639,6 +648,7 @@
     "dockLeft": "Acoplar la pila a la izquierda",
     "dockRight": "Acoplar la pila a la derecha",
     "casting": "Lanzando…",
+    "selectedModes": "Modos seleccionados",
     "next": "Siguiente",
     "activated": "Activada",
     "triggered": "Disparada",
@@ -1026,6 +1036,13 @@
     "activationCost": {
       "title": "Elegir coste de activación"
     },
+    "meld": {
+      "choosePair": "Elige las cartas que se fusionarán",
+      "into": "Fusionar en {{result}}",
+      "chooseAttackTarget": "Elige qué atacará",
+      "player": "Jugador {{id}}",
+      "permanent": "Permanente {{id}}"
+    },
     "debug": {
       "modeBanner": "MODO DEPURACIÓN - Haz clic en cualquier carta",
       "modeButtonOff": "MODO CLIC DESACTIVADO"
@@ -1242,6 +1259,7 @@
       "titleTopdeck": "Poner en la biblioteca",
       "titleBattlefield": "Poner en el campo de batalla",
       "titleHand": "Devolver",
+      "titleExile": "Exiliar",
       "titleUntap": "Enderezar",
       "titleTap": "Girar",
       "titleAttach": "Attach",
@@ -1263,6 +1281,12 @@
       "subtitleBattlefieldUpTo_other": "Elige hasta {{count}} cartas para poner en el campo de batalla",
       "subtitleBattlefieldRange_one": "Elige {{min}}-{{count}} carta para poner en el campo de batalla",
       "subtitleBattlefieldRange_other": "Elige {{min}}-{{count}} cartas para poner en el campo de batalla",
+      "subtitleExileExact_one": "Elige {{count}} carta para exiliar",
+      "subtitleExileExact_other": "Elige {{count}} cartas para exiliar",
+      "subtitleExileUpTo_one": "Elige hasta {{count}} carta para exiliar",
+      "subtitleExileUpTo_other": "Elige hasta {{count}} cartas para exiliar",
+      "subtitleExileRange_one": "Elige {{min}}-{{count}} carta para exiliar",
+      "subtitleExileRange_other": "Elige {{min}}-{{count}} cartas para exiliar",
       "subtitleHandExact_one": "Elige {{count}} permanente para devolver a la mano de su propietario",
       "subtitleHandExact_other": "Elige {{count}} permanentes para devolver a la mano de sus propietarios",
       "subtitleHandUpTo_one": "Elige hasta {{count}} permanente para devolver a la mano de su propietario",
@@ -1294,6 +1318,7 @@
       "labelTop": "Superior ({{selected}}/{{count}})",
       "labelPut": "Poner ({{selected}}/{{count}})",
       "labelReturn": "Devolver ({{selected}}/{{count}})",
+      "labelExile": "Exiliar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Superior"
     },
@@ -1505,7 +1530,11 @@
     "manaCombination": {
       "title": "Elegir combinación de maná",
       "subtitleAny": "Selecciona cada color de maná a producir",
-      "subtitle": "Selecciona qué combinación de maná producir"
+      "subtitle": "Selecciona qué combinación de maná producir",
+      "amount": "{{selected}} / {{count}} de maná seleccionados",
+      "decrease": "Quitar maná {{color}}",
+      "increase": "Añadir maná {{color}}",
+      "quantity": "Maná {{color}}: {{count}}"
     },
     "untapSubset": {
       "title": "Choose permanents to untap",

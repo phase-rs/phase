@@ -4,7 +4,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, Effect, EffectError, EffectKind, ForEachCategoryAction,
-    ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
+    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -79,7 +79,7 @@ pub fn resolve(
     // CR 608.2d: If there are no objects to choose from, skip the choice
     // (a player can't choose an option that's illegal or impossible).
     if cards.is_empty() || count == 0 {
-        state.last_choose_from_zone_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -100,17 +100,10 @@ pub fn resolve(
     // `EventContextAmount` ("that many") sub_ability continuation resolves the
     // triggering event's amount after the pause (Amy Pond). Restored by the
     // `ChooseFromZoneChoice` handler around the continuation drain. Set
-    // unconditionally on every single-pool raise: the `.then` yields `None` for a
+    // unconditionally on every single-pool raise: `capture` yields `None` for a
     // non-trigger ChooseFromZone (activated/spell), so a stale value from a prior
     // resolution can never carry over; consumed by `.take()` in the handler.
-    state.pending_choose_zone_trigger_context = (state.current_trigger_event.is_some()
-        || state.current_trigger_match_count.is_some()
-        || state.die_result_this_resolution.is_some())
-    .then(|| ResolvingTriggerContext {
-        event: state.current_trigger_event.clone(),
-        match_count: state.current_trigger_match_count,
-        die_result: state.die_result_this_resolution,
-    });
+    state.pending_choose_zone_trigger_context = ResolvingTriggerContext::capture(state);
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: choosing_player,
@@ -460,7 +453,7 @@ pub(crate) fn resolve_random_in_chain(
     // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
     // any continuation that depends on the missing pick.
     if cards.is_empty() || count == 0 {
-        state.last_choose_from_zone_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -2443,7 +2436,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), &state));
 
         let ability = ResolvedAbility::new(
             Effect::ForEachCategory {

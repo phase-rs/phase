@@ -13,8 +13,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActivationResidual, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
     ConvokeMode, CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast,
-    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind,
-    TargetSelectionSlot, WaitingFor,
+    PendingCostMoveResume, SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry,
+    StackEntryKind, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -52,6 +52,7 @@ use super::speed::effective_speed;
 use super::splice;
 use super::stack;
 use super::targeting;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
 
@@ -1214,8 +1215,8 @@ pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectI
     can_pay_special_action_cost_after_auto_tap(state, player, &cost)
 }
 
-/// CR 702.143a-b: Pay {2}, exile the hand card, mark it foretold in exile, and
-/// grant the later-turn foretell-cost casting permission.
+/// CR 702.143a-b: Pay {2}, then begin the foretell special-action move through
+/// the replacement-aware zone pipeline.
 pub fn handle_foretell(
     state: &mut GameState,
     player: PlayerId,
@@ -1255,21 +1256,94 @@ pub fn handle_foretell(
         &ManaCost::generic(FORETELL_SPECIAL_ACTION_COST),
         events,
     )?;
-    super::zones::move_to_zone(state, object_id, Zone::Exile, events);
-    if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.foretold = true;
-        obj.face_down = true;
-        obj.casting_permissions.push(CastingPermission::Foretold {
-            cost: foretell_cost,
-            turn_foretold: state.turn_number,
-        });
-    }
-    events.push(GameEvent::Foretold {
-        player_id: player,
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::Foretell {
+        player,
         object_id,
+        cost: foretell_cost,
+        turn_foretold: state.turn_number,
     });
 
-    Ok(WaitingFor::Priority { player })
+    let move_event_start = events.len();
+    match zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::cost(object_id, Zone::Exile, object_id),
+        events,
+    ) {
+        ZoneMoveResult::Done => Ok(resume_foretell_cost_move(state, events)),
+        ZoneMoveResult::NeedsChoice(_) => {
+            // `NeedsChoice` is overloaded by the zone pipeline: it can be the
+            // pre-delivery CR 616.1 ordering prompt, or a post-delivery prompt
+            // raised by a replacement's continuation. A delivery emits the
+            // card's `ZoneChanged` event, so it is the reliable boundary even
+            // if a post-effect has moved the card again before it prompts.
+            if events[move_event_start..].iter().any(|event| {
+                matches!(event, GameEvent::ZoneChanged { object_id: moved, .. } if *moved == object_id)
+            }) {
+                complete_foretell_cost_move(state, events);
+            }
+            Ok(state.waiting_for.clone())
+        }
+        ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            unreachable!("foretell moves a hand card to exile, never an aura to the battlefield")
+        }
+    }
+}
+
+/// CR 702.143a-c + CR 614.1 + CR 616.1: A card is foretold only when the
+/// special action's replacement-aware move delivers it to exile. A redirected
+/// or prevented move still completes the special action without granting a
+/// foretell casting permission.
+pub(crate) fn resume_foretell_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    WaitingFor::Priority {
+        player: complete_foretell_cost_move(state, events),
+    }
+}
+
+/// CR 702.143a-c + CR 614.6: Completes the paid Foretell special action after
+/// its zone move either delivers or is fully replaced. The caller owns the
+/// resulting `WaitingFor`, which makes completion safe at both the normal
+/// priority boundary and a post-replacement prompt boundary.
+pub(crate) fn complete_foretell_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> PlayerId {
+    let Some(PendingCostMoveResume::Foretell {
+        player,
+        object_id,
+        cost,
+        turn_foretold,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("foretell cost move resume must be pending")
+    };
+
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        let object = state
+            .objects
+            .get_mut(&object_id)
+            .expect("foretell object remains in game state");
+        object.foretold = true;
+        object.face_down = true;
+        object
+            .casting_permissions
+            .push(CastingPermission::Foretold {
+                cost,
+                turn_foretold,
+            });
+        events.push(GameEvent::Foretold {
+            player_id: player,
+            object_id,
+        });
+    }
+
+    player
 }
 
 // CR 702.34 (Flashback) / CR 702.81 (Retrace) / CR 702.127 (Aftermath) /
@@ -13740,10 +13814,8 @@ fn apply_mana_spell_grants(
 // (Phase 1 of the cost-payment unification plan). These `pub use` shims keep
 // every existing `casting::*` / `super::casting::*` call site compiling
 // unchanged while the implementation lives in `game/costs.rs`.
-pub use super::costs::pay_ability_cost;
-pub(crate) use super::costs::{
-    pause_cost_payment_for_replacement_choice, pay_ability_cost_for_activation, PaymentOutcome,
-};
+pub use super::costs::pay_ability_cost_for_activation;
+pub(crate) use super::costs::{pause_cost_payment_for_replacement_choice, PaymentOutcome};
 
 fn pending_activation_after_cost_pause(
     source_id: ObjectId,
@@ -14273,6 +14345,77 @@ pub(super) fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Optio
     }
 }
 
+/// Removes the one return-to-hand leg currently represented by a
+/// `WaitingFor::PayCost` selection. Later return legs remain in the residual so
+/// each one receives its own choice after the preceding cost is paid.
+pub(super) fn remove_selected_return_to_hand_cost(cost: AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::ReturnToHand {
+            from_zone: None | Some(Zone::Battlefield),
+            ..
+        } => None,
+        AbilityCost::Composite { costs } => {
+            let mut removed = false;
+            let remaining = costs
+                .into_iter()
+                .filter_map(|cost| {
+                    if !removed && find_return_to_hand_cost(&cost).is_some() {
+                        removed = true;
+                        remove_selected_return_to_hand_cost(cost)
+                    } else {
+                        Some(cost)
+                    }
+                })
+                .collect();
+            combine_cost_legs(remaining)
+        }
+        other => Some(other),
+    }
+}
+
+/// Splits delayed return-to-hand legs from automatic activation-cost legs.
+/// The former must go back through `WaitingFor::PayCost`; the latter may be
+/// paid by the activation-cost authority before the selected move happens.
+pub(super) fn split_return_to_hand_cost_legs(
+    cost: AbilityCost,
+) -> (Option<AbilityCost>, Option<AbilityCost>) {
+    match cost {
+        cost @ AbilityCost::ReturnToHand { .. } => (None, Some(cost)),
+        AbilityCost::Composite { costs } => {
+            let mut automatic = Vec::new();
+            let mut returns = Vec::new();
+            for cost in costs {
+                let (automatic_leg, return_leg) = split_return_to_hand_cost_legs(cost);
+                automatic.extend(automatic_leg);
+                returns.extend(return_leg);
+            }
+            (combine_cost_legs(automatic), combine_cost_legs(returns))
+        }
+        cost => (Some(cost), None),
+    }
+}
+
+/// True only for a residual composed entirely of return-to-hand legs. A full
+/// activation cost may still contain a return leg after another chooser paid a
+/// different component; that legacy path continues through the cost authority.
+pub(super) fn has_only_return_to_hand_cost_legs(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::ReturnToHand { .. } => true,
+        AbilityCost::Composite { costs } => {
+            !costs.is_empty() && costs.iter().all(has_only_return_to_hand_cost_legs)
+        }
+        _ => false,
+    }
+}
+
+fn combine_cost_legs(costs: Vec<AbilityCost>) -> Option<AbilityCost> {
+    match costs.len() {
+        0 => None,
+        1 => costs.into_iter().next(),
+        _ => Some(AbilityCost::Composite { costs }),
+    }
+}
+
 pub(crate) fn find_eligible_return_to_hand_targets(
     state: &GameState,
     player: PlayerId,
@@ -14580,6 +14723,7 @@ pub(crate) fn can_pay_ability_cost_now(
         &super::costs::PaymentScope::Activation {
             excluded_sources: &excluded_sources,
             ability_tag,
+            cost_move_handling: super::costs::ActivationCostMoveHandling::OutcomeAware,
         },
     )
 }
@@ -15187,9 +15331,11 @@ pub fn handle_activate_ability(
 
         if casting_costs::activation_cost_needs_x_choice(&resolved, cost) {
             // CR 602.2b + CR 601.2f: A non-mana activation cost that removes
-            // X counters still needs the same X announcement step before any
-            // mana or counter payment happens. Split fixed mana out so it
-            // flows through ManaPayment, then pay the concretized residual cost.
+            // X counters (or pays a variable-X resource, e.g. "Pay X {E}" —
+            // Chthonian Nightmare, issue #1092) still needs the same X
+            // announcement step before any mana or counter/resource payment
+            // happens. Split fixed mana out so it flows through ManaPayment,
+            // then pay the concretized residual cost.
             let (mana_cost, remaining) = split_alt_cost_components(cost);
             let mut pending_x = PendingCast::new(
                 source_id,
@@ -15199,6 +15345,23 @@ pub fn handle_activate_ability(
             );
             pending_x.activation_cost = remaining;
             pending_x.activation_ability_index = Some(ability_index);
+            // CR 601.2g + CR 601.2h: if a non-self battlefield-removal sub-cost
+            // (Sacrifice / battlefield Exile / ReturnToHand) is still
+            // outstanding in the residual after X-announcement, mark the
+            // `ManaLeg` residual so `push_activated_ability_to_stack`
+            // re-surfaces it interactively via its existing hand-rolled
+            // detour (issue #1092: Chthonian Nightmare's Composite[PayEnergy{X},
+            // Sacrifice, ReturnToHand] was otherwise silently dropped by the
+            // fall-through `pay_ability_cost_for_activation` no-op — the same
+            // class of bug the `XMana` residual gate already documents for
+            // the mana-{X} case).
+            if pending_x
+                .activation_cost
+                .as_ref()
+                .is_some_and(|c| find_non_self_battlefield_removal_cost(c).is_some())
+            {
+                pending_x.activation_residual = ActivationResidual::ManaLeg;
+            }
             state.pending_cast = Some(Box::new(pending_x));
             return casting_costs::enter_payment_step(state, player, None, events);
         }
@@ -15685,12 +15848,17 @@ pub fn handle_activate_ability(
                     activation_ability_tag(state, source_id, ability_index),
                     events,
                 )? {
-                    state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
+                    let pending = pending_activation_after_cost_pause(
                         source_id,
                         resolved.clone(),
                         ability_index,
                         remaining_cost,
-                    )));
+                    );
+                    if let Some(pending) =
+                        casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
+                    {
+                        state.pending_cast = Some(pending);
+                    }
                     return Ok(state.waiting_for.clone());
                 }
             }
@@ -15807,12 +15975,17 @@ pub fn handle_activate_ability(
             activation_ability_tag(state, source_id, ability_index),
             events,
         )? {
-            state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
+            let pending = pending_activation_after_cost_pause(
                 source_id,
                 resolved.clone(),
                 ability_index,
                 remaining_cost,
-            )));
+            );
+            if let Some(pending) =
+                casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
+            {
+                state.pending_cast = Some(pending);
+            }
             return Ok(state.waiting_for.clone());
         }
     }
@@ -15961,7 +16134,7 @@ pub fn handle_cancel_cast(
             .get(object_id)
             .is_some_and(|obj| obj.zone == Zone::Exile)
         {
-            super::zones::move_to_zone(state, *object_id, Zone::Graveyard, _events);
+            super::zones::restore_after_rollback(state, *object_id, Zone::Graveyard, _events);
         }
     }
     if !delved_cards.is_empty() {

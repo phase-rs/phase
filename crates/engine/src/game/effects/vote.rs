@@ -243,7 +243,7 @@ pub fn resolve(
     // `resolve_tally`, then drains this continuation to run any post-Vote
     // chained effects. Mirrors clash::stash_sub.
     if let Some(sub) = ability.sub_ability.as_ref() {
-        state.pending_continuation = Some(PendingContinuation::new(sub.clone()));
+        state.pending_continuation = Some(PendingContinuation::new(sub.clone(), state));
     }
 
     Ok(())
@@ -374,6 +374,7 @@ pub fn resolve_tally(
                 target_constraints: Vec::new(),
                 target_choice_timing: per_choice_effect[idx].target_choice_timing,
                 description: per_choice_effect[idx].description.clone(),
+                selected_mode_labels: Vec::new(),
                 repeat_for: None,
                 min_x_value: per_choice_effect[idx].min_x_value,
                 announced_x: per_choice_effect[idx].announced_x.clone(),
@@ -397,8 +398,7 @@ pub fn resolve_tally(
                 sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
                 modal: None,
                 mode_abilities: vec![],
-                dig_found_nothing_for_parent_target: false,
-                choose_from_zone_found_nothing_for_parent_target: false,
+                parent_target_missing_reason: None,
             };
             resolve_ability_chain(state, &chain, events, 1)?;
         } else if per_choice_effect[idx]
@@ -437,6 +437,7 @@ pub fn resolve_tally(
                 target_constraints: Vec::new(),
                 target_choice_timing: per_choice_effect[idx].target_choice_timing,
                 description: per_choice_effect[idx].description.clone(),
+                selected_mode_labels: Vec::new(),
                 repeat_for: None,
                 min_x_value: per_choice_effect[idx].min_x_value,
                 announced_x: per_choice_effect[idx].announced_x.clone(),
@@ -460,8 +461,7 @@ pub fn resolve_tally(
                 sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
                 modal: None,
                 mode_abilities: vec![],
-                dig_found_nothing_for_parent_target: false,
-                choose_from_zone_found_nothing_for_parent_target: false,
+                parent_target_missing_reason: None,
             };
             resolve_ability_chain(state, &chain, events, 1)?;
         } else {
@@ -669,6 +669,7 @@ fn resolved_from_def(
         target_constraints: Vec::new(),
         target_choice_timing: def.target_choice_timing,
         description: def.description.clone(),
+        selected_mode_labels: Vec::new(),
         repeat_for: None,
         min_x_value: def.min_x_value,
         announced_x: def.announced_x.clone(),
@@ -698,8 +699,7 @@ fn resolved_from_def(
         // abilities through (None for vote sub-effects).
         modal: def.modal.clone(),
         mode_abilities: def.mode_abilities.clone(),
-        dig_found_nothing_for_parent_target: false,
-        choose_from_zone_found_nothing_for_parent_target: false,
+        parent_target_missing_reason: None,
     }
 }
 
@@ -894,6 +894,7 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -917,8 +918,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         };
 
         let mut events = Vec::new();
@@ -998,6 +998,7 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -1021,8 +1022,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         }
     }
 
@@ -1333,6 +1333,7 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -1356,8 +1357,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         };
 
         // Resolution parks on VoteChoice with controller as first subject.
@@ -1494,6 +1494,7 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
             announced_x: None,
@@ -1517,8 +1518,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         };
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("vote initiates");

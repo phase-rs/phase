@@ -109,7 +109,9 @@ fn park_search_observer_triggers(
 pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
-        WaitingFor::ScryChoice { .. }
+        WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::ScryChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
@@ -175,6 +177,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CategoryChoice { .. }
             | WaitingFor::EachPlayerCopyChosenSelection { .. }
             | WaitingFor::KeepWithinTotalPowerChoice { .. }
+            | WaitingFor::KeepExactPermanentsChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
     )
 }
@@ -559,6 +562,42 @@ pub(super) fn handle_resolution_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionChoiceOutcome, EngineError> {
     let outcome = match (waiting_for, action) {
+        (
+            WaitingFor::MeldPairChoice { player, choices },
+            GameAction::ChooseMeldPair {
+                source_id,
+                partner_id,
+            },
+        ) => {
+            let context = choices
+                .into_iter()
+                .find(|choice| choice.source_id == source_id && choice.partner_id == partner_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "meld selection is not one of the offered pairs".to_string(),
+                    )
+                })?;
+            state.waiting_for = WaitingFor::Priority { player };
+            crate::game::meld::begin_selected_meld(state, context, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::MeldAttackTargetChoice {
+                player,
+                context,
+                valid_targets,
+            },
+            GameAction::ChooseEntryAttackTarget { target },
+        ) => {
+            if !valid_targets.contains(&target) {
+                return Err(EngineError::InvalidAction(
+                    "entry attack target is not one of the offered destinations".to_string(),
+                ));
+            }
+            state.waiting_for = WaitingFor::Priority { player };
+            crate::game::meld::finish_meld_attack_choice(state, context, target, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
         (
             WaitingFor::ScryChoice { player, cards },
             GameAction::SelectCards { cards: top_cards },
@@ -1288,7 +1327,8 @@ pub(super) fn handle_resolution_choice(
                             state.pending_continuation.is_none(),
                             "Learn rummage overwriting pending_continuation"
                         );
-                        state.pending_continuation = Some(PendingContinuation::new(Box::new(draw)));
+                        state.pending_continuation =
+                            Some(PendingContinuation::new(Box::new(draw), state));
                         events.push(GameEvent::EffectResolved {
                             kind: EffectKind::Learn,
                             source_id: ObjectId(0),
@@ -2224,6 +2264,24 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            if effects::scoped_library_search::submit_selection(
+                state,
+                player,
+                &cards,
+                count,
+                reveal,
+                up_to,
+                allows_partial_find,
+                &constraint,
+                &chosen,
+                events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?
+            {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
             // CR 701.23b/d: "up to N", hidden-zone stated-quality searches, or
             // explicit stated-quality selection constraints accept a short/empty
             // pick. A pure quantity search needs exactly `count`.
@@ -3988,6 +4046,7 @@ pub(super) fn handle_resolution_choice(
                         pending.ability,
                         pending.activation_cost.as_ref(),
                         pending.activation_residual,
+                        pending.pending_loyalty_activation_player,
                         events,
                     )?;
                 } else {
@@ -4778,6 +4837,94 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
         }
+        // CR 101.4 + CR 701.21a: An exact-cardinality keeper choice. The
+        // collected protected sets are handed to the shared scope-sacrifice
+        // queue only once every scoped player has chosen, so replacement
+        // choices cannot bypass later sacrifices or the parked continuation.
+        (
+            WaitingFor::KeepExactPermanentsChoice {
+                player,
+                target_player: _,
+                eligible,
+                required_count,
+                choose_filter,
+                sacrifice_filter,
+                chooser_scope,
+                source_id,
+                source_controller,
+                remaining_players,
+                mut all_kept,
+                scoped_players,
+            },
+            GameAction::ChooseKeptPermanents { kept },
+        ) => {
+            if kept.len() != required_count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must keep exactly {required_count} permanent(s), got {}",
+                    kept.len()
+                )));
+            }
+            let mut chosen = Vec::with_capacity(kept.len());
+            for id in &kept {
+                if !eligible.contains(id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Permanent {id:?} is not eligible to keep"
+                    )));
+                }
+                if chosen.contains(id) {
+                    return Err(EngineError::InvalidAction(
+                        "Cannot keep the same permanent more than once".to_string(),
+                    ));
+                }
+                chosen.push(*id);
+            }
+            all_kept.extend(chosen);
+
+            let events_before_sacrifice = events.len();
+            set_priority(state, player);
+            effects::choose_and_sacrifice_rest::step_exact_count(
+                state,
+                source_id,
+                source_controller,
+                chooser_scope,
+                &remaining_players,
+                all_kept,
+                &choose_filter,
+                &sacrifice_filter,
+                required_count,
+                &scoped_players,
+                events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+            if matches!(
+                state.waiting_for,
+                WaitingFor::KeepExactPermanentsChoice { .. }
+            ) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
+            let events_after_sacrifice = events.len();
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                resume_with_error_propagation(state, events)?;
+            }
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+            } else {
+                let trigger_events: Vec<GameEvent> = events
+                    [events_before_sacrifice..events_after_sacrifice]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
         (waiting_for, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Cannot perform {:?} while waiting for {:?}",
@@ -5063,6 +5210,37 @@ pub(crate) fn run_batch_completion(
                 );
             }
         }
+        BatchCompletion::ScopedLibrarySearchDelivery {
+            player,
+            source_id,
+            after_scope,
+        } => {
+            // CR 101.4 + CR 701.23i + CR 616.1: the parked batch has finally
+            // delivered every selected card. The searched-this-way shuffle tail
+            // may now resolve; a failure here would mean corrupted serialized
+            // engine state because the completion is created only by the typed
+            // scoped-search protocol above.
+            effects::scoped_library_search::finish_delivery_tail(
+                state,
+                player,
+                source_id,
+                after_scope,
+                events,
+            )
+            .expect("scoped library search batch completion must resolve");
+        }
+        BatchCompletion::MeldExile { context } => {
+            crate::game::meld::finish_meld_exile(state, context, events);
+        }
+        BatchCompletion::MeldEntry {
+            context,
+            attack_target,
+        } => {
+            crate::game::meld::finish_meld_delivery(state, context, attack_target, events);
+        }
+        BatchCompletion::MeldRedirect { source_id } => {
+            crate::game::meld::finish_deferred_meld_resolution(state, source_id, events);
+        }
     }
 }
 
@@ -5075,19 +5253,7 @@ fn surveil_keep_on_top(
     player: crate::types::player::PlayerId,
     top_cards: &[ObjectId],
 ) {
-    let player_state = state
-        .players
-        .iter_mut()
-        .find(|candidate| candidate.id == player)
-        .expect("player exists");
-    player_state.library.retain(|id| !top_cards.contains(id));
-    for (index, &card_id) in top_cards.iter().enumerate() {
-        player_state.library.insert(index, card_id);
-    }
-    // CR 401.5 + CR 611.3a: Surveil keeps cards on top by editing the library
-    // directly (this shared helper backs every Surveil caller), so a
-    // `TopOfLibraryMatches` static must be re-evaluated — self-gated on liveness.
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    zones::reorder_within_library(state, player, top_cards, 0);
 }
 
 fn resume_with_error_propagation(

@@ -567,7 +567,7 @@ mod tests {
             PlayerId(0),
         );
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(ability)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(ability), &state));
         state.waiting_for = WaitingFor::EffectZoneChoice {
             enters_modified_if: None,
             player: PlayerId(0),

@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import type { ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel, loyaltyBadge, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
-import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -17,6 +16,7 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { ReportCardButton, type CardReportContext } from "./ReportCardButton.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
+import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
@@ -882,7 +882,7 @@ function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, pa
 type ActivateLabel = {
   rawLabel: string;
   label: string;
-  loyalty: { iconClasses: string; text: string } | null;
+  loyalty: { amount: number; iconClasses: string | null; text: string } | null;
 };
 
 function CardInfoPanel({
@@ -987,11 +987,7 @@ function CardInfoPanel({
           {activateLabels.map((entry) =>
             entry.loyalty ? (
               <div key={entry.rawLabel} className="flex items-center gap-1">
-                <ManaFontIcon
-                  iconClass={entry.loyalty.iconClasses}
-                  fallbackText={entry.loyalty.text}
-                  label={entry.loyalty.text}
-                />
+                <LoyaltyBadge amount={entry.loyalty.amount} kind="cost" />
                 <RichLabel
                   text={t("preview.activateCost", { cost: entry.label })}
                   size="xs"

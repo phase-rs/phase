@@ -279,7 +279,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ExchangeLifeWithStat { .. }
         | Effect::ExileFromTopUntil { .. }
         | Effect::ExileHaunting { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::ExileTop { .. }
         | Effect::Exploit { .. }
         | Effect::ExploreAll { .. }

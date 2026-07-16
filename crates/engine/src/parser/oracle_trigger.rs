@@ -1625,7 +1625,16 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             }
             Some(Box::new(ability))
         }
-        Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
+        Some(TriggerBody::PreLowered(ability)) => {
+            // CR 603.5: Pre-lowered bodies (inline modals, vote blocks, etc.)
+            // may not have stamped `optional` during extraction even when the
+            // trigger effect began with "you may".
+            let mut ability = ability.clone();
+            if modifiers.optional {
+                ability.optional = true;
+            }
+            Some(ability)
+        }
         None => None,
     };
 
@@ -12844,17 +12853,26 @@ fn build_controlled_subtype_filters(
 // Category parsers
 // ---------------------------------------------------------------------------
 
-/// CR 303.4e: nom combinator for the "enchanted [creature|permanent]'s controller"
-/// possessive that scopes an Aura phase trigger to the controller of the permanent
-/// the source is attached to. Composed along its grammar axes — the fixed
-/// `enchanted ` lead, the object-kind alternation (`creature`/`permanent`), the
-/// possessive apostrophe (ASCII `'s` or curly `’s`), and the `controller` head —
-/// rather than enumerating the cartesian product of literals, so a new object-kind
-/// sibling is a single `alt()` arm. Matched at any word boundary by the caller
-/// because the phrase trails the phase noun ("the upkeep of …").
+/// CR 303.4e: nom combinator for the "enchanted <type>'s controller" possessive
+/// that scopes an Aura phase trigger to the controller of the permanent the
+/// source is attached to. Composed along its grammar axes — the fixed
+/// `enchanted ` lead, the object-kind leg, the possessive apostrophe (ASCII `'s`
+/// or curly `’s`), and the `controller` head — rather than enumerating the
+/// cartesian product of literals, so a new object-kind sibling is free.
+///
+/// CR 702.5a: the object-kind leg delegates to `parse_enchant_type_leg` — the
+/// same shared combinator that defines an Aura's legal enchant-target noun set
+/// (creature / artifact(+subtypes) / land(+basic-land-subtypes) / enchantment /
+/// planeswalker / permanent / instant / sorcery). Reusing it means this trigger
+/// phrase's noun set can never drift from the Aura's own enchant-target noun set
+/// (fixes the previous 2-noun `creature`/`permanent` gap that left "enchanted
+/// enchantment's controller" — Power Leak — and artifact/land Auras unscoped).
+///
+/// Matched at any word boundary by the caller because the phrase trails the
+/// phase noun ("the upkeep of …").
 fn parse_enchanted_controller_phrase(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = tag("enchanted ").parse(input)?;
-    let (input, _) = alt((tag("creature"), tag("permanent"))).parse(input)?;
+    let (input, _) = crate::parser::oracle_nom::enchant::parse_enchant_type_leg(input)?;
     let (input, _) = alt((tag("'s"), tag("\u{2019}s"))).parse(input)?;
     let (input, _) = tag(" controller").parse(input)?;
     Ok((input, ()))
@@ -14692,6 +14710,33 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
             return Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![prop]),
             ));
+        }
+    }
+
+    // CR 702.8a + CR 603.2: "that has <keyword>" / "with <keyword>" — the spell
+    // must possess the named keyword ability (Slitherwisp: "another spell that
+    // has flash"). Without this the keyword clause is dropped and the trigger
+    // over-fires on every spell (e.g. a non-flash counterspell). Gated on a
+    // recognized keyword whose text is fully consumed by `parse_keyword_line_core`
+    // so the numeric/colored "with mana value …" / "with … mana symbol" qualifiers
+    // handled above keep their arms and a non-keyword tail ("with power 3 …")
+    // still declines here. Emits `FilterProp::WithKeyword`, which the object
+    // matcher honors via `obj.has_keyword` (filter.rs).
+    if let Ok((keyword_text, ())) = alt((
+        value((), tag::<_, _, OracleError<'_>>("that has ")),
+        value((), tag("with ")),
+    ))
+    .parse(modifier)
+    {
+        if let Some((keyword, remainder)) =
+            super::oracle_keyword::parse_keyword_line_core(keyword_text.trim())
+        {
+            if remainder.trim().is_empty() {
+                return Some(TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::WithKeyword { value: keyword }]),
+                ));
+            }
         }
     }
 

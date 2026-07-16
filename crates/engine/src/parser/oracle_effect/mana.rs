@@ -21,7 +21,7 @@ use crate::types::mana::{
 };
 use crate::types::zones::Zone;
 
-use super::super::oracle_keyword::parse_keyword_from_oracle;
+use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
 };
@@ -2424,10 +2424,10 @@ fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
         if !remainder.trim().is_empty() {
             return None;
         }
-        let keyword = parse_keyword_from_oracle(keyword_text.trim())?;
+        let keyword = parse_granted_keyword_fragment(keyword_text.trim())?;
         (keyword, Duration::UntilEndOfTurn)
     } else {
-        let keyword = parse_keyword_from_oracle(rest.trim())?;
+        let keyword = parse_granted_keyword_fragment(rest.trim())?;
         (keyword, Duration::Permanent)
     };
 

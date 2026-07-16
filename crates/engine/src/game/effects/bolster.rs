@@ -102,7 +102,7 @@ pub fn resolve(
             controller,
         );
 
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), state));
         state.waiting_for = WaitingFor::ChooseFromZoneChoice {
             player: controller,
             cards: tied,

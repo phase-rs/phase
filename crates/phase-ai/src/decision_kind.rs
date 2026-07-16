@@ -70,6 +70,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // tactical policy currently routes on. Map them to ActivateAbility as
         // the catch-all bucket so policies that explicitly opt in still run.
         WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::MeldPairChoice { .. }
+        | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
@@ -165,6 +167,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::EachPlayerCopyChosenSelection { .. }
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
+        | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }
         // CR 510.1d + CR 702.22k: active player divides a banded blocker's
         // damage — a forced mid-combat choice, routed to the ability catch-all.

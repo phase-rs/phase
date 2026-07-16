@@ -1053,13 +1053,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" — energy costs (CR 107.14)
-    if let Some(energy) = try_parse_energy_cost(&lower) {
-        return AbilityCost::PayEnergy {
-            amount: QuantityExpr::Fixed {
-                value: energy as i32,
-            },
-        };
+    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" / "Pay X {E}" — energy costs (CR 107.14)
+    if let Some(amount) = try_parse_energy_cost(&lower) {
+        return AbilityCost::PayEnergy { amount };
     }
 
     // "Return a land you control to its owner's hand" — bounce cost
@@ -1629,8 +1625,12 @@ fn try_parse_exile_top_library(rest: &str) -> Option<u32> {
     None
 }
 
-/// CR 107.9: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}".
-fn try_parse_energy_cost(lower: &str) -> Option<u32> {
+/// CR 107.3a + CR 107.14: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}",
+/// "pay x {e}" (Chthonian Nightmare / issue #1092). Returns a `QuantityExpr` rather
+/// than a bare count so a variable-X amount ("pay x {e}") can be represented as
+/// `QuantityExpr::Ref { qty: Variable("X") }`, mirroring the "pay x life" /
+/// "pay x speed" branches above instead of silently collapsing X to 0.
+fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
     let text = nom_on_lower(lower, lower, |i| value((), tag("pay ")).parse(i))
         .map(|((), rest)| rest)
         .unwrap_or(lower)
@@ -1641,14 +1641,23 @@ fn try_parse_energy_cost(lower: &str) -> Option<u32> {
         // Verify the text is ONLY {E} symbols (no other text)
         let cleaned = text.replace("{e}", "").replace(' ', "");
         if cleaned.is_empty() {
-            return Some(count);
+            return Some(QuantityExpr::Fixed {
+                value: count as i32,
+            });
         }
     }
-    // "pay N {e}" / "pay eight {e}" / "pay six {e}"
+    // "pay N {e}" / "pay eight {e}" / "pay six {e}" / "pay x {e}"
     if text.ends_with("{e}") {
         let prefix = text.trim_end_matches("{e}").trim();
+        if prefix == "x" {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            });
+        }
         if let Some((n, _)) = parse_number(prefix) {
-            return Some(n);
+            return Some(QuantityExpr::Fixed { value: n as i32 });
         }
     }
     None

@@ -636,6 +636,38 @@ fn foretell_special_action_exiles_and_grants_later_turn_permission() {
     ));
 }
 
+#[test]
+fn foretell_completion_without_exile_clears_paid_continuation_without_stamp() {
+    let mut state = setup_game_at_main_phase();
+    let object_id = add_foretell_sorcery(&mut state);
+    let turn_foretold = state.turn_number;
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::Foretell {
+        player: PlayerId(0),
+        object_id,
+        cost: foretell_test_cost(),
+        turn_foretold,
+    });
+    let mana_after_payment = state.players[0].mana_pool.total();
+    let mut events = Vec::new();
+
+    let waiting = resume_foretell_cost_move(&mut state, &mut events);
+
+    assert_eq!(
+        waiting,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    );
+    assert!(state.pending_cost_move_resume.is_none());
+    assert_eq!(state.players[0].mana_pool.total(), mana_after_payment);
+    let object = &state.objects[&object_id];
+    assert_eq!(object.zone, Zone::Hand);
+    assert!(!object.foretold);
+    assert!(!object.face_down);
+    assert!(object.casting_permissions.is_empty());
+    assert!(events.is_empty());
+}
+
 // CR 708.4 + CR 702.143a / CR 702.143c: a FORETOLD card is cast FACE UP from
 // exile, never as a face-down spell. Mana payment runs `build_spell_meta` while
 // the object still sits in exile with `obj.face_down == true`; the resulting
@@ -22511,6 +22543,22 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
         panic!("expected activated ability on stack");
     };
     assert_eq!(ability.chosen_x, Some(2));
+    assert_eq!(
+        ability.selected_mode_labels,
+        [
+            "Exile target creature with mana value X or less.",
+            "Return target creature with mana value X or less to its owner's hand.",
+        ],
+        "activated modal choice must bind its selected labels before the ability reaches the stack",
+    );
+    let second_mode = ability
+        .sub_ability
+        .as_deref()
+        .expect("two selected modes must produce a second chain node");
+    assert!(
+        second_mode.selected_mode_labels.is_empty(),
+        "selected labels belong only to the root stack ability, not each mode instruction",
+    );
 }
 
 #[test]
@@ -28255,7 +28303,7 @@ fn composite_activated_pay_life_cost_deducts_life() {
     let life_before = state.players[0].life;
     let mut events = Vec::new();
 
-    pay_ability_cost(&mut state, PlayerId(0), fetch, &cost, &mut events)
+    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, None, &mut events)
         .expect("fetchland-style composite cost should be payable");
 
     assert_eq!(state.players[0].life, life_before - 1);
@@ -29083,6 +29131,13 @@ fn sneak_cast_succeeds_and_pays_sneak_cost() {
         attacker.zone,
         Zone::Hand,
         "Returned creature should be bounced to hand"
+    );
+    assert!(
+        !state.combat.as_ref().is_some_and(|combat| combat
+            .attackers
+            .iter()
+            .any(|entry| entry.object_id == attacker_id)),
+        "Returned attacker should be removed from combat"
     );
     // Spell on stack.
     assert!(
@@ -30252,7 +30307,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost(&mut state, PlayerId(0), source, &cost, &mut events)
+        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
             .expect("cost should pay with 2 +1/+1 counters available");
         let remaining = state
             .objects
@@ -30331,7 +30386,8 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost(&mut state, PlayerId(0), source, &cost, &mut events).unwrap();
+        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
+            .unwrap();
         let removed_count = events
             .iter()
             .filter_map(|e| match e {
@@ -31774,8 +31830,15 @@ mod unattach_cost {
         let cost = AbilityCost::Unattach;
 
         assert!(cost.is_payable(&state, PlayerId(0), equipment));
-        pay_ability_cost(&mut state, PlayerId(0), equipment, &cost, &mut Vec::new())
-            .expect("attached Equipment should be able to unattach as a cost");
+        pay_ability_cost_for_activation(
+            &mut state,
+            PlayerId(0),
+            equipment,
+            &cost,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("attached Equipment should be able to unattach as a cost");
 
         assert_eq!(state.objects[&equipment].zone, Zone::Battlefield);
         assert!(state.objects[&equipment].attached_to.is_none());
@@ -33482,11 +33545,12 @@ mod exert_cost {
         state.objects.get_mut(&id).unwrap().tapped = true;
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("exert cost pays");
@@ -33541,19 +33605,21 @@ mod exert_cost {
         let id = make_battlefield_permanent(&mut state);
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("first exert");
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("second exert");
@@ -33596,11 +33662,12 @@ mod exert_cost {
         );
 
         let mut events = Vec::new();
-        let result = pay_ability_cost(
+        let result = pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         );
         assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
@@ -33615,11 +33682,12 @@ mod exert_cost {
         let id = make_battlefield_permanent(&mut state);
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("exert cost pays");

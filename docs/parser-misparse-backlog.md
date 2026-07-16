@@ -2578,7 +2578,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (247 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (246 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2756,7 +2756,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Regent's Authority
 - Reign of Terror
 - Relic Amulet
-- Renowned Weaponsmith
 - Reptilian-...placeholder
 - Resilient Wanderer
 - Return the Favor
@@ -5102,7 +5101,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 30. Token/named-card name corrupted by normalization or overrun  (8 cards)
+### 30. Token/named-card name corrupted by normalization or overrun  (7 cards)
 
 **Signature.** A quoted/literal card name is rewritten by '~' self-reference normalization, an 'or'-list of names isn't split, a zone phrase is absorbed into the name, or trailing punctuation is left on a list option.
 
@@ -5110,7 +5109,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Dragonstorm Forecaster
 - Hecatomb
 - Thran Golem
 - Thrasta, Tempest's Roar

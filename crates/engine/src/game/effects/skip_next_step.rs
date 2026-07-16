@@ -124,6 +124,7 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             player_scope: None,
             starting_with: None,
             chosen_x: None,
@@ -147,8 +148,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         }
     }
 
