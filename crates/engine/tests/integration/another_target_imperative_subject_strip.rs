@@ -21,8 +21,8 @@
 //!   * Cybernetica Datasmith: "... Another target player creates a 4/4 ... Robot
 //!     ... creature token ..."
 //!   * Feral Contest: "... Another target creature blocks it this turn if able."
-//! -- and resolves the phase-out clause of The Phasing of Zhalfir's Chapter I/II
-//! ("Another target nonland permanent phases out.").
+//!     -- and resolves the phase-out clause of The Phasing of Zhalfir's Chapter I/II
+//!     ("Another target nonland permanent phases out.").
 //!
 //! This test drives the phase-out variant because it is the cleanest single
 //! runtime-state delta (phased in -> phased out, no combat or damage). It drives
