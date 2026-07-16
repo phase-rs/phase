@@ -236,6 +236,19 @@ pub(crate) struct ParseContext {
     /// top-level morph reminder/special-action text). Set by
     /// `parse_quoted_ability`; defaults to `false` everywhere else.
     pub in_granted_activated_ability: bool,
+    /// CR 400.1/400.2 + CR 601.2a + CR 608.2c: The player-referencing target of
+    /// an EARLIER same-chain `Effect::RevealHand` clause ("look at that
+    /// player's hand" / "reveal their hand"), e.g. `TriggeringPlayer`. When a
+    /// LATER clause in the SAME chain references "them"/"those cards" in a
+    /// cast-permission clause (Silent-Blade Oni: "You may cast a spell from
+    /// among those cards without paying its mana cost"), the anaphor binds to
+    /// THIS revealed player's hand instead of the exile-only
+    /// `TargetFilter::ExiledBySource` default — no exile ever happened, so
+    /// `ExiledBySource` would resolve to an empty set and silently swallow the
+    /// cast permission. Mirrors `chain_has_prior_exile_producer`'s same-chain
+    /// scan, but for the hand-reveal producer shape. `None` when no such
+    /// producer exists in this chain, or during standalone clause parsing.
+    pub chain_prior_hand_reveal_target: Option<TargetFilter>,
 }
 
 impl ParseContext {

@@ -6,7 +6,8 @@ use crate::game::effects::change_zone;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -203,7 +204,44 @@ pub fn resolve(
         )
     });
 
-    if !specific_targets.is_empty() && (declared_target_discard || object_bound_discard) {
+    // Issue #4950 (Thoughtseize) — corrected root cause: `declared_target_discard`
+    // and `object_bound_discard` say nothing about whether the discard's
+    // target *filter* resolves to an OBJECT (a specific card) or a PLAYER
+    // (whose hand a card gets chosen from separately, at resolution time).
+    // Both shapes can leave `specific_targets` empty:
+    //   - Thoughtseize: `DiscardCard{target: ParentTarget}` forwards the card
+    //     CHOSEN by the preceding reveal-choice. When that choice's eligible
+    //     set was empty (no nonland card), CR 608.2c says there is nothing to
+    //     choose — this must be a hard no-op.
+    //   - Tinybones/Chain of Smog/Skullscorch/Archon: `Discard{target: Player}`
+    //     ("target player discards a card[/two/at random]") is a *declared*
+    //     target (CR 115.1d, hence `declared_target_discard`), but the target
+    //     IS the player, not a card — which specific card(s) get discarded is
+    //     decided generically below (interactive choice or at random).
+    //   - Sonic Shrieker: "they discard a card" forwards the damaged PLAYER
+    //     via `ParentTarget` (hence `object_bound_discard`), not a chosen
+    //     card — same as the Player case above, just via a different filter.
+    // The ORIGINAL (pre-#4950) code gated on `!specific_targets.is_empty()`,
+    // which correctly sent all four shapes above to the generic path — but
+    // that ALSO sent Thoughtseize's empty-reveal case there, force-discarding
+    // an unrelated card whenever hand size happened to equal the discard
+    // count. The one bit those four PLAYER-scoped shapes never carry, and
+    // that Thoughtseize's empty-reveal case DOES, is a
+    // `parent_target_missing_reason` of `RevealHandChoice` — stamped ONLY by
+    // `apply_parent_chain_context` immediately after a `RevealHand`
+    // reveal-choice whose eligible set was empty (see
+    // `GameState::last_parent_target_missing_reason`). So: enter the specific-
+    // targets loop (a no-op when `specific_targets` is empty, which IS the
+    // desired Thoughtseize behavior) whenever either the original condition
+    // holds, OR the parent reveal-choice explicitly found nothing to choose.
+    // Any OTHER empty-`specific_targets`, declared/object-bound discard falls
+    // through to the generic hand-choice/random path below, exactly as
+    // before #4950's broken fix.
+    let parent_reveal_choice_found_nothing =
+        ability.parent_target_missing_reason == Some(ParentTargetMissingReason::RevealHandChoice);
+    if (!specific_targets.is_empty() && (declared_target_discard || object_bound_discard))
+        || (object_bound_discard && parent_reveal_choice_found_nothing)
+    {
         // Discard specific targeted cards
         for obj_id in specific_targets {
             let obj = state
@@ -1812,5 +1850,163 @@ mod tests {
             Some(Zone::Hand),
             "other hand card must not be discarded automatically"
         );
+    }
+
+    /// Issue #4950 (Thoughtseize): "Target player reveals their hand. You
+    /// choose a nonland card from it. That player discards that card. You
+    /// lose 2 life." When the revealed hand has NO nonland card, CR 608.2c
+    /// means there's nothing to choose — `reveal_hand::resolve`'s
+    /// empty-eligible path (correctly) never opens a `RevealChoice` and never
+    /// rebinds `pending_continuation.chain.targets` to a chosen card. Before
+    /// this fix, the chained `DiscardCard{target: ParentTarget}` sub-ability
+    /// then found zero `specific_targets` and fell through to the generic
+    /// "discard from the whole hand" path, force-discarding the land whenever
+    /// the opponent's hand size happened to equal the discard count. It must
+    /// now resolve as a no-op instead — only the life loss applies.
+    #[test]
+    fn reveal_choose_nonland_discard_is_noop_when_hand_has_no_nonland_card() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let opp_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Forest".into(),
+            Zone::Hand,
+        );
+        // `create_object` does not infer type from the name — it must be
+        // stamped explicitly, same as `reveal_hand_offset_count_truncates_to_inner_plus_one`
+        // does for CoreType::Creature. Without this the Non(Land) filter treats
+        // "Forest" as an eligible nonland card and the whole scenario is moot.
+        state
+            .objects
+            .get_mut(&opp_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let def = parse_effect_chain(
+            "Target player reveals their hand. You choose a nonland card from it. \
+             That player discards that card. You lose 2 life.",
+            AbilityKind::Spell,
+        );
+        let ability = build_resolved_from_def_with_targets(
+            &def,
+            ObjectId(100),
+            PlayerId(0),
+            vec![TargetRef::Player(PlayerId(1))],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.players[1].hand.contains(&opp_land),
+            "no nonland card was eligible — the land must NOT be discarded"
+        );
+        assert!(
+            !state.players[1].graveyard.contains(&opp_land),
+            "the land must not have moved to the graveyard"
+        );
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::DiscardChoice { .. } | WaitingFor::RevealChoice { .. }
+            ),
+            "empty-eligible reveal must not leave the game waiting on a stale discard/reveal choice"
+        );
+        assert_eq!(
+            state.players[0].life, 18,
+            "the life-loss clause still applies even when the discard whiffs"
+        );
+    }
+
+    /// Companion case for #4950: with a nonland card present, the reveal
+    /// choice fires normally, the chosen nonland is discarded, and the land
+    /// is left alone — confirms the fix's surviving `if` branch (looping over
+    /// non-empty `specific_targets`) is unchanged.
+    #[test]
+    fn reveal_choose_nonland_discard_targets_the_chosen_nonland_card() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let opp_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Forest".into(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&opp_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let opp_spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Spell".into(),
+            Zone::Hand,
+        );
+
+        let def = parse_effect_chain(
+            "Target player reveals their hand. You choose a nonland card from it. \
+             That player discards that card. You lose 2 life.",
+            AbilityKind::Spell,
+        );
+        let ability = build_resolved_from_def_with_targets(
+            &def,
+            ObjectId(100),
+            PlayerId(0),
+            vec![TargetRef::Player(PlayerId(1))],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let (chooser, cards) = match state.waiting_for.clone() {
+            WaitingFor::RevealChoice { player, cards, .. } => (player, cards),
+            other => panic!("expected RevealChoice for the nonland pick, got {other:?}"),
+        };
+        assert_eq!(chooser, PlayerId(0));
+        assert_eq!(cards, vec![opp_spell], "only the nonland card is eligible");
+
+        let waiting = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![opp_spell],
+            },
+            &mut events,
+        )
+        .expect("choosing the nonland card should succeed");
+
+        assert!(
+            !state.players[1].hand.contains(&opp_spell),
+            "the chosen nonland card must be discarded"
+        );
+        assert!(
+            state.players[1].graveyard.contains(&opp_spell),
+            "the chosen nonland card must land in the graveyard"
+        );
+        assert!(
+            state.players[1].hand.contains(&opp_land),
+            "the land must be left alone"
+        );
+        assert_eq!(state.players[0].life, 18);
     }
 }

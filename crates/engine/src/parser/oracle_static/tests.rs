@@ -15,6 +15,101 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
+/// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
+/// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
+/// strike if it's red, and trample if it's green." Each `if it's <color>` qualifies
+/// ONLY the creature its own keyword lands on, so every listed pair becomes its own
+/// static whose AFFECTED FILTER carries that color. Before the fix the whole line
+/// strict-failed (zero statics) and the card did nothing.
+#[test]
+fn color_conditional_keyword_grants_expand_per_color() {
+    use crate::types::mana::ManaColor;
+
+    let defs = parse_static_line_multi(
+        "Each creature you control has vigilance if it's white, hexproof if it's blue, lifelink if it's black, first strike if it's red, and trample if it's green.",
+    );
+    let expected = [
+        (ManaColor::White, Keyword::Vigilance),
+        (ManaColor::Blue, Keyword::Hexproof),
+        (ManaColor::Black, Keyword::Lifelink),
+        (ManaColor::Red, Keyword::FirstStrike),
+        (ManaColor::Green, Keyword::Trample),
+    ];
+    assert_eq!(
+        defs.len(),
+        expected.len(),
+        "one independent static per listed color: {defs:?}"
+    );
+    for (def, (color, keyword)) in defs.iter().zip(expected) {
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasColor { color }])
+            )),
+            "the color must fold into this branch's affected filter"
+        );
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddKeyword { keyword }]
+        );
+        assert!(
+            def.condition.is_none(),
+            "a per-recipient color qualifier is a filter, never a shared condition"
+        );
+    }
+}
+
+/// A single `"<keyword> if it's <color>"` grant is the same shape — the list is 1..n.
+#[test]
+fn color_conditional_keyword_grant_single_pair() {
+    use crate::types::mana::ManaColor;
+
+    let defs = parse_static_line_multi("Each creature you control has vigilance if it's white.");
+    assert_eq!(defs.len(), 1);
+    assert_eq!(
+        defs[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::HasColor {
+                    color: ManaColor::White
+                }])
+        ))
+    );
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Vigilance
+        }]
+    );
+}
+
+/// Regression: an unqualified keyword grant keeps its own path — the color-conditional
+/// branch declines, so no spurious `HasColor` is folded in.
+#[test]
+fn plain_keyword_grant_unaffected_by_color_conditional_path() {
+    let defs = parse_static_line_multi("Creatures you control have flying.");
+    assert_eq!(defs.len(), 1);
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }]
+    );
+    let Some(TargetFilter::Typed(ref tf)) = defs[0].affected else {
+        panic!("expected a Typed filter, got {:?}", defs[0].affected);
+    };
+    assert!(
+        !tf.properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::HasColor { .. })),
+        "a plain grant must not gain a color qualifier: {tf:?}"
+    );
+}
+
 // CR 205.1b + CR 604.1: a dynamic "gets +N/+M for each X" pump may carry a
 // trailing conjunct the for-each path used to drop (it only recovered trailing
 // keywords): "and is a <Subtype> in addition to its other types" (Reaper's
