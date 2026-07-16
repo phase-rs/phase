@@ -18,7 +18,7 @@ use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
-use super::oracle_nom::condition::parse_source_has_counters;
+use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
 use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::{
     parse_color_property, parse_enters_origin_zone, parse_with_property,
@@ -11847,7 +11847,13 @@ fn try_parse_source_counter_state_trigger(lower: &str) -> Option<(TriggerMode, T
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when ")))
         .parse(lower)
         .ok()?;
-    let (_, static_cond) = parse_source_has_counters(rest).ok()?;
+    // CR 603.8 / CR 122.1: two surface grammars yield the same source
+    // counter-threshold state condition:
+    //   possessive  "~ has [N or more] [type] counters on it"    (Darksteel Reactor)
+    //   existential "there are [N or more] [type] counters on ~" (Mazemind Tome)
+    let (_, static_cond) = alt((parse_source_has_counters, parse_source_counters_exist))
+        .parse(rest)
+        .ok()?;
     // CR 603.8: accept depletion form (minimum: 0, maximum: Some(0)) and
     // threshold form (minimum > 0, maximum: None). Reject mixed/range forms.
     if !matches!(

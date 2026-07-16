@@ -15589,7 +15589,20 @@ fn try_parse_multi_target_damage_chain_inner(
     // target phrase's announcing-player override leak into its first recipient.
     ctx.target_chooser = None;
     let lower = text.to_lowercase();
-    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // CR 608.2c + CR 107.3i: A trailing ", where X is <expr>" is later text that
+    // defines X for the whole instruction (Judgment Bolt); every instance of X
+    // resolves to the same value. Strip it so the bare-damage continuation loop
+    // does not choke on it — mirrors the identical idiom in
+    // try_parse_compound_player_object_damage. The 2nd amount stays
+    // QuantityExpr::Variable("X"); the binding is re-derived and applied at
+    // lowering by compute_sentence_where_x + apply_where_x_ability_expression,
+    // which read the un-stripped ClauseChunk text (a separate path). Fixed
+    // amounts (the primary 5) are untouched — apply_where_x_quantity_expression
+    // only rewrites Variable("X")/CostXPaid leaves.
+    let (stripped, _binding) = strip_trailing_where_x(TextPair::new(text, &lower));
+    let text = stripped.original;
+    let lower = stripped.lower;
+    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
     // Each segment parses through the shared context, so retain the primary
     // segment's announcer before a continuation can overwrite it.
     let primary_target_chooser = ctx.target_chooser.clone();
@@ -30326,6 +30339,150 @@ mod tests;
 /// sub_ability assembly.
 #[cfg(test)]
 mod snapshot_tests;
+
+/// Tests for the trailing ", where X is <expr>" tolerance in the compound
+/// bare-damage chain (Judgment Bolt) — see `try_parse_multi_target_damage_chain_inner`.
+#[cfg(test)]
+mod where_x_damage_chain_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{Effect, QuantityExpr, QuantityRef, TargetFilter};
+
+    fn parse_instant(name: &str, text: &str) -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(text, name, &[], &["Instant".to_string()], &[])
+    }
+
+    /// Judgment Bolt: "deals 5 damage to target creature and X damage to that
+    /// creature's controller, where X is the number of Equipment you control."
+    /// The 2nd damage clause must chain as a `sub_ability` whose amount is the
+    /// dynamic Equipment `ObjectCount`. On main the trailing where-X clause made
+    /// the chain parser bail, so `sub_ability` was `None`; reverting the strip
+    /// restores that `None` and flips this test.
+    #[test]
+    fn judgment_bolt_compound_dynamic_damage_ast() {
+        let parsed = parse_instant(
+            "Judgment Bolt",
+            "Judgment Bolt deals 5 damage to target creature and X damage to that \
+             creature's controller, where X is the number of Equipment you control.",
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "the where-X damage chain must parse cleanly (no swallowed clause), got {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.abilities.len(), 1, "one spell ability");
+        let ability = &parsed.abilities[0];
+        // Primary: fixed 5 to the creature — untouched by the where-X strip.
+        match &*ability.effect {
+            Effect::DealDamage { amount, .. } => {
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 5 })
+            }
+            other => panic!("primary must be DealDamage(5), got {other:?}"),
+        }
+        // 2nd clause: chains only because the where-X tail was stripped.
+        let sub = ability.sub_ability.as_deref().expect(
+            "the 2nd damage clause must chain as a sub_ability — this is None on main \
+             (FLIPs to None if the where-X strip is reverted)",
+        );
+        match &*sub.effect {
+            Effect::DealDamage { amount, target, .. } => {
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { .. }
+                        }
+                    ),
+                    "2nd amount must be the dynamic Equipment ObjectCount, not Fixed: {amount:?}"
+                );
+                // CR 109.4: "that creature's controller".
+                assert_eq!(target, &TargetFilter::ParentTargetController);
+            }
+            other => panic!("2nd clause must be DealDamage, got {other:?}"),
+        }
+    }
+
+    /// Class generalization: any "A to target creature and X to that creature's
+    /// controller, where X is <count>" keeps the 1st amount Fixed while binding
+    /// the 2nd to the dynamic count — proven with a synthetic Artifact card.
+    /// A single-damage line produces NO phantom sub_ability (negative reach-guard,
+    /// paired with a positive "still parses to DealDamage" check so the absence is
+    /// meaningful).
+    #[test]
+    fn compound_dynamic_damage_parameterized_and_single_ast() {
+        let parsed = parse_instant(
+            "Test Bolt",
+            "Test Bolt deals 3 damage to target creature and X damage to that creature's \
+             controller, where X is the number of Artifacts you control.",
+        );
+        let ability = &parsed.abilities[0];
+        assert!(matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("dynamic 2nd clause must chain");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                },
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let single = parse_instant("Test Bolt", "Test Bolt deals 3 damage to target creature.");
+        let single_ability = &single.abilities[0];
+        assert!(
+            matches!(&*single_ability.effect, Effect::DealDamage { .. }),
+            "single-damage line must still parse to a real DealDamage (not Unimplemented), got {:?}",
+            single_ability.effect
+        );
+        assert!(
+            single_ability.sub_ability.is_none(),
+            "a single-damage line must not synthesize a phantom 2nd clause"
+        );
+    }
+
+    /// Reach-guard: a compound damage sibling with NO where-X clause
+    /// (Chandra's Outrage) must be unaffected — both amounts stay Fixed. This
+    /// proves the where-X strip does not corrupt a no-where-x sibling and that
+    /// the where-X binder never rewrites a Fixed amount.
+    #[test]
+    fn chandras_outrage_no_where_x_keeps_both_fixed() {
+        let parsed = parse_instant(
+            "Chandra's Outrage",
+            "Chandra's Outrage deals 4 damage to target creature and 2 damage to that \
+             creature's controller.",
+        );
+        let ability = &parsed.abilities[0];
+        assert!(matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                ..
+            }
+        ));
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("the 2nd fixed clause must chain");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+    }
+}
 
 #[test]
 fn issue_2405_broken_bond_optional_land_from_hand() {

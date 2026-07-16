@@ -3747,7 +3747,11 @@ fn parse_enters_with_counters(
     let counter_type_raw = counter_type_raw.trim();
     let counter_type =
         crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
-    if let Some(for_each_count) = parse_enters_counter_for_each_suffix(after_counter) {
+    if let Some(combined) =
+        parse_enters_base_plus_additional_for_each(after_counter, &counter_type, &count_expr)
+    {
+        count_expr = combined;
+    } else if let Some(for_each_count) = parse_enters_counter_for_each_suffix(after_counter) {
         count_expr = multiply_counter_count_by_for_each(count_expr, for_each_count);
     }
     // CR 122.6: For "a number of counters equal to [quantity]" and the
@@ -3995,6 +3999,90 @@ fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityE
         _ => rest.trim(),
     };
     super::oracle_quantity::parse_for_each_clause_expr(clause)
+}
+
+/// Parse the "<type> counter[s] on it/them plus an additional <M> <type>
+/// counter[s] on it/them for each <filter>" enters-with pattern into the total
+/// count expression (base + M × per-each dynamic count).
+///
+/// CR 122.1 + CR 614.1c: an "enters with N counters plus an additional counter
+/// for each <filter>" replacement places a fixed base plus a per-object bonus.
+/// CR 107.1: only integer amounts — the total resolves as `base + M * count`.
+///
+/// `after_counter` is the slice immediately after the FIRST "<type> counter"
+/// token (same contract as [`parse_enters_counter_for_each_suffix`], which the
+/// tail is delegated to so " counter" is consumed exactly once). Parameterized
+/// over the base N (`base_count_expr`), the per-each multiplier M, and the
+/// `for each` filter. The additional counter type must equal the base type;
+/// otherwise the two clauses name different counters and this pattern does not
+/// apply (caller falls back). Returns `None` (not this pattern) when any token
+/// fails to match, so a non-matching input leaves the caller's existing
+/// single-suffix path intact.
+fn parse_enters_base_plus_additional_for_each(
+    after_counter: &str,
+    base_counter_type: &CounterType,
+    base_count_expr: &QuantityExpr,
+) -> Option<QuantityExpr> {
+    // The base only composes as a fixed integer offset; a dynamic base does not
+    // occur in this "base plus additional per-each" class.
+    let QuantityExpr::Fixed { value: base } = base_count_expr else {
+        return None;
+    };
+
+    // Consume the optional plural "s" of the base counter word, then the base
+    // recipient ("on it"/"on them") and the " plus " bridge to the additional
+    // clause.
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
+        .parse(after_counter)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" on it plus "),
+        tag(" on them plus "),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // Per-each multiplier M: "an additional" (M = 1) or "<N> additional" (M > 1).
+    let (rest, multiplier) = alt((
+        value(1u32, tag::<_, _, OracleError<'_>>("an additional ")),
+        terminated(nom_primitives::parse_number, tag(" additional ")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // The additional counter type must match the base type, else the clauses
+    // describe different counters and this composition does not apply.
+    let (rest, additional_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let (after_additional_counter, _) =
+        alt((tag::<_, _, OracleError<'_>>(" counters"), tag(" counter")))
+            .parse(rest)
+            .ok()?;
+    if &additional_type != base_counter_type {
+        return None;
+    }
+
+    // Delegate the " counter[s] on it/them for each <filter>" tail to the
+    // existing suffix parser — it consumes the plural "s" and the connective,
+    // then parses the for-each filter into the per-each dynamic count.
+    let per_each = parse_enters_counter_for_each_suffix(after_additional_counter)?;
+
+    let inner = if multiplier == 1 {
+        per_each
+    } else {
+        QuantityExpr::Multiply {
+            factor: multiplier as i32,
+            inner: Box::new(per_each),
+        }
+    };
+
+    Some(if *base == 0 {
+        inner
+    } else {
+        QuantityExpr::Offset {
+            inner: Box::new(inner),
+            offset: *base,
+        }
+    })
 }
 
 fn parse_for_each_convoked_creature_clause(
@@ -10303,6 +10391,151 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+
+    /// Sheriff of Safe Passage: "enters with a +1/+1 counter on it plus an
+    /// additional +1/+1 counter on it for each other creature you control." The
+    /// enters-with count must be `Offset { ObjectCount(other creatures), 1 }`.
+    /// Reverting the new combinator drops the additional clause and the count
+    /// stays `Fixed(1)`, flipping this assertion.
+    #[test]
+    fn sheriff_base_plus_additional_for_each_ast() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it plus an additional +1/+1 \
+             counter on it for each other creature you control.",
+            "Sheriff of Safe Passage",
+        )
+        .expect("enters-with base-plus-additional counters must parse to a replacement");
+
+        let execute = def.execute.as_deref().expect("execute present");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("expected PutCounter, got {:?}", execute.effect);
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert_eq!(target, &TargetFilter::SelfRef);
+        // The additional term is exactly the per-each clause the combinator
+        // delegates to; wrapping in Offset{.., 1} adds the base counter.
+        let per_each = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other creature you control",
+        )
+        .expect("per-each clause parses");
+        assert_eq!(
+            count,
+            &QuantityExpr::Offset {
+                inner: Box::new(per_each),
+                offset: 1,
+            },
+            "count must be base 1 + (per-each other-creatures), not Fixed(1)"
+        );
+    }
+
+    /// Class parameterization: base N and per-each multiplier M are both honored,
+    /// over an arbitrary counter kind and filter (no card literals).
+    #[test]
+    fn enters_base_plus_additional_parameterized_ast() {
+        let per_each_artifact =
+            crate::parser::oracle_quantity::parse_for_each_clause_expr("artifact you control")
+                .expect("per-each artifact clause parses");
+
+        // Base N = 2, M = 1 → Offset { ObjectCount(artifacts), 2 }.
+        let def = parse_replacement_line(
+            "This creature enters with two +1/+1 counters on it plus an additional +1/+1 \
+             counter on it for each artifact you control.",
+            "Test Enterer",
+        )
+        .expect("base=2 parameterized case must parse");
+        let Effect::PutCounter { count, .. } = &*def.execute.as_deref().unwrap().effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            &QuantityExpr::Offset {
+                inner: Box::new(per_each_artifact.clone()),
+                offset: 2,
+            }
+        );
+
+        // M = 2 → the per-each is scaled by Multiply { factor: 2 }.
+        let def_m = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it plus two additional +1/+1 \
+             counters on it for each artifact you control.",
+            "Test Enterer",
+        )
+        .expect("M>1 parameterized case must parse");
+        let Effect::PutCounter { count, .. } = &*def_m.execute.as_deref().unwrap().effect else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(
+            count,
+            &QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(per_each_artifact),
+                }),
+                offset: 1,
+            }
+        );
+    }
+
+    /// The additional counter type must match the base type. A mismatched type
+    /// (`stun` vs `+1/+1`) makes the combinator return `None` so it does not
+    /// wrongly compose two different counters — the direct building-block check.
+    #[test]
+    fn enters_base_plus_additional_rejects_mismatched_counter() {
+        // `after_counter` is the slice after the first "<type> counter".
+        let matching = super::parse_enters_base_plus_additional_for_each(
+            " on it plus an additional +1/+1 counter on it for each artifact you control.",
+            &CounterType::Plus1Plus1,
+            &QuantityExpr::Fixed { value: 1 },
+        );
+        assert!(
+            matches!(matching, Some(QuantityExpr::Offset { offset: 1, .. })),
+            "matching counter types compose to Offset, got {matching:?}"
+        );
+
+        let mismatched = super::parse_enters_base_plus_additional_for_each(
+            " on it plus an additional stun counter on it for each artifact you control.",
+            &CounterType::Plus1Plus1,
+            &QuantityExpr::Fixed { value: 1 },
+        );
+        assert_eq!(
+            mismatched, None,
+            "a mismatched additional counter type must not compose"
+        );
+    }
+
+    /// Reach-guard: a pure per-each enters-with (Aeve — no "plus an additional")
+    /// must be unaffected — the count stays a bare `Ref(ObjectCount)`, NOT
+    /// wrapped in `Offset`. Proves the new combinator does not fire on the
+    /// existing single-suffix class.
+    #[test]
+    fn aeve_pure_for_each_stays_bare_ref() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it for each other Ooze you control.",
+            "Aeve, Progenitor Ooze",
+        )
+        .expect("pure per-each enters-with must parse");
+        let Effect::PutCounter { count, .. } = &*def.execute.as_deref().unwrap().effect else {
+            panic!("expected PutCounter");
+        };
+        let expected =
+            crate::parser::oracle_quantity::parse_for_each_clause_expr("other Ooze you control")
+                .expect("per-each Ooze clause parses");
+        assert_eq!(
+            count, &expected,
+            "pure per-each must stay a bare Ref, not Offset"
+        );
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+    }
 
     /// #5649: Nefarious Lich's damage clause is a CR 614.1a substitution
     /// replacement — "If damage would be dealt to you, exile that many cards from
