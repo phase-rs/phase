@@ -676,7 +676,13 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
     let (r, _) = alt((tag::<_, _, OracleError<'_>>(" is a "), tag(" is an ")))
         .parse(r)
         .ok()?;
-    let (r, _) = tag::<_, _, OracleError<'_>>("colorless ").parse(r).ok()?;
+    // CR 105.2: "colorless" is optional. Minimus Containment ("is a Treasure
+    // artifact with ...") sets a card type without recoloring; Imprisoned in the
+    // Moon / Sugar Coat ("colorless land" / "colorless Food artifact") also make
+    // the permanent colorless. Only emit `SetColor([])` when it is stated.
+    let (r, colorless) = opt(tag::<_, _, OracleError<'_>>("colorless "))
+        .parse(r)
+        .ok()?;
     // CR 205.3: optional subtype(s) preceding the core card type — Sugar Coat
     // ("colorless Food artifact ...") vs Imprisoned ("colorless land ...").
     // `parse_subtype` is case-insensitive (runs on the lowered slice) and a core
@@ -717,20 +723,42 @@ pub(crate) fn parse_enchanted_becomes_type_with_ability(
         .parse(after_quote)
         .ok()?;
     let (after_quote, _) = tag::<_, _, OracleError<'_>>("\"").parse(after_quote).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("and loses all other card types and abilities")
+    // Trailing ability-strip clause — two attested shapes, composed from optional
+    // spans rather than enumerated:
+    //   "and loses all other card types and abilities" (Imprisoned in the Moon)
+    //   "and it loses all other abilities"              (Minimus Containment)
+    // The "it" subject and the "card types and " span are each optional; the
+    // effect is a full Layer-6 ability wipe either way (the `SetCardTypes` above
+    // already replaced the card types, so an unstated "card types" phrase loses
+    // nothing). A comma may sit between the closing quote and the clause.
+    let after_strip = opt(tag::<_, _, OracleError<'_>>(","))
         .parse(after_quote.trim_start())
+        .ok()?
+        .0
+        .trim_start();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("and ")
+        .parse(after_strip)
         .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("it ")).parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("loses all other ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("card types and "))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("abilities").parse(rest).ok()?;
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
 
-    let mut modifications = vec![
-        ContinuousModification::SetCardTypes {
-            core_types: vec![core_type],
-        },
-        ContinuousModification::SetColor { colors: Vec::new() },
-    ];
+    let mut modifications = vec![ContinuousModification::SetCardTypes {
+        core_types: vec![core_type],
+    }];
+    // CR 105.2 (Layer 5): only recolor to colorless when the text states it.
+    if colorless.is_some() {
+        modifications.push(ContinuousModification::SetColor { colors: Vec::new() });
+    }
     // CR 205.1a (Layer 4): grant each parsed subtype (Sugar Coat → Food). Placed
     // with the other type-identity modifications, before the Layer-6 ability wipe.
     // Setting a subtype REPLACES the object's existing subtypes from the same

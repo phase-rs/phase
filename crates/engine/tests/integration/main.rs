@@ -892,6 +892,7 @@ mod mad_mage_lost_level_scry_runtime;
 mod mass_unsuspect_701_60a;
 mod memory_vessel_std_s25;
 mod menace_requires_two_blockers;
+mod minimus_containment_treasure_grant;
 mod modal_enters_becomes_choice;
 mod modal_mode_labels;
 mod molten_core_maestro_2384;
