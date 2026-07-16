@@ -1067,28 +1067,88 @@ impl Default for SpellCastRecord {
     }
 }
 
-/// CR 601.2a + CR 702.27a: the cast-time snapshot the PR-7 Phase 4d-ii object-growth
-/// detection hook replays. Captured at cast finalization (the single first-class point,
-/// `finalize_cast_with_phyrexian_choices`), carried on the loop-detection clone, replayed
-/// by the recast injector. NOT reconstructed at the hook seam — `SpellCastRecord` lacks
-/// both the buyback-paid flag and the convoke shape. Every field is loop-INVARIANT across
-/// a homogeneous recast (unit-variant `ConvokeMode` carries zero per-iteration data;
-/// `CardId` is cross-incarnation-stable per CR 400.7), so the whole struct is COMPARED
-/// (never excluded) in the object-growth cover gates — a heterogeneous recast (one whose
-/// iterations alternate `uses_buyback` or `from_zone`) is caught and rejected (fail-closed).
+/// CR 601.2a / CR 602.2a: the repeated ACTION that drives a captured CR 732.2a loop —
+/// either recasting a self-returning spell or re-activating a token-creating activated
+/// ability. Parameterizes the former `RecastContext.{from_zone, uses_buyback}` so an
+/// activation loop reuses the SAME capture/drive/cover pipeline. Deliberately ONE enum, not
+/// a sibling `last_activation_context` field: a second field would be excluded from
+/// `impl PartialEq for GameState` and dropped from the two cover conjuncts, reopening the
+/// fail-closed hole the object-growth cover closes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecastContext {
-    /// CR 400.7 card identity — re-found live in the castable zone each iteration (a
-    /// fresh incarnation on every hand-return), never an `ObjectId` that churns.
+pub enum LoopAction {
+    /// CR 601.2a + CR 702.27a: recast a self-returning spell from `from_zone`, re-paying
+    /// buyback each iteration. The card is re-found LIVE per CR 400.7 (a fresh incarnation
+    /// on every hand-return), keyed by the top-level `card_id`.
+    Recast {
+        /// CR 601.2a: the zone the recast is cast from (Hand — buyback returns the spell here).
+        from_zone: Zone,
+        /// CR 702.27a: the recast must re-pay buyback each iteration to sustain the loop.
+        uses_buyback: BuybackUsage,
+    },
+    /// CR 602.2a: re-activate the `ability_index`-th activated ability of `source_id`. The
+    /// source is pinned by `ObjectId` (G3 — a plain token is `CardId(0)`, so a card-identity
+    /// re-find would match the fodder the loop manufactures); the positional `ability_index`
+    /// into the layer-derived `abilities` vec is re-validated by `Eq` each iteration (G4).
+    Activate {
+        source_id: ObjectId,
+        ability_index: usize,
+    },
+}
+
+/// CR 601.2a / CR 602.2a: the loop-action snapshot the PR-7 Phase 4d-ii object-growth
+/// detection hook replays. Captured at the driving beat (cast finalization for `Recast`, the
+/// `ActivateAbility` reducer for `Activate`), carried on the loop-detection clone, replayed
+/// by the injector. Every field is loop-INVARIANT across a homogeneous cycle (unit-variant
+/// `ConvokeMode` carries zero per-iteration data; `CardId` is cross-incarnation-stable per
+/// CR 400.7; the pinned `ObjectId` is a stable battlefield permanent), so the whole struct is
+/// COMPARED (never excluded) in the object-growth cover gates — a heterogeneous loop (one
+/// whose iterations alternate `action`) is caught and rejected (fail-closed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "LoopActionContextRepr")]
+pub struct LoopActionContext {
+    /// CR 400.7 card identity of the loop's driver — re-found live for `Recast`, a guard for
+    /// `Activate`. Never an `ObjectId` for the `Recast` case (that churns per hand-return).
     pub card_id: CardId,
     pub controller: PlayerId,
-    /// CR 601.2a: the zone the recast is cast from (Hand — buyback returns the spell here).
-    pub from_zone: Zone,
-    /// CR 702.27a: the recast must re-pay buyback each iteration to sustain the loop.
-    pub uses_buyback: BuybackUsage,
-    /// CR 702.51a: the convoke mode the injector's pin re-binds live each iteration
-    /// (`None` when the recast pays no convoke cost).
+    /// CR 601.2a / CR 602.2a: which repeated action drives this loop.
+    pub action: LoopAction,
+    /// CR 702.51a: the convoke mode the recast injector's pin re-binds live each iteration
+    /// (`None` when the recast pays no convoke cost, and always `None` for an `Activate`).
     pub convoke: Option<ConvokeMode>,
+}
+
+/// Serde deserialize shim for `LoopActionContext`. Accepts BOTH the current nested shape
+/// (`action: LoopAction`) AND the pre-rename flat `RecastContext` shape shipped in v0.24–v0.27
+/// (`from_zone` + `uses_buyback` at top level, no `action`). Only affects deserialize; the
+/// serialized surface is unchanged. CR 601.2a: a pre-rename flat value was always a buyback recast.
+#[derive(Deserialize)]
+struct LoopActionContextRepr {
+    card_id: CardId,
+    controller: PlayerId,
+    #[serde(default)]
+    convoke: Option<ConvokeMode>,
+    #[serde(default)]
+    action: Option<LoopAction>, // current nested shape
+    #[serde(default)]
+    from_zone: Option<Zone>, // pre-rename flat RecastContext shape
+    #[serde(default)]
+    uses_buyback: Option<BuybackUsage>,
+}
+
+impl From<LoopActionContextRepr> for LoopActionContext {
+    fn from(r: LoopActionContextRepr) -> Self {
+        // Reconstruct the Recast action from the old flat fields when `action` is absent.
+        let action = r.action.unwrap_or_else(|| LoopAction::Recast {
+            from_zone: r.from_zone.unwrap_or(Zone::Hand),
+            uses_buyback: r.uses_buyback.unwrap_or(BuybackUsage::NotUsed),
+        });
+        LoopActionContext {
+            card_id: r.card_id,
+            controller: r.controller,
+            action,
+            convoke: r.convoke,
+        }
+    }
 }
 
 /// CR 702.27a: whether a homogeneous recast re-pays the buyback additional cost each iteration.
@@ -12476,16 +12536,25 @@ pub struct GameState {
     /// it would recreate the identity-field loop leak Condition 2 fixes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_source_relatch: Option<ResolutionSourceRelatch>,
-    /// CR 732.2a (PR-7 Phase 4d-ii): cast-time snapshot of the most recent buyback-paid,
-    /// permanent-creating spell — the object-growth recast the loop-shortcut hook replays.
-    /// Set at cast finalization, read at the post-resolution empty-stack `Priority` window.
-    /// Transient: deliberately EXCLUDED from `impl PartialEq for GameState` (a decision
-    /// context, not durable board state) and COMPARED explicitly only in the object-growth
-    /// cover gates (`analysis::resource::eq_except_growable` /
-    /// `loop_states_equal_modulo_resources`, fail-closed). `None` in filtered/serialized
-    /// snapshots (byte-preserving).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_recast_context: Option<RecastContext>,
+    /// CR 732.2a (PR-7 Phase 4d-ii): snapshot of the most recent loop-driving ACTION — a
+    /// buyback-paid permanent-creating recast (CR 601.2a) or a token-creating activated
+    /// ability (CR 602.2a) — the object-growth loop-shortcut hook replays. Set at the driving
+    /// beat, read at the post-resolution empty-stack `Priority` window. Transient: deliberately
+    /// EXCLUDED from `impl PartialEq for GameState` (a decision context, not durable board
+    /// state) and COMPARED explicitly only in the object-growth cover gates
+    /// (`analysis::resource::eq_except_growable` / `loop_states_equal_modulo_resources`,
+    /// fail-closed). `None` in filtered/serialized snapshots (byte-preserving). Two-layer
+    /// back-compat (G2): `#[serde(alias = "last_recast_context")]` migrates the old KEY, and
+    /// `LoopActionContext`'s `#[serde(from = "LoopActionContextRepr")]` migrates the old flat
+    /// `RecastContext` VALUE shape (`from_zone` + `uses_buyback`, no `action`) into
+    /// `action: LoopAction::Recast { .. }` — so a populated pre-rename combo-mode save loads with
+    /// its recast context intact rather than hard-erroring on the missing `action` field.
+    #[serde(
+        default,
+        alias = "last_recast_context",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_loop_action_context: Option<LoopActionContext>,
     /// Transient plural form of `current_trigger_event` for batched triggers.
     /// Event-context filters that can legally compare against a group read this.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -14314,7 +14383,7 @@ impl GameState {
             resolving_stack_entry: None,
             pending_resolution_completion: None,
             resolution_source_relatch: None,
-            last_recast_context: None,
+            last_loop_action_context: None,
             current_trigger_events: Vec::new(),
             last_discover_value: None,
             stack_trigger_event_batches: HashMap::new(),
@@ -15486,13 +15555,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_library_search_delivery: _,
         pending_search_found_batch: _,
         post_replacement_token_substitution_count: _,
-        //   - `last_recast_context` (PR-7 Phase 4d-ii object-growth recast snapshot):
+        //   - `last_loop_action_context` (PR-7 Phase 4d-ii object-growth loop-action snapshot):
         //     EXCLUDED from `impl PartialEq for GameState` (a transient decision context, not
         //     durable board state), but COMPARED explicitly in `eq_except_growable` /
         //     `loop_states_equal_modulo_resources` (fail-closed one-sided-safety — its fields
-        //     are loop-INVARIANT across a homogeneous recast, so COMPARING never suppresses a
-        //     legitimate loop; a heterogeneous recast is correctly caught and rejected).
-        last_recast_context: _,
+        //     are loop-INVARIANT across a homogeneous cycle, so COMPARING never suppresses a
+        //     legitimate loop; a heterogeneous cycle is correctly caught and rejected).
+        last_loop_action_context: _,
         //   - `resolution_source_relatch` (CR 400.7j self-move re-latch): EXCLUDED-REQUIRED (measured
         //     by ordering trace, not doc-trust). The clear at stack.rs:194 fires at the START of the
         //     NEXT resolution, while `record_loop_detect_sample` fires at the Priority window AFTER
@@ -16449,6 +16518,34 @@ mod tests {
             serde_json::from_value::<PendingScopedLibrarySearch>(json).unwrap(),
             pending
         );
+    }
+
+    #[test]
+    fn loop_action_context_migrates_pre_rename_flat_recast_shape() {
+        // Build the v0.24–v0.27 flat RecastContext JSON from the components' real serde reprs
+        // (robust to their serialization format): from_zone/uses_buyback at top level, no `action`.
+        let want = LoopActionContext {
+            card_id: CardId(7),
+            controller: PlayerId(1),
+            action: LoopAction::Recast {
+                from_zone: Zone::Hand,
+                uses_buyback: BuybackUsage::Used,
+            },
+            convoke: None,
+        };
+        let old = serde_json::json!({
+            "card_id": serde_json::to_value(want.card_id).unwrap(),
+            "controller": serde_json::to_value(want.controller).unwrap(),
+            "from_zone": serde_json::to_value(Zone::Hand).unwrap(),
+            "uses_buyback": serde_json::to_value(BuybackUsage::Used).unwrap(),
+            "convoke": serde_json::Value::Null,
+        });
+        let got: LoopActionContext =
+            serde_json::from_value(old).expect("pre-rename flat shape must deserialize (G2)");
+        assert_eq!(got, want);
+        // Non-vacuity / revert-probe (documented): deleting `#[serde(from = "LoopActionContextRepr")]`
+        // makes the absent `action` field a hard deserialize error — this test flips to a
+        // `from_value` panic (the `.expect` above) without the shim.
     }
 
     #[test]

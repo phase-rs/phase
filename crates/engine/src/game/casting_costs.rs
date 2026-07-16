@@ -8194,7 +8194,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
 
     // CR 601.2a + CR 702.27a + CR 702.51a: capture the object-growth recast snapshot the
     // PR-7 Phase 4d-ii loop-shortcut hook replays. Gated to a buyback-paid,
-    // permanent-creating (token) spell so the hook's cheap precondition (`last_recast_context
+    // permanent-creating (token) spell so the hook's cheap precondition (`last_loop_action_context
     // == Some`) is set ~never. Fail-safe note: a spurious capture from buyback + some OTHER
     // optional cost only makes the clone-drive run — its cover/abort rejects any non-covering
     // recast, so this can never false-certify. Cleared (set `None`) on any non-matching cast,
@@ -8216,18 +8216,20 @@ fn finalize_cast_with_phyrexian_choices_inner(
             (has_buyback, convoke)
         });
         // #4603 opt-in gate: OFF (`!samples()`) must be byte-identical to pre-PR-7 on the
-        // SERIALIZED surface too — `last_recast_context` is `skip_serializing_if=is_none`, so a
+        // SERIALIZED surface too — `last_loop_action_context` is `skip_serializing_if=is_none`, so a
         // spurious `Some(..)` in OFF mode would appear in a save/replay/scenario. Gate on the
         // SAME accessor the consuming hook uses (engine.rs:448) so the mode gate has one source.
-        state.last_recast_context = (state.loop_detection.samples()
+        state.last_loop_action_context = (state.loop_detection.samples()
             && additional_cost_paid
             && has_buyback
             && is_token_creating)
-            .then_some(crate::types::game_state::RecastContext {
+            .then_some(crate::types::game_state::LoopActionContext {
                 card_id,
                 controller: player,
-                from_zone: source_zone,
-                uses_buyback: crate::types::game_state::BuybackUsage::Used,
+                action: crate::types::game_state::LoopAction::Recast {
+                    from_zone: source_zone,
+                    uses_buyback: crate::types::game_state::BuybackUsage::Used,
+                },
                 convoke,
             });
     }

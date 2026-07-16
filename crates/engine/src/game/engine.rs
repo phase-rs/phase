@@ -464,7 +464,7 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // A self-returning (buyback) recast that creates an inert token settles with an EMPTY
     // stack, so the sampler clears the ring at that beat and the `!stack.is_empty()` bridge
     // is structurally unreachable for it. Detect it here by driving the captured recast on
-    // a clone. Gated identically (opt-in + top-level-only) plus a cheap `last_recast_context`
+    // a clone. Gated identically (opt-in + top-level-only) plus a cheap `last_loop_action_context`
     // precondition (set only on a buyback-paid, token-creating cast — so the clone-drive runs
     // ~never). INV-2: this OFFERS the interactive shortcut (never auto-resolves — CR 732.2a).
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
@@ -472,7 +472,7 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
         && state.stack.is_empty()
         && state.loop_detection.samples()
         && !in_simulation_probe()
-        && state.last_recast_context.is_some()
+        && state.last_loop_action_context.is_some()
     {
         if let Some((certificate, schema)) = try_offer_object_growth_shortcut(state) {
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
@@ -953,20 +953,21 @@ fn apply_until_lethal_shortcut(
     let period = shortcut_drive_period(proposal.template.as_ref());
 
     // DRIVE one representative cycle to produce the measured post-drive `work` state.
-    let work: GameState = if let Some(ctx) = committed.last_recast_context.clone() {
+    let work: GameState = if let Some(ctx) = committed.last_loop_action_context.clone() {
         // Object-growth recast loop (buyback + convoke + affinity) declared `UntilLethal`
         // by the AI (which hardcodes it for every optional offer). Drive one real recast on a
         // clone under the re-entrancy guard; an inert Advantage token loop has NO life/poison
         // faller ⇒ `live_mandatory_loop_winner` returns None below ⇒ manual fallback (this is
         // the latent AI-mis-crown fix, first-class).
         let template = build_recast_template(&ctx);
+        let expected_def = loop_action_expected_def(&committed, &ctx);
         let _probe = SimulationProbeGuard::enter();
         let mut w = committed.clone();
         priority::reset_priority(&mut w);
         w.waiting_for = WaitingFor::Priority {
             player: ctx.controller,
         };
-        match drive_recast_iteration(&mut w, &template, &ctx, 0) {
+        match drive_loop_action_iteration(&mut w, &template, &ctx, 0, expected_def.as_ref()) {
             Ok(()) => w,
             Err(RecastAbort) => {
                 return until_lethal_fallback(state, result, committed);
@@ -1095,12 +1096,12 @@ fn until_lethal_fallback(state: &mut GameState, result: &mut ActionResult, commi
     *state = committed;
     // CR 732.2c: a declined shortcut must not instantly re-offer the SAME loop in this same
     // `apply()`. Clear both re-offer signals: the drain offer's `loop_detect_ring` AND the
-    // object-growth offer's `last_recast_context` routing signal (a non-drain object-growth
+    // object-growth offer's `last_loop_action_context` routing signal (a non-drain object-growth
     // loop, e.g. an AI-declared UntilLethal on an inert Advantage recast, would otherwise
     // re-fire `try_offer_object_growth_shortcut` on the next reconcile and livelock). A later
     // real re-cast re-captures the context and re-detects genuinely.
     state.loop_detect_ring.clear();
-    state.last_recast_context = None;
+    state.last_loop_action_context = None;
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -1260,7 +1261,7 @@ fn drive_one_shortcut_cycle(
 }
 
 /// PR-7 Combo-UI Stage 2: answer ONE mid-drive prompt during a loop-shortcut cycle, using the
-/// INTERNAL reconcile-free `apply_action` path (mirrors `drive_recast_iteration`, so the
+/// INTERNAL reconcile-free `apply_action` path (mirrors `drive_loop_action_iteration`, so the
 /// detection hook cannot recurse mid-drive). Fail-closed: any prompt kind with no Stage-2
 /// producer ⇒ `Err(RecastAbort)`.
 ///
@@ -1357,10 +1358,10 @@ fn materialize_fixed_shortcut(
     // affinity) settles with an EMPTY stack and grows the board, so the per-beat
     // auto-pass drive below never recognizes its recurrence. Route it to the recast
     // INJECTOR instead, which drives one real recast per cycle on a clone. The presence
-    // of `last_recast_context` (set only on a buyback-paid, token-creating cast) is the
-    // routing signal; the `ctx` rides `state.last_recast_context` (carried on the clone
+    // of `last_loop_action_context` (set only on a buyback-paid, token-creating cast) is the
+    // routing signal; the `ctx` rides `state.last_loop_action_context` (carried on the clone
     // since the offer). The drain path below is left byte-identical for every other loop.
-    if let Some(ctx) = state.last_recast_context.clone() {
+    if let Some(ctx) = state.last_loop_action_context.clone() {
         materialize_object_growth_shortcut(state, result, &ctx, n);
         return;
     }
@@ -1466,6 +1467,28 @@ fn materialize_fixed_shortcut(
 #[derive(Debug)]
 struct RecastAbort;
 
+/// CR 602.2a / CR 732.2a (G4): capture the `AbilityDefinition` an `Activate` loop-action
+/// names, so the drive can re-validate the positional `ability_index` by `Eq` each iteration
+/// (a layer re-eval that reorders/removes the granted ability ⇒ fail-closed abort). `None`
+/// for a `Recast` (which re-finds its card + combined spell def live instead).
+fn loop_action_expected_def(
+    state: &GameState,
+    ctx: &crate::types::game_state::LoopActionContext,
+) -> Option<crate::types::ability::AbilityDefinition> {
+    match &ctx.action {
+        crate::types::game_state::LoopAction::Recast { .. } => None,
+        crate::types::game_state::LoopAction::Activate {
+            source_id,
+            ability_index,
+        } => state
+            .objects
+            .get(source_id)?
+            .abilities
+            .get(*ability_index)
+            .cloned(),
+    }
+}
+
 /// CR 601.2b + CR 608.2b + CR 400.7: drive ONE full recast iteration on the clone by
 /// answering each mid-cast prompt from `template` (the ConvokeTaps pin) + `ctx` (the
 /// buyback decision). Reuses the ENTIRE cast state machine via the INTERNAL `apply_action`
@@ -1473,48 +1496,91 @@ struct RecastAbort;
 /// recurse), adding ZERO casting rules. EXHAUSTIVE over `WaitingFor`: any unpinned prompt
 /// ⇒ `Err(RecastAbort)` ⇒ fail-closed to manual (no silent `_` that would fabricate a
 /// bogus offer). `clone` MUST be at `Priority{ctx.controller}` with an empty stack.
-fn drive_recast_iteration(
+fn drive_loop_action_iteration(
     clone: &mut GameState,
     template: &crate::analysis::decision_template::DecisionTemplate,
-    ctx: &crate::types::game_state::RecastContext,
+    ctx: &crate::types::game_state::LoopActionContext,
     iteration: crate::analysis::decision_template::IterationIndex,
+    expected_def: Option<&crate::types::ability::AbilityDefinition>,
 ) -> Result<(), RecastAbort> {
-    // CR 400.7: re-find the recast card LIVE in its castable zone (a fresh incarnation on
-    // each hand-return). Absent ⇒ abort (B3: a no-buyback recast went to the graveyard, so
-    // the card is not here). Lowest ObjectId ⇒ deterministic.
-    let recast_id = clone
-        .objects
-        .values()
-        .filter(|o| {
-            o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
-        })
-        .map(|o| o.id)
-        .min_by_key(|id| id.0)
-        .ok_or(RecastAbort)?;
-    apply_action(
-        clone,
-        ctx.controller,
-        GameAction::CastSpell {
-            object_id: recast_id,
-            card_id: ctx.card_id,
-            targets: vec![],
-            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
-        },
-        None,
-    )
-    .map_err(|_| RecastAbort)?;
+    use crate::types::game_state::LoopAction;
+    // Dispatch the OPENER on the captured action; the beat-loop tail below is action-agnostic.
+    match &ctx.action {
+        // CR 400.7 + CR 601.2a: re-find the recast card LIVE in its castable zone (a fresh
+        // incarnation on each hand-return). Absent ⇒ abort (B3: a no-buyback recast went to
+        // the graveyard). Lowest ObjectId ⇒ deterministic.
+        LoopAction::Recast { from_zone, .. } => {
+            let recast_id = clone
+                .objects
+                .values()
+                .filter(|o| {
+                    o.card_id == ctx.card_id
+                        && o.zone == *from_zone
+                        && o.controller == ctx.controller
+                })
+                .map(|o| o.id)
+                .min_by_key(|id| id.0)
+                .ok_or(RecastAbort)?;
+            apply_action(
+                clone,
+                ctx.controller,
+                GameAction::CastSpell {
+                    object_id: recast_id,
+                    card_id: ctx.card_id,
+                    targets: vec![],
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                },
+                None,
+            )
+            .map_err(|_| RecastAbort)?;
+        }
+        // CR 602.2a: re-activate the pinned permanent's ability. G3: pin by `ObjectId` (a plain
+        // token is `CardId(0)`, so a card-identity re-find would match the fodder the loop
+        // manufactures). G4: re-validate the positional `ability_index` against the captured
+        // def by `Eq` — a layer re-eval that reordered/removed it ⇒ fail-closed abort (CR 602.5a
+        // legality is then the reducer's job — an illegal 2nd activation returns Err below).
+        LoopAction::Activate {
+            source_id,
+            ability_index,
+        } => {
+            let expected = expected_def.ok_or(RecastAbort)?;
+            let src = clone.objects.get(source_id).ok_or(RecastAbort)?;
+            if src.zone != Zone::Battlefield
+                || src.controller != ctx.controller
+                || src.card_id != ctx.card_id
+                || src.abilities.get(*ability_index) != Some(expected)
+            {
+                return Err(RecastAbort);
+            }
+            apply_action(
+                clone,
+                ctx.controller,
+                GameAction::ActivateAbility {
+                    source_id: *source_id,
+                    ability_index: *ability_index,
+                },
+                None,
+            )
+            .map_err(|_| RecastAbort)?;
+        }
+    }
 
     let beat_cap = auto_pass_loop_max_iterations(clone);
     for _ in 0..beat_cap {
         let actor = crate::game::turn_control::authorized_submitter(clone).ok_or(RecastAbort)?;
         match clone.waiting_for.clone() {
-            // CR 601.2f/702.27a: re-pay (or decline) the buyback additional cost.
+            // CR 601.2f/702.27a: re-pay (or decline) the buyback additional cost — RECAST-only.
+            // CR 732.2a "can't include conditional actions": an activation that opens an
+            // optional-cost window is not a pinned shortcut ⇒ fail-closed abort.
             WaitingFor::OptionalCostChoice { .. } => {
+                let LoopAction::Recast { uses_buyback, .. } = &ctx.action else {
+                    return Err(RecastAbort);
+                };
                 apply_action(
                     clone,
                     actor,
                     GameAction::DecideOptionalCost {
-                        pay: ctx.uses_buyback.pays(),
+                        pay: uses_buyback.pays(),
                     },
                     None,
                 )
@@ -1581,7 +1647,7 @@ fn drive_recast_iteration(
 /// the CARD-identity source (`AllCopies` — survives the per-iteration incarnation churn,
 /// CR 400.7). The presence of the pin is the object-growth routing signal.
 fn build_recast_template(
-    ctx: &crate::types::game_state::RecastContext,
+    ctx: &crate::types::game_state::LoopActionContext,
 ) -> crate::analysis::decision_template::DecisionTemplate {
     use crate::analysis::decision_template::{
         DecisionGroupKey, DecisionKind, DecisionSlot, IterationCount, PinnedDecision, ReplayMode,
@@ -1623,24 +1689,30 @@ fn build_recast_template(
 /// every frame is fail-safe — any OTHER stable object still compares by id.
 fn normalize_recast_frame(
     state: &GameState,
-    ctx: &crate::types::game_state::RecastContext,
+    ctx: &crate::types::game_state::LoopActionContext,
 ) -> GameState {
     let mut s = state.clone();
-    let ids: Vec<ObjectId> = s
-        .objects
-        .values()
-        .filter(|o| {
-            o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
-        })
-        .map(|o| o.id)
-        .collect();
-    for id in &ids {
-        s.objects.remove(id);
-    }
-    if let Some(p) = s.players.iter_mut().find(|p| p.id == ctx.controller) {
-        p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
-        p.graveyard.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
-        p.library.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+    // CR 400.7 (M15-b): stripping the self-returning recast card is RECAST-ONLY. An `Activate`
+    // ctx has `from_zone == Battlefield` (its source is a resident permanent), so applying the
+    // strip would DELETE the driving permanent from every comparison frame. The three token-id
+    // bookkeeping clears below apply to BOTH actions.
+    if let crate::types::game_state::LoopAction::Recast { from_zone, .. } = &ctx.action {
+        let ids: Vec<ObjectId> = s
+            .objects
+            .values()
+            .filter(|o| {
+                o.card_id == ctx.card_id && o.zone == *from_zone && o.controller == ctx.controller
+            })
+            .map(|o| o.id)
+            .collect();
+        for id in &ids {
+            s.objects.remove(id);
+        }
+        if let Some(p) = s.players.iter_mut().find(|p| p.id == ctx.controller) {
+            p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+            p.graveyard.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+            p.library.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+        }
     }
     // CR 608.2 anaphora / display bookkeeping: the "last created token / revealed /
     // zone-changed" id slots churn a fresh id each cycle. No observer reads them at the
@@ -1684,29 +1756,41 @@ fn try_offer_object_growth_shortcut(
     crate::analysis::loop_check::LoopCertificate,
     crate::analysis::decision_template::ShortcutDecisionSchema,
 )> {
-    let ctx = state.last_recast_context.clone()?;
+    let ctx = state.last_loop_action_context.clone()?;
     let WaitingFor::Priority { player: caster } = state.waiting_for else {
         return None;
     };
     if ctx.controller != caster {
         return None;
     }
-    // The recast card must be in its castable origin zone right now (recastable) —
-    // capture it so the recast spell ability can be scanned for randomness below.
-    let recast_obj = state.objects.values().find(|o| {
-        o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
-    })?;
-    // CR 732.2a: a shortcut "can't include conditional actions, where the outcome of a
-    // game event determines the next action." A recast whose spell body bears an
-    // auto-resolved coin flip (CR 705.1) / die roll (CR 706.1a) / random selection
-    // (CR 701.9a/b) has more than one equally-likely outcome ⇒ not a legal shortcut.
-    // Reject it STATICALLY, before driving (cheap + compile-time exhaustive over
-    // `Effect`). Fail-closed: an undeterminable spell ability (no combined Spell def)
-    // also does not offer. (A2 determinism gate — the static half; the post-drive
-    // rng-position check below is the complete runtime backstop that additionally
-    // catches external triggered/replacement randomness firing in the cycle.)
-    let spell_def = crate::game::casting::combined_spell_ability_def(recast_obj)?;
-    if crate::game::ability_scan::spell_ability_bears_randomness(&spell_def) {
+    // CR 602.2a / CR 732.2a (G4): capture the ability def an `Activate` loop names so the drive
+    // can re-validate its positional `ability_index` by `Eq` each iteration; `None` for `Recast`.
+    let expected_def = loop_action_expected_def(state, &ctx);
+    // CR 732.2a: a shortcut "can't include conditional actions, where the outcome of a game
+    // event determines the next action." A driving ability whose body bears an auto-resolved
+    // coin flip (CR 705.1) / die roll (CR 706.1a) / random selection (CR 701.9a/b) has more
+    // than one equally-likely outcome ⇒ not a legal shortcut. Reject it STATICALLY, before
+    // driving (cheap + compile-time exhaustive over `Effect`), dispatched on the captured action
+    // (D1): a `Recast` re-finds its card in the castable origin zone (which ALSO proves
+    // recastability) and scans the combined spell ability; an `Activate` pins the driving
+    // permanent by `ObjectId` (G3) and scans the activated ability's own def. Fail-closed: an
+    // undeterminable ability (no combined Spell def, or a missing source/index) does not offer.
+    // (A2 determinism gate — the static half; the post-drive rng-position check below is the
+    // complete runtime backstop that additionally catches external triggered/replacement
+    // randomness firing in the cycle.)
+    let bears_randomness = match &ctx.action {
+        crate::types::game_state::LoopAction::Recast { from_zone, .. } => {
+            let recast_obj = state.objects.values().find(|o| {
+                o.card_id == ctx.card_id && o.zone == *from_zone && o.controller == ctx.controller
+            })?;
+            let spell_def = crate::game::casting::combined_spell_ability_def(recast_obj)?;
+            crate::game::ability_scan::spell_ability_bears_randomness(&spell_def)
+        }
+        crate::types::game_state::LoopAction::Activate { .. } => {
+            crate::game::ability_scan::spell_ability_bears_randomness(expected_def.as_ref()?)
+        }
+    };
+    if bears_randomness {
         return None;
     }
 
@@ -1715,9 +1799,9 @@ fn try_offer_object_growth_shortcut(
     let template = build_recast_template(&ctx);
     let s_n = state.clone();
     let mut clone = state.clone();
-    drive_recast_iteration(&mut clone, &template, &ctx, 0).ok()?;
+    drive_loop_action_iteration(&mut clone, &template, &ctx, 0, expected_def.as_ref()).ok()?;
     let s_n1 = clone.clone();
-    drive_recast_iteration(&mut clone, &template, &ctx, 1).ok()?;
+    drive_loop_action_iteration(&mut clone, &template, &ctx, 1, expected_def.as_ref()).ok()?;
     let s_n2 = clone;
 
     // CR 732.2a: any randomness CONSUMED during the deterministic detection drive means the
@@ -1802,7 +1886,7 @@ fn try_offer_object_growth_shortcut(
 /// PR-7 Phase 4d-ii (CR 732.2a): materialize a confirmed `Fixed(N)` object-growth recast
 /// shortcut by driving N real recast cycles on a clone via the injector, committing each
 /// completed cycle atomically. The recurrence boundary is the injector's OWN settle
-/// condition (`Priority` + empty stack) — one successful `drive_recast_iteration` IS one
+/// condition (`Priority` + empty stack) — one successful `drive_loop_action_iteration` IS one
 /// materialized cycle of real game actions, so the result is ground-truth (contrast the
 /// drain path, which re-derives recurrence from `loop_states_*`). Any injector abort
 /// (e.g. the loop stopped being sustainable — CR 702.51b unpayable convoke) ⇒ commit the
@@ -1810,10 +1894,11 @@ fn try_offer_object_growth_shortcut(
 fn materialize_object_growth_shortcut(
     state: &mut GameState,
     result: &mut ActionResult,
-    ctx: &crate::types::game_state::RecastContext,
+    ctx: &crate::types::game_state::LoopActionContext,
     n: u32,
 ) {
     let template = build_recast_template(ctx);
+    let expected_def = loop_action_expected_def(state, ctx);
     let _probe = SimulationProbeGuard::enter();
     // Last fully-completed cycle (owned O(1) rollback); the board is unchanged since the
     // offer (Declare/Accept touch only the protocol).
@@ -1828,7 +1913,8 @@ fn materialize_object_growth_shortcut(
         work.waiting_for = WaitingFor::Priority {
             player: ctx.controller,
         };
-        if drive_recast_iteration(&mut work, &template, ctx, i).is_err() {
+        if drive_loop_action_iteration(&mut work, &template, ctx, i, expected_def.as_ref()).is_err()
+        {
             break; // loop no longer sustainable ⇒ keep the completed cycles
         }
         committed = work; // ATOMIC: one real recast cycle committed
@@ -1839,7 +1925,7 @@ fn materialize_object_growth_shortcut(
     // not instantly re-offer the just-materialized loop; a later manual recast re-arms the
     // context and a later beat re-detects genuinely.
     state.loop_detect_ring.clear();
-    state.last_recast_context = None;
+    state.last_loop_action_context = None;
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -1980,8 +2066,8 @@ fn handle_declare_shortcut(
 ///   the ring (re-clearing would special-case `DeclineShortcut` to distrust an engine-wide
 ///   invariant). The interactive e2e's "no re-offer" assertion guards this end-to-end: a future
 ///   regression excluding `DeclineShortcut` from that allowlist would fail it loudly.
-/// - Object-growth (Seam 2, gated by `last_recast_context.is_some()`): the deliberate-action
-///   clear does NOT touch `last_recast_context`, so `state.last_recast_context = None` here is
+/// - Object-growth (Seam 2, gated by `last_loop_action_context.is_some()`): the deliberate-action
+///   clear does NOT touch `last_loop_action_context`, so `state.last_loop_action_context = None` here is
 ///   the genuinely load-bearing suppressor — without it the post-return reconcile re-fires
 ///   `try_offer_object_growth_shortcut` within this same `apply()`.
 ///
@@ -1999,7 +2085,7 @@ fn handle_decline_shortcut(
     };
     // Seam 1 (loop_detect_ring) is already invalidated by apply_action's deliberate-action
     // ring-clear (engine.rs:3006-3011) — see doc. Only Seam 2 is the handler's gap:
-    state.last_recast_context = None; // Seam 2: load-bearing object-growth offer-gate clear (CR 732.2a)
+    state.last_loop_action_context = None; // Seam 2: load-bearing object-growth offer-gate clear (CR 732.2a)
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -3436,13 +3522,48 @@ fn apply_action(
             } else {
                 // Non-mana activated ability — clear tracking
                 state.lands_tapped_for_mana.remove(player);
-                casting::handle_activate_ability(
+                let wf = casting::handle_activate_ability(
                     state,
                     *player,
                     source_id,
                     ability_index,
                     &mut events,
-                )?
+                )?;
+                // CR 602.2a + CR 732.2a (B1 fix): capture a token-creating activation so the
+                // loop-shortcut hook (`try_offer_object_growth_shortcut`) can replay it — the
+                // activation-shaped dual of the recast capture's STATIC `is_token_creating`
+                // predicate. ⛔ A `state.battlefield.len() > before` gate here is STRUCTURALLY
+                // DEAD (B1): the activated ability only goes on the STACK at this beat; its token
+                // appears on RESOLUTION. `.samples()`-gated so `Off` never writes the capture
+                // (#4603). No static re-activatability proof is attempted — the clone-drive is the
+                // oracle (M8): an illegal 2nd activation returns `Err(RecastAbort)`, no offer.
+                let captured = state
+                    .objects
+                    .get(&source_id)
+                    // Capture guard: only a live battlefield permanent is a valid {T} source.
+                    .filter(|o| o.zone == Zone::Battlefield)
+                    .and_then(|o| {
+                        let card_id = o.card_id;
+                        let creates_token = o.abilities.get(ability_index).is_some_and(|def| {
+                            let mut es = Vec::new();
+                            crate::analysis::ability_graph::collect_effects(def, &mut es);
+                            es.iter()
+                                .any(|e| matches!(e, crate::types::ability::Effect::Token { .. }))
+                        });
+                        (state.loop_detection.samples() && creates_token).then_some(
+                            crate::types::game_state::LoopActionContext {
+                                card_id,
+                                controller: *player,
+                                action: crate::types::game_state::LoopAction::Activate {
+                                    source_id,
+                                    ability_index,
+                                },
+                                convoke: None,
+                            },
+                        )
+                    });
+                state.last_loop_action_context = captured;
+                wf
             }
         }
         (WaitingFor::Priority { player }, GameAction::UnlockRoomDoor { object_id, door }) => {
