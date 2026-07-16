@@ -8348,30 +8348,27 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         // CR 609.4b: A during-resolution PAID cast (Quistis Trepe, Tinybones the
         // Pickpocket) carries a "mana of any type can be spent to cast that spell"
         // concession on the consumed resolution permission. The CR 608.2g timing
-        // marker (`resolution_cleanup`) is consumed here, but the CR 609.4b
-        // payment concession must outlive it — the real mana payment still runs
-        // below (`finalize_cast` → `pay_mana_cost_with_choices`). Re-home a
-        // concession-only `ExileWithAltCost` (no `resolution_cleanup`, so this
-        // gate never re-fires) so the payment step still reads the off-color
-        // concession. Cleared with the object's other permissions when the spell
-        // leaves the stack. Free casts (no concession) carry `None` and skip this.
+        // marker (`resolution_cleanup`) is consumed here, but the selected slot
+        // must remain stable through payment and finalization. Re-home a neutral
+        // `ExileWithAltCost` (no cleanup or riders, so this gate never re-fires)
+        // at the same index. Its optional CR 609.4b concession remains available
+        // to the real mana payment below (`finalize_cast` →
+        // `pay_mana_cost_with_choices`), while a no-concession cast cannot shift
+        // a sibling permission into the elected slot. Normal zone-exit cleanup
+        // removes the neutral entry when the spell leaves exile for the stack.
         if let Some(obj) = state.objects.get_mut(&object_id) {
-            if let Some(mana_spend_permission) = mana_spend_permission {
-                obj.casting_permissions[index] = CastingPermission::ExileWithAltCost {
-                    cost: crate::types::mana::ManaCost::SelfManaCost,
-                    cast_transformed: false,
-                    constraint: None,
-                    granted_to,
-                    resolution_cleanup: None,
-                    duration: None,
-                    graveyard_replacement: None,
-                    enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
-                    mana_spend_permission: Some(mana_spend_permission),
-                };
-            } else {
-                obj.casting_permissions.remove(index);
-            }
+            obj.casting_permissions[index] = CastingPermission::ExileWithAltCost {
+                cost: crate::types::mana::ManaCost::SelfManaCost,
+                cast_transformed: false,
+                constraint: None,
+                granted_to,
+                resolution_cleanup: None,
+                duration: None,
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+                mana_spend_permission,
+            };
         }
         let waiting_for = handle_resolution_cast_success(
             state,
@@ -16166,8 +16163,18 @@ mod tests {
 
             let hit_obj = state.objects.get(&hit).unwrap();
             assert!(
-                hit_obj.casting_permissions.is_empty(),
-                "cascade permission must be consumed on accept"
+                matches!(
+                    hit_obj.casting_permissions.as_slice(),
+                    [CastingPermission::ExileWithAltCost {
+                        resolution_cleanup: None,
+                        mana_spend_permission: None,
+                        graveyard_replacement: None,
+                        enters_with_counter: None,
+                        enters_with_modifications,
+                        ..
+                    }] if enters_with_modifications.is_empty()
+                ),
+                "the consumed cascade permission must retain a neutral stable slot"
             );
 
             for miss in &misses {

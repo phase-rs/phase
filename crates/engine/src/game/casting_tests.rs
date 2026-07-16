@@ -45329,6 +45329,95 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
     );
 }
 
+/// CR 601.2a + CR 608.2g + CR 609.4b: consuming a no-concession
+/// during-resolution permission must retain its exact slot through payment. A
+/// later compatible sibling carrying `AnyColor` must not shift into that slot
+/// and let red mana pay the elected permission's blue cost.
+#[test]
+fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_sibling() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_object(
+        &mut state,
+        CardId(8306),
+        PlayerId(0),
+        "Exact No-Concession Spell".to_string(),
+        Zone::Exile,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        obj.casting_permissions
+            .push(CastingPermission::ExileWithAltCost {
+                cost: ManaCost::SelfManaCost,
+                cast_transformed: false,
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+                    exiled_misses: Vec::new(),
+                    reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                }),
+                duration: None,
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+                mana_spend_permission: None,
+            });
+        obj.casting_permissions
+            .push(CastingPermission::ExileWithAltCost {
+                cost: ManaCost::SelfManaCost,
+                cast_transformed: false,
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                resolution_cleanup: None,
+                duration: Some(Duration::UntilEndOfTurn),
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+            });
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let mut prepared = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        PlayerId(0),
+        spell,
+        None,
+        None,
+        Some(CastingPermissionIndex(0)),
+        CastingMode::Actual,
+    )
+    .expect("the exact first permission must prepare");
+    prepared.payment_mode = CastPaymentMode::Manual;
+    state.waiting_for = continue_with_prepared(&mut state, PlayerId(0), prepared, &mut Vec::new())
+        .expect("the exact no-concession cast must reach manual payment");
+
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert!(
+        !player_can_spend_as_any_color_for_optional_spell(&state, PlayerId(0), Some(spell)),
+        "the later sibling's AnyColor concession must not bind to the elected slot"
+    );
+    assert!(
+        apply_as_current(&mut state, GameAction::PassPriority).is_err(),
+        "red mana must not pay the elected permission's blue cost"
+    );
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+    assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+}
+
 /// TEST 6 (negative): a `without_paying` immediate graveyard free cast (Memory
 /// Plunder-class) still routes to the free `cast_single_target_during_resolution`
 /// path — it casts for free, never opening the PAID offer. Guards that adding the
