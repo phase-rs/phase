@@ -3341,28 +3341,28 @@ pub(crate) fn priority_actions_with_probe(
         let mut prepare_castability_sim: Option<GameState> = None;
         for &obj_id in &state.battlefield {
             if let Some(obj) = state.objects.get(&obj_id) {
-                if obj.controller == player {
-                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
-                            && casting::can_activate_ability_now_with_restriction_gates(
-                                state,
-                                player,
-                                obj_id,
-                                i,
-                                &activation_restriction_gates,
-                            )
-                        {
-                            actions.push(candidate(
-                                GameAction::ActivateAbility {
-                                    source_id: obj_id,
-                                    ability_index: i,
-                                },
-                                TacticalClass::Ability,
-                                Some(player),
-                            ));
-                        }
+                for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
+                    if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                        && !crate::game::mana_abilities::is_mana_ability(&ability_def)
+                        && casting::can_activate_ability_now_with_restriction_gates(
+                            state,
+                            player,
+                            obj_id,
+                            i,
+                            &activation_restriction_gates,
+                        )
+                    {
+                        actions.push(candidate(
+                            GameAction::ActivateAbility {
+                                source_id: obj_id,
+                                ability_index: i,
+                            },
+                            TacticalClass::Ability,
+                            Some(player),
+                        ));
                     }
+                }
+                if obj.controller == player {
                     // CR 702.xxx: Prepare (Strixhaven) — priority-time offer to
                     // cast a copy of the prepare-spell face. Gated on
                     // `prepared.is_some()` (single-authority state flag managed

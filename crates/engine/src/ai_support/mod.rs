@@ -1378,9 +1378,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // `activatable_object_mana_actions` proxy while dropping the false HOLD.
     // Meaningful non-mana activated abilities, grouped mana that would queue
     // non-mana triggers, and issue #544 sac-for-mana on an opponent's turn are
-    // still held below by the meaningful-action/sac gates; a dedicated
-    // `has_feasibly_activatable_ability` opponent-turn seam (the ability
-    // analogue of this predicate) is deferred as future work.
+    // held below by the same engine-authoritative legality predicates.
     if state.active_player != player {
         let probe: &_ = cast_probe.get_or_insert_with(|| {
             crate::game::casting::PriorityCastProbe::from_flushed_state(state.clone(), player)
@@ -1873,9 +1871,9 @@ mod tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification,
-        ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction, QuantityExpr,
-        ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-        TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
+        ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction, PlayerFilter,
+        QuantityExpr, ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
+        TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -3340,6 +3338,126 @@ mod tests {
                 &super::flat_priority_actions(runner.state())
             ),
             "castable instant on your own turn → hold via own-turn castability rung"
+        );
+    }
+
+    /// Issue #4387: a mana-costed non-mana activated ability is a meaningful
+    /// opponent-turn priority action. The production flat action list must
+    /// expose it, and auto-pass must hold from that exposed action because the
+    /// engine can begin the activation and open the CR 117.1d mana window while
+    /// activating it.
+    #[test]
+    fn auto_pass_holds_priority_for_mana_costed_activation_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::ManaCostShard;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let source = scenario
+            .add_creature(P0, "Squirrel Girl Shape", 3, 3)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![
+                            ManaCostShard::Green,
+                            ManaCostShard::Green,
+                            ManaCostShard::Green,
+                        ],
+                        generic: 1,
+                    },
+                }),
+            )
+            .id();
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+
+        let flat = super::flat_priority_actions(runner.state());
+        assert!(
+            flat.contains(&GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            }),
+            "precondition: the production flat action list exposes the activation"
+        );
+        assert!(
+            bucket_has(
+                &legal_actions_full(runner.state()).2,
+                source,
+                &GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                },
+            ),
+            "precondition: the production grouped actions expose the activation"
+        );
+        assert!(
+            !super::auto_pass_recommended(runner.state(), &flat),
+            "mana-costed non-mana activation on opponent's turn -> hold"
+        );
+    }
+
+    /// CR 602.1b + CR 602.2: an object's activation instruction may let a
+    /// non-controller activate it. The flat action list and auto-pass hold must
+    /// stay aligned so the UI never pauses for an activation it cannot submit.
+    #[test]
+    fn priority_actions_expose_any_player_activation_to_non_controller() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        ability.activator_filter = Some(PlayerFilter::All);
+        let source = scenario
+            .add_creature(P0, "Any Player Activates", 1, 1)
+            .with_ability_definition(ability)
+            .id();
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+
+        let action = GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        };
+        let flat = super::flat_priority_actions(runner.state());
+        assert!(
+            flat.contains(&action),
+            "non-controller permitted by activator_filter must receive the flat legal action"
+        );
+        assert!(
+            bucket_has(&legal_actions_full(runner.state()).2, source, &action),
+            "non-controller permitted by activator_filter must receive the grouped action"
+        );
+        assert!(
+            !super::auto_pass_recommended(runner.state(), &flat),
+            "auto-pass must hold only because the exposed action is available"
         );
     }
 
