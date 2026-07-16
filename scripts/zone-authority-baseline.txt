@@ -46,7 +46,6 @@ crates/engine/src/game/effects/put_on_top.rs	resolve	mover	2
 crates/engine/src/game/effects/return_as_aura.rs	resolve	mover	1
 crates/engine/src/game/effects/token.rs	commit_liminal_token_entry_with_post_actions	mover	1
 crates/engine/src/game/elimination.rs	do_eliminate	container	1
-crates/engine/src/game/engine.rs	apply_action	mover	1
 crates/engine/src/game/engine.rs	normalize_recast_frame	exempt	3
 crates/engine/src/game/engine_debug.rs	apply_debug_action	mover	1
 crates/engine/src/game/engine_payment_choices.rs	handle_unless_bounce_choice	mover	1
