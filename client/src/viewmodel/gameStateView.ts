@@ -316,7 +316,8 @@ export type BoardChoiceResponse =
   | { type: "SaddleMount"; mountId: ObjectId }
   | { type: "ChooseRingBearer" }
   | { type: "HarmonizeTap" }
-  | { type: "ChooseKeptCreatures" };
+  | { type: "ChooseKeptCreatures" }
+  | { type: "ChooseKeptPermanents" };
 
 export interface BoardChoiceView {
   player: PlayerId;
@@ -412,6 +413,18 @@ export function getBoardChoiceView(
         intent: "keep",
         selection: { type: "totalPowerAtMost", power: waitingFor.data.cap },
         response: { type: "ChooseKeptCreatures" },
+        sourceId: waitingFor.data.source_id,
+      };
+    // CR 101.4 + CR 701.21a: exact keeper-cardinality selection. The engine
+    // supplies the legal pool and authoritative count; the board is display
+    // only and submits the typed choice action below.
+    case "KeepExactPermanentsChoice":
+      return {
+        player: waitingFor.data.player,
+        objectIds: waitingFor.data.eligible,
+        intent: "keep",
+        selection: { type: "exactCount", count: waitingFor.data.required_count },
+        response: { type: "ChooseKeptPermanents" },
         sourceId: waitingFor.data.source_id,
       };
     case "PayCost": {
@@ -603,6 +616,8 @@ export function buildBoardChoiceAction(
       return { type: "HarmonizeTap", data: { creature_id: selectedIds[0] } };
     case "ChooseKeptCreatures":
       return { type: "ChooseKeptCreatures", data: { kept: selectedIds } };
+    case "ChooseKeptPermanents":
+      return { type: "ChooseKeptPermanents", data: { kept: selectedIds } };
   }
 }
 

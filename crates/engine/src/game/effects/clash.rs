@@ -127,7 +127,7 @@ pub fn perform_clash(
     // redundant sub_ability processing.
     let stash_sub = |state: &mut GameState| {
         if let Some(sub) = original_sub {
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(sub)));
+            state.pending_continuation = Some(PendingContinuation::new(Box::new(sub), state));
         }
     };
 

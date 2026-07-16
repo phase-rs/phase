@@ -18,7 +18,7 @@ use super::oracle_classifier::{
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_ir::context::ParseContext;
-use super::oracle_keyword::extract_keyword_line;
+use super::oracle_keyword::extract_granted_keyword_list;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_replacement::parse_replacement_line;
@@ -144,7 +144,7 @@ pub(crate) fn parse_class_oracle_text(
             }
 
             // Keyword-only lines
-            if let Some(extracted) = extract_keyword_line(line, mtgjson_keyword_names) {
+            if let Some(extracted) = extract_granted_keyword_list(line, mtgjson_keyword_names) {
                 items.extend(
                     extracted
                         .into_iter()

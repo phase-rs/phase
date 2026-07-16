@@ -9,6 +9,8 @@ cli = ["tracing-subscriber"]
 audit = []
 forge = []
 proptest = ["dep:proptest"]
+# Exposes raw zone placement for test crates; never enabled by production consumers.
+test-support = []
 # Compiles the shared combo corpus (`analysis::corpus`) into the lib + the
 # `combo-verify` tool bin. Excluded from the default lib / WASM surface.
 combo-verify = []
@@ -87,6 +89,7 @@ toml = "0.8"
 serde_json = "1"
 
 [dev-dependencies]
+engine = { path = ".", features = ["test-support"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
 assert_matches = "1.5"

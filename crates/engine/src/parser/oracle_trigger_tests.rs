@@ -7,12 +7,12 @@ use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
-    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope,
-    DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope,
-    Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
+    Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
+    DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
     ManaSpendPermission, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, TapStateChange, TargetFilter,
-    TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, TapStateChange,
+    TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -838,6 +838,42 @@ fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
     assert!(def.execute.is_some());
 }
 
+/// CR 603.4 + CR 113.6b: Nether Spirit's intervening-if
+/// ("if this card is the only creature card in your graveyard") must be hoisted
+/// into `def.condition`. The `{SourceInZone, Graveyard}` conjunct then drives
+/// `trigger_condition_source_zones` to derive `trigger_zones == [Graveyard]`
+/// (so the trigger is even detectable while the card sits in the graveyard) and
+/// `stamp_self_return_origin_from_trigger_condition` to stamp the return
+/// effect's `ChangeZone.origin == Graveyard` — the same auto-derivation Jocasta,
+/// Automaton Avenger (issue #4566) already relies on. SHAPE TEST — the end-to-end
+/// runtime behavior is covered by the
+/// `nether_spirit_only_creature_card_intervening_if` integration suite.
+#[test]
+fn nether_spirit_intervening_if_hoists_condition_zone_and_origin() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if this card is the only creature card \
+             in your graveyard, you may return this card to the battlefield.",
+        "Nether Spirit",
+    );
+    // The intervening-if is hoisted out of the effect text into the trigger.
+    assert!(
+        def.condition.is_some(),
+        "intervening-if must be hoisted to def.condition, got None"
+    );
+    // The off-battlefield zone is derived so the trigger is detectable from the
+    // graveyard, not stuck at the structural [Battlefield] default.
+    assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+    // The return effect's origin is stamped from the derived source zone.
+    let execute = def.execute.expect("execute");
+    let Effect::ChangeZone { origin, .. } = execute.effect.as_ref() else {
+        panic!(
+            "expected ChangeZone return effect, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard));
+}
+
 /// CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
 /// names the one unique step that occurs exactly once per game (the starting
 /// player's first upkeep), so the trigger must carry `OncePerGame` — NOT fire
@@ -1485,6 +1521,53 @@ fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
         }
         other => panic!("expected attachment intervening-if, got {other:?}"),
     }
+}
+
+/// CR 603.4 + CR 120.1: Wolverine's end-step trigger puts a +1/+1 counter ONLY
+/// if it dealt damage to another creature this turn. Pre-fix the intervening-if
+/// (dealing-direction, creature target) was swallowed (`condition: None`).
+#[test]
+fn parse_wolverine_end_step_dealt_damage_to_creature_intervening_if() {
+    let def = parse_trigger_line(
+        "At the beginning of each end step, if Wolverine dealt damage to another creature \
+         this turn, put a +1/+1 counter on Wolverine.",
+        "Wolverine, Best There Is",
+    );
+
+    // Revert-guard: pre-fix `def.condition` is None.
+    match &def.condition {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn { source, target, .. },
+                },
+            comparator: Comparator::GE,
+            ..
+        }) => {
+            assert!(matches!(**source, TargetFilter::SelfRef));
+            match &**target {
+                TargetFilter::Typed(t) => {
+                    assert!(t
+                        .type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Creature)));
+                    assert!(t
+                        .properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Another)));
+                }
+                other => panic!("expected Typed creature target, got {other:?}"),
+            }
+        }
+        other => panic!("expected DamageDealtThisTurn intervening-if, got {other:?}"),
+    }
+
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    assert!(
+        matches!(*execute.effect, Effect::PutCounter { .. }),
+        "execute must be PutCounter, got {:?}",
+        execute.effect,
+    );
 }
 
 /// CR 208.1 + CR 603.4 + CR 603.10a + CR 608.2h: Deathknell Berserker -- a
@@ -8064,6 +8147,37 @@ fn trigger_you_cast_another_spell_keeps_another_filter() {
     );
 }
 
+/// CR 702.8a + CR 603.2 (issue #4754): Slitherwisp — "Whenever you cast another
+/// spell that has flash" must scope the trigger to flash spells. The "that has
+/// flash" keyword clause was dropped by `parse_type_phrase`, leaving only the
+/// `Another` prop, so the trigger over-fired on every non-first spell (a
+/// counterspell without flash wrongly triggered it). The spell filter must now
+/// carry BOTH `WithKeyword(Flash)` and `Another`.
+#[test]
+fn slitherwisp_cast_another_flash_spell_scopes_to_flash() {
+    let def = parse_trigger_line(
+        "Whenever you cast another spell that has flash, you draw a card and each opponent loses 1 life.",
+        "Slitherwisp",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+        panic!("expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::WithKeyword {
+            value: Keyword::Flash
+        }),
+        "expected WithKeyword(Flash) in {:?}",
+        tf.properties
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::Another),
+        "expected Another retained in {:?}",
+        tf.properties
+    );
+}
+
 /// CR 701.47a + CR 603.1 (issue #5341): Dreadhorde Invasion upkeep trigger —
 /// "you lose 1 life and amass Zombies 1" must keep Amass as a sub_ability.
 /// Coverage previously claimed support while only emitting LoseLife.
@@ -12165,34 +12279,20 @@ fn trigger_encounter_maps_to_planeswalked_to() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
-/// DEFERRED GAP (documented, not fixed): Caught in a Parallel Universe is a
+/// CR 101.4 + CR 102.1 + CR 103.1 + CR 707.2: Caught in a Parallel Universe is a
 /// Planechase phenomenon whose encounter effect is a per-player, left-neighbor,
 /// many-to-many choose-and-copy — "each player chooses a creature controlled by
 /// the player to their left. Each player creates a token that's a copy of the
 /// creature they chose, except it has menace."
 ///
-/// Modeling this correctly needs infrastructure the engine does not yet have:
-///   * a left-neighbor `ControllerRef` — CR 103.1 fixes turn order (starting
-///     player, proceeding clockwise) and thus "the player to their left", but no
-///     filter controller ref resolves it (`ControllerRef` has no
-///     `PlayerToTheLeft`/left-neighbor variant);
-///   * a per-player PARALLEL selection where every player is simultaneously a
-///     chooser binding their own creature — `Effect::ChooseObjectsIntoTrackedSet`
-///     has a single `chooser` and one tracked set (CR 608.2c), not one binding
-///     per player; and
-///   * a per-player token copy keyed to each chooser's own binding —
-///     `CopyTokenOf { target: ParentTarget }` inherits ONE parent target, not a
-///     per-player selection (CR 707.2).
-///
-/// This is a single Planechase phenomenon, not a card class, so the per-player
-/// left-neighbor choose head is deliberately left as a strict-failure
-/// `Unimplemented { name: "choose" }` gap rather than mis-modeled with the
-/// single-chooser machinery. This test LOCKS that documented state so the card
-/// is not silently counted as fixed and a future change can't quietly alter the
-/// shape. When per-player parallel-selection infrastructure lands, replace this
-/// with a positive end-to-end test.
+/// This now lowers to a single self-contained [`Effect::EachPlayerCopyChosen`]
+/// with `choose_scope: Neighbor { Left }` (each chooser's pool is drawn from the
+/// player seated to their left, resolved by `game::players::neighbor`), the same
+/// shape as Human—Time Lord Meta-Crisis but with the seat-relative eligibility
+/// scope and a single choice + menace grant. No chained tail: the whole body
+/// collapses into one effect (`sub_ability.is_none()`).
 #[test]
-fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap() {
+fn caught_in_a_parallel_universe_lowers_to_left_neighbor_copy_chosen() {
     let def = parse_trigger_line(
         "When you encounter Caught in a Parallel Universe, each player chooses a \
          creature controlled by the player to their left. Each player creates a \
@@ -12211,17 +12311,53 @@ fn caught_in_a_parallel_universe_per_player_left_neighbor_choose_is_deferred_gap
         .execute
         .as_deref()
         .expect("the encounter trigger must carry an execute body");
-    // The per-player left-neighbor selection head is unsupported: it must remain
-    // a documented `Unimplemented { name: "choose" }` strict-failure, NOT be
-    // mis-converted into a single-chooser `ChooseObjectsIntoTrackedSet`.
+    // CR 101.4: "each player" → scope over all players.
+    assert_eq!(
+        execute.player_scope,
+        Some(PlayerFilter::All),
+        "\"each player\" → player_scope All"
+    );
+    // The whole body collapses into a single self-contained effect (no chained
+    // tail); the pre-fix `SequentialSibling` CopyTokenOf head is gone.
+    assert!(
+        execute.sub_ability.is_none(),
+        "the body must collapse into a single EachPlayerCopyChosen, got sub {:?}",
+        execute.sub_ability
+    );
     match &*execute.effect {
-        Effect::Unimplemented { name, .. } => assert_eq!(
-            name, "choose",
-            "the deferred per-player choose head must stay an Unimplemented choose gap"
-        ),
+        Effect::EachPlayerCopyChosen {
+            choose_filter,
+            min,
+            max,
+            copy_modifications,
+            scale,
+            choose_scope,
+        } => {
+            assert_eq!((*min, *max), (1, 1), "chooses a (single) creature");
+            assert!(
+                matches!(choose_filter, TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)),
+                "choose_filter must be a creature filter, got {choose_filter:?}"
+            );
+            assert_eq!(
+                *choose_scope,
+                CopyChooseScope::Neighbor {
+                    direction: SeatDirection::Left
+                },
+                "\"controlled by the player to their left\" → Neighbor{{Left}}"
+            );
+            assert_eq!(
+                copy_modifications,
+                &vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Menace
+                }],
+                "except it has menace → AddKeyword(Menace)"
+            );
+            assert_eq!(scale, &None, "single-choice shape → no scaling clause");
+        }
         other => panic!(
-            "Caught in a Parallel Universe's per-player left-neighbor choose is a \
-             deferred gap and must remain Unimplemented, got {other:?}"
+            "Caught in a Parallel Universe must lower to a left-neighbor \
+             EachPlayerCopyChosen, got {other:?}"
         ),
     }
 }
@@ -16575,7 +16711,9 @@ fn trigger_coalition_relic_charge_counter_drain() {
                     assert_eq!(
                         *count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::PreviousEffectAmount
+                            qty: QuantityRef::PreviousEffectAmount {
+                                channel: crate::types::ability::DamageChannel::Total,
+                            }
                         },
                         "for-each tail must dispatch to PreviousEffectAmount"
                     );
@@ -17421,6 +17559,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         kind: AbilityKind::Spell,
         chain_rounding: None,
         actor: None,
+        in_trigger: true,
         repeat_until: None,
     };
 
@@ -17499,6 +17638,7 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
         kind: AbilityKind::Spell,
         chain_rounding: None,
         actor: None,
+        in_trigger: true,
         repeat_until: None,
     };
 
@@ -17591,6 +17731,7 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
         kind: AbilityKind::Spell,
         chain_rounding: None,
         actor: None,
+        in_trigger: true,
         repeat_until: None,
     };
 
@@ -23485,6 +23626,187 @@ fn dance_of_the_dead_etb_lowers_to_reanimator_chain_tapped_4767() {
     );
 }
 
+// --- issue #640: reanimator-Aura GRANT-shape ETB whole-body recognizer (Necromancy) ---
+
+/// Verbatim Necromancy Oracle text (Scryfall, 2026-07). Unlike Animate Dead,
+/// Necromancy is a plain (non-Aura) Enchantment whose ETB ability BOTH becomes
+/// an Aura AND targets the graveyard creature to reanimate ("Put target creature
+/// card from a graveyard onto the battlefield ...").
+const NECROMANCY_ORACLE: &str = "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nWhen this enchantment enters, if it's on the battlefield, it becomes an Aura with \"enchant creature put onto the battlefield with Necromancy.\" Put target creature card from a graveyard onto the battlefield under your control and attach this enchantment to it. When this enchantment leaves the battlefield, that creature's controller sacrifices it.";
+
+/// SHAPE test — assert Necromancy's ETB trigger lowers to the 4-node
+/// reanimator-Aura chain with the GRANT shape: the root `ChangeZone` targets a
+/// genuinely-parsed creature-card-in-a-graveyard `Typed` filter (NOT
+/// `AttachedTo`, unlike the swap shape — this is the #640 fix), and the
+/// `GenericEffect` grants the Aura subtype and the Enchant keyword for the first
+/// time (`AddSubtype` + `AddKeyword`, with NO `RemoveKeyword`). Runtime behavior
+/// is exercised separately in `casting_tests.rs`.
+#[test]
+fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
+    use crate::types::zones::Zone;
+
+    let parsed = parse_oracle_text(
+        NECROMANCY_ORACLE,
+        "Necromancy",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    // Necromancy has TWO enters-battlefield triggers: its first ability (the
+    // cleanup-step sacrifice for flash-casts) and this reanimator ETB. Select
+    // the reanimator one by its root `Effect::ChangeZone` body.
+    let root = parsed
+        .triggers
+        .iter()
+        .filter(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .filter_map(|t| t.execute.as_deref())
+        .find(|def| matches!(def.effect.as_ref(), Effect::ChangeZone { .. }))
+        .unwrap_or_else(|| {
+            panic!(
+                "Necromancy: expected a reanimator ETB trigger with a root ChangeZone, got {:?}",
+                parsed.triggers
+            )
+        });
+
+    // Node 1: ChangeZone at the root, forward_result set, targeting a real
+    // graveyard-creature-card filter (NOT AttachedTo).
+    assert!(
+        root.forward_result,
+        "Necromancy: root ChangeZone must set forward_result"
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enters_under,
+        enter_tapped,
+        ..
+    } = root.effect.as_ref()
+    else {
+        panic!(
+            "Necromancy: expected root Effect::ChangeZone, got {:?}",
+            root.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard), "Necromancy: origin");
+    assert_eq!(*destination, Zone::Battlefield, "Necromancy: destination");
+    assert_eq!(
+        *enters_under,
+        Some(ControllerRef::You),
+        "Necromancy: enters_under"
+    );
+    // Untapped: "onto the battlefield" with no trailing " tapped".
+    assert!(
+        !enter_tapped.is_tapped(),
+        "Necromancy: creature enters untapped ({enter_tapped:?})"
+    );
+    // The #640 fix: the target is a genuinely-parsed creature-card-in-a-graveyard
+    // filter (owner-agnostic — "a graveyard"), NOT `TargetFilter::AttachedTo`.
+    assert_ne!(
+        *target,
+        TargetFilter::AttachedTo,
+        "Necromancy: ETB must target the graveyard creature itself, not AttachedTo"
+    );
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+            zone: Zone::Graveyard
+        }])),
+        "Necromancy: ETB ChangeZone target"
+    );
+
+    // Node 2: GenericEffect grants (not swaps) — AddSubtype{Aura} + AddKeyword,
+    // referencing OriginalSource, no duration.
+    let generic = root
+        .sub_ability
+        .as_deref()
+        .expect("Necromancy: ChangeZone has no GenericEffect sub");
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = generic.effect.as_ref()
+    else {
+        panic!(
+            "Necromancy: expected GenericEffect, got {:?}",
+            generic.effect
+        );
+    };
+    assert_eq!(*duration, None, "Necromancy: grant has no stated duration");
+    assert_eq!(static_abilities.len(), 1, "Necromancy: one grant static");
+    let sd = &static_abilities[0];
+    assert_eq!(
+        sd.affected,
+        Some(TargetFilter::OriginalSource),
+        "Necromancy: grant must target OriginalSource (the enchantment), not SelfRef"
+    );
+    assert_eq!(
+        sd.modifications,
+        vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Aura".to_string(),
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::ParentTarget),
+            },
+        ],
+        "Necromancy: grant modifications (AddSubtype + AddKeyword, no RemoveKeyword)"
+    );
+
+    // Node 3: Attach — SelfRef (the enchantment) onto ParentTarget (the creature).
+    let attach = generic
+        .sub_ability
+        .as_deref()
+        .expect("Necromancy: GenericEffect has no Attach sub");
+    let Effect::Attach { attachment, target } = attach.effect.as_ref() else {
+        panic!("Necromancy: expected Attach, got {:?}", attach.effect);
+    };
+    assert_eq!(
+        *attachment,
+        TargetFilter::SelfRef,
+        "Necromancy: attach attachment"
+    );
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "Necromancy: attach host"
+    );
+
+    // Node 4: CreateDelayedTrigger — WhenLeavesPlayFiltered{SelfRef} -> Sacrifice{ParentTarget}.
+    let delayed = attach
+        .sub_ability
+        .as_deref()
+        .expect("Necromancy: Attach has no CreateDelayedTrigger sub");
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = delayed.effect.as_ref()
+    else {
+        panic!(
+            "Necromancy: expected CreateDelayedTrigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::WhenLeavesPlayFiltered {
+            filter: TargetFilter::SelfRef,
+        },
+        "Necromancy: delayed leaves-battlefield condition on the enchantment (SelfRef)"
+    );
+    let Effect::Sacrifice { target, .. } = effect.effect.as_ref() else {
+        panic!("Necromancy: expected Sacrifice, got {:?}", effect.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "Necromancy: sacrifice targets the reanimated creature"
+    );
+    assert!(
+        delayed.sub_ability.is_none(),
+        "Necromancy: chain ends at the delayed trigger"
+    );
+}
+
 /// #5253 (Railway Brawler): "Whenever another creature you control enters, put
 /// X +1/+1 counters on it, where X is its power." The "its" in the count clause
 /// is the ENTERING creature (the counter recipient), not the ability carrier.
@@ -23647,5 +23969,42 @@ fn saruman_copy_the_exiled_card_binds_exiled_by_source_not_tracked_set() {
         serde_json::json!({ "type": "ExiledBySource" }),
         "Saruman's copy must bind ExiledBySource (was TrackedSet(0)); got {:?}",
         targets[0]
+    );
+}
+
+#[test]
+fn ketramose_exile_trigger_gated_on_source_zones_and_own_turn() {
+    // #4952: the batched "one or more cards are put into exile from graveyards
+    // and/or the battlefield during your turn" trigger must (a) restrict its
+    // source zones to graveyard + battlefield (NOT exile-from-hand) and (b) fire
+    // only on the controller's own turn — both were dropped, so it fired on the
+    // opponent's turn and on exiling a card from hand.
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Whenever one or more cards are put into exile from graveyards and/or the battlefield during your turn, you draw a card and lose 1 life.",
+        "Ketramose, the New Dawn",
+        &[],
+        &[],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == crate::types::TriggerMode::ChangesZoneAll)
+        .expect("batched exile trigger should parse as ChangesZoneAll");
+    assert!(
+        trigger
+            .origin_zones
+            .contains(&crate::types::Zone::Graveyard)
+            && trigger
+                .origin_zones
+                .contains(&crate::types::Zone::Battlefield),
+        "source zones must be graveyard + battlefield, got {:?}",
+        trigger.origin_zones
+    );
+    assert_eq!(
+        trigger.constraint,
+        Some(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn),
+        "must be gated to the controller's own turn, got {:?}",
+        trigger.constraint
     );
 }

@@ -23,6 +23,27 @@ pub(crate) fn parse_typed_you_control(
         let descriptor = before.original.trim();
         if !descriptor.is_empty() {
             let after_prefix = &after.original[" creatures you control ".len()..];
+            // CR 611.3: "X creatures you control and Y ..." — "you control" here
+            // ends only the FIRST conjunct of a compound subject, not the whole
+            // subject. A well-formed single-subject predicate always starts with
+            // a verb (get/gets/has/have/gain/gains) right after "you control ",
+            // never the conjunction "and" — so a leading "and " means this
+            // positional split guessed wrong and the real subject is compound
+            // (Dune Chanter: "Lands you control and land cards you own that
+            // aren't on the battlefield are Deserts..."). Decline so dispatch
+            // falls through to a handler that resolves the whole compound
+            // subject correctly (`parse_contextual_continuous_subject_static` for
+            // get/has predicates, `parse_subject_additive_type_static` for
+            // are/is predicates) instead of treating the second conjunct as
+            // unparsed predicate noise that `parse_continuous_gets_has`'s lenient
+            // `parse_additive_type_clause_modifications` fallback can scan past
+            // and silently drop.
+            if tag::<_, _, OracleError<'_>>("and ")
+                .parse(after_prefix.trim_start())
+                .is_ok()
+            {
+                return None;
+            }
             let full_subject = tp.original[..creatures_pos + " creatures you control".len()].trim();
             // CR 509.1h: Strip combat-status prefixes ("Attacking Ninja" → props=[Attacking], subtype="Ninja")
             let mut extra_props = Vec::new();
@@ -162,6 +183,14 @@ pub(crate) fn parse_typed_you_control(
         let descriptor = before.original.trim();
         if !descriptor.is_empty() {
             let after_prefix = &after.original[" you control ".len()..];
+            // CR 611.3: same compound-subject guard as the "creatures you
+            // control" branch above — see its comment for the full rationale.
+            if tag::<_, _, OracleError<'_>>("and ")
+                .parse(after_prefix.trim_start())
+                .is_ok()
+            {
+                return None;
+            }
             let full_subject = tp.original[..yc_pos + " you control".len()].trim();
             // CR 509.1h: Strip combat-status prefixes
             let mut extra_props = Vec::new();
@@ -1153,6 +1182,22 @@ fn strip_trailing_distributive_each(s: &str) -> &str {
     }
 }
 
+/// Split a compound "+X/+Y" pump binding clause `<A>, and Y is <B>` into the
+/// X-axis expression (`A`) and Y-axis expression (`B`) when the two axes bind to
+/// different quantities (Aspect of Wolf: "X is half the number of Forests you
+/// control, rounded down, and Y is half the number of Forests you control,
+/// rounded up"). Returns `None` for the common single-quantity clause. `wx`
+/// reaches here in original case (printed "and Y is"), so it is lowercased
+/// before locating the boundary via the `split_once_on` combinator. The
+/// separator `", and y is "` consumes the joining comma, and the sentence period
+/// is already stripped upstream by `strip_trailing_where_x`, so each half feeds
+/// the case-insensitive `parse_cda_quantity` after a plain whitespace trim.
+fn split_x_and_y_where_clause(wx: &str) -> Option<(String, String)> {
+    let lower = wx.to_lowercase();
+    let (_, (x_expr, y_expr)) = nom_primitives::split_once_on(&lower, ", and y is ").ok()?;
+    Some((x_expr.trim().to_string(), y_expr.trim().to_string()))
+}
+
 pub(crate) fn parse_dynamic_pt_in_text(
     lower: &str,
     where_x_expression: Option<&str>,
@@ -1163,14 +1208,31 @@ pub(crate) fn parse_dynamic_pt_in_text(
     let after_verb = nom_tag_lower(after_gets, after_gets, "gets ")
         .or_else(|| nom_tag_lower(after_gets, after_gets, "get "))?;
 
-    // CR 613.4c: Parse variable P/T pattern via nom combinator. Each axis is
-    // either the variable X (`None`) or a fixed magnitude (`Some(n)`).
+    // CR 613.4c: Parse the variable P/T pattern. Each axis is a fixed magnitude,
+    // the variable X, or (toughness only, in a distinct "+X/+Y" pump) the
+    // variable Y.
     let (_, (p_sign, p_mag, t_sign, t_mag)) = parse_variable_pt_pattern(after_verb).ok()?;
-    let p_is_x = p_mag.is_none();
-    let t_is_x = t_mag.is_none();
+    let p_is_dynamic = matches!(p_mag, PtAxisMag::VarX | PtAxisMag::VarY);
+    let t_is_dynamic = matches!(t_mag, PtAxisMag::VarX | PtAxisMag::VarY);
 
-    if !p_is_x && !t_is_x {
-        return None; // No X variable — not a dynamic P/T pattern
+    if !p_is_dynamic && !t_is_dynamic {
+        return None; // No variable axis — not a dynamic P/T pattern
+    }
+
+    // A distinct-letter "+X/+Y" pump (X on power, Y on toughness) is supported
+    // ONLY when a paired "where X is <A>, and Y is <B>" binding was structurally
+    // parsed — its two axes carry independent bindings. Without one the pattern
+    // stays UNSUPPORTED rather than synthesizing from cost-X: Snowblind's
+    // "gets -X/-Y" (X/Y defined by later conditional sentences, no `{X}` cost)
+    // must not emit a bogus `-CostXPaid/-CostXPaid` static.
+    let is_distinct_xy = p_mag == PtAxisMag::VarX && t_mag == PtAxisMag::VarY;
+    // `Y` is not a generic cost variable in this grammar. The only supported
+    // Y-bearing form is Aspect of Wolf's ordered `+X/+Y` pair, whose distinct
+    // bindings are carried by the structured where-clause below. Reject every
+    // other placement so `+Y/+X` or `+Y/+Y` cannot silently borrow `CostXPaid`
+    // or an X-only binding.
+    if (matches!(p_mag, PtAxisMag::VarY) || matches!(t_mag, PtAxisMag::VarY)) && !is_distinct_xy {
+        return None;
     }
 
     // CR 706.2 + CR 706.3b: "where X is the result" binds X to the preceding
@@ -1188,13 +1250,33 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // case. This unblocks +X/+0 and +X/+X pump activations like Kessig Wolf
     // Run whose effect text has no binding clause — the X is bound to the
     // cost, not to a derived quantity.
-    let quantity = match where_x_expression {
-        Some(wx) => parse_cda_quantity(wx)
-            .or_else(|| parse_event_context_quantity(wx))
-            .or_else(|| parse_source_intensity_where_x(wx))?,
-        None => QuantityExpr::Ref {
-            qty: QuantityRef::CostXPaid,
-        },
+    // Intensity and the other derived quantities live in the shared
+    // `parse_quantity_ref` combinator (oracle_nom/quantity.rs), which
+    // `parse_cda_quantity` delegates to. Most pumps bind X to a single quantity
+    // applied to both axes; a "+X/+Y" pump whose clause reads "where X is <A> and
+    // Y is <B>" (Aspect of Wolf) binds each axis to its own quantity, so the
+    // clause is split on " and y is " and each half is parsed independently.
+    let resolve_quantity =
+        |wx: &str| parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx));
+    let (p_quantity, t_quantity) = if is_distinct_xy {
+        // Require the paired binding; a "+X/+Y" without it is unsupported.
+        let (x_expr, y_expr) = split_x_and_y_where_clause(where_x_expression?)?;
+        (resolve_quantity(&x_expr)?, resolve_quantity(&y_expr)?)
+    } else {
+        match where_x_expression {
+            Some(wx) => {
+                let q = resolve_quantity(wx)?;
+                (q.clone(), q)
+            }
+            // CR 107.3a + CR 107.3i: no binding clause → X is the value chosen as
+            // the ability's cost-X was paid (Kessig Wolf Run).
+            None => {
+                let q = QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                };
+                (q.clone(), q)
+            }
+        }
     };
 
     let mut mods = Vec::new();
@@ -1202,61 +1284,41 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // fixed nonzero axis grants a constant modification alongside it (the mixed
     // "+X/+1" case). A fixed `0` axis contributes nothing.
     match p_mag {
-        None => {
-            let qty = if p_sign < 0 {
+        PtAxisMag::VarX | PtAxisMag::VarY => {
+            let value = if p_sign < 0 {
                 QuantityExpr::Multiply {
                     factor: -1,
-                    inner: Box::new(quantity.clone()),
+                    inner: Box::new(p_quantity),
                 }
             } else {
-                quantity.clone()
+                p_quantity
             };
-            mods.push(ContinuousModification::AddDynamicPower { value: qty });
+            mods.push(ContinuousModification::AddDynamicPower { value });
         }
-        Some(n) if n != 0 => mods.push(ContinuousModification::AddPower { value: p_sign * n }),
-        Some(_) => {}
+        PtAxisMag::Fixed(n) if n != 0 => {
+            mods.push(ContinuousModification::AddPower { value: p_sign * n })
+        }
+        PtAxisMag::Fixed(_) => {}
     }
     match t_mag {
-        None => {
-            let qty = if t_sign < 0 {
+        PtAxisMag::VarX | PtAxisMag::VarY => {
+            let value = if t_sign < 0 {
                 QuantityExpr::Multiply {
                     factor: -1,
-                    inner: Box::new(quantity),
+                    inner: Box::new(t_quantity),
                 }
             } else {
-                quantity
+                t_quantity
             };
-            mods.push(ContinuousModification::AddDynamicToughness { value: qty });
+            mods.push(ContinuousModification::AddDynamicToughness { value });
         }
-        Some(n) if n != 0 => mods.push(ContinuousModification::AddToughness { value: t_sign * n }),
-        Some(_) => {}
+        PtAxisMag::Fixed(n) if n != 0 => {
+            mods.push(ContinuousModification::AddToughness { value: t_sign * n })
+        }
+        PtAxisMag::Fixed(_) => {}
     }
 
     Some(mods)
-}
-
-/// Digital-only Alchemy (Arena): "where X is <source>'s intensity" — a dynamic
-/// P/T pump that scales by the STATIC's own source object's intensity (Minthara
-/// of the Absolute, Teysa of the Ghost Council, Quickbeast Amulet). The
-/// self-possessive axis reuses [`nom_quantity::parse_self_possessive`]
-/// (its / ~'s / this creature's / …) rather than enumerating verbatim strings;
-/// `normalize_card_name_refs` funnels every card-name and permanent-type
-/// self-reference to `~` upstream, so `~'s intensity` is the form the static
-/// parser actually receives. `QuantityRef::Intensity { scope: Source }` is fully
-/// evaluated at runtime by `game::quantity`, so this is a grammar-only seam that
-/// reuses existing modeling.
-fn parse_source_intensity_where_x(wx: &str) -> Option<QuantityExpr> {
-    nom_parse_lower(wx.trim().trim_end_matches('.').trim(), |i| {
-        value(
-            QuantityExpr::Ref {
-                qty: QuantityRef::Intensity {
-                    scope: ObjectScope::Source,
-                },
-            },
-            terminated(nom_quantity::parse_self_possessive, tag(" intensity")),
-        )
-        .parse(i)
-    })
 }
 
 pub(crate) fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {

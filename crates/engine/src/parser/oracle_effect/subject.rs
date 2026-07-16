@@ -9,24 +9,24 @@ use nom::Parser;
 
 use super::animation::{
     animation_modifications_with_replacement, has_in_addition_to_other_colors,
-    has_in_addition_to_other_types, parse_animation_spec,
+    has_in_addition_to_other_types, parse_animation_spec, split_in_addition_tail,
 };
 use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope,
-    PtValue, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-    TypedFilter,
+    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
+    ControllerRef, Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec,
+    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
 
-use super::super::oracle_keyword::parse_keyword_from_oracle;
+use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::error::OracleResult;
@@ -3274,8 +3274,8 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Opti
     {
         let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
         let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
-        let first = parse_keyword_from_oracle(left.trim())?;
-        let second = parse_keyword_from_oracle(right.trim())?;
+        let first = parse_granted_keyword_fragment(left.trim())?;
+        let second = parse_granted_keyword_fragment(right.trim())?;
         return Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))));
     }
 
@@ -3303,7 +3303,7 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Opti
         nom_primitives::split_once_on(quality_text.trim(), " or from ").ok()?;
     // The halves are bare qualities (the "protection from " prefix is already
     // stripped), so map each with parse_protection_target — NOT
-    // parse_keyword_from_oracle, which expects the full "protection from …" form.
+    // parse_granted_keyword_fragment, which expects the full "protection from …" form.
     let first = Keyword::Protection(crate::types::keywords::parse_protection_target(left.trim()));
     let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
         right.trim(),
@@ -4407,8 +4407,9 @@ fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
 ///   This creature becomes that color", Foraging Wickermaw) — the mana producer
 ///   records it as `ChosenAttribute::Color` on the source
 ///   (`produce_mana_from_ability`), and this `AddChosenColor` reads it live at
-///   Layer 5. Despite the additive-sounding `Add` prefix, `AddChosenColor` SETS
-///   the color at Layer 5 (CR 105.3 / CR 613.1e) — see its definition.
+///   Layer 5 with [`ColorChangeMode::Set`] (CR 105.3 / CR 613.1e) — "becomes
+///   that color" replaces prior colors unless an "in addition" retain-suffix
+///   selected [`ColorChangeMode::Add`].
 ///
 /// Returns `None` for any other predicate so the caller falls through to the
 /// fixed-color animation path (which already handles single named colors) and to
@@ -4434,7 +4435,9 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
     .parse(lower.as_str())
     .is_ok()
     {
-        return Some(ContinuousModification::AddChosenColor);
+        return Some(ContinuousModification::AddChosenColor {
+            mode: ColorChangeMode::Set,
+        });
     }
     None
 }
@@ -4453,8 +4456,8 @@ fn ends_with_of_your_choice(lower: &str) -> bool {
 }
 
 /// CR 205.3 / CR 305.7 / CR 105.3: Parse "become the [creature type / basic land
-/// type / color] of your choice [and <keyword grant>]" into a Choose →
-/// GenericEffect(apply) chain.
+/// type / color] of your choice [in addition to its other types] [and
+/// <keyword grant>]" into a Choose → GenericEffect(apply) chain.
 ///
 /// The optional trailing "and <keyword grant>" clause (Mondo Gecko: "becomes the
 /// color of your choice and gains hexproof from that color") composes the chosen
@@ -4463,6 +4466,17 @@ fn ends_with_of_your_choice(lower: &str) -> bool {
 /// which resolves "hexproof from that color" to `HexproofFrom(ChosenColor)`
 /// (CR 702.11d) — the same `ChosenAttribute::Color` the `AddChosenColor`
 /// modification reads, so the protection tracks the chosen color.
+///
+/// The optional "in addition to its other types" retention marker (Navigator's
+/// Compass: "becomes the basic land type of your choice in addition to its
+/// other types") is peeled off via the shared `split_in_addition_tail` splitter
+/// — the same one `build_become_clause`'s fixed-value fallback already uses for
+/// the non-choice "becomes a `<type>`" form (Possessed Goat). Previously this
+/// function anchored on the choice phrase literally ending in "of your choice",
+/// so any trailing marker text made the whole predicate fall through unparsed.
+/// The land/creature choice modification (`AddChosenSubtype`) is additive by
+/// construction (CR 205.1b) regardless of the marker, so accepting it changes
+/// nothing about the emitted modification — only whether the line parses at all.
 fn try_parse_become_choice(
     become_text: &str,
     application: &SubjectApplication,
@@ -4488,6 +4502,23 @@ fn try_parse_become_choice(
         _ => (become_text.trim(), None),
     };
 
+    // CR 205.1b: the choice phrase may itself carry the "in addition to its
+    // other types" retention marker (Navigator's Compass: "becomes the basic
+    // land type of your choice in addition to its other types") — the same
+    // marker the fixed-value sibling path already recognizes via
+    // `has_in_addition_to_other_types` (see `build_become_clause`'s
+    // `parse_animation_spec` fallback). Peel it off with the shared
+    // `split_in_addition_tail` splitter before the "of your choice" anchor
+    // check below, so the choice phrase underneath is still recognized instead
+    // of the whole predicate falling through unparsed. `AddChosenSubtype` (the
+    // land/creature-type modification below) is additive by construction
+    // regardless of the marker, so no branching on the match is needed — it
+    // only needs to be accepted, not interpreted.
+    let choice_text = match split_in_addition_tail(choice_text) {
+        Some((prefix, _matched)) => prefix.trim(),
+        None => choice_text,
+    };
+
     let lower = choice_text.to_lowercase();
     if !ends_with_of_your_choice(lower.as_str()) {
         return None;
@@ -4496,6 +4527,11 @@ fn try_parse_become_choice(
     let (choice_type, modification) = if lower.contains("creature type") {
         (
             ChoiceType::creature_type(),
+            // CR 205.1b: additive by construction regardless of the marker —
+            // `AddChosenSubtype` never clears existing creature subtypes (unlike
+            // the bare "are the chosen type" static form, which pairs it with
+            // `RemoveAllSubtypes` for CR 205.1a replacement semantics). The
+            // marker (if present) is accepted, not required.
             ContinuousModification::AddChosenSubtype {
                 kind: ChosenSubtypeKind::CreatureType,
             },
@@ -4509,7 +4545,16 @@ fn try_parse_become_choice(
         )
     } else if lower.contains("color") {
         // CR 105.3: "become the color of your choice" — player chooses a color.
-        (ChoiceType::color(), ContinuousModification::AddChosenColor)
+        // No printed card pairs this with the "in addition to its other colors"
+        // marker (unlike the land/creature-type axes), so this stays the
+        // CR 105.3 replacement default; the marker-strip above still lets such a
+        // line parse instead of falling through, should one ever be printed.
+        (
+            ChoiceType::color(),
+            ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set,
+            },
+        )
     } else {
         return None;
     };
@@ -6038,11 +6083,15 @@ mod tests {
     fn become_that_color_maps_to_add_chosen_color() {
         assert!(matches!(
             try_parse_become_color_modification("that color"),
-            Some(ContinuousModification::AddChosenColor)
+            Some(ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set
+            })
         ));
         assert!(matches!(
             try_parse_become_color_modification("the chosen color"),
-            Some(ContinuousModification::AddChosenColor)
+            Some(ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::Set
+            })
         ));
         assert!(matches!(
             try_parse_become_color_modification("all colors"),

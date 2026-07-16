@@ -143,7 +143,7 @@ pub fn resolve(
     // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
     // wrapped in `UpTo` means the player may select 0..=count.
     let default_count = QuantityExpr::Fixed { value: 1 };
-    let (filter, count_expr, up_to, min_count) = match &ability.effect {
+    let (raw_filter, count_expr, up_to, min_count) = match &ability.effect {
         Effect::Sacrifice {
             target,
             count,
@@ -154,6 +154,21 @@ pub fn resolve(
         }
         _ => (&TargetFilter::Any, &default_count, false, 0),
     };
+    // CR 608.2c + CR 510.2: Bind the parser's `TrackedSetId(0)` "most recent set"
+    // sentinel to a concrete filter before deriving the eligible pool. This is
+    // the same filter-level authority every other tracked-set consumer
+    // (`change_zone`, `shuffle`, `token_copy`, …) routes through, and it is the
+    // ONLY one that carries the combat-damage rung: for a "you may sacrifice one
+    // of them" trigger seeded from a `CombatDamageDealtToPlayer` event (e.g.
+    // Descendants' Fury), the eligible creatures live in the event's
+    // `source_amounts`, reachable only via `current_combat_damage_source_filter`.
+    // `matches_target_filter`'s id-level ladder (`resolve_tracked_set_id`) never
+    // reaches that rung, so matching the raw sentinel directly would leave the
+    // pool empty and silently sacrifice nothing. Non-sentinel filters (SelfRef,
+    // Any, controller-scoped) pass through unchanged.
+    let resolved_filter =
+        crate::game::targeting::resolve_tracked_set_sentinel(state, raw_filter.clone());
+    let filter = &resolved_filter;
     // CR 400.7: A self-referential sacrifice ("sacrifice this creature") does
     // nothing if the source has left and re-entered the battlefield (blink/
     // flicker) since this ability fired — the re-entered permanent is a new

@@ -78,6 +78,10 @@ import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchMod
 import { LifeRedistributionModal } from "../components/modal/LifeRedistributionModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { DeclareShortcutModal, RespondToShortcutModal } from "../components/modal/LoopShortcutModal.tsx";
+import {
+  PrecastCopyShortcutOfferModal,
+  RespondToPrecastCopyShortcutModal,
+} from "../components/modal/PrecastCopyShortcutModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { PeekTab } from "../components/modal/DialogShell.tsx";
@@ -87,6 +91,7 @@ import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.t
 import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
 import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
+import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -151,7 +156,7 @@ import {
   loyaltyBadge,
   stripLoyaltyCostPrefix,
 } from "../viewmodel/costLabel.ts";
-import { ManaFontIcon } from "../components/icons/ManaFontIcon.tsx";
+import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
 import {
   getCastableZoneViewerTarget,
   getBoardChoiceView,
@@ -1698,9 +1703,11 @@ function GamePageContent({
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
         <BattleProtectorModal />
+        <MeldChoiceModal />
         <AssistChoosePlayerModal />
         <ClashOpponentModal />
         <PileOpponentModal />
+        <AnnouncingOpponentModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />
@@ -1709,6 +1716,8 @@ function GamePageContent({
         <ModeChoiceModal />
         <DeclareShortcutModal />
         <RespondToShortcutModal />
+        <PrecastCopyShortcutOfferModal />
+        <RespondToPrecastCopyShortcutModal />
         <ChooseOneOfBranchModal />
         <LifeRedistributionModal />
         <AdventureCastModal />
@@ -2859,16 +2868,13 @@ function AbilityChoiceModal() {
         if (badge) {
           return {
             id: String(i),
-            label: stripLoyaltyCostPrefix(label),
-            description,
-            // No `size`: mana-font scales the loyalty glyph off the parent's
-            // font-size (font-size:1.5em), so it inherits the option row size.
+            // The ability effect is the option's primary content. The loyalty
+            // badge already expresses its cost, so keeping the effect in the
+            // secondary description would visually detach it from that badge.
+            label: description ?? stripLoyaltyCostPrefix(label),
+            labelTone: "secondary",
             icon: (
-              <ManaFontIcon
-                iconClass={badge.iconClasses}
-                fallbackText={badge.text}
-                label={badge.text}
-              />
+              <LoyaltyBadge amount={badge.amount} kind="cost" />
             ),
           };
         }
@@ -3321,6 +3327,57 @@ function ActivationCostOneOfChoiceModal() {
       }
     />
   );
+}
+
+function MeldChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type === "MeldPairChoice") {
+    const choices = waitingFor.data.choices;
+    return (
+      <ChoiceModal
+        title={t("gamePage.meld.choosePair")}
+        options={choices.map((choice, index) => ({
+          id: String(index),
+          label: `${objects?.[choice.source_id]?.name ?? choice.expected_source} + ${objects?.[choice.partner_id]?.name ?? choice.expected_partner}`,
+          description: t("gamePage.meld.into", { result: choice.result }),
+        }))}
+        onChoose={(id) => {
+          const choice = choices[Number.parseInt(id, 10)];
+          if (!choice) return;
+          dispatch({
+            type: "ChooseMeldPair",
+            data: { source_id: choice.source_id, partner_id: choice.partner_id },
+          });
+        }}
+      />
+    );
+  }
+
+  if (waitingFor?.type === "MeldAttackTargetChoice") {
+    const targets = waitingFor.data.valid_targets;
+    return (
+      <ChoiceModal
+        title={t("gamePage.meld.chooseAttackTarget")}
+        options={targets.map((target, index) => {
+          const label = target.type === "Player"
+            ? t("gamePage.meld.player", { id: target.data })
+            : objects?.[target.data]?.name ?? t("gamePage.meld.permanent", { id: target.data });
+          return { id: String(index), label };
+        })}
+        onChoose={(id) => {
+          const target = targets[Number.parseInt(id, 10)];
+          if (!target) return;
+          dispatch({ type: "ChooseEntryAttackTarget", data: { target } });
+        }}
+      />
+    );
+  }
+
+  return null;
 }
 
 function DebugModeBanner() {

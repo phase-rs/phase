@@ -227,9 +227,9 @@ pub fn choose_action_with_session(
         // so the game never deadlocks waiting for the AI.
         return fallback_action(state);
     }
-    if config.execution_mode.is_measurement() {
-        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
-    }
+    // Issue #4878: total order before softmax so equal scores never depend on
+    // HashSet/HashMap allocation order.
+    scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
     let chosen = if scored.len() == 1 {
         Some(scored[0].0.clone())
     } else {
@@ -760,12 +760,56 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::LoopShortcut { .. } => engine::ai_support::legal_actions(state)
             .into_iter()
             .find(|action| matches!(action, GameAction::DeclineShortcut)),
+        // CR 732.2a: the finite pre-cast family has the same conservative
+        // proposer fallback as the legacy shortcut. Ask the engine for its
+        // issued decline capability instead of fabricating a route response.
+        WaitingFor::PrecastCopyShortcutOffer { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::PrecastCopyShortcut {
+                        response: engine::types::actions::PrecastCopyShortcutResponse::Decline,
+                        ..
+                    }
+                )
+            }),
         // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
         // `smart_shortcut_response` — Shorten when the polled player has a meaningful
         // way to break the loop, else Accept.
         WaitingFor::RespondToShortcut { player, .. } => Some(GameAction::RespondToShortcut {
             response: engine::ai_support::smart_shortcut_response(state, *player),
         }),
+        // CR 732.2b/c: use the same meaningful-priority probe as the legacy
+        // responder. A finite route can only shorten at its engine-issued
+        // breakpoint, so translate a legacy-style Shorten to that concrete
+        // capability; if none is issued, accepting is the only legal fallback.
+        WaitingFor::RespondToPrecastCopyShortcut {
+            player,
+            epoch,
+            breakpoint_ids,
+            ..
+        } => {
+            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
+                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
+                    breakpoint_ids.first().map_or(
+                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
+                        |breakpoint_id| {
+                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
+                                breakpoint_id: *breakpoint_id,
+                            }
+                        },
+                    )
+                }
+                engine::analysis::loop_check::ShortcutResponse::Accept => {
+                    engine::types::actions::PrecastCopyShortcutResponse::Accept
+                }
+            };
+            Some(GameAction::PrecastCopyShortcut {
+                epoch: *epoch,
+                response,
+            })
+        }
 
         // Combat declarations: an empty declaration is NOT always legal —
         // CR 508.1d / CR 701.15b require goaded / "attacks if able" creatures
@@ -799,6 +843,23 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // CR 508.1g + CR 702.154a: Enlist is optional; the conservative
         // fallback declines while normal search evaluates legal tap choices.
         WaitingFor::EnlistChoice { .. } => Some(GameAction::ChooseEnlist { target: None }),
+
+        // CR 701.42b / CR 508.4: deadlock-safe deterministic fallbacks. Normal
+        // public `choose_action` evaluates these legal actions through search;
+        // when time expires, preserve the engine's canonical physical-pair
+        // authority before falling back to the first legal live-name choice.
+        WaitingFor::MeldPairChoice { choices, .. } => choices
+            .iter()
+            .find(|choice| engine::game::meld::is_canonical_physical_meld_pair(state, choice))
+            .or_else(|| choices.first())
+            .map(|choice| GameAction::ChooseMeldPair {
+                source_id: choice.source_id,
+                partner_id: choice.partner_id,
+            }),
+        WaitingFor::MeldAttackTargetChoice { valid_targets, .. } => valid_targets
+            .first()
+            .copied()
+            .map(|target| GameAction::ChooseEntryAttackTarget { target }),
 
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is
@@ -1123,6 +1184,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
             .first()
             .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
+
+        // CR 601.2c + CR 115.1: "of an opponent's choice" announcer — the
+        // controller picks which opponent announces; fall back to the first.
+        WaitingFor::ChooseAnnouncingOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseAnnouncingOpponent { opponent }),
 
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::CastOffer {
@@ -1549,6 +1616,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseKeptCreatures { kept })
         }
 
+        // CR 101.4 + CR 701.21a: choose a valid exact-size baseline subset.
+        WaitingFor::KeepExactPermanentsChoice {
+            eligible,
+            required_count,
+            ..
+        } => {
+            let kept = eligible.iter().copied().take(*required_count).collect();
+            Some(GameAction::ChooseKeptPermanents { kept })
+        }
+
         // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
         // object goes to derived pile B) is the simplest legal partition, and
         // pile A is the default choice for the chooser. Tactical AI override
@@ -1723,9 +1800,8 @@ pub fn score_candidates_with_session(
         merge_into(&mut acc, &mut positions, &mut counts, scored);
     }
     let mut out = finalize_mean(acc, counts, k as usize);
-    if config.execution_mode.is_measurement() {
-        out.sort_by_cached_key(|(action, _)| action_order_key(action));
-    }
+    // Issue #4878: canonical order after K-sample merge (measurement + play).
+    out.sort_by(|a, b| a.0.cmp_stable(&b.0));
     out
 }
 
@@ -1851,9 +1927,8 @@ fn score_candidates_core(
             _ => true,
         })
         .collect();
-    if config.execution_mode.is_measurement() {
-        gated.sort_by_cached_key(|g| action_order_key(&g.candidate.action));
-    }
+    // Issue #4878: deterministic candidate order before scoring / search.
+    gated.sort_by(|a, b| a.candidate.action.cmp_stable(&b.candidate.action));
 
     let actions: Vec<GameAction> = gated
         .iter()
@@ -1931,10 +2006,7 @@ fn score_candidates_core(
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| {
-                    action_order_key(&a.candidate.action)
-                        .cmp(&action_order_key(&b.candidate.action))
-                })
+                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
         });
         ranked.truncate(branching);
 
@@ -2011,9 +2083,7 @@ fn score_candidates_core(
         }
 
         let mut out = best_scored;
-        if config.execution_mode.is_measurement() {
-            out.sort_by_cached_key(|(action, _)| action_order_key(action));
-        }
+        out.sort_by(|a, b| a.0.cmp_stable(&b.0));
         out
     } else {
         // Heuristic-only scoring
@@ -2030,15 +2100,9 @@ fn score_candidates_core(
                 (candidate.candidate.action, score)
             })
             .collect();
-        if config.execution_mode.is_measurement() {
-            out.sort_by_cached_key(|(action, _)| action_order_key(action));
-        }
+        out.sort_by(|a, b| a.0.cmp_stable(&b.0));
         out
     }
-}
-
-fn action_order_key(action: &GameAction) -> String {
-    format!("{action:?}")
 }
 
 /// Build AI context from the player's deck pool, or a neutral default if unavailable.
@@ -2884,10 +2948,15 @@ pub fn softmax_select_pairs(
 
     let total: f64 = weights.iter().sum();
     if total <= 0.0 || !total.is_finite() {
-        // Fallback: pick the highest-scored action
+        // Fallback: pick the highest-scored action (tie-break by action key —
+        // issue #4878).
         return scored
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp_stable(&b.0))
+            })
             .map(|s| s.0.clone());
     }
 
@@ -2960,6 +3029,210 @@ mod tests {
             fallback_action(&state),
             Some(GameAction::DeclineShortcut),
             "the no-score fallback must select DeclineShortcut from engine legal actions"
+        );
+    }
+
+    /// CR 701.42b: the public search path prefers the physical canonical meld
+    /// pair over an earlier live-name impostor that would exile both selected
+    /// objects without producing the result permanent. This proves the choice
+    /// is handled by ordinary simulation/evaluation, not bespoke name scoring.
+    #[test]
+    fn choose_action_simulates_meld_pair_outcomes() {
+        use engine::types::ability::{PermanentEntryMode, PtValue};
+        use engine::types::card::CardFace;
+        use engine::types::game_state::{MeldPairRecord, MeldSelection};
+
+        const SOURCE: &str = "AI Meld Source";
+        const PARTNER: &str = "AI Meld Partner";
+        const RESULT: &str = "AI Meld Result";
+
+        let mut state = make_state();
+        let impostor_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let impostor_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        for (id, live_name, base_name) in [
+            (impostor_source, SOURCE, "Printed Impostor Source"),
+            (impostor_partner, PARTNER, "Printed Impostor Partner"),
+            (real_source, SOURCE, SOURCE),
+            (real_partner, PARTNER, PARTNER),
+        ] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.name = live_name.to_string();
+            object.base_name = base_name.to_string();
+        }
+        let mut result = CardFace {
+            name: RESULT.to_string(),
+            power: Some(PtValue::Fixed(9)),
+            toughness: Some(PtValue::Fixed(9)),
+            ..CardFace::default()
+        };
+        result.card_type.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut state.card_face_registry).insert(RESULT.to_lowercase(), result);
+        Arc::make_mut(&mut state.meld_pair_registry).insert(
+            format!("{}\0{}", SOURCE.to_lowercase(), PARTNER.to_lowercase()),
+            MeldPairRecord {
+                source: SOURCE.to_string(),
+                partner: PARTNER.to_string(),
+                result: RESULT.to_string(),
+            },
+        );
+        let selection = |source_id, partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller: PlayerId(0),
+            expected_source: SOURCE.to_string(),
+            expected_partner: PARTNER.to_string(),
+            result: RESULT.to_string(),
+            entry: PermanentEntryMode::Normal,
+        };
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: vec![
+                selection(impostor_source, impostor_partner),
+                selection(real_source, real_partner),
+            ],
+        };
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(9);
+        let mut rng = SmallRng::seed_from_u64(9);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseMeldPair {
+                source_id: real_source,
+                partner_id: real_partner,
+            })
+        );
+    }
+
+    /// CR 701.42b: even when search cannot run, the deterministic fallback
+    /// prefers the canonical physical pair over an earlier live-name impostor.
+    #[test]
+    fn meld_pair_fallback_prefers_canonical_pair_in_hostile_order() {
+        use engine::types::ability::PermanentEntryMode;
+        use engine::types::game_state::{MeldPairRecord, MeldSelection};
+
+        const SOURCE: &str = "Fallback Meld Source";
+        const PARTNER: &str = "Fallback Meld Partner";
+        const RESULT: &str = "Fallback Meld Result";
+
+        let mut state = make_state();
+        let impostor_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let impostor_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        for (id, base_name) in [
+            (impostor_source, "Printed Impostor Source"),
+            (impostor_partner, "Printed Impostor Partner"),
+            (real_source, SOURCE),
+            (real_partner, PARTNER),
+        ] {
+            state.objects.get_mut(&id).unwrap().base_name = base_name.to_string();
+        }
+        Arc::make_mut(&mut state.meld_pair_registry).insert(
+            format!("{}\0{}", SOURCE.to_lowercase(), PARTNER.to_lowercase()),
+            MeldPairRecord {
+                source: SOURCE.to_string(),
+                partner: PARTNER.to_string(),
+                result: RESULT.to_string(),
+            },
+        );
+        let selection = |source_id, partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller: PlayerId(0),
+            expected_source: SOURCE.to_string(),
+            expected_partner: PARTNER.to_string(),
+            result: RESULT.to_string(),
+            entry: PermanentEntryMode::Normal,
+        };
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: vec![
+                selection(impostor_source, impostor_partner),
+                selection(real_source, real_partner),
+            ],
+        };
+
+        assert_eq!(
+            fallback_action(&state),
+            Some(GameAction::ChooseMeldPair {
+                source_id: real_source,
+                partner_id: real_partner,
+            })
+        );
+    }
+
+    /// Issue #4878: the degenerate-weight fallback in `softmax_select_pairs`
+    /// must break score ties with `GameAction::cmp_stable`, not fall back to the
+    /// input-list order. Here every score is `-inf` (weights become `NaN`, so
+    /// the fallback branch runs). `PassPriority` (discriminant 0) sorts before
+    /// `PlayLand` (discriminant 1), so the `cmp_stable`-maximum is the `PlayLand`
+    /// listed FIRST. Removing the `then_with(cmp_stable)` tie-break makes
+    /// `max_by` return the last equally-maximal element (`PassPriority`) instead,
+    /// flipping this assertion.
+    #[test]
+    fn softmax_fallback_tiebreak_is_cmp_stable_deterministic() {
+        let scored = vec![
+            (
+                GameAction::PlayLand {
+                    object_id: ObjectId(5),
+                    card_id: CardId(1),
+                },
+                f64::NEG_INFINITY,
+            ),
+            (GameAction::PassPriority, f64::NEG_INFINITY),
+        ];
+        // Reach guard: `PlayLand` must outrank `PassPriority` under cmp_stable so
+        // the expected pick is the first (non-last) element, distinguishing the
+        // tie-break from `max_by`'s last-on-ties behavior.
+        assert_eq!(
+            scored[0].0.cmp_stable(&scored[1].0),
+            std::cmp::Ordering::Greater,
+            "precondition: PlayLand > PassPriority under cmp_stable"
+        );
+
+        let mut rng = SmallRng::seed_from_u64(0);
+        let chosen = softmax_select_pairs(&scored, 1.0, &mut rng)
+            .expect("non-empty scored list must select an action");
+        assert_eq!(
+            chosen, scored[0].0,
+            "degenerate-weight fallback must pick the cmp_stable-max action"
+        );
+    }
+
+    /// Issue #4878: the candidate sort was previously gated behind measurement
+    /// mode. A *normal* (non-measurement) config must still emit candidates in
+    /// the canonical `cmp_stable` order. Reverting the always-on
+    /// `out.sort_by(cmp_stable)` returns candidates in score / enumeration order,
+    /// which is not `cmp_stable`-sorted for this set, flipping the assertion.
+    #[test]
+    fn score_candidates_non_measurement_order_is_cmp_stable_canonical() {
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellC", 3);
+        // Normal config: NOT measurement mode (the guard this test protects only
+        // ever sorted under measurement before #4878).
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+
+        let scored = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let actions: Vec<GameAction> = scored.iter().map(|(a, _)| a.clone()).collect();
+        // Reach guard: several distinct candidates (3 castable spells + Pass)
+        // so the order is non-trivial.
+        assert!(
+            actions.len() >= 3,
+            "expected several scored candidates, got {}",
+            actions.len()
+        );
+
+        let mut expected = actions.clone();
+        expected.sort_by(|a, b| a.cmp_stable(b));
+        assert_eq!(
+            actions, expected,
+            "non-measurement scoring must emit cmp_stable-canonical order"
         );
     }
 
@@ -3221,6 +3494,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(opp_creature)],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4336,6 +4610,7 @@ mod tests {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4374,6 +4649,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: Vec::new(),
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -5402,7 +5678,7 @@ mod tests {
     }
 
     fn sorted_by_action(mut scored: Vec<(GameAction, f64)>) -> Vec<(GameAction, f64)> {
-        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
+        scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
         scored
     }
 

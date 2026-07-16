@@ -144,9 +144,10 @@ This ability costs {4} less to activate if an opponent controls four or more non
 
 #[test]
 fn thaumaton_torpedo_cost_reduction_carries_spacecraft_attacker_condition() {
-    // #3223 follow-up: this gap is now filled by PR #3950, which models the
-    // "if you attacked with a <filter> this turn" gate as a filtered
-    // `YouAttackedWithAtLeast { count: 1, filter: Some(Spacecraft) }` condition.
+    // #3223 follow-up: this gap is now filled by PR #3950; the shared grammar
+    // models the "if you attacked with a <filter> this turn" gate as a typed
+    // `QuantityComparison` over a filtered `AttackedThisTurn` count (GE 1,
+    // Spacecraft filter).
     let card = "Thaumaton Torpedo";
     let oracle = "{6}, {T}, Sacrifice this artifact: Destroy target nonland permanent. \
 This ability costs {3} less to activate if you attacked with a Spacecraft this turn.";

@@ -129,6 +129,13 @@ fn strip_leading_general_conditional	crates/engine/src/parser/oracle_effect/cond
 fn static_condition_to_ability_condition	crates/engine/src/parser/oracle_effect/conditions.rs
 fn static_condition_to_trigger_condition	crates/engine/src/parser/oracle_trigger.rs
 fn static_condition_to_restriction_condition	crates/engine/src/parser/oracle_condition.rs
+fn parse_keyword_line_core	crates/engine/src/parser/oracle_keyword.rs
+fn parse_router_keyword_line	crates/engine/src/parser/oracle_keyword.rs
+fn parse_granted_keyword_fragment	crates/engine/src/parser/oracle_keyword.rs
+fn extract_granted_keyword_list	crates/engine/src/parser/oracle_keyword.rs
+fn is_keyword_cost_line	crates/engine/src/parser/oracle_keyword.rs
+ROUTER_KEYWORD_CASES	crates/engine/src/parser/oracle_keyword.rs
+KNOWN_NOUN_PARAM_LEAKS	crates/engine/src/parser/oracle_keyword.rs
 fn strip_trailing_duration	crates/engine/src/parser/oracle_effect/lower.rs
 fn strip_leading_duration	crates/engine/src/parser/oracle_effect/lower.rs
 fn parse_search_library_details	crates/engine/src/parser/oracle_effect/search.rs
@@ -177,7 +184,11 @@ EOF
 # (3) §3 priority table sync with `// Priority <label>:` slot comments.
 # ---------------------------------------------------------------------------
 code_slots=$(grep -cE '// Priority [^:]+:' "$ORACLE" || true)
-section=$(awk '/^## 3\./{f=1} /^## 4\./{f=0} f' "$SKILL")
+# Scope to the priority table PROPER: from `## 3.` to the first `###` subsection.
+# §3 also carries sibling tables now (§3a's strict-router/permissive-grant surface
+# table), and those rows also start with "| `" — counting them as priority slots
+# would make this invariant fail for a reason that has nothing to do with drift.
+section=$(awk '/^## 3\./{f=1; next} /^### /{f=0} /^## 4\./{f=0} f' "$SKILL")
 doc_rows=$(printf '%s\n' "$section" | grep -cE '^\| `' || true)
 
 if [ "$code_slots" -eq 0 ]; then
@@ -193,6 +204,34 @@ while IFS= read -r label; do
     err "priority slot '$label' exists in $ORACLE but has no \`$label\` row in SKILL.md §3"
   fi
 done < <(grep -oE '// Priority [^:]+:' "$ORACLE" | sed -E 's#// Priority ##; s#:$##' | sort -u)
+
+# ---------------------------------------------------------------------------
+# (4) SKILL.md must not NAME a symbol that no longer exists.
+#
+# Invariant (2) runs documented-symbol -> code. It cannot catch the opposite rot,
+# which is the one that actually happened: Plan 02 step 5 renamed the permissive
+# keyword surfaces, and SKILL.md's §3 priority table went on citing
+# `extract_keyword_line()` and `parse_keyword_from_oracle()` — symbols that exist
+# nowhere in the tree — while this gate reported green, because neither name was
+# in the anchor list. A doc that names a dead function is worse than one that says
+# nothing: it sends the next reader to a symbol they cannot grep.
+#
+# Each entry is a symbol REMOVED or RENAMED by a landed refactor. If a future
+# rename retires a name the doc cites, add it here in the same commit.
+# ---------------------------------------------------------------------------
+while IFS= read -r dead; do
+  [ -n "$dead" ] || continue
+  if grep -q "$dead" "$SKILL"; then
+    err "SKILL.md cites '$dead', which no longer exists in the parser tree (renamed/removed)"
+  fi
+  # Non-vacuity: if the symbol came BACK, this list is the stale thing.
+  if grep -rq "fn $dead" crates/engine/src/parser/; then
+    err "'$dead' is listed as dead but exists in the parser tree — update this list, not the doc"
+  fi
+done <<'EOF'
+parse_keyword_from_oracle
+extract_keyword_line
+EOF
 
 if [ "$fail" -ne 0 ]; then
   echo "✗ STALE — update .claude/skills/oracle-parser/SKILL.md (see §12)" >&2

@@ -4,8 +4,8 @@ use crate::game::functioning_abilities::static_kind_present;
 use crate::game::layers;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zone_pipeline::{
-    self, ApprovedZoneChange, DeliveryCtx, EntryMods, ExileLinkSpec, ZoneChangeCause,
-    ZoneDeliveryResult, ZoneMoveRequest, ZoneMoveResult,
+    self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult, ZoneMoveRequest,
+    ZoneMoveResult,
 };
 use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
@@ -678,14 +678,7 @@ pub(crate) fn move_to_graveyard_via_pipeline(
     id: crate::types::identifiers::ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let req = ZoneMoveRequest {
-        object_id: id,
-        to: Zone::Graveyard,
-        cause: ZoneChangeCause::StateBasedAction,
-        mods: EntryMods::default(),
-        placement: None,
-        exile_links: ExileLinkSpec::default(),
-    };
+    let req = ZoneMoveRequest::state_based_action(id, Zone::Graveyard);
     matches!(
         zone_pipeline::move_object(state, req, events),
         ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice
@@ -1851,8 +1844,7 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         // CR 704.5d: Token ceases to exist — not a zone change, no event emitted.
         // Ceasing to exist is distinct from exile (CR 400.7); the frontend detects
         // removal via state diffs. No "whenever exiled" trigger should fire.
-        zones::remove_from_zone(state, obj_id, zone, owner);
-        state.objects.remove(&obj_id);
+        zones::cease_object(state, obj_id, zone, owner);
         *any_performed = true;
     }
 }
@@ -3608,7 +3600,9 @@ mod tests {
                 count: 1,
                 applied: HashSet::new(),
             },
+            sacrifice_provenance: None,
             candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -3774,7 +3768,9 @@ mod tests {
                 count: 1,
                 applied: HashSet::new(),
             },
+            sacrifice_provenance: None,
             candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,

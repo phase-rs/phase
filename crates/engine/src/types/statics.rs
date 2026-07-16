@@ -955,6 +955,12 @@ pub enum StaticMode {
         cost: AbilityCost,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timing_permission: Option<CastTimingPermission>,
+        /// CR 118.9 + CR 601.2b: how often per turn the controller may apply this
+        /// alternative cost. `Unlimited` (default) covers Fist of Suns / Jodah /
+        /// Rooftop Storm / Primal Prayers. `OncePerTurn` covers As Foretold,
+        /// tracked per-source in `GameState::alt_cost_grant_permissions_used`.
+        #[serde(default, skip_serializing_if = "CastFrequency::is_unlimited")]
+        frequency: CastFrequency,
     },
     /// CR 118.9 + CR 702.29a + CR 702.122a: Controller may pay `cost` instead
     /// of the printed cost for `keyword` ability activations. Covers New
@@ -4146,6 +4152,7 @@ mod tests {
                     cost: ManaCost::zero(),
                 },
                 timing_permission: None,
+                frequency: CastFrequency::Unlimited,
             },
             StaticMode::CastWithAlternativeCost {
                 cost: AbilityCost::Mana {
@@ -4161,6 +4168,7 @@ mod tests {
                     },
                 },
                 timing_permission: None,
+                frequency: CastFrequency::Unlimited,
             },
             // CR 118.9 + CR 601.2f: `CastExtraCost` riders ride on serde (not the
             // Display round-trip). Cover all three shapes of the building block:

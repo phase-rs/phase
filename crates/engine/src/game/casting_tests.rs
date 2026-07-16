@@ -636,6 +636,38 @@ fn foretell_special_action_exiles_and_grants_later_turn_permission() {
     ));
 }
 
+#[test]
+fn foretell_completion_without_exile_clears_paid_continuation_without_stamp() {
+    let mut state = setup_game_at_main_phase();
+    let object_id = add_foretell_sorcery(&mut state);
+    let turn_foretold = state.turn_number;
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::Foretell {
+        player: PlayerId(0),
+        object_id,
+        cost: foretell_test_cost(),
+        turn_foretold,
+    });
+    let mana_after_payment = state.players[0].mana_pool.total();
+    let mut events = Vec::new();
+
+    let waiting = resume_foretell_cost_move(&mut state, &mut events);
+
+    assert_eq!(
+        waiting,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    );
+    assert!(state.pending_cost_move_resume.is_none());
+    assert_eq!(state.players[0].mana_pool.total(), mana_after_payment);
+    let object = &state.objects[&object_id];
+    assert_eq!(object.zone, Zone::Hand);
+    assert!(!object.foretold);
+    assert!(!object.face_down);
+    assert!(object.casting_permissions.is_empty());
+    assert!(events.is_empty());
+}
+
 // CR 708.4 + CR 702.143a / CR 702.143c: a FORETOLD card is cast FACE UP from
 // exile, never as a face-down spell. Mana payment runs `build_spell_meta` while
 // the object still sits in exile with `obj.face_down == true`; the resulting
@@ -2581,7 +2613,13 @@ fn mana_spend_trigger_fires_only_on_matching_spell() {
         source_could_produce_two_or_more_colors: false,
         restrictions: vec![],
         grants: vec![ManaSpellGrant::TriggerOnSpend {
-            restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Dragon".to_string()),
+                ],
+                ..TypedFilter::default()
+            }),
             ability: Box::new(trigger_ability),
         }],
         expiry: None,
@@ -2611,11 +2649,20 @@ fn mana_spend_trigger_fires_only_on_matching_spell() {
     );
 }
 
-/// CR 106.6 + CR 205.3m + CR 903.3: Path of Ancestry's
-/// `SharesCreatureTypeWithCommander` spend filter fires the reflexive scry
-/// only when the spell is a creature sharing a creature type with the
-/// controller's commander. Evaluated at the spend-check site (game-state
-/// aware), not via `allows_spell`.
+/// CR 603.3 + CR 205.3m + CR 903.3: Path of Ancestry's commander-relational trigger
+/// filter fires the reflexive scry only when the spell is a creature sharing a
+/// creature type with the controller's commander.
+///
+/// THIS TEST IS THE BEHAVIOR-PRESERVATION PROOF for the `TriggerOnSpend`
+/// `ManaRestriction` → `TargetFilter` retype, and it is the ONLY instrument that can
+/// be. The retype moved this predicate from a bespoke check at the spend site into
+/// the generic filter layer: a RUNTIME semantics change with an IDENTICAL parse
+/// shape. A full-pool export diff — the campaign's usual collateral instrument —
+/// would come back 100% clean even if this card silently stopped triggering, because
+/// it compares parse output and this change is not in the parse. Only a runtime test
+/// can see it. If it ever goes red, the filter layer has stopped consulting the
+/// commander authority (`commander::commander_creature_types`, deck-pool-FIRST) and
+/// Path of Ancestry is broken.
 #[test]
 fn mana_spend_trigger_shares_creature_type_with_commander() {
     let mut state = setup_game_at_main_phase();
@@ -2703,7 +2750,13 @@ fn mana_spend_trigger_shares_creature_type_with_commander() {
         source_could_produce_two_or_more_colors: false,
         restrictions: vec![],
         grants: vec![ManaSpellGrant::TriggerOnSpend {
-            restriction: Some(ManaRestriction::SharesCreatureTypeWithCommander),
+            filter: {
+                let mut typed = TypedFilter::new(TypeFilter::Creature);
+                typed
+                    .properties
+                    .push(FilterProp::SharesCreatureTypeWithCommander);
+                TargetFilter::Typed(typed)
+            },
             ability: Box::new(trigger_ability),
         }],
         expiry: None,
@@ -2791,7 +2844,13 @@ fn mana_spend_trigger_cast_pipeline_places_trigger_after_spell_is_cast() {
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![ManaSpellGrant::TriggerOnSpend {
-                restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Subtype("Dragon".to_string()),
+                    ],
+                    ..TypedFilter::default()
+                }),
                 ability: Box::new(trigger_ability),
             }],
             expiry: None,
@@ -5043,7 +5102,9 @@ fn x_spell_doubled_lose_life_drains_opponents_and_gains_controller() {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Ref {
-                        qty: QuantityRef::PreviousEffectAmount,
+                        qty: QuantityRef::PreviousEffectAmount {
+                            channel: crate::types::ability::DamageChannel::Total,
+                        },
                     },
                     player: TargetFilter::Controller,
                 },
@@ -5178,7 +5239,7 @@ fn exsanguinate_oracle_text_drains_each_opponent_and_gains_controller() {
         Effect::GainLife {
             amount:
                 QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount { .. },
                 },
             player,
         } => assert_eq!(
@@ -11683,6 +11744,7 @@ fn add_primal_prayers_grant(state: &mut GameState, controller: PlayerId) -> Obje
             amount: QuantityExpr::Fixed { value: 1 },
         },
         timing_permission: Some(CastTimingPermission::AsThoughHadFlash),
+        frequency: crate::types::statics::CastFrequency::Unlimited,
     })
     .affected(TargetFilter::Typed(
         TypedFilter::creature()
@@ -22481,6 +22543,22 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
         panic!("expected activated ability on stack");
     };
     assert_eq!(ability.chosen_x, Some(2));
+    assert_eq!(
+        ability.selected_mode_labels,
+        [
+            "Exile target creature with mana value X or less.",
+            "Return target creature with mana value X or less to its owner's hand.",
+        ],
+        "activated modal choice must bind its selected labels before the ability reaches the stack",
+    );
+    let second_mode = ability
+        .sub_ability
+        .as_deref()
+        .expect("two selected modes must produce a second chain node");
+    assert!(
+        second_mode.selected_mode_labels.is_empty(),
+        "selected labels belong only to the root stack ability, not each mode instruction",
+    );
 }
 
 #[test]
@@ -28225,7 +28303,7 @@ fn composite_activated_pay_life_cost_deducts_life() {
     let life_before = state.players[0].life;
     let mut events = Vec::new();
 
-    pay_ability_cost(&mut state, PlayerId(0), fetch, &cost, &mut events)
+    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, None, &mut events)
         .expect("fetchland-style composite cost should be payable");
 
     assert_eq!(state.players[0].life, life_before - 1);
@@ -29053,6 +29131,13 @@ fn sneak_cast_succeeds_and_pays_sneak_cost() {
         attacker.zone,
         Zone::Hand,
         "Returned creature should be bounced to hand"
+    );
+    assert!(
+        !state.combat.as_ref().is_some_and(|combat| combat
+            .attackers
+            .iter()
+            .any(|entry| entry.object_id == attacker_id)),
+        "Returned attacker should be removed from combat"
     );
     // Spell on stack.
     assert!(
@@ -30222,7 +30307,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost(&mut state, PlayerId(0), source, &cost, &mut events)
+        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
             .expect("cost should pay with 2 +1/+1 counters available");
         let remaining = state
             .objects
@@ -30301,7 +30386,8 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost(&mut state, PlayerId(0), source, &cost, &mut events).unwrap();
+        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
+            .unwrap();
         let removed_count = events
             .iter()
             .filter_map(|e| match e {
@@ -31744,8 +31830,15 @@ mod unattach_cost {
         let cost = AbilityCost::Unattach;
 
         assert!(cost.is_payable(&state, PlayerId(0), equipment));
-        pay_ability_cost(&mut state, PlayerId(0), equipment, &cost, &mut Vec::new())
-            .expect("attached Equipment should be able to unattach as a cost");
+        pay_ability_cost_for_activation(
+            &mut state,
+            PlayerId(0),
+            equipment,
+            &cost,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("attached Equipment should be able to unattach as a cost");
 
         assert_eq!(state.objects[&equipment].zone, Zone::Battlefield);
         assert!(state.objects[&equipment].attached_to.is_none());
@@ -33452,11 +33545,12 @@ mod exert_cost {
         state.objects.get_mut(&id).unwrap().tapped = true;
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("exert cost pays");
@@ -33511,19 +33605,21 @@ mod exert_cost {
         let id = make_battlefield_permanent(&mut state);
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("first exert");
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("second exert");
@@ -33566,11 +33662,12 @@ mod exert_cost {
         );
 
         let mut events = Vec::new();
-        let result = pay_ability_cost(
+        let result = pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         );
         assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
@@ -33585,11 +33682,12 @@ mod exert_cost {
         let id = make_battlefield_permanent(&mut state);
 
         let mut events = Vec::new();
-        pay_ability_cost(
+        pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             id,
             &AbilityCost::Exert,
+            None,
             &mut events,
         )
         .expect("exert cost pays");
@@ -36346,12 +36444,12 @@ fn animate_dead_full_pipeline_reanimates_and_reattaches() {
     );
 }
 
-/// CR 701.17a + CR 603.7c regression (issue #4767): the delayed "When ~ leaves the
+/// CR 701.21a + CR 603.7c regression (issue #4767): the delayed "When ~ leaves the
 /// battlefield, that creature's controller sacrifices it" trigger must sacrifice
 /// the reanimated creature when the Aura leaves the battlefield.
 ///
 /// LIVE-REVERT EVIDENCE: removing the `CreateDelayedTrigger` node from
-/// `build_reanimator_aura_etb_chain` leaves no delayed trigger, so destroying the
+/// `build_aura_attach_chain` leaves no delayed trigger, so destroying the
 /// Aura no longer puts a sacrifice ability on the stack and the final assertion
 /// fails (creature stays on the battlefield).
 #[test]
@@ -36386,7 +36484,7 @@ fn animate_dead_delayed_sacrifice_when_aura_leaves() {
     );
 }
 
-/// CR 701.17a regression (issue #4767, `sacrifice.rs` controller-scope relaxation):
+/// CR 701.21a regression (issue #4767, `sacrifice.rs` controller-scope relaxation):
 /// "that creature's controller sacrifices it" must be performed by the creature's
 /// CURRENT controller even if control changed after Animate Dead reanimated it and
 /// before the delayed leaves-battlefield trigger fires.
@@ -36437,6 +36535,378 @@ fn animate_dead_delayed_sacrifice_follows_new_controller() {
         Zone::Graveyard,
         "sacrificed creature must go to its owner's graveyard"
     );
+}
+
+/// Verbatim Necromancy Oracle text (Scryfall, 2026-07). Necromancy is a plain
+/// (non-Aura) Enchantment: its ETB ability BOTH becomes an Aura AND targets a
+/// creature card in a graveyard to reanimate (issue #640).
+const NECROMANCY_ORACLE_FULL: &str = "You may cast this spell as though it had flash. If you cast it any time a sorcery couldn't have been cast, the controller of the permanent it becomes sacrifices it at the beginning of the next cleanup step.\nWhen this enchantment enters, if it's on the battlefield, it becomes an Aura with \"enchant creature put onto the battlefield with Necromancy.\" Put target creature card from a graveyard onto the battlefield under your control and attach this enchantment to it. When this enchantment leaves the battlefield, that creature's controller sacrifices it.";
+
+/// Cast Necromancy (a plain Enchantment) through the real pipeline and fire its
+/// ETB reanimation trigger onto the stack (auto-targeting the single legal
+/// graveyard creature), leaving it UNRESOLVED. Shared by the resolve-path tests
+/// and the fizzle test.
+///
+/// Only the reanimator ETB trigger is installed on the object — Necromancy's
+/// first ability (flash-cast permission + cleanup-step sacrifice, separately
+/// supported and verified) is orthogonal to the #640 ETB reanimation fix and
+/// would add an intervening-if / same-controller trigger-ordering path that this
+/// seam does not exercise. The trigger installed IS the live parser output for
+/// the ETB ability, so this drives the exact chain production ships.
+///
+/// Returns `(state, necromancy_id, creature_id)` with the ETB trigger on the
+/// stack and the caster's enters-event batch already consumed.
+fn cast_necromancy_and_fire_etb() -> (GameState, ObjectId, ObjectId) {
+    use crate::parser::oracle::parse_oracle_text;
+
+    let mut state = setup_game_at_main_phase();
+
+    let necromancy_id = create_object(
+        &mut state,
+        CardId(701),
+        PlayerId(0),
+        "Necromancy".to_string(),
+        Zone::Hand,
+    );
+    // Real parser output — same construction path a fresh card-data export uses.
+    let parsed = parse_oracle_text(
+        NECROMANCY_ORACLE_FULL,
+        "Necromancy",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    // Reach-guard: the live parser MUST produce the reanimator ETB trigger (a
+    // root `Effect::ChangeZone`). If the GRANT-shape recognizer's dispatch is
+    // reverted, this filter is empty and the helper panics here, so no
+    // downstream assertion can pass vacuously.
+    let reanimator_triggers: Vec<_> = parsed
+        .triggers
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.execute.as_deref().map(|d| d.effect.as_ref()),
+                Some(Effect::ChangeZone { .. })
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        reanimator_triggers.len(),
+        1,
+        "parser must produce exactly one reanimator ETB trigger (root ChangeZone); got {}",
+        reanimator_triggers.len()
+    );
+    {
+        let obj = state.objects.get_mut(&necromancy_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        // NO "Aura" subtype and NO Enchant keyword: Necromancy is a plain
+        // Enchantment until its own ETB grants both (the #640 GRANT shape).
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_trigger_definitions = Arc::new(reanimator_triggers.clone());
+        obj.trigger_definitions = reanimator_triggers.into();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 2,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Black, 3);
+
+    // Grizzly Bears (2/2) in the OPPONENT's graveyard, so reanimation genuinely
+    // moves control to the caster.
+    let creature_id = create_object(
+        &mut state,
+        CardId(702),
+        PlayerId(1),
+        "Grizzly Bears".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&creature_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+    }
+
+    let mut events = Vec::new();
+    let result = handle_cast_spell(
+        &mut state,
+        PlayerId(0),
+        necromancy_id,
+        CardId(701),
+        &mut events,
+    )
+    .unwrap();
+    // Necromancy has no cast-time target → straight onto the stack.
+    assert!(
+        matches!(result, WaitingFor::Priority { .. }),
+        "expected the plain enchantment to go straight to the stack; got {result:?}"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "Necromancy spell must be on the stack"
+    );
+
+    // (1) Resolve the Necromancy spell → it enters the battlefield as a plain
+    // (non-Aura) Enchantment.
+    stack::resolve_top(&mut state, &mut events);
+    assert!(
+        state.battlefield.contains(&necromancy_id),
+        "Necromancy must resolve onto the battlefield"
+    );
+    // Pre-ETB reach guard: it is NOT yet an Aura and has NO Enchant keyword, so
+    // the post-ETB AddSubtype/AddKeyword assertions are not vacuous.
+    assert!(
+        !state.objects[&necromancy_id]
+            .card_types
+            .subtypes
+            .contains(&"Aura".to_string()),
+        "Necromancy must NOT be an Aura before its ETB resolves (reach guard)"
+    );
+    assert!(
+        !state.objects[&necromancy_id]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Enchant(_))),
+        "Necromancy must NOT have an Enchant keyword before its ETB resolves (reach guard)"
+    );
+
+    // (2) Fire the ETB reanimation trigger through the real trigger pipeline.
+    // Exactly one creature card in any graveyard → the targeted trigger
+    // auto-selects it (CR 603.3d) and pushes to the stack.
+    crate::game::triggers::process_triggers(&mut state, &events);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the reanimator ETB trigger must auto-target and be on the stack after process_triggers"
+    );
+
+    (state, necromancy_id, creature_id)
+}
+
+/// Drives Necromancy's FULL end-to-end reanimation pipeline (issue #640): the
+/// ETB targets a creature card in a graveyard, reanimates it under the caster's
+/// control, grants Necromancy the Aura subtype and the Enchant keyword for the
+/// first time, and attaches it — mirroring the Animate Dead cluster's harness.
+fn reanimate_grizzly_via_necromancy() -> (GameState, ObjectId, ObjectId) {
+    let (mut state, necromancy_id, creature_id) = cast_necromancy_and_fire_etb();
+
+    // (3) Resolve the 4-node reanimation chain
+    // (ChangeZone -> GenericEffect grant -> Attach -> CreateDelayedTrigger).
+    let mut etb_events = Vec::new();
+    stack::resolve_top(&mut state, &mut etb_events);
+    crate::game::layers::evaluate_layers(&mut state);
+
+    (state, necromancy_id, creature_id)
+}
+
+/// CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a regression (issue
+/// #640, "Necromancy can't target any creature in a graveyard"): the ETB
+/// reanimation chain must move the targeted creature card from the graveyard
+/// onto the battlefield under the caster's control, GRANT Necromancy the Aura
+/// subtype and Enchant keyword for the first time, attach it, and survive SBAs.
+///
+/// LIVE-REVERT EVIDENCE: reverting the GRANT-shape dispatch in `oracle_trigger`
+/// leaves the ETB body an `Effect::Unimplemented`, so `cast_necromancy_and_fire_etb`'s
+/// reach-guard (exactly one root-ChangeZone trigger) fails and the reanimation
+/// never runs — assertion (a) can never pass.
+#[test]
+fn necromancy_full_pipeline_reanimates_and_becomes_aura() {
+    use crate::game::game_object::AttachTarget;
+
+    let (mut state, necromancy_id, creature_id) = reanimate_grizzly_via_necromancy();
+
+    // (a) The creature was reanimated: it left the graveyard for the battlefield.
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Battlefield,
+        "reanimated creature must be on the battlefield, not the graveyard"
+    );
+    assert!(
+        !state.players[1].graveyard.contains(&creature_id),
+        "reanimated creature must no longer be in its owner's graveyard"
+    );
+
+    // (b) Necromancy GAINED the Aura subtype (proves AddSubtype, not a pre-existing
+    // subtype — the pre-ETB reach guard in the helper asserted it was not an Aura).
+    assert!(
+        state.objects[&necromancy_id]
+            .card_types
+            .subtypes
+            .contains(&"Aura".to_string()),
+        "Necromancy must become an Aura (AddSubtype grant) after its ETB resolves"
+    );
+
+    // (c) Necromancy is attached to the SPECIFIC reanimated creature.
+    assert_eq!(
+        state.objects[&necromancy_id].attached_to,
+        Some(AttachTarget::Object(creature_id)),
+        "Necromancy must be attached to the reanimated creature"
+    );
+
+    // (d) Necromancy GAINED an Enchant keyword (it had none before — the helper's
+    // reach guard asserted that). The AddKeyword grant re-targets its Enchant
+    // restriction to the reanimated creature.
+    assert!(
+        state.objects[&necromancy_id]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Enchant(_))),
+        "Necromancy must gain an Enchant keyword (AddKeyword grant)"
+    );
+
+    // (e) An explicit SBA pass does NOT re-graveyard Necromancy (CR 704.5m): it is
+    // an Aura correctly attached to a legal creature, so it survives.
+    let mut sba_events = Vec::new();
+    crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+    assert!(
+        state.battlefield.contains(&necromancy_id),
+        "Necromancy must survive SBAs (Aura attached to a legal creature, CR 704.5m)"
+    );
+    assert_eq!(
+        state.objects[&necromancy_id].attached_to,
+        Some(AttachTarget::Object(creature_id)),
+        "Necromancy must stay attached to the reanimated creature after SBAs"
+    );
+}
+
+/// CR 608.2c + CR 400.7 hostile fixture (issue #640): the targeted creature card
+/// lives in the OPPONENT's graveyard, but "under your control" must reanimate it
+/// under the CASTER's control — not silently default to the owner. Discriminates
+/// a `enters_under` regression that ships the owner as controller.
+#[test]
+fn necromancy_cross_controller_target_reanimates_under_caster_control() {
+    let (state, _necromancy_id, creature_id) = reanimate_grizzly_via_necromancy();
+
+    // Owner is P1 (the graveyard it came from); controller must be the caster P0.
+    assert_eq!(
+        state.objects[&creature_id].owner,
+        PlayerId(1),
+        "precondition: the reanimated creature is owned by the opponent"
+    );
+    assert_eq!(
+        state.objects[&creature_id].controller,
+        PlayerId(0),
+        "reanimated creature must be controlled by the CASTER (under your control), not the owner"
+    );
+}
+
+/// CR 701.21a + CR 603.7c regression (issue #640): the delayed "When ~ leaves the
+/// battlefield, that creature's controller sacrifices it" trigger must sacrifice
+/// the reanimated creature when Necromancy leaves the battlefield.
+#[test]
+fn necromancy_delayed_sacrifice_when_leaves() {
+    let (mut state, necromancy_id, creature_id) = reanimate_grizzly_via_necromancy();
+    // Baseline reach-guard: the creature is on the battlefield before we remove
+    // Necromancy, so the sacrifice assertion below is not vacuous.
+    assert_eq!(state.objects[&creature_id].zone, Zone::Battlefield);
+
+    // Remove Necromancy from the battlefield → fires the delayed leaves-play trigger.
+    let mut events = Vec::new();
+    zones::move_to_zone(&mut state, necromancy_id, Zone::Graveyard, &mut events);
+    crate::game::triggers::check_delayed_triggers(&mut state, &events);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the delayed leaves-battlefield sacrifice must be on the stack"
+    );
+
+    // Resolve the sacrifice.
+    let mut sac_events = Vec::new();
+    stack::resolve_top(&mut state, &mut sac_events);
+    assert!(
+        !state.battlefield.contains(&creature_id),
+        "reanimated creature must be sacrificed when Necromancy leaves the battlefield"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Graveyard,
+        "sacrificed creature must go to its owner's graveyard"
+    );
+}
+
+/// CR 608.2b regression (issue #640): if the ETB trigger's chosen target leaves
+/// the graveyard before the trigger resolves, the trigger is removed from the
+/// stack and does nothing — Necromancy stays a plain (non-Aura) Enchantment with
+/// no attachment and no delayed trigger, and SBAs must not panic or misfire.
+#[test]
+fn necromancy_etb_trigger_fizzles_when_target_creature_leaves_graveyard() {
+    let (mut state, necromancy_id, creature_id) = cast_necromancy_and_fire_etb();
+    // Reach guard: the trigger is on the stack with its target chosen.
+    assert_eq!(state.stack.len(), 1, "ETB trigger must be on the stack");
+
+    // Remove the exact targeted card from the graveyard BEFORE the trigger
+    // resolves (CR 608.2b: it is no longer in the zone it was targeted in).
+    let mut events = Vec::new();
+    zones::move_to_zone(&mut state, creature_id, Zone::Exile, &mut events);
+
+    // Resolve the (now illegal-target) trigger → it is removed from the stack.
+    let mut etb_events = Vec::new();
+    stack::resolve_top(&mut state, &mut etb_events);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.stack.len(),
+        0,
+        "the ETB trigger must be removed from the stack when its only target became illegal"
+    );
+
+    // The creature did NOT come back to the battlefield.
+    assert!(
+        !state.battlefield.contains(&creature_id),
+        "creature must not be reanimated when the trigger fizzled"
+    );
+    assert_eq!(
+        state.objects[&creature_id].zone,
+        Zone::Exile,
+        "the target stays where it was moved (exile), not reanimated"
+    );
+
+    // Necromancy stayed a plain Enchantment: no Aura subtype, no Enchant keyword,
+    // no attachment.
+    assert!(
+        !state.objects[&necromancy_id]
+            .card_types
+            .subtypes
+            .contains(&"Aura".to_string()),
+        "Necromancy must remain a non-Aura Enchantment when the ETB fizzles"
+    );
+    assert!(
+        !state.objects[&necromancy_id]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Enchant(_))),
+        "Necromancy must gain no Enchant keyword when the ETB fizzles"
+    );
+    assert!(
+        state.objects[&necromancy_id].attached_to.is_none(),
+        "Necromancy must not be attached to anything when the ETB fizzles"
+    );
+
+    // No delayed leaves-battlefield trigger was registered: moving Necromancy to
+    // the graveyard fires nothing.
+    let mut leave_events = Vec::new();
+    zones::move_to_zone(
+        &mut state,
+        necromancy_id,
+        Zone::Graveyard,
+        &mut leave_events,
+    );
+    crate::game::triggers::check_delayed_triggers(&mut state, &leave_events);
+    assert_eq!(
+        state.stack.len(),
+        0,
+        "no delayed sacrifice trigger must exist after a fizzled ETB"
+    );
+
+    // SBAs run cleanly (no panic, nothing spurious happens to Necromancy in the
+    // graveyard).
+    let mut sba_events = Vec::new();
+    crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
 }
 
 /// CR 702.103b regression: drives the full cast pipeline end-to-end —
@@ -39759,8 +40229,8 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
 /// reparse, mirroring production) and applied through `apply_cost_reduction`.
 ///
 /// Discriminating assertion: `generic_of(&def)` is 3 with a Spacecraft
-/// attacker declaration present and 6 without. Reverting the
-/// `YouAttackedWithAtLeast { filter }` parser arm leaves `condition: None`
+/// attacker declaration present and 6 without. Reverting the filtered
+/// attacked-with parser arm leaves `condition: None`
 /// (try_parse_cost_reduction returns None), so the positive case would read
 /// {6} and this assertion fails. Reverting the runtime filter arm in
 /// `restrictions::evaluate_condition` would treat the filtered count as the
@@ -39768,7 +40238,7 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
 #[test]
 fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
     use crate::parser::oracle_cost::try_parse_cost_reduction;
-    use crate::types::ability::{Effect, ParsedCondition};
+    use crate::types::ability::{Effect, ParsedCondition, QuantityExpr, QuantityRef};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -39783,9 +40253,14 @@ fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
     assert!(
         matches!(
             reduction.condition,
-            Some(ParsedCondition::YouAttackedWithAtLeast {
-                count: 1,
-                filter: Some(_)
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::AttackedThisTurn {
+                        filter: Some(_),
+                        ..
+                    },
+                },
+                ..
             })
         ),
         "must gate on a filtered attacked-with condition, got {:?}",
@@ -44588,5 +45063,174 @@ fn land_grant_alt_cost_not_offered_with_land_in_hand() {
     assert!(
         !can_cast_object_now(&state, PlayerId(0), land_grant),
         "without the alt-cost and with no mana available, Land Grant must not be castable"
+    );
+}
+
+/// The exact spell filter Path of Ancestry's Oracle text lowers to, taken from the
+/// parser so the runtime witnesses below cannot drift from the real card.
+fn path_of_ancestry_spend_filter() -> TargetFilter {
+    let grant = crate::parser::oracle_effect::mana::parse_mana_spend_trigger(
+        "when that mana is spent to cast a creature spell that shares a creature type with your commander, scry 1",
+    )
+    .expect("Path of Ancestry's spend trigger must parse");
+    match grant {
+        ManaSpellGrant::TriggerOnSpend { filter, .. } => filter,
+        other => panic!("expected TriggerOnSpend, got {other:?}"),
+    }
+}
+
+/// Build a Path of Ancestry mana unit carrying the real parsed spend filter.
+fn path_of_ancestry_unit(source_id: ObjectId) -> ManaUnit {
+    ManaUnit {
+        color: ManaType::Green,
+        source_id,
+        pip_id: crate::types::mana::ManaPipId(0),
+        supertype: None,
+        source_could_produce_two_or_more_colors: false,
+        restrictions: vec![],
+        grants: vec![ManaSpellGrant::TriggerOnSpend {
+            filter: path_of_ancestry_spend_filter(),
+            ability: Box::new(crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )),
+        }],
+        expiry: None,
+    }
+}
+
+/// CR 106.6 + CR 903.3: the commander a player *registered* is the authority for
+/// "your commander", and `commander_creature_types` reads
+/// `deck_pools.current_commander` FIRST. A player whose commander is known only from
+/// the deck pool (no command-zone `is_commander` object materialized) must still fire
+/// Path of Ancestry's reflexive scry.
+///
+/// This is the witness the parse-shape export ledger is structurally blind to: the
+/// spell filter is byte-identical either way, but resolving it by scanning
+/// `state.objects` alone silently finds nothing here and the trigger never fires.
+#[test]
+fn path_of_ancestry_fires_for_a_deck_pool_registered_commander() {
+    let mut state = setup_game_at_main_phase();
+    // CR 205.3m: the creature-type vocabulary is loaded from card data in production;
+    // the shared-quality evaluator filters subtypes through it, so an empty list here
+    // would make every creature-type comparison vacuously false.
+    state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
+    // Commander known ONLY as a registered deck-pool entry — no game object for it.
+    state
+        .deck_pools
+        .push(crate::types::game_state::PlayerDeckPool {
+            player: PlayerId(0),
+            current_commander: std::sync::Arc::new(vec![crate::game::deck_loading::DeckEntry {
+                card: crate::types::card::CardFace {
+                    name: "Elvish Commander".to_string(),
+                    card_type: crate::types::card_type::CardType {
+                        core_types: vec![CoreType::Creature],
+                        subtypes: vec!["Elf".to_string()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                count: 1,
+            }]),
+            ..Default::default()
+        });
+    assert!(
+        !state
+            .objects
+            .values()
+            .any(|o| o.is_commander && o.owner == PlayerId(0)),
+        "premise: no commander OBJECT exists — only the deck-pool registration"
+    );
+
+    let path = create_object(
+        &mut state,
+        CardId(410),
+        PlayerId(0),
+        "Path of Ancestry".to_string(),
+        Zone::Battlefield,
+    );
+    let elf_id = create_object(
+        &mut state,
+        CardId(411),
+        PlayerId(0),
+        "Elvish Mystic".to_string(),
+        Zone::Stack,
+    );
+    {
+        let e = state.objects.get_mut(&elf_id).unwrap();
+        e.card_types.core_types.push(CoreType::Creature);
+        e.card_types.subtypes.push("Elf".to_string());
+    }
+
+    let unit = path_of_ancestry_unit(path);
+    let base = state.deferred_triggers.len();
+    apply_mana_spell_grants(&mut state, elf_id, std::slice::from_ref(&unit));
+    assert_eq!(
+        state.deferred_triggers.len(),
+        base + 1,
+        "an Elf creature spell shares a type with the DECK-POOL-registered Elf commander"
+    );
+}
+
+/// CR 903.3: the commander designation "is an attribute of the card itself" and is
+/// retained across zones — it belongs to the player who registered it, NOT to whoever
+/// currently CONTROLS the permanent. So when an opponent steals your commander, it is
+/// still *your* commander and your Path of Ancestry keeps triggering.
+///
+/// Resolving "your commander" by CONTROLLER instead of by registration/ownership
+/// silently breaks this.
+#[test]
+fn path_of_ancestry_fires_for_a_commander_an_opponent_controls() {
+    let mut state = setup_game_at_main_phase();
+    // CR 205.3m: the creature-type vocabulary is loaded from card data in production;
+    // the shared-quality evaluator filters subtypes through it, so an empty list here
+    // would make every creature-type comparison vacuously false.
+    state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
+    // P0 owns the commander; P1 has stolen it (controls the permanent).
+    let commander = create_object(
+        &mut state,
+        CardId(420),
+        PlayerId(0),
+        "Elvish Commander".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let c = state.objects.get_mut(&commander).unwrap();
+        c.is_commander = true;
+        c.controller = PlayerId(1);
+        c.card_types.core_types.push(CoreType::Creature);
+        c.card_types.subtypes.push("Elf".to_string());
+    }
+
+    let path = create_object(
+        &mut state,
+        CardId(421),
+        PlayerId(0),
+        "Path of Ancestry".to_string(),
+        Zone::Battlefield,
+    );
+    let elf_id = create_object(
+        &mut state,
+        CardId(422),
+        PlayerId(0),
+        "Elvish Mystic".to_string(),
+        Zone::Stack,
+    );
+    {
+        let e = state.objects.get_mut(&elf_id).unwrap();
+        e.card_types.core_types.push(CoreType::Creature);
+        e.card_types.subtypes.push("Elf".to_string());
+    }
+
+    let unit = path_of_ancestry_unit(path);
+    let base = state.deferred_triggers.len();
+    apply_mana_spell_grants(&mut state, elf_id, std::slice::from_ref(&unit));
+    assert_eq!(
+        state.deferred_triggers.len(),
+        base + 1,
+        "a stolen commander is still YOUR commander (CR 903.3) — the scry must still fire"
     );
 }

@@ -424,6 +424,15 @@ pub struct PolicyPenalties {
     /// Consumed by `SelfCostValuePolicy`.
     #[serde(default = "default_self_cost_exile_graveyard_per_card")]
     pub self_cost_exile_graveyard_per_card: f64,
+    /// CR 732.2a / CR 104.2a: bonus for proposing an `UntilLethal` loop shortcut whose latched
+    /// `predicted_winner` IS the proposer — the crown ends the game in their favor, and the only
+    /// other outcome (`until_lethal_fallback`) restores the board a decline would have produced.
+    /// Game-deciding ⇒ the default lands in the `critical` band (5.0, 15.0]. Consumed by
+    /// `LoopShortcutPolicy`; fed through `PolicyVerdict::score`, which auto-bands and clamps to
+    /// `CRITICAL_MAX`. (The losing / no-crown cases are `PolicyVerdict::reject`s and take no
+    /// scalar.)
+    #[serde(default = "default_loop_shortcut_winning_declare_bonus")]
+    pub loop_shortcut_winning_declare_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -485,6 +494,7 @@ impl Default for PolicyPenalties {
             self_cost_pay_life_per_point: default_self_cost_pay_life_per_point(),
             self_cost_discard_per_card: default_self_cost_discard_per_card(),
             self_cost_exile_graveyard_per_card: default_self_cost_exile_graveyard_per_card(),
+            loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
         }
     }
 }
@@ -512,6 +522,25 @@ fn default_self_cost_discard_per_card() -> f64 {
 }
 fn default_self_cost_exile_graveyard_per_card() -> f64 {
     0.15
+}
+
+/// 8.0 = mid-`critical` band. Sized for the HEURISTIC branch, which adds the tactical score RAW:
+/// it turns the measured 0.5-vs-0.4 coinflip on a GUARANTEED win into ~88% declare at VeryEasy
+/// (T = 4.0) and ~98% at Easy (T = 2.0). That is the branch where nothing else can differentiate
+/// the two candidates.
+///
+/// On the SEARCH branch (Medium and up) the score is multiplied by `tactical_weight`: 0.1 at a
+/// quiesced `LoopShortcut` node, or 0.35 if an opponent's object is on the stack (the offer is
+/// raised at a priority window, which does not imply an empty stack). So this becomes a
+/// +0.8..+2.8 move-ordering / tie-break nudge on top of the beam's own continuation value, which
+/// already sees the CR 104.2a crown. It is deliberately NOT sized to dominate that value, and
+/// deliberately NOT saturated to `CRITICAL_MAX`: a VeryEasy AI is allowed to miss a free win.
+///
+/// The symmetric losing case is a `Reject` (`-inf`), which is temperature- AND weight-IMMUNE
+/// (`-inf * 0.1 == -inf * 0.35 == -inf`; `exp(-inf / T) == 0` for every T > 0) — no difficulty
+/// ever throws the game away.
+fn default_loop_shortcut_winning_declare_bonus() -> f64 {
+    8.0
 }
 
 fn default_lethality_tapout_penalty() -> f64 {
@@ -735,6 +764,10 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "self_cost_exile_graveyard_per_card",
         "new SelfCostValuePolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "loop_shortcut_winning_declare_bonus",
+        "LoopShortcutPolicy band selector for a game-deciding CR 104.2a crown; deliberately kept OUT of the CMA-ES penalties vector — win-rate gradients from games that never reach a WaitingFor::LoopShortcut node would tune a win-detector into noise",
     ),
 ];
 

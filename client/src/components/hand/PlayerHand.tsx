@@ -11,8 +11,9 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
-import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
   collectObjectActions,
@@ -74,6 +75,7 @@ export function PlayerHand() {
   const [draggingCardId, setDraggingCardId] = useState<number | null>(null);
 
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const manaPaymentPreviewRequestId = useRef(0);
 
   // Hide the card being cast (shown on stack as preview during TargetSelection)
   const pendingObjectId = useGameStore((s) => {
@@ -155,6 +157,41 @@ export function PlayerHand() {
     },
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
   );
+
+  const previewManaPayment = useCallback((objectId: number) => {
+    const requestId = ++manaPaymentPreviewRequestId.current;
+    const store = useGameStore.getState();
+    const object = store.gameState?.objects[objectId];
+    const action = object
+      ? resolveSingleActionDispatch(
+          collectObjectActions(store.legalActionsByObject, objectId as ObjectId),
+          object,
+        )
+      : null;
+    if (!action) {
+      store.clearManaPaymentPreview();
+      return;
+    }
+
+    void previewAutomaticManaPayment(action, getPlayerId())
+      .then((sourceIds) => {
+        const current = useGameStore.getState();
+        if (
+          manaPaymentPreviewRequestId.current === requestId
+          && sourceIds !== null
+        ) {
+          current.setManaPaymentPreviewSourceIds(sourceIds);
+        } else if (manaPaymentPreviewRequestId.current === requestId) {
+          current.clearManaPaymentPreview();
+        }
+      })
+      .catch(() => {
+        const current = useGameStore.getState();
+        if (manaPaymentPreviewRequestId.current === requestId) {
+          current.clearManaPaymentPreview();
+        }
+      });
+  }, []);
 
   const hoveredSlotRef = useRef<number | null>(null);
   const shouldReduceMotion = useReducedMotion();
@@ -386,6 +423,7 @@ export function PlayerHand() {
   const handleDragStart = useCallback(
     (id: number) => {
       setDraggingCardId(id);
+      previewManaPayment(id);
       // Measure the rendered card geometry once per drag (stable while dragging)
       // so the slide-apart gap opens to a visible 2/3 card width. getComputedStyle
       // returns transform-free layout values, so the fan's rotation/scale don't
@@ -404,9 +442,11 @@ export function PlayerHand() {
         if (Number.isFinite(cardHeightPx)) cardHeightMV.set(cardHeightPx);
       }
     },
-    [gapPxMV, cardHeightMV],
+    [gapPxMV, cardHeightMV, previewManaPayment],
   );
   const handleDragStop = useCallback(() => {
+    manaPaymentPreviewRequestId.current += 1;
+    useGameStore.getState().clearManaPaymentPreview();
     setDraggingCardId(null);
     arrowOpacity.set(0);
     arrowRotateRaw.set(0);
@@ -514,6 +554,8 @@ export function PlayerHand() {
                 hasPriority={hasPriority}
                 isSelected={selectedCardId === obj.id}
                 onPlay={playCard}
+                onDragStart={previewManaPayment}
+                onDragStop={handleDragStop}
                 onClick={handleCardClick}
                 onDoubleClick={handleCardDoubleClick}
                 onMouseEnter={handleMouseEnter}
@@ -576,6 +618,8 @@ export function PlayerHand() {
                 hasPriority={hasPriority}
                 isSelected={selectedCardId === obj.id}
                 onPlay={playCard}
+                onDragStart={previewManaPayment}
+                onDragStop={handleDragStop}
                 onClick={handleCardClick}
                 onDoubleClick={handleCardDoubleClick}
                 onMouseEnter={handleMouseEnter}
@@ -879,6 +923,8 @@ interface ZoneFanCardProps {
   hasPriority: boolean;
   isSelected: boolean;
   onPlay: (objectId: number) => void;
+  onDragStart: (objectId: number) => void;
+  onDragStop: () => void;
   onClick: (objectId: number, e?: React.MouseEvent) => void;
   onDoubleClick: (objectId: number) => void;
   onMouseEnter: (id: number) => void;
@@ -905,6 +951,8 @@ const ZoneFanCard = memo(function ZoneFanCard({
   hasPriority,
   isSelected,
   onPlay,
+  onDragStart,
+  onDragStop,
   onClick,
   onDoubleClick,
   onMouseEnter,
@@ -943,9 +991,11 @@ const ZoneFanCard = memo(function ZoneFanCard({
         playedRef.current = false;
         setDragging(true);
         inspectObject(null);
+        onDragStart(objectId);
       }}
       onDragEnd={(_event, info: PanInfo) => {
         setDragging(false);
+        onDragStop();
         // Cast-only: flick up past the threshold while holding priority. There
         // is no reorder branch, so this card can never land in the hand.
         if (hasPriority && info.offset.y < DRAG_PLAY_THRESHOLD) {

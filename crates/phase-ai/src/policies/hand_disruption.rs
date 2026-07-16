@@ -444,6 +444,7 @@ mod tests {
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: legal_targets.clone(),
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: Default::default(),
@@ -573,6 +574,7 @@ mod tests {
                         TargetRef::Player(PlayerId(2)),
                     ],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -665,6 +667,7 @@ mod tests {
                         TargetRef::Player(PlayerId(2)),
                     ],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),

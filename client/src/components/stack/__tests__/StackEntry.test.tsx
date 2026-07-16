@@ -253,4 +253,60 @@ describe("StackEntry", () => {
 
     expect(screen.queryByRole("button", { name: /auto-pass/i })).not.toBeInTheDocument();
   });
+
+  it("renders engine-authored repeated spell mode labels and hides empty or nonspell labels", () => {
+    const spell: StackEntryType = buildStackEntry({
+      id: 100,
+      source_id: 70,
+      controller: 0,
+      kind: { type: "Spell", data: { card_id: 4, actual_mana_spent: 0 } },
+    });
+    const trigger: StackEntryType = buildStackEntry({
+      id: 101,
+      source_id: 70,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: { source_id: 70, ability: { targets: [] }, source_name: "Brotherhood's End" },
+      },
+    });
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObject({ id: 70, card_id: 4, name: "Brotherhood's End", zone: "Stack" }),
+      ),
+      stack: [spell],
+    });
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+    const details = {
+      source_name: "Brotherhood's End",
+      kind_label: "Spell",
+      selected_mode_labels: ["~ deals 3 damage.", "~ deals 3 damage."],
+    };
+
+    const { rerender } = render(
+      <StackEntry entry={spell} index={0} isTop cardSize={{ width: 120, height: 168 }} details={details} />,
+    );
+    const selectedModes = screen.getByRole("region", { name: "Selected modes" });
+    expect(selectedModes).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getAllByText("Brotherhood's End deals 3 damage.")).toHaveLength(2);
+
+    rerender(
+      <StackEntry entry={trigger} index={0} isTop cardSize={{ width: 120, height: 168 }} details={details} />,
+    );
+    expect(screen.queryByRole("region", { name: "Selected modes" })).not.toBeInTheDocument();
+
+    rerender(
+      <StackEntry
+        entry={spell}
+        index={0}
+        isTop
+        cardSize={{ width: 120, height: 168 }}
+        details={{ ...details, selected_mode_labels: [] }}
+      />,
+    );
+    expect(screen.queryByRole("region", { name: "Selected modes" })).not.toBeInTheDocument();
+  });
 });

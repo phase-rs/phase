@@ -1418,6 +1418,7 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");

@@ -139,6 +139,13 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // the conservative prompt is fail-closed = rules-correct). ----
     // end-step ZoneChangeCountThisTurn read × self-Sacrifice — self-limiting.
     "chorale of the void",
+    // Upkeep ObjectCount(Creature, Battlefield) >= 4 intervening-if × DestroyAll +
+    // self-Sacrifice (AST measured). The first copy's board sweep drives the census
+    // to 0, so the sibling's CR 603.4 re-check is false: it is removed from the stack,
+    // does nothing, and is NOT sacrificed. The write is monotone (the census only
+    // falls) and self-limiting, so identical siblings commute up to relabeling — either
+    // order sweeps the board and sacrifices exactly one of the two copies.
+    "planar collapse",
     // Mill membership write × ZoneCardCount(gy, Creature) self-transform threshold —
     // monotone graveyard growth.
     "deathbonnet sprout",
@@ -213,6 +220,18 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
     // b2_dotd_member_bound_pin (reads_member_bound refuses batch-T1).
     "day of the dragons",
+    // LTB (self_ref): Discard{count: HandSize{Controller}} → sub Draw{count:
+    // Intensity{Source}} gated on EffectOutcome(OptionalEffectPerformed) (AST
+    // measured). Each co-departing Hellion draws off ITS OWN intensity but discards
+    // the SHARED hand, so the second trigger discards the cards the first one just
+    // drew: with intensities a != b the final hand (b vs a cards), the graveyard, and
+    // the library differ by order — the members are not identical functions (intensity
+    // is per-source mutable state), so the commutation proof genuinely fails. The new
+    // prompt is the CR 603.3b choice the legacy serde walk wrongly auto-ordered
+    // (CR 603.5: each copy's "may" is chosen on resolution). Only visible post-#5721/
+    // #5719 — the Draw was Unimplemented until the quantity channel bound Intensity,
+    // and the sweep skips Unimplemented-bearing triggers.
+    "great desert hellion",
 ];
 
 /// R3 HIGH-1 (PR #5072 review): SAME-EVENT GENUINE member-bound order-dependence —

@@ -1025,7 +1025,148 @@ class PrReviewTests(unittest.TestCase):
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "review")
-        self.assertEqual(recommendation["reason"], "author_followup_after_local_block")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
+
+    def test_edited_author_followup_is_not_acknowledged_by_later_hold_event(self) -> None:
+        local_event = {
+            "event_type": "held",
+            "outcome": "held",
+            "head_sha": "head",
+            "timestamp": self._minutes_ago(1),
+        }
+        pr = {
+            "number": 5015,
+            "state": "OPEN",
+            "headRefOid": "head",
+            "author_login": "contributor",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [
+                {
+                    "author": "maintainer",
+                    "createdAt": self._days_ago(1),
+                    "updatedAt": self._days_ago(1),
+                },
+                {
+                    "author": "contributor",
+                    "createdAt": self._days_ago(2),
+                    "updatedAt": self._minutes_ago(2),
+                },
+            ],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": local_event,
+            "freshness": pr_review.review_freshness(
+                pr, "maintainer", local_event, local_event
+            ),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
+
+    def test_changed_head_never_inherits_previous_hold(self) -> None:
+        previous_event = {
+            "event_type": "held",
+            "outcome": "held",
+            "head_sha": "old-head",
+            "timestamp": self._minutes_ago(5),
+        }
+        pr = {
+            "number": 5016,
+            "state": "OPEN",
+            "headRefOid": "new-head",
+            "author_login": "contributor",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "old-head",
+            "local_current_event": None,
+            "freshness": pr_review.review_freshness(
+                pr, "maintainer", None, previous_event
+            ),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "head_changed_since_local_event")
+
+    def test_incomplete_author_history_does_not_preserve_hold(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5017,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "held",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(2),
+            },
+            "freshness": {"comment_history_incomplete": True},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "author_activity_history_incomplete")
+
+    def test_author_followup_resurfaces_queued_pr(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5018,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "APPROVED",
+                "isInMergeQueue": True,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "freshness": {"author_followup_after_maintainer_activity": True},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
 
     def test_local_block_without_author_followup_stays_blocked(self) -> None:
         packet = {
@@ -1611,6 +1752,62 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(summary["state"], "failed")
         self.assertIn("legacy-ci", summary["failures"])
         self.assertIn("clippy", summary["successes"])
+
+    def test_status_summary_ignores_non_required_failed_checks(self) -> None:
+        summary = pr_review.status_summary(
+            [
+                {
+                    "name": "Rust (fmt, clippy, test, coverage-gate)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+                {
+                    "name": "Frontend (lint, type-check, test)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+                {
+                    "name": "Contributor trust",
+                    "status": "COMPLETED",
+                    "conclusion": "ACTION_REQUIRED",
+                },
+            ],
+            {
+                "Rust (fmt, clippy, test, coverage-gate)",
+                "Frontend (lint, type-check, test)",
+            },
+        )
+
+        self.assertEqual(summary["state"], "green")
+        self.assertEqual(summary["failures"], [])
+        self.assertEqual(
+            summary["advisory"],
+            [
+                {
+                    "name": "Contributor trust",
+                    "status": "COMPLETED",
+                    "conclusion": "ACTION_REQUIRED",
+                }
+            ],
+        )
+
+    def test_status_summary_waits_for_missing_required_check(self) -> None:
+        summary = pr_review.status_summary(
+            [
+                {
+                    "name": "Rust (fmt, clippy, test, coverage-gate)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            {
+                "Rust (fmt, clippy, test, coverage-gate)",
+                "Frontend (lint, type-check, test)",
+            },
+        )
+
+        self.assertEqual(summary["state"], "pending")
+        self.assertEqual(summary["pending"], ["Frontend (lint, type-check, test)"])
 
     def test_recommend_defer_fe_is_case_insensitive(self) -> None:
         for outcome in ("DEFER-FE", "defer-fe"):

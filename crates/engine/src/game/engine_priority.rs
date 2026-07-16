@@ -174,7 +174,40 @@ pub(crate) fn run_post_action_pipeline_from(
         }
     }
 
+    let events_before_returns = events.len();
     check_exile_returns(state, events);
+
+    // CR 603.2 + CR 603.3: A card returning from exile enters the battlefield,
+    // which is a game event that can trigger abilities — most commonly the
+    // returned permanent's OWN enters-the-battlefield trigger (Wall of Omens
+    // returned by Fiend Hunter's leaves-the-battlefield trigger draws a card,
+    // issue #3673). `check_exile_returns` appends those enter events but,
+    // unlike the SBA loop above, does not scan them; scan here so the ETB
+    // reaches the stack. Combine normal ETBs with delayed triggers matching
+    // the same return event before ordering, so simultaneous triggers controlled
+    // by the same player share one CR 603.3b ordering prompt. Any state-based
+    // actions the return implicates (CR 704.3) are checked on the next pipeline
+    // pass once the ETB resolves.
+    //
+    // Gate on Priority so a return that paused on an as-enters
+    // replacement/aura choice (`BatchMoveResult::NeedsChoice`) is not
+    // clobbered — that resume path owns its own trigger scan.
+    if events.len() > events_before_returns
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        let return_events: Vec<_> = events[events_before_returns..].to_vec();
+        let outcome = triggers::process_triggers_with_delayed_events(
+            state,
+            &return_events,
+            &return_events,
+            events,
+        );
+        if let Some(waiting_for) = outcome.prompt {
+            state.waiting_for = waiting_for.clone();
+            state.consumed_before_priority_trigger_events.clear();
+            return Ok(waiting_for);
+        }
+    }
 
     consumed_trigger_events.extend(std::mem::take(
         &mut state.consumed_before_priority_trigger_events,
@@ -204,22 +237,38 @@ pub(crate) fn run_post_action_pipeline_from(
     }
 
     if state.stack.len() > stack_before {
-        return Ok(flush_pending_priority_intercepts(
+        let outgoing = flush_pending_priority_intercepts(
             state,
             WaitingFor::Priority {
                 player: state.active_player,
             },
-        ));
+            default_wf.acting_player(),
+        );
+        return Ok(outgoing);
     }
 
     super::layers::flush_layers(state);
 
-    Ok(flush_pending_priority_intercepts(state, default_wf.clone()))
+    Ok(flush_pending_priority_intercepts(
+        state,
+        default_wf.clone(),
+        default_wf.acting_player(),
+    ))
 }
 
-fn flush_pending_priority_intercepts(state: &mut GameState, outgoing: WaitingFor) -> WaitingFor {
+fn flush_pending_priority_intercepts(
+    state: &mut GameState,
+    outgoing: WaitingFor,
+    semantic_caster: Option<crate::types::player::PlayerId>,
+) -> WaitingFor {
     let outgoing = super::effects::paradigm::flush_pending_remaining_offers(state, outgoing);
-    flush_pending_miracle_offer(state, outgoing)
+    let outgoing = flush_pending_miracle_offer(state, outgoing);
+    match semantic_caster {
+        Some(caster) => {
+            super::precast_copy_shortcut::maybe_offer_after_cast_triggers(state, caster, outgoing)
+        }
+        None => outgoing,
+    }
 }
 
 /// CR 702.94a + CR 603.11: Intercept a `WaitingFor::Priority` and replace it

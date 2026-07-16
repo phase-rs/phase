@@ -33,6 +33,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
   new Set<WaitingFor["type"]>([
     // Active priority — passes via PassButton / mana payment / cast.
     "Priority",
+    // CR 701.42 / CR 508.4: meld pair and attacking-entry destination dialogs.
+    "MeldPairChoice",
+    "MeldAttackTargetChoice",
     // Cast / activation chain — ManaPayment + PhyrexianPayment share ManaPaymentUI.
     ...MANA_PAYMENT_WAITING_FOR_TYPES,
     "ChooseXValue",
@@ -84,6 +87,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // (DeclareShortcutModal / RespondToShortcutModal).
     "LoopShortcut",
     "RespondToShortcut",
+    "PrecastCopyShortcutOffer",
+    "RespondToPrecastCopyShortcut",
     "ReplacementChoice",
     "CopyTargetChoice",
     "CopyRetarget",
@@ -117,6 +122,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "SpellbookDraft",
     "ManifestDreadChoice",
     "ClashChooseOpponent",
+    "ChooseAnnouncingOpponent",
     "ClashCardPlacement",
     // CR 702.132a: Assist — caster picks a helper (AssistChoosePlayerModal),
     // then the helper commits generic mana (AssistPaymentUI).
@@ -129,6 +135,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "CategoryChoice",
     "EachPlayerCopyChosenSelection",
     "KeepWithinTotalPowerChoice",
+    "KeepExactPermanentsChoice",
     "DistributeAmong",
     // CR 119.7 + CR 119.8: controller-chosen life-total redistribution permutation
     // (Reverse the Sands, The Doctor's Tomb) — rendered by LifeRedistributionModal.

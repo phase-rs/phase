@@ -46,6 +46,7 @@ import sys
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -658,6 +659,24 @@ def latest_events_by_pr_head(events: list[dict[str, Any]]) -> dict[tuple[int, st
         if pr is None or not head_sha:
             continue
         latest[(int(pr), str(head_sha))] = event
+    return latest
+
+
+def latest_events_by_pr(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Return the newest recorded event for each PR, regardless of its head.
+
+    The current-head index above decides whether a prior outcome still applies.
+    This companion index makes a head transition visible to the recommendation
+    ladder instead of silently treating an old hold as the PR's current state.
+    """
+    latest: dict[int, dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") == "review_correction":
+            continue
+        pr = event.get("pr")
+        if pr is None:
+            continue
+        latest[int(pr)] = event
     return latest
 
 
@@ -1662,11 +1681,43 @@ def classify_files(files: list[str], policy: Policy) -> dict[str, Any]:
     }
 
 
-def status_summary(checks: list[dict[str, Any]]) -> dict[str, Any]:
+def status_summary(
+    checks: list[dict[str, Any]], required_check_names: set[str] | None = None
+) -> dict[str, Any]:
+    """Summarize merge-gating checks, retaining non-required checks as advisory.
+
+    GitHub's status rollup contains every integration that reports on a commit,
+    including third-party trust and informational services. Only the checks
+    configured on the PR base branch can block the merge queue. When that
+    configuration is unavailable, retain the conservative legacy behavior rather
+    than claiming a PR is ready without evidence.
+    """
+    advisory = []
+    if required_check_names is None:
+        required_checks = checks
+        required_names = None
+    else:
+        required_names = set(required_check_names)
+        required_checks = []
+        seen_names = set()
+        for check in checks:
+            name = check.get("name", "<unknown>")
+            if name in required_names:
+                required_checks.append(check)
+                seen_names.add(name)
+            else:
+                advisory.append(
+                    {
+                        "name": name,
+                        "status": check.get("status"),
+                        "conclusion": check.get("conclusion"),
+                    }
+                )
+
     pending = []
     failures = []
     successes = []
-    for check in checks:
+    for check in required_checks:
         name = check.get("name", "<unknown>")
         status = check.get("status")
         conclusion = (check.get("conclusion") or "").upper()
@@ -1676,15 +1727,26 @@ def status_summary(checks: list[dict[str, Any]]) -> dict[str, Any]:
             failures.append(name)
         else:
             successes.append(name)
+    if required_names is not None:
+        pending.extend(sorted(required_names - seen_names, key=str.casefold))
     if failures:
         state = "failed"
     elif pending:
         state = "pending"
-    elif successes:
+    elif successes or required_names == set():
         state = "green"
     else:
         state = "unknown"
-    return {"state": state, "pending": pending, "failures": failures, "successes": successes}
+    return {
+        "state": state,
+        "pending": pending,
+        "failures": failures,
+        "successes": successes,
+        "required_checks": (
+            sorted(required_names, key=str.casefold) if required_names is not None else None
+        ),
+        "advisory": advisory,
+    }
 
 
 def pr_files_from_view(pr: dict[str, Any]) -> list[str]:
@@ -2333,17 +2395,91 @@ def comment_text(comment: dict[str, Any]) -> str:
     return str(comment.get("body") or comment.get("body_excerpt") or "")
 
 
+def activity_timestamp(activity: dict[str, Any], *fields: str) -> str | None:
+    """Return the latest parseable timestamp from one comment or review."""
+    timestamps = [
+        value
+        for field in fields
+        if (value := activity.get(field)) and parse_event_datetime(value) is not None
+    ]
+    return max(timestamps, key=lambda value: parse_event_datetime(value) or datetime.min.replace(tzinfo=UTC), default=None)
+
+
 def author_activity_after(pr: dict[str, Any], timestamp: str | None) -> bool:
     author_login = pr.get("author_login")
     return any(
         comment_login(comment) == author_login
-        and timestamp_after(comment.get("createdAt"), timestamp)
+        and timestamp_after(activity_timestamp(comment, "createdAt", "updatedAt"), timestamp)
         for comment in pr.get("comments", [])
     ) or any(
         comment_login(review) == author_login
-        and timestamp_after(review.get("submittedAt"), timestamp)
+        and timestamp_after(activity_timestamp(review, "submittedAt"), timestamp)
         for review in pr.get("reviews", [])
     )
+
+
+def has_author_activity(pr: dict[str, Any]) -> bool:
+    """Whether the contributor has left a comment or review on this PR."""
+    author_login = pr.get("author_login")
+    return any(
+        comment_login(comment) == author_login for comment in pr.get("comments", [])
+    ) or any(
+        comment_login(review) == author_login for review in pr.get("reviews", [])
+    )
+
+
+def latest_maintainer_activity_timestamp(pr: dict[str, Any], acting_login: str | None) -> str | None:
+    """Find the latest GitHub-visible response from the acting maintainer.
+
+    Local event-log rows record what the loop observed or decided; they are not a
+    response to a contributor. Follow-up freshness must therefore anchor only on
+    a real GitHub review/comment from the maintainer.
+    """
+    if not acting_login:
+        return None
+    timestamps = [
+        activity_timestamp(comment, "createdAt", "updatedAt")
+        for comment in pr.get("comments", [])
+        if comment_login(comment) == acting_login
+    ] + [
+        activity_timestamp(review, "submittedAt")
+        for review in pr.get("reviews", [])
+        if comment_login(review) == acting_login
+    ]
+    timestamps = [timestamp for timestamp in timestamps if timestamp]
+    return max(
+        timestamps,
+        key=lambda timestamp: parse_event_datetime(timestamp) or datetime.min.replace(tzinfo=UTC),
+        default=None,
+    )
+
+
+def review_freshness(
+    pr: dict[str, Any],
+    acting_login: str | None,
+    local_current_event: dict[str, Any] | None,
+    local_latest_event: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Describe GitHub activity that invalidates a cached local posture."""
+    current_head = pr.get("headRefOid")
+    previous_head = (local_latest_event or {}).get("head_sha")
+    maintainer_activity = latest_maintainer_activity_timestamp(pr, acting_login)
+    local_timestamp = (local_current_event or {}).get("timestamp")
+    author_followup_after_maintainer_activity = (
+        author_activity_after(pr, maintainer_activity)
+        if maintainer_activity
+        else has_author_activity(pr)
+    )
+    return {
+        "head_changed_since_local_event": bool(
+            current_head and previous_head and previous_head != current_head
+        ),
+        "previous_head_sha": previous_head,
+        "latest_maintainer_activity_at": maintainer_activity,
+        "author_followup_after_maintainer_activity": author_followup_after_maintainer_activity,
+        "author_followup_after_local_event": author_activity_after(pr, local_timestamp),
+        "comment_history_incomplete": pr.get("commentsComplete") is False,
+    }
 
 
 def latest_requested_changes_review_timestamp(packet: dict[str, Any]) -> str | None:
@@ -2475,7 +2611,17 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     local_event_type = local_event.get("event_type")
     local_outcome = local_event.get("outcome")
     local_event_timestamp = local_event.get("timestamp")
-    author_followup_after_local_event = author_activity_after(pr, local_event_timestamp)
+    freshness = packet.get("freshness") or {}
+    author_followup_after_local_event = freshness.get(
+        "author_followup_after_local_event",
+        author_activity_after(pr, local_event_timestamp),
+    )
+    author_followup_after_maintainer_activity = freshness.get(
+        "author_followup_after_maintainer_activity",
+        author_followup_after_local_event,
+    )
+    head_changed_since_local_event = freshness.get("head_changed_since_local_event", False)
+    comment_history_incomplete = freshness.get("comment_history_incomplete", False)
     parse_diff = packet.get("parse_diff") or {}
     parse_diff_after_local_event = timestamp_after(
         parse_diff.get("updated_at"), local_event_timestamp
@@ -2520,21 +2666,27 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif (local_outcome or "").lower() == "defer-fe":
         action = "defer"
         reason = "local_defer_fe_current_head"
-    elif local_hold and author_followup_after_local_event:
+    elif local_hold and author_followup_after_maintainer_activity:
         action = "review"
-        reason = "author_followup_after_local_hold"
+        reason = "author_followup_after_maintainer_activity"
+    elif local_hold and comment_history_incomplete:
+        action = "review"
+        reason = "author_activity_history_incomplete"
     elif local_hold and (packet.get("ci") or {}).get("state") != "green":
         action = "hold_ci"
         reason = "local_hold_current_head"
     elif local_hold and conflicts_with_base:
         action = "blocked"
         reason = "local_hold_current_head"
-    elif local_block and author_followup_after_local_event and conflicts_with_base:
+    elif local_block and author_followup_after_maintainer_activity and conflicts_with_base:
         action = "update_branch_for_handler"
         reason = "conflicting_after_author_followup"
-    elif local_block and author_followup_after_local_event:
+    elif local_block and author_followup_after_maintainer_activity:
         action = "review"
-        reason = "author_followup_after_local_block"
+        reason = "author_followup_after_maintainer_activity"
+    elif local_block and comment_history_incomplete:
+        action = "review"
+        reason = "author_activity_history_incomplete"
     elif requested_changes_expiry["author_followup_after_warning"] and conflicts_with_base:
         action = "update_branch_for_handler"
         reason = "conflicting_after_author_followup"
@@ -2547,6 +2699,12 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif requested_changes_expiry["warning_due"]:
         action = "warn_stale_changes_for_handler"
         reason = "requested_changes_warning_due"
+    elif head_changed_since_local_event and conflicts_with_base:
+        action = "update_branch_for_handler"
+        reason = "conflicting_after_head_change"
+    elif head_changed_since_local_event:
+        action = "review"
+        reason = "head_changed_since_local_event"
     elif local_block and parse_diff_after_local_event:
         if conflicts_with_base:
             action = "update_branch_for_handler"
@@ -2575,6 +2733,12 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif latest_commit and latest_commit != head and review_decision == "APPROVED":
         action = "dequeue_stale_for_handler" if queue else "review"
         reason = "stale_approval"
+    elif queue and author_followup_after_maintainer_activity:
+        action = "review"
+        reason = "author_followup_after_maintainer_activity"
+    elif queue and comment_history_incomplete:
+        action = "review"
+        reason = "author_activity_history_incomplete"
     elif queue and review_decision == "APPROVED":
         action = "queued"
         reason = (
@@ -2742,6 +2906,7 @@ def make_packet(
     contributor_summary: dict[str, Any] | None = None,
     gittensor: dict[str, Any] | None = None,
     first_block_event: dict[str, Any] | None = None,
+    required_check_names: set[str] | None = None,
 ) -> dict[str, Any]:
     files = pr_files_from_view(pr)
     classification = classify_files(files, policy)
@@ -2752,7 +2917,7 @@ def make_packet(
         classification["surface"] = "files_truncated"
         classification["gate"] = "review"
         classification["files_truncated"] = True
-    checks = status_summary(pr.get("statusCheckRollup", []))
+    checks = status_summary(pr.get("statusCheckRollup", []), required_check_names)
     # Classify the parse-diff sticky comment from raw bodies, before compact_pr_view
     # excerpts them to 300 chars and would drop the marker substrings.
     parse_diff = parse_diff_comment_state(
@@ -2916,7 +3081,7 @@ def pr_node_fields(
     )
     comments = (
         f"comments(last:{comments_last})"
-        + "{nodes{author{login} createdAt updatedAt"
+        + "{totalCount pageInfo{hasNextPage endCursor} nodes{author{login} createdAt updatedAt"
         + comment_body
         + "}} "
     )
@@ -2944,12 +3109,12 @@ SCAN_PR_QUERY = (
     "pageInfo{hasNextPage endCursor}"
     "nodes{"
     + pr_node_fields(
-        comments_last=15,
+        comments_last=100,
         include_full_reviews=True,
         include_pr_body=True,
         include_review_body=False,
         include_comment_body=True,
-        status_contexts_first=None,
+        status_contexts_first=80,
     )
     + "}"
     "}}}"
@@ -3156,6 +3321,7 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
             }
             for c in graphql_nodes(node.get("comments"))
         ],
+        "commentsComplete": graphql_connection_complete(node.get("comments")),
         "latestReviews": latest_reviews,
         "reviews": graphql_reviews(full_reviews) if full_reviews else latest_reviews,
         "commits": graphql_commit_authors(node),
@@ -3210,6 +3376,65 @@ def gh_pr_view(repo: str, pr_number: int) -> dict[str, Any]:
     return normalize_graphql_pr(node or {})
 
 
+def required_status_check_names(repo: str, base_ref: str | None) -> set[str] | None:
+    """Return the actual branch-protection check names for a PR base branch.
+
+    `statusCheckRollup` is deliberately broader than merge requirements. The
+    branch-protection endpoint is GitHub's source of truth for legacy required
+    status checks; a failed lookup returns ``None`` so callers preserve the
+    conservative all-checks fallback instead of treating unknown requirements as
+    green.
+    """
+    if not base_ref:
+        return None
+    try:
+        required = run_json(
+            [
+                "gh",
+                "api",
+                "repos/"
+                f"{repo}/branches/{urllib.parse.quote(base_ref, safe='')}/"
+                "protection/required_status_checks",
+            ]
+        )
+    except subprocess.CalledProcessError:
+        print(
+            f"could not read required status checks for {repo}@{base_ref}; "
+            "using the conservative all-checks fallback",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(required, dict):
+        return None
+    names = {
+        str(name)
+        for name in required.get("contexts", [])
+        if isinstance(name, str) and name
+    }
+    names.update(
+        str(check.get("context"))
+        for check in required.get("checks", [])
+        if isinstance(check, dict) and check.get("context")
+    )
+    return names
+
+
+def required_checks_by_base(
+    repo: str, prs: list[dict[str, Any]]
+) -> dict[str, set[str] | None]:
+    return {
+        base_ref: required_status_check_names(repo, base_ref)
+        for base_ref in sorted(
+            {
+                str(pr.get("baseRefName"))
+                for pr in prs
+                if pr.get("baseRefName")
+            },
+            key=str.casefold,
+        )
+    }
+
+
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 
@@ -3226,6 +3451,7 @@ class ReviewContext:
     private_overrides: dict[str, Any]
     acting_login: str
     local_events: dict[tuple[int, str], dict[str, Any]]
+    local_latest_events: dict[int, dict[str, Any]]
     first_block_events: dict[tuple[int, str], dict[str, Any]]
     analytics_model: dict[str, Any]
     signal_occurrences: dict[str, list[dict[str, Any]]]
@@ -3243,6 +3469,7 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
         private_overrides=load_private_overrides(args.state_dir),
         acting_login=args.acting_login or gh_user(),
         local_events=latest_events_by_pr_head(events),
+        local_latest_events=latest_events_by_pr(events),
         first_block_events=first_block_events_by_pr_head(events),
         analytics_model=build_analytics_model(
             events,
@@ -3257,11 +3484,17 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
     )
 
 
-def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict[str, Any]:
+def packet_for_pr(
+    context: ReviewContext,
+    pr: dict[str, Any],
+    mode: str,
+    required_check_names: set[str] | None = None,
+) -> dict[str, Any]:
     """Assemble the full packet for one normalized PR view."""
     pr_number = int(pr.get("number") or 0)
     head_key = (pr_number, pr.get("headRefOid") or "")
     local_event = context.local_events.get(head_key)
+    local_latest_event = context.local_latest_events.get(pr_number)
     first_block_event = context.first_block_events.get(head_key)
     contributor_summary = build_contributor_summary(
         (pr.get("author") or {}).get("login"),
@@ -3275,7 +3508,7 @@ def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict
         context.gittensor_index,
         context.gittensor_warning,
     )
-    return make_packet(
+    packet = make_packet(
         pr,
         context.policy,
         context.acting_login,
@@ -3285,7 +3518,14 @@ def packet_for_pr(context: ReviewContext, pr: dict[str, Any], mode: str) -> dict
         contributor_summary,
         gittensor,
         first_block_event,
+        required_check_names,
     )
+    packet["local_latest_event"] = local_latest_event
+    packet["freshness"] = review_freshness(
+        packet["pr"], context.acting_login, local_event, local_latest_event
+    )
+    packet["recommendation"] = recommend_from_packet(packet)
+    return packet
 
 
 def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
@@ -3325,6 +3565,7 @@ def scan_candidate(pr: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]
         "parse_diff": packet["parse_diff"],
         "artifacts": packet.get("artifacts"),
         "architecture_scope": packet.get("architecture_scope"),
+        "freshness": packet.get("freshness"),
         "review_decision": pr.get("reviewDecision"),
         "is_in_merge_queue": packet["pr"].get("isInMergeQueue"),
         "merge_queue_entry": packet["pr"].get("mergeQueueEntry"),
@@ -3342,14 +3583,20 @@ def scan_candidate(pr: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]
 
 def command_scan(args: argparse.Namespace) -> int:
     context = load_review_context(args)
-    # The repo-wide scan uses a deliberately light GraphQL selection set and
-    # small pages; single-PR inspect/recommend fetch full review/comment/check
-    # details when the sweep needs to act on a candidate.
+    # The repo-wide scan uses small GraphQL pages, but includes individual check
+    # contexts so its CI verdict can be restricted to the base branch's actual
+    # merge requirements rather than every third-party status.
     nodes = fetch_open_prs(args.repo, args.limit)
+    prs = [normalize_graphql_pr(node) for node in nodes]
+    required_checks = required_checks_by_base(args.repo, prs)
     candidates = []
-    for node in nodes:
-        pr = normalize_graphql_pr(node)
-        packet = packet_for_pr(context, pr, "full")
+    for pr in prs:
+        packet = packet_for_pr(
+            context,
+            pr,
+            "full",
+            required_checks.get(pr.get("baseRefName") or ""),
+        )
         candidates.append(scan_candidate(pr, packet))
 
     candidates.sort(key=candidate_sort_key)
@@ -3416,7 +3663,12 @@ def event_skeleton(pr_number: int, compact_pr: dict[str, Any]) -> dict[str, Any]
 def command_inspect(args: argparse.Namespace) -> int:
     context = load_review_context(args)
     pr = gh_pr_view(args.repo, args.pr)
-    packet = packet_for_pr(context, pr, args.mode)
+    packet = packet_for_pr(
+        context,
+        pr,
+        args.mode,
+        required_status_check_names(args.repo, pr.get("baseRefName")),
+    )
     if args.emit_event:
         packet["event_skeleton"] = event_skeleton(args.pr, packet["pr"])
         signals = proof_tracking_signals(packet)
@@ -3429,7 +3681,12 @@ def command_inspect(args: argparse.Namespace) -> int:
 def command_recommend(args: argparse.Namespace) -> int:
     context = load_review_context(args)
     pr = gh_pr_view(args.repo, args.pr)
-    packet = packet_for_pr(context, pr, "full")
+    packet = packet_for_pr(
+        context,
+        pr,
+        "full",
+        required_status_check_names(args.repo, pr.get("baseRefName")),
+    )
     recommendation = packet["recommendation"]
     if packet["completeness"] != "complete" and recommendation["advisory_action"].endswith("_for_handler"):
         recommendation = {

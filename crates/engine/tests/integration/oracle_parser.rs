@@ -6,6 +6,7 @@ use engine::types::ability::{
 };
 use engine::types::keywords::Keyword;
 use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
 
 fn parse(
     oracle_text: &str,
@@ -134,8 +135,53 @@ fn snapshot_rancor() {
     insta::assert_json_snapshot!(result);
 }
 
+fn assert_same_is_true_type_recipients(affected: &Option<TargetFilter>) {
+    let Some(TargetFilter::Or { filters }) = affected else {
+        panic!("expected battlefield, stack, and owned-card recipient arms, got {affected:?}");
+    };
+    assert_eq!(filters.len(), 3);
+
+    let TargetFilter::Typed(battlefield) = &filters[0] else {
+        panic!("expected a typed battlefield recipient arm")
+    };
+    assert_eq!(battlefield.controller, Some(ControllerRef::You));
+    assert!(battlefield.type_filters.contains(&TypeFilter::Creature));
+    assert!(battlefield.properties.contains(&FilterProp::InZone {
+        zone: Zone::Battlefield,
+    }));
+
+    let TargetFilter::Typed(stack) = &filters[1] else {
+        panic!("expected a typed stack recipient arm")
+    };
+    assert_eq!(stack.controller, Some(ControllerRef::You));
+    assert!(stack.type_filters.contains(&TypeFilter::Creature));
+    assert!(stack
+        .properties
+        .contains(&FilterProp::InZone { zone: Zone::Stack }));
+
+    let TargetFilter::Typed(cards) = &filters[2] else {
+        panic!("expected a typed owned-card recipient arm")
+    };
+    assert_eq!(cards.controller, None);
+    assert!(cards.type_filters.contains(&TypeFilter::Creature));
+    assert!(cards.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::You,
+    }));
+    assert!(cards.properties.contains(&FilterProp::RepresentedByCard));
+    assert!(cards.properties.contains(&FilterProp::InAnyZone {
+        zones: vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command,
+        ],
+    }));
+}
+
 #[test]
-fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tail() {
+fn arcane_adaptation_full_oracle_models_all_same_is_true_recipients() {
     let result = parse(
         "As Arcane Adaptation enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
         "Arcane Adaptation",
@@ -154,13 +200,7 @@ fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tai
             kind: ChosenSubtypeKind::CreatureType
         }
     )));
-    match &static_def.affected {
-        Some(TargetFilter::Typed(filter)) => {
-            assert_eq!(filter.controller, Some(ControllerRef::You));
-            assert!(filter.type_filters.contains(&TypeFilter::Creature));
-        }
-        other => panic!("expected battlefield creature filter, got {other:?}"),
-    }
+    assert_same_is_true_type_recipients(&static_def.affected);
 
     let unimplemented: Vec<_> = result
         .abilities
@@ -173,24 +213,17 @@ fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tai
             _ => None,
         })
         .collect();
-    assert_eq!(
-        unimplemented,
-        vec![
-            "The same is true for creature spells you control and creature cards you own that aren't on the battlefield."
-        ]
+    assert!(
+        unimplemented.is_empty(),
+        "Arcane Adaptation's continuation is fully modeled: {unimplemented:?}"
     );
 }
 
-// CR 613.1d + CR 205.3m: Maskwood Nexus's full Oracle text shares Arcane
-// Adaptation's two-sentence shape — a battlefield static plus the
-// "the same is true for creature spells / creature cards you own that aren't
-// on the battlefield" tail. The dispatcher in `oracle.rs` must split the
-// battlefield static (Layer 4 `AddAllCreatureTypes` on creatures you
-// control) from the non-battlefield tail, which is parked as
-// `Unimplemented` because layer-applied type changes outside the
-// battlefield aren't modeled.
+// CR 611.3a + CR 613.1d + CR 205.3m: Maskwood Nexus's complete two-sentence
+// static reaches controlled permanents and spells plus owned cards outside the
+// battlefield through one Layer-4 continuous effect.
 #[test]
-fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail() {
+fn maskwood_nexus_full_oracle_models_all_same_is_true_recipients() {
     let result = parse(
         "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling.",
         "Maskwood Nexus",
@@ -206,13 +239,7 @@ fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail()
         .modifications
         .iter()
         .any(|modification| matches!(modification, ContinuousModification::AddAllCreatureTypes)));
-    match &static_def.affected {
-        Some(TargetFilter::Typed(filter)) => {
-            assert_eq!(filter.controller, Some(ControllerRef::You));
-            assert!(filter.type_filters.contains(&TypeFilter::Creature));
-        }
-        other => panic!("expected battlefield creature filter, got {other:?}"),
-    }
+    assert_same_is_true_type_recipients(&static_def.affected);
 
     let unimplemented: Vec<_> = result
         .abilities
@@ -225,11 +252,9 @@ fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail()
             _ => None,
         })
         .collect();
-    assert_eq!(
-        unimplemented,
-        vec![
-            "The same is true for creature spells you control and creature cards you own that aren't on the battlefield."
-        ]
+    assert!(
+        unimplemented.is_empty(),
+        "Maskwood Nexus's continuation is fully modeled: {unimplemented:?}"
     );
 }
 
