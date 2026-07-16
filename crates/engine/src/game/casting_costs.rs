@@ -17,8 +17,8 @@ use crate::types::game_state::{
     CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
     CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit, GameState,
     ManaAbilityCostParent, ManaAbilityResume, PayCostKind, PendingCast, PendingCostMoveCompletion,
-    PendingCostMoveResume, PendingDiscardForCostResume, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    PendingCostMoveResume, PendingDiscardForCostResume, PendingSacrificeCostCompletion,
+    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -1802,6 +1802,17 @@ pub(crate) fn resume_interrupted_cost_payment(
 ) -> Result<WaitingFor, EngineError> {
     if matches!(
         state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::SacrificeForCost { .. })
+    ) {
+        return resume_sacrifice_for_cost(
+            state,
+            events,
+            replacement_action_cost_event_start.unwrap_or(events.len()),
+        );
+    }
+
+    if matches!(
+        state.pending_cost_move_resume,
         Some(PendingCostMoveResume::Cast { .. })
     ) {
         let Some(PendingCostMoveResume::Cast {
@@ -2214,6 +2225,215 @@ fn park_deferred_cost_triggers_if_paused(
     crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
 }
 
+/// CR 603.10a: Retain the state-ledger identities for every selected permanent
+/// that has actually left the battlefield in this action fragment. The matching
+/// event copy is kept separately in the typed resume root so terminal stamping
+/// can update both event buffers and the authoritative LKI ledger.
+fn record_sacrifice_cost_departure_records(
+    departure_record_indices: &mut Vec<usize>,
+    events: &[GameEvent],
+    chosen: &[ObjectId],
+) {
+    for event in events {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if chosen.contains(object_id)
+                && !departure_record_indices.contains(&record.turn_zone_change_index)
+            {
+                departure_record_indices.push(record.turn_zone_change_index);
+            }
+        }
+    }
+}
+
+/// CR 601.2h + CR 602.2b + CR 616.1: Park one selected sacrifice component
+/// without exposing a partial event group to trigger collection. The currently
+/// paused object is delivered or prevented by the replacement action; the
+/// typed root resumes at the following program-counter index.
+#[allow(clippy::too_many_arguments)]
+fn pause_sacrifice_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    chosen: Vec<ObjectId>,
+    paused_at_index: usize,
+    completion: PendingSacrificeCostCompletion,
+    mut deferred_cost_events: Vec<GameEvent>,
+    mut departure_record_indices: Vec<usize>,
+    events: &[GameEvent],
+    cost_event_start: usize,
+    choice_player: PlayerId,
+) -> WaitingFor {
+    record_sacrifice_cost_departure_records(
+        &mut departure_record_indices,
+        &events[cost_event_start..],
+        &chosen,
+    );
+    deferred_cost_events.extend_from_slice(&events[cost_event_start..]);
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::SacrificeForCost {
+        player,
+        pending: Box::new(pending),
+        chosen,
+        paused_at_index,
+        completion,
+        deferred_cost_events,
+        departure_record_indices,
+    });
+    // The inner sacrifice-zone-change pipeline has normally already installed
+    // this prompt. Preserve a delivery-tail prompt if one owns the action
+    // instead; only a live CR 616.1 replacement needs synthesis here.
+    if state.pending_replacement.is_some() {
+        super::costs::pause_cost_payment_for_replacement_choice(state, choice_player);
+    }
+    state.waiting_for.clone()
+}
+
+/// CR 603.2 + CR 603.3b: The typed sacrifice root owns every cost event that
+/// crossed a replacement-choice action boundary. Collect the full stamped set
+/// once, and claim the current action occurrences so its normal Priority
+/// pipeline cannot collect the same events again.
+fn settle_sacrifice_for_cost_events(
+    state: &mut GameState,
+    mut deferred_cost_events: Vec<GameEvent>,
+    events: &[GameEvent],
+    current_start: usize,
+    current_end: usize,
+) {
+    deferred_cost_events.extend_from_slice(&events[current_start..current_end]);
+    if !deferred_cost_events.is_empty() {
+        crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
+    }
+    state.consumed_before_priority_trigger_events.extend(
+        events[current_start..current_end]
+            .iter()
+            .enumerate()
+            .map(|(offset, event)| {
+                let index = current_start + offset;
+                crate::game::triggers::ConsumedTriggerEventOccurrence {
+                    event: event.clone(),
+                    occurrence: events[..index]
+                        .iter()
+                        .filter(|prior| *prior == event)
+                        .count(),
+                }
+            }),
+    );
+}
+
+/// CR 603.10a + CR 601.2h + CR 602.2b: Run the one terminal epilogue for a
+/// selected or SelfRef sacrifice cost after every selected object has delivered
+/// or been fully replaced. No earlier pause may invoke this path.
+#[allow(clippy::too_many_arguments)]
+fn finish_sacrifice_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    chosen: &[ObjectId],
+    completion: PendingSacrificeCostCompletion,
+    mut deferred_cost_events: Vec<GameEvent>,
+    mut departure_record_indices: Vec<usize>,
+    events: &mut Vec<GameEvent>,
+    current_start: usize,
+) -> Result<WaitingFor, EngineError> {
+    record_sacrifice_cost_departure_records(
+        &mut departure_record_indices,
+        &events[current_start..],
+        chosen,
+    );
+    let departed = crate::game::zones::departed_subset(state, chosen);
+    crate::game::zones::mark_simultaneous_departures(&mut deferred_cost_events, &departed);
+    crate::game::zones::mark_simultaneous_departures(&mut events[current_start..], &departed);
+    crate::game::zones::mark_simultaneous_departure_records(
+        state,
+        &departure_record_indices,
+        &departed,
+    );
+    let current_end = events.len();
+
+    // Cost-trigger collection must see the fully stamped, cross-action group
+    // before a later cast/activation prompt can hide this action's event span.
+    settle_sacrifice_for_cost_events(
+        state,
+        deferred_cost_events,
+        events,
+        current_start,
+        current_end,
+    );
+
+    if matches!(completion, PendingSacrificeCostCompletion::SelectedNonSelf)
+        && pending.activation_ability_index.is_some()
+    {
+        pending.activation_cost = pending
+            .activation_cost
+            .take()
+            .and_then(super::casting::remove_selected_non_self_sacrifice_cost);
+    }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 601.2h + CR 602.2b + CR 616.1: Continue the exact unpaid suffix of a
+/// replacement-paused sacrifice cost. The replacement action has settled the
+/// `paused_at_index` object, so this resumes only later selections.
+pub(crate) fn resume_sacrifice_for_cost(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    replacement_action_cost_event_start: usize,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::SacrificeForCost {
+        player,
+        pending,
+        chosen,
+        paused_at_index,
+        completion,
+        deferred_cost_events,
+        departure_record_indices,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("sacrifice cost-move resume requires its typed continuation")
+    };
+
+    for index in paused_at_index + 1..chosen.len() {
+        match super::sacrifice::sacrifice_permanent(state, chosen[index], player, events)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+        {
+            super::sacrifice::SacrificeOutcome::Complete => {}
+            super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                return Ok(pause_sacrifice_for_cost(
+                    state,
+                    player,
+                    *pending,
+                    chosen,
+                    index,
+                    completion,
+                    deferred_cost_events,
+                    departure_record_indices,
+                    events,
+                    replacement_action_cost_event_start,
+                    choice_player,
+                ));
+            }
+        }
+    }
+
+    finish_sacrifice_for_cost(
+        state,
+        player,
+        *pending,
+        &chosen,
+        completion,
+        deferred_cost_events,
+        departure_record_indices,
+        events,
+        replacement_action_cost_event_start,
+    )
+}
+
 pub(crate) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -2372,22 +2592,38 @@ pub(crate) fn handle_sacrifice_for_cost(
     // block after `finish_pending_cost_or_cast`).
     let cost_event_start = events.len();
 
-    // Sacrifice each chosen permanent
-    for &id in chosen {
-        super::sacrifice::sacrifice_permanent(state, id, player, events)
-            .map_err(|e| EngineError::InvalidAction(format!("{e}")))?;
+    // CR 601.2h + CR 616.1: A selected cost sacrifice can pause at any
+    // selected object. Keep the complete selection and event span on the
+    // typed root; resumption starts after the object resolved by the chooser.
+    for (index, &id) in chosen.iter().enumerate() {
+        match super::sacrifice::sacrifice_permanent(state, id, player, events)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+        {
+            super::sacrifice::SacrificeOutcome::Complete => {}
+            super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                return Ok(pause_sacrifice_for_cost(
+                    state,
+                    player,
+                    pending,
+                    chosen.to_vec(),
+                    index,
+                    PendingSacrificeCostCompletion::SelectedNonSelf,
+                    Vec::new(),
+                    Vec::new(),
+                    events,
+                    cost_event_start,
+                    choice_player,
+                ));
+            }
+        }
     }
 
-    // CR 603.10a + CR 701.21a + CR 601.2h + CR 118.8: permanents sacrificed to pay
-    // one cost component leave the battlefield together; a co-departing observer
-    // among them observes the rest (look-back-in-time). Single authority — identical
-    // wiring to `effects::sacrifice::resolve`. `departed_subset` drops any permanent
-    // that did not actually leave (CantBeSacrificed, replacement).
+    // No action boundary split this component, so the ordinary post-action
+    // pipeline remains its trigger settlement authority.
     crate::game::zones::mark_simultaneous_departures(
         events,
         &crate::game::zones::departed_subset(state, chosen),
     );
-    let cost_event_end = events.len();
 
     if pending.activation_ability_index.is_some() {
         pending.activation_cost = pending
@@ -2397,37 +2633,14 @@ pub(crate) fn handle_sacrifice_for_cost(
     }
 
     let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
-
-    // CR 603.6c + CR 603.10a + CR 603.3b: When `finish_pending_cost_or_cast`
-    // lands on `Priority` the cast completed in THIS action, so
-    // `run_post_action_pipeline` will scan `events` (including the
-    // cost-sacrifice `ZoneChanged` records stamped just above) and the
-    // leaves-the-battlefield / dies observers fire normally.
-    //
-    // But when the cast PAUSES on a later target/kicker/modal choice
-    // (a non-`Priority` `WaitingFor`), `apply_action` does NOT run the
-    // post-action pipeline over this action's `events` (engine.rs gates the
-    // pipeline on `WaitingFor::Priority`), and the cast lands in a LATER
-    // action whose fresh `events` vector no longer carries these records — so
-    // the producer co-departed stamp would be unreadable and a "whenever a
-    // creature you control dies" / leaves-the-battlefield observer among the
-    // co-sacrificed permanents would under-observe. Mirror the established
-    // B2 parking pattern in `engine_resolution_choices::batch_or_drain_observer_triggers`:
-    // collect the cost-payment observer triggers into `deferred_triggers` now,
-    // where the stamped records are still in scope. They are NOT drained while
-    // the announced spell remains on the stack (`should_drain_deferred_triggers_now`
-    // refuses to drain with a `Spell` entry present), so they reach the stack
-    // at the next true resolution boundary after the cast completes — CR 603.3
-    // ("the next time a player would receive priority").
     if !matches!(waiting_for, WaitingFor::Priority { .. }) {
-        let cost_events: Vec<GameEvent> = events[cost_event_start..cost_event_end]
+        let cost_events: Vec<GameEvent> = events[cost_event_start..]
             .iter()
-            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
             .cloned()
             .collect();
         crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
     }
-
     Ok(waiting_for)
 }
 
@@ -5787,9 +6000,32 @@ fn pay_additional_cost_with_source(
                         "Cannot sacrifice this permanent as a cost".into(),
                     ));
                 }
-                // CR 118.3: Self-sacrifice is atomic — no player choice needed
-                super::sacrifice::sacrifice_permanent(state, pending.object_id, player, events)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e}")))?;
+                // CR 118.3 + CR 616.1: The cost itself has no selection prompt,
+                // but its battlefield-to-graveyard move can still require a
+                // replacement ordering choice. Preserve the automatic tail on
+                // the same typed root used by selected sacrifice costs.
+                let cost_event_start = events.len();
+                let object_id = pending.object_id;
+                match super::sacrifice::sacrifice_permanent(state, object_id, player, events)
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
+                    super::sacrifice::SacrificeOutcome::Complete => {}
+                    super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                        return Ok(pause_sacrifice_for_cost(
+                            state,
+                            player,
+                            pending,
+                            vec![object_id],
+                            0,
+                            PendingSacrificeCostCompletion::SelfRef,
+                            Vec::new(),
+                            Vec::new(),
+                            events,
+                            cost_event_start,
+                            choice_player,
+                        ));
+                    }
+                }
             } else {
                 // CR 118.3: Non-self sacrifice needs interactive selection
                 let eligible = super::casting::find_eligible_sacrifice_targets(
@@ -11060,7 +11296,8 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
         ManaProduction, PtStat, PtValue, PtValueScope, QuantityExpr, ReplacementDefinition,
-        ReplacementMode, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        ReplacementMode, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -11069,6 +11306,7 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn announcing_opponent_preflight_ignores_scoped_player_chooser() {
@@ -13640,6 +13878,97 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::LifeChanged { amount: -1, .. })),
             "auto-pay should not emit a life payment when an equivalent non-life line exists"
+        );
+    }
+
+    /// Issue #5912: City of Brass prints its self-damage as a *separate*
+    /// "Whenever this land becomes tapped, it deals 1 damage to you" trigger
+    /// (`TriggerMode::Taps`), not folded into the `{T}: Add one mana of any
+    /// color.` ability's own resolution chain like a painland. Before
+    /// `object_mana_ability_penalty` accounted for this sibling trigger,
+    /// City of Brass classified byte-identically to a basic land (`None`
+    /// penalty), so auto-tap could pick it over a truly free Island for the
+    /// same generic slot. Auto-tap must prefer the Island.
+    #[test]
+    fn auto_tap_prefers_free_land_over_city_of_brass_self_damage_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let city_of_brass = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "City of Brass".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&city_of_brass).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: ManaColor::ALL.to_vec(),
+                            contribution: crate::types::ability::ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Taps)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                            damage_source: None,
+                            excess: None,
+                        },
+                    )),
+            );
+        }
+        let island = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&island).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Island".to_string());
+        }
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            },
+            &mut events,
+            None,
+        );
+
+        assert!(
+            state.objects.get(&island).unwrap().tapped,
+            "the free Island must be tapped for the generic cost"
+        );
+        assert!(
+            !state.objects.get(&city_of_brass).unwrap().tapped,
+            "City of Brass must NOT be tapped when a truly free source can pay the same cost"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "auto-pay must avoid the self-damage source when an equivalent free line exists"
         );
     }
 

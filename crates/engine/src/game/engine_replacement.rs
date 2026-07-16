@@ -1003,68 +1003,20 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
-            // CR 601.2h + CR 602.2b + CR 616.1: Resume a cast or activation
-            // cost move after the replacement delivered its current object.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::Cast { .. })
-                )
-            {
-                waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A delivered cost
+            // move resumes through the single typed dispatcher before ordinary
+            // effect continuations. Foretell completed above at its dedicated
+            // delivery boundary and is intentionally ineligible here.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
                     state,
                     events,
-                    Some(replacement_action_event_start),
-                )?;
-            }
-
-            // CR 614.12a + CR 616.1: Finish the inner forced MayCost moves
-            // before re-entering the optional outer replacement they paid for.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::ReplacementMayCost { .. })
-                )
-            {
-                waiting_for = super::costs::resume_replacement_may_cost_move(state, events)?;
-            }
-
-            // CR 702.143a-c + CR 614.1 + CR 616.1: Finish a foretell special
-            // action after its replacement-aware move is delivered. The
-            // foretell resume stamps the card only if it arrived in exile.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::Foretell { .. })
-                )
-            {
-                waiting_for = super::casting::resume_foretell_cost_move(state, events);
-            }
-
-            // CR 702.66a + CR 614.1 + CR 616.1: A delivered or redirected
-            // Delve fuel move still pays one generic component. Its delivery
-            // tail linked only an actual exile destination; resume must restore
-            // ManaPayment rather than finish the pending cast.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::DelveManaPayment { .. })
-                )
-            {
-                waiting_for = super::engine::resume_delve_mana_payment(state);
-            }
-
-            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: The selected
-            // replacement has delivered the interrupted mana-ability cost move.
-            // Resume only its unpaid cursor suffix; it owns production and the
-            // inline subchain after every cost component has settled.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
-                )
-            {
-                waiting_for = super::mana_abilities::resume_mana_ability_cost_move(state, events)?;
+                    super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                        action_event_start: replacement_action_event_start,
+                    },
+                )? {
+                    waiting_for = resumed;
+                }
             }
 
             // CR 118.12 + CR 605.3b + CR 616.1: The ordinary effect rider may
@@ -1255,55 +1207,22 @@ pub(super) fn handle_replacement_choice(
             state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
             };
-            if matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::Cast { .. })
-            ) {
-                return super::casting_costs::resume_interrupted_cost_payment(
-                    state,
-                    events,
-                    Some(replacement_action_event_start),
-                );
-            }
-            if matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::ReplacementMayCost { .. })
-            ) {
-                return super::costs::resume_replacement_may_cost_move(state, events);
-            }
-            // CR 702.143a-c + CR 614.1 + CR 616.1: A fully substituted
-            // foretell move completes the special action without stamping a
-            // card that was not delivered to exile.
-            if matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::Foretell { .. })
-            ) {
-                return Ok(super::casting::resume_foretell_cost_move(state, events));
-            }
-            // CR 702.66a + CR 614.1 + CR 616.1: A prevented Delve move still
-            // pays its generic component, but has no delivered exile link.
-            if matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::DelveManaPayment { .. })
-            ) {
-                let waiting_for = super::engine::resume_delve_mana_payment(state);
-                state.waiting_for = waiting_for.clone();
-                return Ok(waiting_for);
-            }
-            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A fully
-            // prevented or substituted mana-ability cost move still pays that
-            // component, so drain the exact unpaid cursor suffix.
-            if matches!(
+            let resumed_mana_ability_cost = matches!(
                 state.pending_cost_move_resume,
                 Some(PendingCostMoveResume::ManaAbilityPayment { .. })
-            ) {
-                let waiting_for =
-                    super::mana_abilities::resume_mana_ability_cost_move(state, events)?;
-                state.waiting_for = waiting_for.clone();
-                // CR 118.12 + CR 605.3b + CR 616.1: A prevented or substituted
-                // cost move has the same sequencing as a delivered move: settle
-                // the typed cost root first, then exactly once drain its rider.
-                if matches!(waiting_for, WaitingFor::Priority { .. })
+            );
+            if let Some(waiting_for) = super::engine::drain_pending_cost_move_resume(
+                state,
+                events,
+                super::engine::CostMoveDrainBoundary::ReplacementPrevented {
+                    action_event_start: replacement_action_event_start,
+                },
+            )? {
+                // CR 118.12 + CR 605.3b + CR 616.1: A prevented mana cost has
+                // the same rider ordering as a delivered one: its typed root
+                // settles before any ordinary continuation drains.
+                if resumed_mana_ability_cost
+                    && matches!(waiting_for, WaitingFor::Priority { .. })
                     && (state.pending_continuation.is_some()
                         || state.pending_change_zone_iteration.is_some())
                 {

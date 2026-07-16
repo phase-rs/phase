@@ -4223,6 +4223,7 @@ mod tests {
                 next_exiled: 0,
                 next_sacrificed: 0,
                 selected_exile_remaining: Some(vec![hidden]),
+                selected_sacrifice_remaining: None,
                 deferred_cost_events: Vec::new(),
                 current_action_deferred_start: 0,
                 parent: None,

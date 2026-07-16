@@ -52,6 +52,10 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         ))
 }
 
+fn redirect_self_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefinition {
+    redirect_moved_to(destination, redirected_to).valid_card(TargetFilter::SelfRef)
+}
+
 fn prompt_after_moved_to_exile() -> ReplacementDefinition {
     redirect_moved_to_with_post_effect(Zone::Exile, Zone::Exile)
 }
@@ -210,6 +214,531 @@ fn stage_prevented_mana_cost_move(
         candidate_count: 1,
         candidates: vec![],
     };
+}
+
+#[test]
+fn village_rites_sacrifice_cost_pauses_for_competing_graveyard_replacements() {
+    const VILLAGE_RITES: &str =
+        "As an additional cost to cast this spell, sacrifice a creature.\nDraw two cards.";
+    const DARKSTEEL_COLOSSUS: &str = "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nIndestructible (Effects that say \"destroy\" don't destroy this creature. A creature with indestructible can't be destroyed by damage.)\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.";
+    const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let village_rites = scenario
+        .add_spell_to_hand_from_oracle(P0, "Village Rites", true, VILLAGE_RITES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    let darksteel = scenario
+        .add_creature_from_oracle(P0, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
+        .id();
+    let rest_in_peace = scenario
+        .add_creature(P0, "Rest in Peace", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(REST_IN_PEACE)
+        .id();
+    scenario.add_basic_land(P0, ManaColor::Blue);
+
+    let mut runner = scenario.build();
+    let initial_state = runner.state().clone();
+    let card_id = runner.state().objects[&village_rites].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: village_rites,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Village Rites should announce before its additional cost is selected");
+    assert!(
+        runner.state().objects[&village_rites].zone == Zone::Hand,
+        "the spell object must remain in hand until its cost is fully paid"
+    );
+
+    let result = runner
+        .act(GameAction::SelectCards {
+            cards: vec![darksteel],
+        })
+        .expect("the chosen sacrifice cost should reach its replacement pipeline");
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the interrupted sacrifice cost must surface its CR 616.1 replacement choice"
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume.as_ref(),
+            Some(PendingCostMoveResume::SacrificeForCost {
+                player,
+                chosen,
+                paused_at_index: 0,
+                ..
+            }) if *player == P0 && chosen == &vec![darksteel]
+        ),
+        "the interrupted sacrifice cost must retain a typed cost-move continuation"
+    );
+    assert!(
+        runner.state().objects[&village_rites].zone == Zone::Hand
+            && !result.events.iter().any(
+                |event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == village_rites)
+            ),
+        "the spell must not complete its cast while the sacrifice cost is unpaid"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the engine must not grant priority while the cost is unpaid"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { ref candidates, .. }
+                if candidates.iter().any(|candidate| candidate.source_id == rest_in_peace)
+        ),
+        "Rest in Peace must be one of the material replacement choices"
+    );
+
+    let rest_in_peace_index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate.source_id == rest_in_peace)
+            .expect("Rest in Peace replacement is selectable"),
+        waiting_for => panic!("expected replacement choice, got {waiting_for:?}"),
+    };
+    let completed = runner
+        .act(GameAction::ChooseReplacement {
+            index: rest_in_peace_index,
+        })
+        .expect("Rest in Peace should replace the sacrifice destination");
+
+    assert_eq!(runner.state().objects[&darksteel].zone, Zone::Exile);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert!(
+        completed
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == village_rites)),
+        "Village Rites must finish casting once its paid sacrifice reaches exile"
+    );
+
+    let mut darksteel_first_runner = GameRunner::from_state(initial_state);
+    let card_id = darksteel_first_runner.state().objects[&village_rites].card_id;
+    darksteel_first_runner
+        .act(GameAction::CastSpell {
+            object_id: village_rites,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce the symmetric Village Rites cast");
+    darksteel_first_runner
+        .act(GameAction::SelectCards {
+            cards: vec![darksteel],
+        })
+        .expect("select Darksteel Colossus for the symmetric sacrifice cost");
+    let darksteel_index = match &darksteel_first_runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate.source_id == darksteel)
+            .expect("Darksteel Colossus replacement is selectable"),
+        waiting_for => panic!("expected replacement choice, got {waiting_for:?}"),
+    };
+    let darksteel_completed = darksteel_first_runner
+        .act(GameAction::ChooseReplacement {
+            index: darksteel_index,
+        })
+        .expect("Darksteel Colossus should replace its own sacrifice");
+    assert_eq!(
+        darksteel_first_runner.state().objects[&darksteel].zone,
+        Zone::Library,
+        "choosing Darksteel Colossus first must use its library redirect"
+    );
+    assert!(
+        darksteel_completed.events.iter().any(
+            |event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == village_rites)
+        ),
+        "the symmetric redirect must still complete Village Rites exactly once"
+    );
+}
+
+fn count_two_sacrifice_activation_witness(
+    with_departure_observer: bool,
+) -> (
+    GameRunner,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Count-Two Sacrifice Activation Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                2,
+            ))),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Count-Two Sacrifice Witness", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Count-Two Sacrifice Witness", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let mut runner = scenario.build();
+    if with_departure_observer {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&first)
+            .expect("the first selected creature exists before the sacrifice")
+            .trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard)
+                    .trigger_zones(vec![Zone::Battlefield])
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    )),
+            );
+    }
+    (runner, source, first, second)
+}
+
+#[test]
+fn count_two_sacrifice_cost_resumes_at_second_object_and_activates_once() {
+    let (mut runner, source, first, second) = count_two_sacrifice_activation_witness(false);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("begin the count-two sacrifice activation");
+
+    let initial = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("the second sacrifice should reach its replacement pipeline");
+    assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert!(matches!(
+        runner.state().pending_cost_move_resume.as_ref(),
+        Some(PendingCostMoveResume::SacrificeForCost {
+            chosen,
+            paused_at_index: 1,
+            ..
+        }) if chosen == &vec![first, second]
+    ));
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("deliver the second selected sacrifice");
+    assert_ne!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(matches!(resumed.waiting_for, WaitingFor::Priority { .. }));
+
+    let events = initial.events.iter().chain(resumed.events.iter());
+    assert_eq!(
+        events
+            .clone()
+            .filter(|event| matches!(event, GameEvent::PermanentSacrificed { object_id, .. } if *object_id == first))
+            .count(),
+        1,
+        "the resume must not replay the first selected sacrifice"
+    );
+    assert_eq!(
+        events
+            .clone()
+            .filter(|event| matches!(event, GameEvent::PermanentSacrificed { object_id, .. } if *object_id == second))
+            .count(),
+        1,
+        "the paused second sacrifice must complete exactly once"
+    );
+    assert_eq!(
+        events
+            .filter(|event| matches!(event, GameEvent::AbilityActivated { source_id, .. } if *source_id == source))
+            .count(),
+        1,
+        "the selected activation cost is removed once and the activation proceeds once"
+    );
+}
+
+#[test]
+fn paused_sacrifice_cost_stamps_cross_action_departures_and_collects_dies_once() {
+    let (mut runner, source, first, second) = count_two_sacrifice_activation_witness(true);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("begin the observed count-two sacrifice activation");
+    let initial = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("the second sacrifice pauses after the first dies");
+    assert!(matches!(
+        initial.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the replacement completion must settle the complete sacrifice group");
+    assert!(resumed.events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged { object_id, record, .. }
+            if *object_id == second && record.co_departed == vec![first]
+    )));
+    for (object_id, other) in [(first, second), (second, first)] {
+        assert!(
+            runner.state().zone_changes_this_turn.iter().any(|record| {
+                record.object_id == object_id
+                    && record.from_zone == Some(Zone::Battlefield)
+                    && record.co_departed == vec![other]
+            }),
+            "the authoritative LKI ledger must retain the complete co-departure group"
+        );
+    }
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == first
+            ))
+            .count(),
+        1,
+        "the deferred first departure trigger is collected once after the full group is stamped"
+    );
+}
+
+#[test]
+fn self_sacrifice_mana_cost_waits_for_replacement_before_producing_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Self-Sacrifice Mana Replacement Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::SelfRef,
+                1,
+            ))),
+        )
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let mut runner = scenario.build();
+
+    let initial = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("the self-sacrifice mana ability reaches its replacement choice");
+    assert!(matches!(
+        initial.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        0,
+        "mana must not be produced before the sacrifice cost finishes"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the replacement completion resumes the mana cursor");
+    assert_ne!(runner.state().objects[&source].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        1
+    );
+    assert_eq!(
+        initial
+            .events
+            .iter()
+            .chain(resumed.events.iter())
+            .filter(|event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == source))
+            .count(),
+        1,
+        "the resumed self-sacrifice cost produces mana exactly once"
+    );
+}
+
+#[test]
+fn selected_sacrifice_mana_cost_resumes_without_repaying_its_prefix() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Selected-Sacrifice Mana Replacement Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                2,
+            ))),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Selected-Sacrifice Mana Witness", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Selected-Sacrifice Mana Witness", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("begin the selected-sacrifice mana ability");
+    let initial = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("the second selected mana sacrifice reaches its replacement choice");
+    assert!(matches!(
+        runner.state().pending_cost_move_resume.as_ref(),
+        Some(PendingCostMoveResume::ManaAbilityPayment { cursor, .. })
+            if cursor.next_sacrificed == 2
+                && cursor.selected_sacrifice_remaining.as_deref() == Some(&[])
+    ));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        0,
+        "the mana ability cannot produce its output before every selected sacrifice settles"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("resuming the selected sacrifice cursor produces mana");
+    assert_ne!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        1
+    );
+    let events = initial.events.iter().chain(resumed.events.iter());
+    assert_eq!(
+        events
+            .clone()
+            .filter(|event| matches!(event, GameEvent::PermanentSacrificed { object_id, .. } if *object_id == first))
+            .count(),
+        1,
+        "the cursor must not re-pay the first selected sacrifice"
+    );
+    assert_eq!(
+        events
+            .filter(|event| matches!(event, GameEvent::ManaAdded { source_id, .. } if *source_id == source))
+            .count(),
+        1,
+        "the selected sacrifice cursor settles its cost events and produces mana once"
+    );
+}
+
+#[test]
+fn mandatory_single_sacrifice_redirect_completes_without_a_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Mandatory Single Sacrifice Redirect Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::SelfRef,
+                1,
+            ))),
+        )
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .id();
+    let mut runner = scenario.build();
+
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("the unambiguous sacrifice redirect must resolve synchronously");
+    assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        1
+    );
 }
 
 #[test]
