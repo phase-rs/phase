@@ -298,6 +298,25 @@ export type AttackTarget =
   | { type: "Planeswalker"; data: ObjectId }
   | { type: "Battle"; data: ObjectId };
 
+export type EntryAttackDestination =
+  | { type: "AnyDefender" }
+  | { type: "PlayerOrPlaneswalker" }
+  | { type: "Exact"; data: { target: AttackTarget } };
+
+export type PermanentEntryMode =
+  | { type: "Normal" }
+  | { type: "TappedAndAttacking"; data: { destination: EntryAttackDestination } };
+
+export interface MeldSelection {
+  source_id: ObjectId;
+  partner_id: ObjectId;
+  controller: PlayerId;
+  expected_source: string;
+  expected_partner: string;
+  result: string;
+  entry: PermanentEntryMode;
+}
+
 // CR 508.1c/d + CR 509.1b/c: per-creature combat requirement/restriction the
 // engine surfaces on the declare-attackers/blockers waiting payloads for
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
@@ -710,15 +729,10 @@ export type MayTriggerAutoChoiceOp =
   | { type: "Remove"; data: { key: MayTriggerAutoChoiceKey } }
   | { type: "ClearAll" };
 
-// CR 603.3b: The mutation a `SetTriggerOrderTemplate` action performs on the
-// acting player's saved trigger-ordering templates. `Save` echoes the prompted
-// group's source object ids + the submitted permutation; `Remove` echoes a
-// stored key; `ClearAll` drops every saved template belonging to the acting
-// player. Mirrors engine `TriggerOrderTemplateOp` (types/actions.rs).
-export type TriggerOrderTemplateOp =
-  | { type: "Save"; data: { sources: ObjectId[]; order: number[] } }
-  | { type: "Remove"; data: { key: DecisionGroupKey } }
-  | { type: "ClearAll" };
+// CR 603.3b: A live `OrderTriggers` answer is the only way to save a
+// trigger-ordering preference. This public action only forgets the acting
+// player's saved preferences.
+export type TriggerOrderTemplateOp = { type: "ClearAll" };
 
 // CR 603.3b: Order-insensitive identity of a recurring decision group — the
 // canonical sorted (identity, multiplicity) source multiset plus its kind.
@@ -1079,6 +1093,7 @@ export interface ResolvedAbility {
   sub_ability?: ResolvedAbility;
   else_ability?: ResolvedAbility;
   description?: string;
+  selected_mode_labels?: string[];
   /**
    * CR 400.7 identity latch + CR 704.5d token cessation: the source's card
    * identity snapshotted at trigger push, so an `AllCopies` priority yield can
@@ -1149,6 +1164,8 @@ export interface StackEntryDisplay {
   token_image_ref?: TokenImageRef | null;
   kind_label: string;
   ability_description?: string;
+  selected_mode_labels?: string[];
+  is_pending?: boolean;
   targets?: StackTargetDisplay[];
   paid?: StackPaidFactView[];
   trigger_context?: TriggerContextDisplay[];
@@ -1319,6 +1336,8 @@ export type MulliganDecisionPhase =
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
+  | { type: "MeldPairChoice"; data: { player: PlayerId; choices: MeldSelection[] } }
+  | { type: "MeldAttackTargetChoice"; data: { player: PlayerId; context: MeldSelection; valid_targets: AttackTarget[] } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
@@ -1436,6 +1455,8 @@ export type WaitingFor =
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
+  | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
+  | { type: "RespondToPrecastCopyShortcut"; data: { player: PlayerId; epoch: number; breakpoint_ids?: number[]; remaining_players?: PlayerId[] } }
   | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[] } }
   // CR 118.12a: Disjunctive unless-cost — player picks **which** sub-cost
   // to pay (or declines all). Drives Tergrid's Lantern and the broader
@@ -1563,6 +1584,12 @@ export type WaitingFor =
       choose_filter: TargetFilter;
       copy_modifications?: unknown[];
       scale?: unknown;
+      // CR 102.1 + CR 103.1: whose battlefield the chooser's pool was drawn from
+      // (their own or a seat-neighbor's). Resolver-internal; the modal renders the
+      // precomputed public `eligible` list and ignores this.
+      choose_scope?:
+        | { type: "Chooser" }
+        | { type: "Neighbor"; direction: { type: "Left" | "Right" } };
       source_id: ObjectId;
       source_controller: PlayerId;
       remaining_players: PlayerId[];
@@ -1577,6 +1604,20 @@ export type WaitingFor =
       target_player: PlayerId;
       eligible: ObjectId[];
       cap: number;
+      choose_filter?: TargetFilter;
+      sacrifice_filter?: TargetFilter;
+      chooser_scope?: "EachPlayerSelf" | "ControllerForAll";
+      source_id: ObjectId;
+      source_controller?: PlayerId;
+      remaining_players: PlayerId[];
+      all_kept: ObjectId[];
+      scoped_players: PlayerId[];
+    } }
+  | { type: "KeepExactPermanentsChoice"; data: {
+      player: PlayerId;
+      target_player: PlayerId;
+      eligible: ObjectId[];
+      required_count: number;
       choose_filter?: TargetFilter;
       sacrifice_filter?: TargetFilter;
       chooser_scope?: "EachPlayerSelf" | "ControllerForAll";
@@ -1813,8 +1854,16 @@ export interface PriorityYield {
   target: YieldTarget;
 }
 
+export type PrecastCopyShortcutResponse =
+  | { type: "Propose"; data: { route_id: number } }
+  | { type: "Decline" }
+  | { type: "Accept" }
+  | { type: "Shorten"; data: { breakpoint_id: number } };
+
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "ChooseMeldPair"; data: { source_id: ObjectId; partner_id: ObjectId } }
+  | { type: "ChooseEntryAttackTarget"; data: { target: AttackTarget } }
   | { type: "RollPlanarDie" }
   | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
@@ -1942,6 +1991,7 @@ export type GameAction =
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
   | { type: "ChooseKeptCreatures"; data: { kept: ObjectId[] } }
+  | { type: "ChooseKeptPermanents"; data: { kept: ObjectId[] } }
   | { type: "ChooseX"; data: { value: number } }
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
@@ -1956,6 +2006,7 @@ export type GameAction =
   | { type: "DeclareShortcut"; data: { count: IterationCount; template?: DecisionTemplate | null } }
   | { type: "RespondToShortcut"; data: { response: ShortcutResponse } }
   | { type: "DeclineShortcut" }
+  | { type: "PrecastCopyShortcut"; data: { epoch: number; response: PrecastCopyShortcutResponse } }
   | { type: "Concede"; data: { player_id: PlayerId } };
 
 // CR 605.3b + CR 106.1a: Shape of the prompt surfaced by WaitingFor::ChooseManaColor.
@@ -2338,6 +2389,12 @@ export interface TurnOrderSlotView {
  * `engine::game::derived_views::DerivedViews`.
  */
 export interface DerivedViews {
+  /**
+   * Engine-classified live keyword badges for battlefield permanents. The
+   * strip renders this map directly rather than deciding which keyword timing
+   * matters on the battlefield. Keyed by ObjectId-as-string.
+   */
+  battlefield_keyword_badges?: Record<string, Keyword[]>;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
   /**
@@ -2598,6 +2655,24 @@ export interface GameState {
   /** CR 732.2a: opt-in gate for the live combo-detector (default Off). Set from the
    *  match's immutable `MatchConfig` at game creation; not mutable mid-game. */
   loop_detection?: LoopDetectionMode;
+}
+
+/**
+ * Engine-private data carried only by a trusted local persistence snapshot.
+ * The frontend treats the envelope as opaque: it may forward it back to the
+ * engine, but every rendered or wire-facing view uses `state` alone.
+ */
+export interface TrustedGameStateEnvelope {
+  state: GameState;
+  precast_shortcut_runtime?: unknown;
+}
+
+/** A legacy raw save or the trusted envelope emitted by the engine worker. */
+export type PersistedGameState = GameState | TrustedGameStateEnvelope;
+
+/** Extract the public game state without exposing trusted runtime internals. */
+export function persistedGameStateView(state: PersistedGameState): GameState {
+  return "state" in state ? state.state : state;
 }
 
 export type TurnBoundary = "EndOfCurrentTurn" | "MyNextTurnStart";
@@ -2943,6 +3018,11 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /**
+   * Read-only preview of the exact automatic `CastSpell` action currently
+   * offered by the engine. Unsupported transports omit this capability.
+   */
+  previewManaPayment?(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
   /**
@@ -2960,7 +3040,9 @@ export interface EngineAdapter {
     aiSeats: { playerId: number; difficulty: string }[],
     maxResolutions?: number,
   ): Promise<BatchResolveResult>;
-  restoreState(state: GameState): void | Promise<void>;
+  restoreState(state: PersistedGameState): void | Promise<void>;
+  /** Trusted local persistence snapshot, when this adapter owns the engine. */
+  exportPersistenceState?(): Promise<string>;
   dispose(): void;
 
   /**

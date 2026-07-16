@@ -1,7 +1,7 @@
 //! Runtime proof that Escape works on INSTANTS, not just permanents.
 //!
 //! Cluster 62 (WHO misparse) registered the `escape—` em-dash branch in
-//! `parse_keyword_from_oracle` so the generic keyword-cost guards extract Escape
+//! `parse_granted_keyword_fragment` so the generic keyword-cost guards extract Escape
 //! uniformly for every card type. Before that fix, the escape line on an
 //! instant/sorcery fell through to `Effect::Unimplemented` and the card was
 //! never offered as an escape cast from the graveyard.

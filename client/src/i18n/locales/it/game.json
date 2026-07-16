@@ -22,6 +22,16 @@
       "Advantage": "This loop generates unbounded advantage."
     }
   },
+  "precastShortcut": {
+    "offerTitle": "Copy Shortcut",
+    "offerSubtitle": "The engine verified a finite copy route. Propose it or continue normally.",
+    "propose": "Propose route",
+    "routeCount_one": "1 verified route is available.",
+    "routeCount_other": "{{count}} verified routes are available.",
+    "respondTitle": "Copy Shortcut Proposed",
+    "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
+    "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
+  },
   "resolutionProgress": {
     "label": "Risoluzione {{resolved}} / {{total}}",
     "collapse": "Comprimi avanzamento risoluzione",
@@ -235,10 +245,14 @@
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_one": "Mostra {{count}} carta assegnata nascosta",
+    "hiddenAttachmentsAria_other": "Mostra {{count}} carte assegnate nascoste",
     "fanPick": "Scegli",
     "fanConfirm": "Conferma ({{count}})",
     "viewAttachments_one": "Mostra carta assegnata",
     "viewAttachments_other": "Mostra {{count}} carte assegnate",
+    "viewAttachmentsFor_one": "Mostra carta assegnata a {{name}}",
+    "viewAttachmentsFor_other": "Mostra {{count}} carte assegnate a {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -279,6 +293,11 @@
     "creatureFallback": "Creatura #{{id}}",
     "planeswalkerFallback": "Planeswalker #{{id}}",
     "objectFallback": "Object #{{id}}",
+    "playerTarget": "{{name}} (Giocatore — {{life}} punti vita)",
+    "playerTargetProjected": "{{name}} (Giocatore — {{life}} → {{projectedLife}})",
+    "playerTargetLethal": "{{name}} (Giocatore — {{life}} → {{projectedLife}} · Letale)",
+    "planeswalkerTarget": "{{name}} (Planeswalker)",
+    "battleTarget": "{{name}} (Battaglia)",
     "you": "Tu",
     "ally": "Alleato",
     "restoreDialog": "Ripristina finestra",
@@ -629,6 +648,7 @@
     "dockLeft": "Ancora la pila a sinistra",
     "dockRight": "Ancora la pila a destra",
     "casting": "Lancio…",
+    "selectedModes": "Modalità selezionate",
     "next": "Successivo",
     "activated": "Attivata",
     "triggered": "Innescata",
@@ -1016,6 +1036,13 @@
     "activationCost": {
       "title": "Scegli il costo di attivazione"
     },
+    "meld": {
+      "choosePair": "Scegli le carte da combinare",
+      "into": "Combina in {{result}}",
+      "chooseAttackTarget": "Scegli cosa attacca",
+      "player": "Giocatore {{id}}",
+      "permanent": "Permanente {{id}}"
+    },
     "debug": {
       "modeBanner": "MODALITÀ DEBUG - Clicca qualsiasi carta",
       "modeButtonOff": "MODALITÀ CLIC DISATTIVATA"
@@ -1232,6 +1259,7 @@
       "titleTopdeck": "Metti nel grimorio",
       "titleBattlefield": "Metti sul campo di battaglia",
       "titleHand": "Restituisci",
+      "titleExile": "Esilia",
       "titleUntap": "Stappa",
       "titleTap": "Tappa",
       "titleAttach": "Attach",
@@ -1253,6 +1281,12 @@
       "subtitleBattlefieldUpTo_other": "Scegli fino a {{count}} carte da mettere sul campo di battaglia",
       "subtitleBattlefieldRange_one": "Scegli {{min}}-{{count}} carta da mettere sul campo di battaglia",
       "subtitleBattlefieldRange_other": "Scegli {{min}}-{{count}} carte da mettere sul campo di battaglia",
+      "subtitleExileExact_one": "Scegli {{count}} carta da esiliare",
+      "subtitleExileExact_other": "Scegli {{count}} carte da esiliare",
+      "subtitleExileUpTo_one": "Scegli fino a {{count}} carta da esiliare",
+      "subtitleExileUpTo_other": "Scegli fino a {{count}} carte da esiliare",
+      "subtitleExileRange_one": "Scegli {{min}}-{{count}} carta da esiliare",
+      "subtitleExileRange_other": "Scegli {{min}}-{{count}} carte da esiliare",
       "subtitleHandExact_one": "Scegli {{count}} permanente da restituire nella mano del suo proprietario",
       "subtitleHandExact_other": "Scegli {{count}} permanenti da restituire nella mano del loro proprietario",
       "subtitleHandUpTo_one": "Scegli fino a {{count}} permanente da restituire nella mano del suo proprietario",
@@ -1284,6 +1318,7 @@
       "labelTop": "Cima ({{selected}}/{{count}})",
       "labelPut": "Metti ({{selected}}/{{count}})",
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
+      "labelExile": "Esilia ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Cima"
     },
@@ -1495,7 +1530,11 @@
     "manaCombination": {
       "title": "Scegli la combinazione di mana",
       "subtitleAny": "Seleziona ogni colore di mana da produrre",
-      "subtitle": "Seleziona quale combinazione di mana produrre"
+      "subtitle": "Seleziona quale combinazione di mana produrre",
+      "amount": "{{selected}} / {{count}} mana selezionati",
+      "decrease": "Rimuovi mana {{color}}",
+      "increase": "Aggiungi mana {{color}}",
+      "quantity": "Mana {{color}}: {{count}}"
     },
     "untapSubset": {
       "title": "Choose permanents to untap",

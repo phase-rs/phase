@@ -36,7 +36,7 @@ use crate::types::zones::{EtbTapState, Zone};
 
 use super::oracle_effect::{parse_effect_chain_with_context, strip_trailing_duration};
 use super::oracle_ir::context::ParseContext;
-use super::oracle_keyword::parse_keyword_from_oracle;
+use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_target::parse_target;
 use super::oracle_util::SELF_REF_TYPE_PHRASES;
 
@@ -409,7 +409,7 @@ fn parse_threshold_vote_clauses(
 /// "with the most votes [or tied for most votes]" suffix. For each named choice
 /// the `each <characteristic>` distributor is substituted with that choice and
 /// the per-choice effect is built via the standard keyword building block
-/// (`parse_keyword_from_oracle`), wrapped in a continuous self-grant.
+/// (`parse_granted_keyword_fragment`), wrapped in a continuous self-grant.
 ///
 /// CR 611.2a: the grant has no stated duration, so it lasts until the end of the
 /// game (`Duration::Permanent`) — NOT the `UntilEndOfTurn` keyword-grant default.
@@ -450,7 +450,7 @@ fn parse_all_tied_vote_clause(
     let mut per_choice_effect: Vec<Box<AbilityDefinition>> = Vec::with_capacity(choices.len());
     for choice in choices {
         let phrase = substitute_each_noun(keyword_template, choice)?;
-        let keyword = parse_keyword_from_oracle(&phrase.to_lowercase())?;
+        let keyword = parse_granted_keyword_fragment(&phrase.to_lowercase())?;
         per_choice_effect.push(Box::new(build_self_keyword_grant(
             kind,
             keyword,

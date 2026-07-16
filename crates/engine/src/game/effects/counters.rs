@@ -627,6 +627,10 @@ fn apply_pending_counter_post_action(
             }
             true
         }
+        PendingCounterPostAction::FinishMeldEntry { context } => {
+            crate::game::meld::finish_deferred_meld_entry(state, context, events);
+            true
+        }
         PendingCounterPostAction::ClearPendingEtbCounters { object_id } => {
             state
                 .pending_etb_counters
@@ -3763,6 +3767,7 @@ mod tests {
                 counters: lki_counters,
                 tapped: false,
                 is_suspected: false,
+                attachments: Vec::new(),
             },
         );
 

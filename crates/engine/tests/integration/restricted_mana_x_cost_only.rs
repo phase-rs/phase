@@ -39,6 +39,7 @@ fn spell_meta(types: &[&str], cost: &ManaCost) -> SpellMeta {
         color_count: None,
         has_x_in_cost: cost.has_x(),
         is_face_down: false,
+        cant_spend_mana: false,
     }
 }
 

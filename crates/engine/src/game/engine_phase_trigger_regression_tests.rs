@@ -2481,6 +2481,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
             source_id,
             PlayerId(0),
         )),
+        &state,
     ));
 
     let result = apply_as_current(

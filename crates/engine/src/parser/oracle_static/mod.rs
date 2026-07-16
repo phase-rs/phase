@@ -37,6 +37,7 @@ mod prelude {
     pub(super) use super::super::oracle_target::{
         distribute_controller_to_or, parse_combat_status_prefix, parse_counter_suffix,
         parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase,
+        scope_target_spell_phrase,
     };
     pub(super) use super::super::oracle_util::{
         has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
@@ -45,11 +46,12 @@ mod prelude {
     };
     pub(super) use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
-        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, CombatRelation,
-        CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CostCategory,
-        CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, ColorChangeMode,
+        CombatRelation, CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
+        CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -84,6 +86,7 @@ mod keyword_grant;
 mod loyalty;
 mod mana_transform;
 mod restriction;
+mod same_is_true;
 mod shared;
 mod static_helpers;
 mod type_change;
@@ -139,9 +142,9 @@ mod support {
 }
 
 pub(crate) use cost_mod::{
-    parse_activated_ability_cost_head, parse_alternative_keyword_cost,
-    parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
-    parse_spells_alternative_cost,
+    parse_activated_ability_cost_head, parse_alt_cost_frequency_prefix,
+    parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
+    parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
 };
 pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
@@ -174,10 +177,7 @@ pub(crate) use shared::{
 pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use static_helpers::parse_basic_land_type_plural;
 pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
-pub(crate) use type_change::{
-    parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
-    parse_compound_you_control_chosen_type_static_prefix, parse_every_creature_type_static_prefix,
-};
+pub(crate) use type_change::parse_additive_type_clause_modifications;
 
 /// Parse a static/continuous ability line into a `StaticDefinition`.
 #[tracing::instrument(level = "debug")]

@@ -1,7 +1,7 @@
 ---
 name: engine-implementation-executor
 description: Execute an already-reviewed phase.rs implementation plan surgically. Receives the approved plan + scope, edits files, runs Tilt-first verification, and returns a diff summary with any judgement-call notes. Does NOT plan, does NOT review, does NOT commit. Spawned by the `/engine-implementer` skill.
-tools: Read, Edit, Write, Bash, Grep, Glob, SendMessage
+tools: Read, Edit, Write, Bash, Grep, Glob, SendMessage, mcp__serena, mcp__ast-grep
 model: opus
 ---
 

@@ -5,6 +5,7 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 
 /// CR 701.22a: Scry N — look at top N, put any number on bottom in any order, rest on top in any order.
@@ -39,11 +40,14 @@ pub fn resolve(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            apply_scry_after_replacement(state, event, events);
+            if matches!(&event, ProposedEvent::Draw { .. }) {
+                resolve_scry_substituted_draw(state, ability.source_id, event, events);
+                return Ok(());
+            }
+
+            let _ = apply_scry_after_replacement(state, event, events);
             // CR 614.6 + CR 614.11 + CR 704.3: A scry replacement may substitute
-            // scry→draw (handled inside `apply_scry_after_replacement` → calls
-            // `apply_draw_after_replacement`); if the substituted draw stashes a
-            // mandatory-post-effect continuation, drain it in the same step.
+            // a mandatory-post-effect continuation. Drain it in the same step.
             // Mirrors the pipeline ceremony in
             // `effects::draw::draw_through_replacement` — scry's own propose
             // event variant means we can't use that helper directly, but the
@@ -56,6 +60,20 @@ pub fn resolve(
         }
         ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(player) => {
+            // `replace_event` continues through a substituted Draw event before
+            // returning, so a per-draw replacement can park its full-count Draw
+            // here. Take that parked event back into the draw-sequence authority
+            // before the generic replacement resume delivers it as one batch.
+            let Some(pending) = state.pending_replacement.take() else {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
+            };
+            if matches!(&pending.proposed, ProposedEvent::Draw { .. }) {
+                resolve_scry_substituted_draw(state, ability.source_id, pending.proposed, events);
+                return Ok(());
+            }
+            state.pending_replacement = Some(pending);
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
             return Ok(());
@@ -71,29 +89,103 @@ pub fn resolve(
     Ok(())
 }
 
+fn resolve_scry_substituted_draw(
+    state: &mut GameState,
+    source_id: ObjectId,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) {
+    if let ReplacementResult::NeedsChoice(player) =
+        apply_scry_after_replacement_with_source(state, source_id, event, events)
+    {
+        state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(player, state);
+    }
+}
+
 pub(crate) fn apply_scry_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) {
+) -> ReplacementResult {
+    let ProposedEvent::Draw {
+        player_id,
+        count,
+        applied,
+        ..
+    } = event
+    else {
+        return apply_scry_after_replacement_without_draw(state, event, events);
+    };
+
+    // CR 614.5: keep the replacements already applied to the substituted draw
+    // instruction on its frame so they cannot re-apply to the individual draws.
+    crate::game::effects::draw::start_draw_sequence_with_origin(
+        state,
+        player_id,
+        count,
+        applied,
+        crate::types::game_state::DrawSequenceOrigin::Plain,
+        events,
+    )
+}
+
+/// Applies an already-replaced scry with the source needed to emit its completion
+/// event if the replacement substituted a draw instruction.
+pub(crate) fn apply_scry_after_replacement_with_source(
+    state: &mut GameState,
+    source_id: ObjectId,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    let ProposedEvent::Draw {
+        player_id,
+        count,
+        applied,
+        ..
+    } = event
+    else {
+        return apply_scry_after_replacement_without_draw(state, event, events);
+    };
+
+    // CR 614.5: keep the replacements already applied to the substituted draw
+    // instruction on its frame so they cannot re-apply to the individual draws.
+    crate::game::effects::draw::start_draw_sequence_with_origin(
+        state,
+        player_id,
+        count,
+        applied,
+        crate::types::game_state::DrawSequenceOrigin::ScryCompletion { source_id },
+        events,
+    )
+}
+
+fn apply_scry_after_replacement_without_draw(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
     let (player_id, count) = match event {
         ProposedEvent::Scry {
             player_id, count, ..
         } => (player_id, count),
-        ProposedEvent::Draw { .. } => {
-            crate::game::effects::draw::apply_draw_after_replacement(state, event, events);
-            return;
-        }
-        _ => return,
+        event => return ReplacementResult::Execute(event),
     };
 
     let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
-        return;
+        return ReplacementResult::Execute(ProposedEvent::Scry {
+            player_id,
+            count,
+            applied: HashSet::new(),
+        });
     };
 
     let count = (count as usize).min(player.library.len());
     if count == 0 {
-        return;
+        return ReplacementResult::Execute(ProposedEvent::Scry {
+            player_id,
+            count: 0,
+            applied: HashSet::new(),
+        });
     }
 
     events.push(GameEvent::PlayerPerformedAction {
@@ -112,6 +204,12 @@ pub(crate) fn apply_scry_after_replacement(
         player: player_id,
         cards,
     };
+
+    ReplacementResult::Execute(ProposedEvent::Scry {
+        player_id,
+        count: count as u32,
+        applied: HashSet::new(),
+    })
 }
 
 #[cfg(test)]

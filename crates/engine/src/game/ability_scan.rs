@@ -94,10 +94,10 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
     CountScope, Duration, EachDamageRecipient, Effect, FilterProp, ForEachCategoryAction,
-    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility,
-    StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
-    TypedFilter,
+    GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition,
+    ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource,
+    TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::Keyword;
@@ -163,6 +163,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -186,6 +187,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         optional_for: _,          // OpponentMayScope: AnyOpponent/AnyPlayer, no read
         target_choice_timing: _,  // Stack/Resolution tag
         description: _,           // display string
+        selected_mode_labels: _,  // display strings, no dynamic read
         min_x_value: _,           // u32
         cant_be_copied: _,        // bool
         copy_count_status: _,     // status tag
@@ -201,8 +203,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         chosen_players: _,        // concrete chosen player ids
         replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
-        dig_found_nothing_for_parent_target: _, // bool seam flag
-        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
+        parent_target_missing_reason: _, // seam flag
     } = a;
 
     let mut acc = scan_effect(effect);
@@ -226,6 +227,14 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
     }
     if let Some(repeat_for) = repeat_for {
         acc = acc.or(scan_quantity_expr(repeat_for));
+    }
+    // CR 601.2b: the announce-time-locked definition of X ("where X is <count> as
+    // you cast this spell") is a live board read like any other quantity — it is
+    // merely READ EARLIER (at announcement) than a resolution-time slot. It is
+    // read-bearing and must be scanned, not classified as a cast-time snapshot;
+    // `chosen_x` (below) is the concrete VALUE this expression produces.
+    if let Some(announced_x) = announced_x {
+        acc = acc.or(scan_quantity_expr(announced_x));
     }
     // CR 601.2c / CR 115.1d: variable-count targeting bounds (min/max) are
     // `QuantityExpr`s that can read a projected/event resource (e.g. a die-result X).
@@ -541,6 +550,7 @@ fn scan_effect(x: &Effect) -> Axes {
             max: _,
             copy_modifications: _,
             scale: _,
+            choose_scope: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(choose_filter));
@@ -729,7 +739,10 @@ fn scan_effect(x: &Effect) -> Axes {
             source: _,
             partner: _,
             result: _,
-        } => Axes::NONE,
+            source_filter,
+            partner_filter,
+            entry: _,
+        } => scan_target_filter(source_filter).or(scan_target_filter(partner_filter)),
         Effect::ExileHaunting { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));
@@ -1057,7 +1070,10 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
-        Effect::ExileResolvingSpellInsteadOfGraveyard => Axes::NONE,
+        // The `on_exile` rider is fixed at parse time and only read by the
+        // stack-resolution router when the replacement applies — no game-state
+        // read happens at scan time, so NONE stays correct.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => Axes::NONE,
         Effect::PreventDamage {
             amount_dynamic,
             target,
@@ -1215,6 +1231,7 @@ fn scan_effect(x: &Effect) -> Axes {
             choose_filter,
             sacrifice_filter,
             total_power_cap,
+            keeper_constraint,
             categories: _,
             chooser_scope: _,
         } => {
@@ -1223,6 +1240,9 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(sacrifice_filter));
             if let Some(x) = total_power_cap {
                 acc = acc.or(scan_quantity_expr(x));
+            }
+            if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
+                acc = acc.or(scan_quantity_expr(count));
             }
             acc
         }
@@ -1825,7 +1845,7 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             },
         },
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
-        QuantityRef::PreviousEffectAmount => Axes::NONE,
+        QuantityRef::PreviousEffectAmount { .. } => Axes::NONE,
         QuantityRef::LifeLostThisTurn { player } => {
             let mut acc = Axes {
                 event: false,
@@ -2233,6 +2253,8 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
         }
         AbilityCondition::HasMaxSpeed => Axes::NONE,
         AbilityCondition::IsMonarch => Axes::NONE,
+        // CR 309.7: controller-state predicate — touches no scan axis.
+        AbilityCondition::CompletedDungeon { .. } => Axes::NONE,
         AbilityCondition::IsInitiative => Axes::NONE,
         AbilityCondition::HasCityBlessing => Axes::NONE,
         AbilityCondition::IsRingBearer => Axes::NONE,
@@ -3087,6 +3109,7 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         // Their drift breaks the board-equality gate (item 1), not the item-4 scan.
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -3153,6 +3176,9 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m + CR 903.3: reads commander designation + the candidate's own
+        // creature types — a board/object read, no player resource.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => Axes::NONE,
 
         // --- QuantityExpr-bearing: recurse so `Ref(LifeTotal)` / `PlayerCounter`
@@ -3219,6 +3245,11 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         // has `damage_marked == 0` yet a persistent journal record, so gate (1) cannot
         // backstop this read — PROVEN projected, fail closed.
         FilterProp::WasDealtDamageThisTurn => Axes::CONSERVATIVE,
+        // CR 120.1: reads `state.damage_dealt_this_turn`, the same append-only
+        // per-turn journal a loop pumps and `project_out_resources` clears — a
+        // projected-resource read, PROVEN projected, fail closed (mirrors the
+        // passive `WasDealtDamageThisTurn` arm above).
+        FilterProp::DealtDamageThisTurn => Axes::CONSERVATIVE,
         // CR 400 / CR 603.6a: runtime eval reads `state.zone_changes_this_turn`, an
         // append-only event journal a loop pumps, cleared by `project_out_resources`
         // and strict-compared by nothing in gate (1). A flicker/blink loop keeps the
@@ -3460,6 +3491,7 @@ fn scan_replacement_condition(x: &ReplacementCondition) -> Axes {
         }
         ReplacementCondition::ClassLevelGE { level: _ } => Axes::NONE,
         ReplacementCondition::DuringUntapStep => Axes::NONE,
+        ReplacementCondition::DuringDrawStep { .. } => Axes::NONE,
         ReplacementCondition::ControllerControlsSource {
             source: _,
             controller: _,
@@ -3626,6 +3658,7 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
         modal,
         mode_abilities,
         repeat_for,
+        announced_x,
         player_scope,
         starting_with,
         target_chooser,
@@ -3669,6 +3702,11 @@ fn ability_definition_axes(def: &AbilityDefinition) -> Axes {
     }
     if let Some(condition) = condition {
         acc = acc.or(scan_ability_condition(condition));
+    }
+    // CR 601.2b: the announce-time-locked definition of X is a live board read,
+    // merely read earlier (at announcement) than a resolution-time slot.
+    if let Some(announced_x) = announced_x {
+        acc = acc.or(scan_quantity_expr(announced_x));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc = acc.or(scan_quantity_expr(min));
@@ -4268,7 +4306,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -4531,7 +4569,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -4670,6 +4708,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         player_scope: _, // iteration fan-out, pure player-filter eval
         starting_with: _, // APNAP start override, no prompt
         repeat_for: _, // "for each" count, pure quantity eval (game/quantity.rs)
+        announced_x: _, // CR 601.2b announce-time count, pure quantity eval, no prompt
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
@@ -4683,6 +4722,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         kind: _,      // AbilityKind tag (no payload)
         context: _,   // SpellContext: cast-time fact snapshot, not a live choice
         description: _, // display string
+        selected_mode_labels: _, // display strings, no resolution-time choice
         min_x_value: _, // u32
         cant_be_copied: _, // bool
         copy_count_status: _, // status tag
@@ -4697,8 +4737,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
-        dig_found_nothing_for_parent_target: _, // bool seam flag
-        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
+        parent_target_missing_reason: _, // seam flag
     } = a;
 
     // CR 608.2d: an optional effect / optional targeting / opponent-may

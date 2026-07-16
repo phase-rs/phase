@@ -25,8 +25,8 @@
 //!  2. **Nefarious Lich** — `Template`. An ordinary substitution (CR 614.6): the
 //!     life gain never happens and an equal-sized draw happens instead.
 //!
-//!  3. **New Way Forward** — the card that *should* be the `Resolved` witness,
-//!     pinned at the point where it fails to be one. See its test.
+//!  3. **New Way Forward** — the `Resolved` witness: a resolving spell whose
+//!     prevention rider deals back and draws. See its test.
 //!
 //! # Which arm a card takes — and why `Resolved` has no draw witness at all
 //!
@@ -44,12 +44,12 @@
 //! arms confirms it — Swans and Nefarious Lich print `Template`, and `Resolved`
 //! never fires.
 //!
-//! New Way Forward is the only card in the pool whose prevention rider draws, and
-//! its rider is never installed (it parses as `SequentialSibling` rather than
-//! `ContinuationStep`, which is what `prevent_damage.rs` requires). So the
-//! `Resolved` -> `Effect::Draw` edge is **type-reachable but not
-//! production-reachable**: no card exercises it today. Test 3 pins that, and goes
-//! red the moment it stops being true.
+//! New Way Forward is the only card in the pool whose prevention rider draws. Its
+//! rider (a separate "When damage is prevented this way, …" sentence) is now
+//! classified as a `ContinuationStep`, so `prevent_damage.rs` installs it as the
+//! shield's `runtime_execute` and it takes the `Resolved` arm (issue #5658). So
+//! the `Resolved` -> `Effect::Draw` edge has a real production witness — Test 3
+//! exercises it end to end.
 //!
 //! CR 121.2 + CR 614.6 + CR 615.1 + CR 615.5 + CR 119.3.
 
@@ -296,43 +296,33 @@ fn nefarious_lich_case(db: &CardDatabase) {
     );
 }
 
-/// New Way Forward — the only card in the pool that could reach the `Resolved`
-/// arm with a Draw. It does not, today. This test pins that.
+/// New Way Forward — the pool's only card that reaches the `Resolved`->`Draw`
+/// edge with a prevention rider. This is its production witness (issue #5658).
 ///
 /// Oracle (pool-verified): "The next time a source of your choice would deal
 /// damage to you this turn, prevent that damage. When damage is prevented this
 /// way, New Way Forward deals that much damage to that source's controller and
 /// you draw that many cards."
 ///
-/// # What runs, and what silently does not
+/// # The full rider now runs (CR 615.5)
 ///
-/// The prevention half works: the chosen source's combat damage is prevented
-/// (CR 615.1). The CR 615.5 rider half — deal that much back, draw that many —
-/// never fires.
+/// The prevention half prevents the chosen source's combat damage (CR 615.1).
+/// The CR 615.5 rider — deal that much back, draw that many — fires against the
+/// aggregate prevented amount once the batch settles.
 ///
-/// `effects/prevent_damage.rs` installs a shield's rider as its `runtime_execute`
-/// **only** when the sub-ability is linked `SubAbilityLink::ContinuationStep`.
-/// New Way Forward's rider chain (`DealDamage` -> `Draw`) parses as
-/// `SequentialSibling` — an independent instruction — so it is never installed.
-/// `combat_damage.rs::fire_combat_prevention_riders` then finds the shield in the
-/// prevention tally (3 damage prevented, definition found) but bails on
-/// `repl_def.runtime_execute.clone()` returning `None`. Verified by instrumenting
-/// that loop: it prints `has_runtime=false`.
-///
-/// The consequence for Plan 03 is the point of this test. `Resolved` is built
-/// only from a `runtime_execute`; parsed static shields never carry one (they
-/// take `Template` — see the file header); and New Way Forward is the ONLY pool
-/// card whose prevention rider draws. So **the `Resolved` -> `Effect::Draw` edge
-/// has no working production witness at all**. It is type-reachable, not
-/// production-reachable. Anyone rewriting `apply_pending_post_replacement_effect`
-/// should know that its `Resolved` arm is, for draws, currently dead in practice.
-///
-/// The BUG-PIN assertions below encode today's (wrong) zeroes (issue #5658).
-/// Fixing the
-/// `sub_link` classification SHOULD turn them red — at which point this test
-/// becomes the real `Resolved`->`Draw` pin, and the two marked values become 3.
+/// This exercises three fixes for #5658, all in the same class ("When damage is
+/// prevented this way, …" separate-sentence riders):
+///   1. The rider chain (`DealDamage` -> `Draw`) is a `ContinuationStep`, not a
+///      `SequentialSibling`, so `effects/prevent_damage.rs` installs it as the
+///      shield's `runtime_execute` instead of dropping it.
+///   2. "that source's controller" lowers to `PostReplacementSourceController`
+///      (the prevented event's damage dealer's controller), not a dangling
+///      `ParentTargetController` with no runtime referent.
+///   3. `combat_damage.rs::fire_combat_prevention_riders` seeds the aggregate
+///      rider's drain event source from the shield's chosen single-object source
+///      filter, so `PostReplacementSourceController` resolves to P0.
 #[test]
-fn new_way_forward_prevents_damage_but_its_draw_rider_never_fires() {
+fn new_way_forward_prevented_damage_deals_back_and_draws() {
     let Some(db) = load_db() else {
         return;
     };
@@ -356,22 +346,20 @@ fn new_way_forward_prevents_damage_but_its_draw_rider_never_fires() {
         "New Way Forward prevents the chosen source's damage: P1 takes none"
     );
 
-    // ── BUG-PIN — issue #5658: the CR 615.5 rider never fires. ──
-    // CORRECT: p0_life_delta == -3 (New Way Forward deals the prevented amount
-    // back to the source's controller) and p1_library_delta == -3 (P1 draws that
-    // many). Both are 0 because the rider parsed as `SequentialSibling` and was
-    // never installed as the shield's `runtime_execute`.
+    // ── The CR 615.5 rider now fires (issue #5658 fixed). ──
+    // The "When damage is prevented this way, …" sentence is classified as a
+    // `ContinuationStep` prevention rider, so it installs as the shield's
+    // `runtime_execute` and fires once per prevented event against the prevented
+    // amount (3): New Way Forward deals that much back to the source's controller
+    // (P0) and its controller (P1) draws that many.
     assert_eq!(
-        shielded.p0_life_delta, 0,
-        "BUG-PIN (#5658): the rider does not deal the prevented damage back to \
-         the source's controller. Correct value is -3. Fixing #5658 flips this."
+        shielded.p0_life_delta, -3,
+        "the rider deals the prevented amount (3) back to the source's controller"
     );
     assert_eq!(
-        shielded.p1_library_delta, 0,
-        "BUG-PIN (#5658): the rider does not draw. Correct value is -3 — and this \
-         is the `Resolved`->`Effect::Draw` edge, which therefore has NO working \
-         production witness today. Fixing #5658 makes this test the real \
-         Resolved->Draw pin."
+        shielded.p1_library_delta, -3,
+        "the rider draws that many (3) — this is the `Resolved`->`Effect::Draw` \
+         production witness"
     );
 }
 

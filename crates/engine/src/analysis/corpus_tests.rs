@@ -19,12 +19,12 @@
 //! (`drive_damage_loop_certificate` plus the negatives) exercise the same pipeline
 //! without the export. Reverting either `detect_loop` gate flips an assertion.
 //!
-//! Corpus card-availability over all 53 rows
+//! Corpus card-availability over all 54 rows
 //! (`corpus_cards_present_and_implementation_status_matches_gating`): every card
 //! present, and every non-gated combo fully modeled (no top-level `Unimplemented`).
 //! Skips gracefully when the gitignored export is absent.
 //!
-//! Corpus table (`corpus::CORPUS`) + shape/partition-lock meta-tests: all 53 rows
+//! Corpus table (`corpus::CORPUS`) + shape/partition-lock meta-tests: all 54 rows
 //! partitioned into driven ∪ gated ∪ deferred. The `combo-verify` CLI
 //! ([`corpus::drive_row`]) classifies each via the same drivers;
 //! `drive_row_classifies_corpus_via_shared_pipeline` and the `classify_status`
@@ -58,13 +58,13 @@ fn card_db() -> &'static CardDatabase {
 // ===========================================================================
 
 /// META-TEST: lock the corpus shape so an accidental row deletion or miscount
-/// fails loudly. 53 rows total (3 driving + 50 corpus), exactly 4 card-gated.
+/// fails loudly. 54 rows total (3 driving + 51 corpus), exactly 4 card-gated.
 #[test]
 fn corpus_table_shape_is_locked() {
     assert_eq!(
         corpus::corpus_len(),
-        53,
-        "corpus must hold all 3 driving + 50 combos"
+        54,
+        "corpus must hold all 3 driving + 51 combos"
     );
     let gated = (0..corpus::corpus_len())
         .filter(|&i| corpus::row(i).gated_on.is_some())
@@ -87,13 +87,13 @@ fn corpus_table_shape_is_locked() {
             | WinKind::Advantage => {}
         }
     }
-    // 49 of 53 are testable today (gated count is the complement).
+    // 50 of 54 are testable today (gated count is the complement).
     let testable = corpus::corpus_len() - gated;
-    assert_eq!(testable, 49, "49 corpus combos are testable once driven");
+    assert_eq!(testable, 50, "50 corpus combos are testable once driven");
 }
 
 /// META-TEST: the corpus is a clean partition — every row is exactly one of
-/// {driven, gated, deferred}, pairwise disjoint, covering all 53. The driven set
+/// {driven, gated, deferred}, pairwise disjoint, covering all 54. The driven set
 /// is `corpus::DRIVERS`, gated is `gated_on.is_some()`, deferred is
 /// `deferral.is_some()`; a driven/gated row must NOT also carry a deferral bucket.
 #[test]
@@ -108,7 +108,7 @@ fn corpus_partition_is_locked() {
         .filter(|&i| corpus::row(i).deferral.is_some())
         .collect();
 
-    assert_eq!(driven.len(), 12, "12 driven rows");
+    assert_eq!(driven.len(), 13, "13 driven rows");
     assert_eq!(gated.len(), 4, "4 gated rows");
     assert_eq!(deferred.len(), 37, "37 deferred rows");
 
@@ -131,7 +131,7 @@ fn corpus_partition_is_locked() {
         n,
         "driven ∪ gated ∪ deferred must cover every one of the {n} rows"
     );
-    assert_eq!(n, 53);
+    assert_eq!(n, 54);
 
     // Exclusivity: a driven or gated row must not also declare a deferral bucket.
     for &i in driven.iter().chain(gated.iter()) {
@@ -161,7 +161,7 @@ fn face_has_unimplemented(face: &crate::types::card::CardFace) -> bool {
             .any(|t| t.execute.as_deref().is_some_and(ability_unimpl))
 }
 
-/// ACCEPTANCE OVER THE WHOLE CORPUS (all 53 rows): every card of every combo is
+/// ACCEPTANCE OVER THE WHOLE CORPUS (all 54 rows): every card of every combo is
 /// present in the real card-data export, and its implementation status matches
 /// the row's `gated_on` — a non-gated combo has zero `Effect::Unimplemented`
 /// across all its cards, while a gated combo legitimately contains an unmodeled
@@ -225,8 +225,8 @@ fn confirmed_drivers_match_expected() {
 
 /// The shared CLI dispatch ([`corpus::drive_row`]) classifies each status class
 /// through the REAL pipeline. NOTE: these are ARRAY indices; the gated rows are
-/// 2 / 21 / 38 / 51 (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone) —
-/// NOT the ComboRow doc-comment's FEASIBILITY numbering (array idx 49 is a
+/// 2 / 21 / 39 / 52 (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone) —
+/// NOT the ComboRow doc-comment's FEASIBILITY numbering (array idx 50 is a
 /// CONFIRMED driver, Spike Feeder + Archangel, not a gated row).
 #[test]
 fn drive_row_classifies_corpus_via_shared_pipeline() {
@@ -257,12 +257,23 @@ fn drive_row_classifies_corpus_via_shared_pipeline() {
         }
     }
 
+    // Confirmed (finite pre-cast shortcut): the route ends in ordinary priority,
+    // but its classified combo family remains drain / LethalDamage.
+    match corpus::drive_row(db, 22).status {
+        corpus::RowStatus::Confirmed { win_kind, .. } => {
+            assert_eq!(win_kind, WinKind::LethalDamage)
+        }
+        other => panic!(
+            "idx 22 (Witherbloom Apprentice + Chain of Smog) must be Confirmed via the finite pre-cast route, got {other:?}"
+        ),
+    }
+
     // Gated: never Failed — gated is expected. (ARRAY indices, see the note above.)
     for (idx, card) in [
         (2usize, "Doc Aurlock, Grizzled Genius"),
         (21, "Professor Onyx"),
-        (38, "Animate Dead"),
-        (51, "Grindstone"),
+        (39, "Animate Dead"),
+        (52, "Grindstone"),
     ] {
         match corpus::drive_row(db, idx).status {
             corpus::RowStatus::Gated { card: c } => assert_eq!(c, card),
@@ -271,11 +282,11 @@ fn drive_row_classifies_corpus_via_shared_pipeline() {
     }
 
     // Deferred: a non-driven testable row reports its structural bucket, never Failed.
-    match corpus::drive_row(db, 22).status {
+    match corpus::drive_row(db, 23).status {
         corpus::RowStatus::Deferred { bucket } => {
             assert_eq!(bucket, corpus::DeferralBucket::ObjectReentry)
         }
-        other => panic!("idx 22 (Kiki-Jiki) must be Deferred(ObjectReentry), got {other:?}"),
+        other => panic!("idx 23 (Kiki-Jiki) must be Deferred(ObjectReentry), got {other:?}"),
     }
 }
 
@@ -440,7 +451,7 @@ fn drive_combo_02_grim_power() {
 fn drive_combo_47_spike_archangel() {
     let cert = corpus::drive_offline_spike_archangel(card_db())
         .expect("Spike Feeder + Archangel must confirm infinite counters + life");
-    assert_combo(49, &cert);
+    assert_combo(50, &cert);
 }
 
 /// #7 BLOOM TENDER + FREED FROM THE REAL — infinite mana.
@@ -996,6 +1007,40 @@ fn drive_drain_idx17_targeted_wins_live() {
     assert!(
         board.runner.state().players[1].life < 200,
         "the auto-resolved target must be the opponent P1 (its life drained)"
+    );
+}
+
+/// Issue #4787: Bloodthirsty Conqueror + Enduring Tenacity is the reported
+/// targeted drain/refill loop. It is structurally close to idx17 (Sanguine Bond +
+/// Exquisite Blood), but the report names this concrete card pair, so keep a
+/// direct live witness pinned to the actual parsed cards.
+#[test]
+fn drive_bloodthirsty_conqueror_enduring_tenacity_wins_live() {
+    let Some(mut board) = corpus::build_drain_board(
+        card_db(),
+        &["Bloodthirsty Conqueror", "Enduring Tenacity"],
+        200,
+    ) else {
+        return; // export absent: skip
+    };
+    corpus::seed_lifegain_cascade(&mut board);
+    let trace = corpus::drive_pass_priority(&mut board, 40);
+    assert!(
+        trace.iter().all(|t| !matches!(
+            t.wf,
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
+        )),
+        "Enduring Tenacity's targeted trigger must auto-resolve to the sole opponent"
+    );
+    let (beat, winner) = corpus::first_gameover_beat(&trace)
+        .expect("Bloodthirsty Conqueror + Enduring Tenacity must win LIVE via the persisted ring");
+    assert_eq!(
+        winner, P0,
+        "the single non-falling player (P0) must be the winner"
+    );
+    assert!(
+        beat <= 12,
+        "the live win must fire from the ring, not the natural 704.5a death; got beat {beat}"
     );
 }
 

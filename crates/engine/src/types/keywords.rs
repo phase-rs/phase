@@ -1119,6 +1119,228 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    /// Whether this keyword should appear in the battlefield card's compact
+    /// badge strip. The strip communicates abilities that remain relevant to
+    /// the object as a permanent: combat, protection, live characteristics,
+    /// activated abilities, and triggers sourced from the battlefield.
+    ///
+    /// This is an engine-owned presentation classification. It intentionally
+    /// omits cast-, hand-, graveyard-, and enters-only keywords (for example,
+    /// Evoke and Ravenous) while preserving the complete `keywords` list for
+    /// card previews and all rules processing.
+    pub fn is_battlefield_display_relevant(&self) -> bool {
+        match self {
+            // Combat, damage, and evasion
+            Keyword::Flying
+            | Keyword::FirstStrike
+            | Keyword::DoubleStrike
+            | Keyword::Trample
+            | Keyword::TrampleOverPlaneswalkers
+            | Keyword::Deathtouch
+            | Keyword::Lifelink
+            | Keyword::Vigilance
+            | Keyword::Haste
+            | Keyword::Reach
+            | Keyword::Defender
+            | Keyword::Menace
+            | Keyword::Fear
+            | Keyword::Intimidate
+            | Keyword::Skulk
+            | Keyword::Shadow
+            | Keyword::Horsemanship
+            | Keyword::Wither
+            | Keyword::Infect
+            | Keyword::Afflict(_)
+            | Keyword::Landwalk(_)
+            | Keyword::Rampage(_)
+            | Keyword::Absorb(_)
+            | Keyword::Banding
+            | Keyword::BandsWithOther(_)
+            | Keyword::Decayed
+            | Keyword::Unleash
+            | Keyword::Poisonous(_)
+            | Keyword::Toxic(_) => true,
+
+            // Live characteristics, protection, and attachment constraints
+            Keyword::Indestructible
+            | Keyword::Hexproof
+            | Keyword::HexproofFrom(_)
+            | Keyword::Shroud
+            | Keyword::Devoid
+            | Keyword::Changeling
+            | Keyword::Phasing
+            | Keyword::Protection(_)
+            | Keyword::Ward(_)
+            | Keyword::Enchant(_)
+            | Keyword::TotemArmor
+            | Keyword::LivingMetal
+            | Keyword::Daybound
+            | Keyword::Nightbound => true,
+
+            // Activated abilities available from the battlefield
+            Keyword::Reconfigure(_)
+            | Keyword::Equip(_)
+            | Keyword::Crew { .. }
+            | Keyword::Outlast(_)
+            | Keyword::Fortify(_)
+            | Keyword::Craft { .. }
+            | Keyword::LevelUp(_)
+            | Keyword::Saddle(_)
+            | Keyword::Transfigure(_)
+            | Keyword::Station
+            | Keyword::Specialize(_) => true,
+
+            // Triggered and ongoing abilities sourced from the battlefield
+            Keyword::Prowess
+            | Keyword::Undying
+            | Keyword::Persist
+            | Keyword::Exalted
+            | Keyword::Flanking
+            | Keyword::Evolve
+            | Keyword::Extort
+            | Keyword::Ascend
+            | Keyword::StartYourEngines
+            | Keyword::Modular(_)
+            | Keyword::Renown(_)
+            | Keyword::Annihilator(_)
+            | Keyword::Bushido(_)
+            | Keyword::Frenzy(_)
+            | Keyword::Soulbond
+            | Keyword::Battlecry
+            | Keyword::Afterlife(_)
+            | Keyword::Fading(_)
+            | Keyword::Vanishing(_)
+            | Keyword::Echo(_)
+            | Keyword::Impending { .. }
+            | Keyword::CumulativeUpkeep(_)
+            | Keyword::Haunt
+            | Keyword::Ingest
+            | Keyword::Melee
+            | Keyword::Mentor
+            | Keyword::Myriad
+            | Keyword::Provoke
+            | Keyword::Mobilize(_)
+            | Keyword::Dethrone
+            | Keyword::DoubleTeam
+            | Keyword::Graft(_)
+            | Keyword::Soulshift(_)
+            | Keyword::Firebending(_)
+            | Keyword::Champion(_)
+            | Keyword::Training => true,
+
+            // Cast-, zone-, deckbuilding-, or enters-only keywords; they are
+            // deliberately hidden from the battlefield badge strip.
+            Keyword::Flash
+            | Keyword::StartingIntensity(_)
+            | Keyword::Cascade
+            | Keyword::Exploit
+            | Keyword::Explore
+            | Keyword::Dredge(_)
+            | Keyword::Fabricate(_)
+            | Keyword::Tribute(_)
+            | Keyword::Unearth(_)
+            | Keyword::Convoke
+            | Keyword::Waterbend
+            | Keyword::Delve
+            | Keyword::Riot
+            | Keyword::EtbCounter { .. }
+            | Keyword::LivingWeapon
+            | Keyword::JobSelect
+            | Keyword::Bestow(_)
+            | Keyword::Embalm(_)
+            | Keyword::Eternalize(_)
+            | Keyword::Kicker(_)
+            | Keyword::Cycling(_)
+            | Keyword::Flashback(_)
+            | Keyword::Partner(_)
+            | Keyword::Companion(_)
+            | Keyword::Ninjutsu(_)
+            | Keyword::CommanderNinjutsu(_)
+            | Keyword::Prowl(_)
+            | Keyword::Morph(_)
+            | Keyword::Megamorph(_)
+            | Keyword::Mayhem(_)
+            | Keyword::Madness(_)
+            | Keyword::Miracle(_)
+            | Keyword::Dash(_)
+            | Keyword::Emerge(_)
+            | Keyword::Escape(_)
+            | Keyword::Harmonize(_)
+            | Keyword::Evoke(_)
+            | Keyword::Foretell(_)
+            | Keyword::Mutate(_)
+            | Keyword::Disturb(_)
+            | Keyword::Disguise(_)
+            | Keyword::Blitz(_)
+            | Keyword::Overload(_)
+            | Keyword::Spectacle(_)
+            | Keyword::Surge(_)
+            | Keyword::Encore(_)
+            | Keyword::Buyback(_)
+            | Keyword::Casualty(_)
+            | Keyword::Entwine(_)
+            | Keyword::Scavenge(_)
+            | Keyword::Reinforce { .. }
+            | Keyword::Prototype { .. }
+            | Keyword::Plot(_)
+            | Keyword::Offspring(_)
+            | Keyword::Affinity(_)
+            | Keyword::Epic
+            | Keyword::Fuse
+            | Keyword::Gravestorm
+            | Keyword::Hideaway(_)
+            | Keyword::Improvise
+            | Keyword::Rebound
+            | Keyword::Retrace
+            | Keyword::Ripple(_)
+            | Keyword::SplitSecond
+            | Keyword::Storm
+            | Keyword::Suspend { .. }
+            | Keyword::Totem
+            | Keyword::Warp(_)
+            | Keyword::Sneak(_)
+            | Keyword::WebSlinging(_)
+            | Keyword::Gift(_)
+            | Keyword::Discover(_)
+            | Keyword::Spree
+            | Keyword::Ravenous
+            | Keyword::Enlist
+            | Keyword::ReadAhead
+            | Keyword::Compleated
+            | Keyword::Conspire
+            | Keyword::Demonstrate
+            | Keyword::Bloodthirst(_)
+            | Keyword::Amplify(_)
+            | Keyword::Devour(_)
+            | Keyword::Teamwork(_)
+            | Keyword::Backup(_)
+            | Keyword::Squad(_)
+            | Keyword::Typecycling { .. }
+            | Keyword::Splice { .. }
+            | Keyword::Bargain
+            | Keyword::Sunburst
+            | Keyword::Assist
+            | Keyword::Augment
+            | Keyword::Aftermath
+            | Keyword::JumpStart
+            | Keyword::Cipher
+            | Keyword::Transmute(_)
+            | Keyword::Escalate(_)
+            | Keyword::Recover(_)
+            | Keyword::Cleave(_)
+            | Keyword::Undaunted
+            | Keyword::Paradigm
+            | Keyword::Replicate(_)
+            | Keyword::Awaken { .. }
+            | Keyword::ForMirrodin
+            | Keyword::MoreThanMeetsTheEye(_)
+            | Keyword::Freerunning(_)
+            | Keyword::Increment
+            | Keyword::Offering(_)
+            | Keyword::Unknown(_) => false,
+        }
+    }
+
     /// CR 122.1b: Promote a bare `KeywordKind` (as stored on `CounterType::Keyword`)
     /// to the full `Keyword` enum for insertion into an object's keyword list.
     /// Every enumerated keyword-counter kind maps to a parameterless Keyword

@@ -225,6 +225,7 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         },
     );
     set_etb_event(&mut state, dead_id);

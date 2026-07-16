@@ -355,6 +355,33 @@ fn permute_into(
 /// constructing `GameAction::Concede { player_id }` directly.
 pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
     match &state.waiting_for {
+        WaitingFor::MeldPairChoice { player, choices } => choices
+            .iter()
+            .map(|choice| {
+                candidate(
+                    GameAction::ChooseMeldPair {
+                        source_id: choice.source_id,
+                        partner_id: choice.partner_id,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::MeldAttackTargetChoice {
+            player,
+            valid_targets,
+            ..
+        } => valid_targets
+            .iter()
+            .map(|target| {
+                candidate(
+                    GameAction::ChooseEntryAttackTarget { target: *target },
+                    TacticalClass::Attack,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ReplacementChoice {
             candidate_count,
             player,
@@ -744,6 +771,9 @@ pub fn candidate_actions_broad_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let actions = match &state.waiting_for {
+        WaitingFor::MeldPairChoice { .. } | WaitingFor::MeldAttackTargetChoice { .. } => {
+            candidate_actions_exact(state)
+        }
         WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
         WaitingFor::ManaPayment {
             player,
@@ -1382,6 +1412,22 @@ pub fn candidate_actions_broad_with_probe(
                     )
                 })
                 .collect()
+        }
+        WaitingFor::KeepExactPermanentsChoice {
+            player,
+            eligible,
+            required_count,
+            ..
+        } => {
+            // CR 101.4 + CR 701.21a: any distinct exact-size subset is legal.
+            // Enumerate a compact deterministic baseline and leave richer board
+            // evaluation to the tactical policy layer.
+            let kept = eligible.iter().copied().take(*required_count).collect();
+            vec![candidate(
+                GameAction::ChooseKeptPermanents { kept },
+                TacticalClass::Selection,
+                Some(*player),
+            )]
         }
         WaitingFor::BetweenGamesSideboard { player, .. } => sideboard_actions(state, *player),
         WaitingFor::NamedChoice {
@@ -3006,6 +3052,7 @@ pub fn candidate_actions_broad_with_probe(
         // CR 732.2a: proposing a shortcut is optional. Offer both legal actions so the
         // policy/search layer, rather than the candidate generator, decides whether an AI
         // proposer declares or returns to ordinary priority.
+        // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut { proposer, .. } => vec![
             candidate(
                 GameAction::DeclareShortcut {
@@ -3028,6 +3075,58 @@ pub fn candidate_actions_broad_with_probe(
             vec![candidate(
                 GameAction::RespondToShortcut {
                     response: crate::ai_support::smart_shortcut_response(state, *player),
+                },
+                TacticalClass::Utility,
+                Some(*player),
+            )]
+        }
+        WaitingFor::PrecastCopyShortcutOffer {
+            proposer, epoch, ..
+        } => vec![
+            candidate(
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response: crate::types::actions::PrecastCopyShortcutResponse::Propose {
+                        route_id: *epoch,
+                    },
+                },
+                TacticalClass::Utility,
+                Some(*proposer),
+            ),
+            candidate(
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response: crate::types::actions::PrecastCopyShortcutResponse::Decline,
+                },
+                TacticalClass::Pass,
+                Some(*proposer),
+            ),
+        ],
+        WaitingFor::RespondToPrecastCopyShortcut {
+            player,
+            epoch,
+            breakpoint_ids,
+            ..
+        } => {
+            let response = match crate::ai_support::smart_shortcut_response(state, *player) {
+                crate::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
+                    breakpoint_ids.first().map_or(
+                        crate::types::actions::PrecastCopyShortcutResponse::Accept,
+                        |breakpoint_id| {
+                            crate::types::actions::PrecastCopyShortcutResponse::Shorten {
+                                breakpoint_id: *breakpoint_id,
+                            }
+                        },
+                    )
+                }
+                crate::analysis::loop_check::ShortcutResponse::Accept => {
+                    crate::types::actions::PrecastCopyShortcutResponse::Accept
+                }
+            };
+            vec![candidate(
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response,
                 },
                 TacticalClass::Utility,
                 Some(*player),

@@ -238,6 +238,24 @@ pub(crate) fn strip_leading_general_conditional(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (Option<AbilityCondition>, String) {
+    // CR 508.4 + CR 608.2c + CR 701.42: this condition contains an internal
+    // comma before its second conjunct ("are attacking, and you both own and
+    // control them"). Peel it through the shared condition production before
+    // the generic first-comma splitter, then leave the imperative body to the
+    // normal effect-chain parser.
+    if let Some((condition, _, _, partner, body)) = super::meld::strip_live_pair_conditional(text) {
+        ctx.pending_meld_partner = Some(partner);
+        return (Some(condition), body);
+    }
+    // CR 603.4: an inline `If` in an activated ability has its normal English
+    // meaning. Parse the shared own/control pair grammar as an AbilityCondition;
+    // this covers Hanweir Battlements and Urza, Lord Protector without a
+    // card-name dispatch.
+    if let Some((condition, _, _, partner, body)) = super::meld::strip_owned_pair_conditional(text)
+    {
+        ctx.pending_meld_partner = Some(partner);
+        return (Some(condition), body);
+    }
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
@@ -3270,13 +3288,15 @@ fn parse_mana_spent_vs_mana_value_target_condition(
     ))
 }
 
-/// CR 122.1f + CR 109.4 + CR 608.2c: "if its controller is poisoned" on a
-/// targeted spell effect — a player is "poisoned" iff they have one or more
-/// poison counters (CR 122.1f), and "its controller" anaphors to the controller
-/// of the ability's first object target (the countered spell). Corrupted
-/// Resolve. Mirrors `parse_no_mana_spent_to_cast_target_condition_text`: reuses
-/// `QuantityCheck` over an existing `QuantityRef` building block rather than a
-/// bespoke condition variant, the poison threshold `>= 1` expressing "poisoned".
+/// CR 122.1f + CR 109.4 + CR 608.2c: a poison predicate on the controller of the
+/// ability's first object target — "if its controller is poisoned" (Corrupted
+/// Resolve) and "if its controller has three or more poison counters" (the
+/// Corrupted ability word: Bring the Ending, Anoint with Affliction). Both read
+/// the SAME player counter through the SAME `QuantityRef` and the SAME `GE`
+/// comparator; only the threshold differs, so the predicate is parameterized on
+/// its threshold rather than split into sibling combinators. Mirrors
+/// `parse_no_mana_spent_to_cast_target_condition_text`: reuses `QuantityCheck`
+/// over an existing `QuantityRef` building block rather than a bespoke variant.
 fn parse_target_controller_poisoned_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.to_ascii_lowercase();
     nom_parse_lower(&lower, |input| {
@@ -3294,9 +3314,10 @@ fn parse_target_controller_poisoned_condition(input: &str) -> OracleResult<'_, A
             tag("this spell's "),
             tag("the spell's "),
         )),
-        tag("controller is poisoned"),
+        tag("controller "),
     )
         .parse(input)?;
+    let (rest, threshold) = parse_target_controller_poison_threshold(rest)?;
     Ok((
         rest,
         AbilityCondition::QuantityCheck {
@@ -3305,11 +3326,31 @@ fn parse_target_controller_poisoned_condition(input: &str) -> OracleResult<'_, A
                     kind: crate::types::player::PlayerCounterKind::Poison,
                 },
             },
-            // CR 122.1f: "poisoned" == one or more poison counters.
             comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
+            rhs: QuantityExpr::Fixed { value: threshold },
         },
     ))
+}
+
+/// CR 122.1f: the poison threshold the predicate compares against. "poisoned" is
+/// DEFINED as one or more poison counters, so it is exactly the `>= 1` case of
+/// the same `<N> or more poison counters` shape the Corrupted ability word spells
+/// out — one axis, two printings, not two combinators.
+fn parse_target_controller_poison_threshold(input: &str) -> OracleResult<'_, i32> {
+    alt((
+        value(1, tag("is poisoned")),
+        map(
+            preceded(
+                tag("has "),
+                terminated(
+                    nom_primitives::parse_number,
+                    tag(" or more poison counters"),
+                ),
+            ),
+            |count| count as i32,
+        ),
+    ))
+    .parse(input)
 }
 
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
@@ -3765,11 +3806,34 @@ fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
     })
 }
 
+/// CR 614.1a + CR 614.6: the outcome of lowering an "instead" override clause.
+///
+/// The three-way split is load-bearing, and the middle arm is why this is not an
+/// `Option`. CR 614.6 ("If an event is replaced, it never happens") makes an
+/// "instead" override a **branch**, never a sequel: the engine does the override
+/// or the printed effect, never both. When the override grammar matches but its
+/// condition has no typed representation, returning a bare `None` let the caller
+/// fall through and re-emit the override BODY as an ordinary unconditional chain
+/// clause — so the engine ran the replaced effect AND its replacement, with the
+/// condition dropped (Anax, Hardened in the Forge: a 2/2 dying produced three
+/// Satyrs instead of one). `ConditionUnlowerable` forces the caller to fail
+/// honestly instead.
+pub(super) enum InsteadLowering {
+    /// The override lowered to a conditional branch (`AbilityCondition::ConditionInstead`).
+    Branch(Box<AbilityDefinition>),
+    /// The text IS an "instead" override, but its condition has no typed variant
+    /// yet. The caller MUST emit `Effect::unimplemented` — never the body.
+    ConditionUnlowerable,
+    /// Not the generic "instead" grammar, or deliberately owned by a more
+    /// specific lowering (see the additional-cost deferral in `build_instead_def`).
+    NotOwned,
+}
+
 pub(super) fn try_parse_generic_instead_clause(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> InsteadLowering {
     // Forward form: "If <cond>, [body] instead." — split on the leading "If, "
     // and strip a trailing/leading "instead" from the body.
     if let Some((cond_text, effect_text)) = split_forward_instead_clause(text) {
@@ -3785,7 +3849,7 @@ pub(super) fn try_parse_generic_instead_clause(
         return build_instead_def(cond_text, effect_text, kind, ctx);
     }
 
-    None
+    InsteadLowering::NotOwned
 }
 
 /// Forward instead form: "If <cond>, [body] instead." Returns the trimmed
@@ -3833,9 +3897,61 @@ fn split_inverted_instead_clause(text: &str) -> Option<(String, String)> {
     Some((cond_text.to_string(), effect_text.to_string()))
 }
 
+/// CR 614.1: replacement effects "watch for a particular event that **would**
+/// happen and completely or partially replace that event." The modal "would" is
+/// the Comprehensive Rules' own marker for the EVENT reading of an "instead"
+/// clause, and it splits the grammar in two:
+///
+/// - **CR 614.1a EVENT replacement** — "If that spell *would* be put into your
+///   graveyard, exile it instead" (Torrential Gearhulk, Goblin Dark-Dwellers,
+///   Mission Briefing; ~68 faces). The clause names an event, not a game state.
+///   These are owned elsewhere — by a `ReplacementDefinition`, by the line-level
+///   replacement parser, or by the structural cast-then-exile rider chain that
+///   `swallow_check::any_ability_has_exile_parent_rider` recognizes as the "exile
+///   it instead" encoding. An unlowerable EVENT condition must therefore fall
+///   through UNCHANGED: reporting it as `ConditionUnlowerable` would make the
+///   caller replace a *working* rider encoding with `Effect::unimplemented`.
+///
+/// - **CR 608.2c STATE override** — "If the creature had power 4 or greater,
+///   create two of those tokens instead" (Anax, Hardened in the Forge). The
+///   clause is a game-state predicate evaluated as the ability resolves. These,
+///   and only these, are `ConditionUnlowerable` when they fail to lower.
+///
+/// The scan is word-boundary anchored (`scan_contains`), so "would" is matched
+/// as a word and never as a fragment of a longer token.
+fn condition_names_an_event(cond_text: &str) -> bool {
+    nom_primitives::scan_contains(&cond_text.to_lowercase(), "would")
+}
+
+/// CR 608.2c + CR 614.15: the SINGLE AUTHORITY for lowering the condition of an
+/// "instead" self-replacement override — wherever that override is printed.
+///
+/// A self-replacement override can be printed inside the clause chain it replaces
+/// ("… create two of those tokens instead", handled by `build_instead_def`) or as
+/// a SEPARATE ability on its own line, "particularly when preceded by an ability
+/// word" (CR 614.15 — "Corrupted — Counter that spell instead if …", handled by
+/// the cross-line binder in `oracle.rs`). Both callers MUST lower the condition
+/// through here.
+///
+/// They previously did not: the cross-line path ran only the nom `StaticCondition`
+/// grammar, which cannot express a target-relative predicate, so a condition this
+/// ladder lowers fine ("its controller has three or more poison counters") was
+/// dropped there. The override then reached the emitter with `condition: None`
+/// and was published as an UNCONDITIONAL sibling ability — the engine ran the base
+/// effect AND the replacement, every time (CR 614.6). One authority, one
+/// vocabulary, so the two paths cannot drift apart again.
+pub(crate) fn lower_instead_condition(
+    cond_text: &str,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
+    try_nom_condition_as_ability_condition(cond_text, ctx)
+        .or_else(|| parse_condition_text(cond_text))
+        .or_else(|| parse_control_count_as_ability_condition(cond_text))
+}
+
 /// Shared assembly: build an `AbilityDefinition` for an instead override.
-/// Tries the three condition parsers in priority order; bails if none match
-/// (so the chunk can fall through to other dispatch paths). Wraps the result
+/// Lowers the condition through `lower_instead_condition`; bails if it does not
+/// lower (so the chunk can fall through to other dispatch paths). Wraps the result
 /// in `ConditionInstead` per CR 608.2c and rewrites cost-paid-object quantity
 /// references when needed.
 fn build_instead_def(
@@ -3843,20 +3959,32 @@ fn build_instead_def(
     effect_text: String,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> InsteadLowering {
     // CR 608.2c: An additional-cost-paid "instead" fold ("if it/this spell was
     // kicked, ... instead") is owned by `strip_additional_cost_conditional`,
     // which folds it to the dedicated `AdditionalCostPaidInstead`. Defer here so
     // the generic `parse_condition_text` recognizer (which now classifies "was
     // kicked" as the bare `AdditionalCostPaid`) does not pre-empt that fold by
     // producing a `ConditionInstead { inner: AdditionalCostPaid }` wrapper.
+    // This deferral is `NotOwned`, NOT `ConditionUnlowerable`: the clause has a
+    // typed home, just not this one, so the caller must fall through to it.
     if parse_additional_cost_instead_condition_fragment(&cond_text).is_some() {
-        return None;
+        return InsteadLowering::NotOwned;
     }
 
-    let condition = try_nom_condition_as_ability_condition(&cond_text, ctx)
-        .or_else(|| parse_condition_text(&cond_text))
-        .or_else(|| parse_control_count_as_ability_condition(&cond_text))?;
+    // CR 614.6: a replaced event never happens. If the override's condition has
+    // no typed representation, the branch cannot be built — and emitting the
+    // override body anyway would run BOTH the replaced effect and its
+    // replacement. Everything that lowers today still lowers; only the failure
+    // path is split, by `condition_names_an_event`, into "defer" vs "fail
+    // honestly".
+    let Some(condition) = lower_instead_condition(&cond_text, ctx) else {
+        return if condition_names_an_event(&cond_text) {
+            InsteadLowering::NotOwned
+        } else {
+            InsteadLowering::ConditionUnlowerable
+        };
+    };
 
     let instead_def = parse_effect_chain(&effect_text, kind);
     let mut result = instead_def;
@@ -3870,7 +3998,33 @@ fn build_instead_def(
     {
         super::rewrite_cost_paid_object_quantities_in_definition(&mut result);
     }
-    Some(result)
+    InsteadLowering::Branch(Box::new(result))
+}
+
+/// CR 614.15: an "instead" marker replaces "part or all" of the ability's effect,
+/// and the printed grammar says WHICH. A bare trailing "instead" replaces the whole
+/// clause ("create two of those tokens instead"). A trailing "instead of <N>"
+/// replaces only a PART — the antecedent's quantity — and names the OLD value it is
+/// displacing ("put up to two creature cards … into your hand instead of one",
+/// "search your library for up to three basic Forest cards instead of two").
+///
+/// That trailing "of <N>" is redundant with the antecedent, which still holds the old
+/// value, so it carries nothing the branch needs: it is a marker, not an operand.
+/// This recognizes both printings as the same replacement marker so the alternative
+/// grammar is not blocked by the one that spells out what it replaces.
+///
+/// Anything else after "instead" ("instead of putting it into your hand") names a
+/// non-quantity part and is NOT accepted here — that is a different replacement axis,
+/// and silently treating it as a whole-clause marker would drop the part it names.
+fn is_replacement_marker_tail(after_instead_lower: &str) -> bool {
+    let tail = after_instead_lower.trim().trim_end_matches('.').trim();
+    if tail.is_empty() {
+        return true;
+    }
+    nom_parse_lower(tail, |input| {
+        all_consuming(preceded(tag("of "), nom_primitives::parse_number)).parse(input)
+    })
+    .is_some()
 }
 
 /// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among-body>" — conditional
@@ -3887,7 +4041,7 @@ fn build_instead_def(
 /// caller wraps the preceding Dig as `else_ability`. Class coverage: any card of form
 /// "look at top N / reveal a <filter> card from among them ... if <cond>, you may
 /// instead reveal M <filter'> cards from among them" (CR 608.2c replacement effect).
-pub(super) fn try_parse_dig_instead_alternative(
+pub(crate) fn try_parse_dig_instead_alternative(
     text: &str,
     previous: Option<&AbilityDefinition>,
     kind: AbilityKind,
@@ -3938,7 +4092,7 @@ pub(super) fn try_parse_dig_instead_alternative(
             let body_rest_pair = TextPair::new(body_rest, &body_rest_lower);
             let (body_rest, suffix_had_instead) =
                 if let Some((before, after)) = body_rest_pair.split_around(" instead") {
-                    if after.original.trim().is_empty() {
+                    if is_replacement_marker_tail(after.lower) {
                         (before.original.trim(), true)
                     } else {
                         (body_rest, false)
@@ -4423,6 +4577,24 @@ pub(crate) fn static_condition_to_ability_condition(
                 ..Default::default()
             }),
         }),
+        // CR 309.7 ("A player completes a dungeon as that dungeon card is removed from the
+        // game") + CR 608.2c: "if you've completed a dungeon" is a plain game-state
+        // predicate about the CONTROLLER, evaluated as the ability resolves — it is not
+        // source-bound, layer-bound, or cost-bound like the unbridgeable statics below.
+        // `AbilityCondition::CompletedDungeon { specific }` is its exact effect-resolution
+        // equivalent and has existed all along; listing `CompletedADungeon` among the
+        // "no equivalent -> None" arms was a vocabulary asymmetry, not a real gap.
+        //
+        // It went unnoticed while an unlowerable condition merely fell through silently.
+        // Once the CR 614 branch guard started reporting such conditions honestly, the
+        // asymmetry surfaced as a regression: Tomb of Horrors Adventurer's "If you've
+        // completed a dungeon, copy that spell twice instead" lost its branch to
+        // `Unimplemented`. The `specific: None` form matches the bare "a dungeon" reading;
+        // a specific-dungeon static has no `StaticCondition` spelling today, so there is
+        // nothing else to map here.
+        StaticCondition::CompletedADungeon => {
+            Some(AbilityCondition::CompletedDungeon { specific: None })
+        }
         StaticCondition::DevotionGE { .. }
         // CR 702.176a + CR 611.3a: Persistent alternative-cost markers are
         // source-bound static predicates with no effect-resolution
@@ -4455,7 +4627,6 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::RingLevelAtLeast { .. }
-        | StaticCondition::CompletedADungeon
         | StaticCondition::ControlsCommander { .. }
         | StaticCondition::EnchantedIsFaceDown
         // CR 311.2 / CR 901.7: plane face-up status is a duration-only continuous-
@@ -4509,6 +4680,13 @@ pub(crate) fn ability_condition_to_static_condition(
 ) -> Option<StaticCondition> {
     match ac {
         AbilityCondition::IsYourTurn => Some(StaticCondition::DuringYourTurn),
+        // CR 309.7: round-trips the bridge in `static_condition_to_ability_condition`.
+        // Only the "any dungeon" reading round-trips — `StaticCondition` has no
+        // specific-dungeon spelling, so a specific one has no static form to bridge to.
+        AbilityCondition::CompletedDungeon { specific: None } => {
+            Some(StaticCondition::CompletedADungeon)
+        }
+        AbilityCondition::CompletedDungeon { specific: Some(_) } => None,
         // CR 301.5 + CR 303.4: round-trips the bidirectional bridge in
         // `static_condition_to_ability_condition` (a continuous "attached to a
         // creature" gate can ride per-`StaticDefinition`).
@@ -4960,6 +5138,14 @@ pub(super) fn try_nom_condition_as_ability_condition(
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let lower = text.to_lowercase();
+
+    // CR 508.4 + CR 608.2c + CR 701.42: attacking meld-pair conditions are
+    // resolution-time leading conditions. Keep them in the shared condition
+    // dispatcher so trigger, activated-ability, and ordinary effect chains all
+    // obtain the same typed source/partner predicates.
+    if let Some((condition, ..)) = super::meld::parse_live_pair_ability_condition(text) {
+        return Some(condition);
+    }
 
     // CR 608.2c: "<condition A> or if <condition B>" disjunction (Reptilian
     // Recruiter: "If that creature's power is 2 or less or if you control another
@@ -6831,7 +7017,7 @@ mod tests {
                 cond,
                 Some(AbilityCondition::QuantityCheck {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::PreviousEffectAmount
+                        qty: QuantityRef::PreviousEffectAmount { .. }
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -9218,12 +9404,13 @@ mod tests {
     /// CR 608.2c: Full instead-clause assembly for Fblthp's ETB draw rider.
     #[test]
     fn fblthp_library_origin_instead_clause() {
-        let instead = try_parse_generic_instead_clause(
+        let InsteadLowering::Branch(instead) = try_parse_generic_instead_clause(
             "If it entered from your library or was cast from your library, draw two cards instead.",
             AbilityKind::Spell,
             &mut ParseContext::default(),
-        )
-        .expect("instead clause must parse");
+        ) else {
+            panic!("instead clause must lower to a conditional branch");
+        };
         assert!(matches!(&*instead.effect, Effect::Draw { .. }));
         let cond = instead
             .condition

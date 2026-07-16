@@ -298,6 +298,146 @@ class LifetimeTests(unittest.TestCase):
                 self.assertIn("add_to_zone(a);", code)
 
 
+class LineContinuationTests(unittest.TestCase):
+    r"""A non-raw string RUNS ON when the line ends in a backslash.
+
+    Rust's STRING_CONTINUE (Reference, "String literals"): a `\` immediately before
+    the newline escapes it, dropping the newline and the next line's leading
+    whitespace, and the literal continues. It is the ONLY way a non-raw string spans
+    a line break -- an unescaped newline inside `"..."` is a compile error -- and it
+    is how every wrapped assertion message in the tree is written:
+
+        assert!(x, "combined MV 5 must satisfy the threshold; the front-only \
+                    MV (1) would wrongly omit Assault // Battery");
+
+    A scanner that stops at the end of the line reads that continuation body as
+    CODE, which is the raw-string ceiling (#5704) and the lifetime ceiling (#5705)
+    for a third time -- and it fails in all three of their directions at once: the
+    `//` above opens a phantom comment, a `{` in a message LEAKS into the brace
+    counter, and an `add_to_zone(` inside a message is a FALSE HIT.
+    """
+
+    def test_continuation_body_is_not_code(self) -> None:
+        # The census-visible loss, in both directions on one line: the body carries
+        # a pattern (a FALSE HIT if scanned) and the tail after the close is real
+        # code (a MISSED HIT if the scanner never gets back out of the literal).
+        src = 'let s = "add_to_zone(inside) \\\n         tail"; add_to_zone(after);\n'
+        code = code_of(src)
+        self.assertNotIn("inside", code)
+        self.assertIn("add_to_zone(after);", code)
+
+    def test_continuation_brace_does_not_leak(self) -> None:
+        # The strictly worse direction: an INVENTED brace. A `{` inside the message
+        # is data; counted, it opens a scope the file never closes and brace depth
+        # drifts for every line that follows.
+        src = 'let s = "a { b \\\n         c"; let y = 1;\n'
+        code = code_of(src)
+        self.assertEqual(code.count("{"), 0)
+        self.assertEqual(code.count("}"), 0)
+        self.assertIn("let y = 1;", code)
+
+    def test_continuation_comment_markers_do_not_start_a_comment(self) -> None:
+        # `//` inside the continuation is DATA -- and it is not hypothetical: the
+        # tree's own message text says `Assault // Battery`. Read as a comment, it
+        # eats the rest of the line, including the string's own terminator, and the
+        # scanner never learns the literal closed.
+        src = 'let s = "x \\\n         a // b"; add_to_zone(after);\n'
+        code = code_of(src)
+        self.assertNotIn("//", code)
+        self.assertIn("add_to_zone(after);", code)
+
+    def test_continuation_block_comment_open_does_not_eat_the_file(self) -> None:
+        # `/*` does not stop at the end of the line: it runs to the next `*/`
+        # ANYWHERE, so a mis-scanned one eats the production code after it.
+        src = 'let s = "x \\\n         a /* b"; add_to_zone(a);\nlet z = 2;\n'
+        code = code_of(src)
+        self.assertIn("add_to_zone(a);", code)
+        self.assertIn("let z = 2;", code)
+
+    def test_multiline_continuation_across_three_lines(self) -> None:
+        # The literal is closed only by its own quote, however many continuations
+        # it takes to get there. Every intermediate line is body, not code.
+        src = 'let s = "a \\\n         b add_to_zone(mid) \\\n         c"; add_to_zone(after);\n'
+        code = code_of(src)
+        self.assertNotIn("mid", code)
+        self.assertIn("add_to_zone(after);", code)
+
+    def test_continuation_cannot_toggle_the_cfg_test_region(self) -> None:
+        # The mis-scope, end to end. A continued message that QUOTES a region marker
+        # must not arm a skip: if it does, the production code after it silently
+        # disappears and the census reports zero hits and calls that a pass.
+        src = (
+            "fn prod_before() { add_to_zone(a); }\n"
+            'const DOC: &str = "x \\\n'
+            "#[cfg(test)] \\\n"
+            "mod fake { \\\n"
+            '";\n'
+            "fn prod_after() { add_to_zone(b); }\n"
+        )
+        code = code_of(src)
+        self.assertIn("add_to_zone(a);", code)
+        self.assertIn("add_to_zone(b);", code)
+
+    def test_continuation_inside_a_cfg_test_body_does_not_desync(self) -> None:
+        # Where the tree actually keeps these: a wrapped `assert!` message inside a
+        # `#[cfg(test)]` mod. An unbalanced brace leaking out of the message walks
+        # brace tracking out through the mod's floor -- CensusError, or worse, a
+        # swallowed production tail.
+        src = (
+            "fn prod_before() { add_to_zone(a); }\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    fn t() {\n"
+            '        assert!(x, "the {} form } } } is wrong \\\n'
+            '                    and so is this");\n'
+            "    }\n"
+            "}\n"
+            "fn prod_after() { add_to_zone(b); }\n"
+        )
+        code = code_of(src)  # must not raise CensusError
+        self.assertIn("add_to_zone(a);", code)
+        self.assertIn("add_to_zone(b);", code)
+
+    def test_byte_and_c_string_continuations(self) -> None:
+        # The prefixed non-raw forms continue exactly like a bare `"` string: the
+        # prefix is part of the token, not a separate thing the scanner may skip.
+        for prefix in ("", "b", "c"):
+            with self.subTest(prefix=prefix):
+                src = f'let s = {prefix}"a {{ add_to_zone(inside) \\\n         b"; add_to_zone(after);\n'
+                code = code_of(src)
+                self.assertNotIn("inside", code)
+                self.assertEqual(code.count("{"), 0)
+                self.assertIn("add_to_zone(after);", code)
+
+    # ---- the minimal pair: an ESCAPED backslash does not continue anything ----
+
+    def test_escaped_backslash_before_the_closing_quote_closes_the_string(self) -> None:
+        # `"a\\"` is a string holding ONE backslash, and it CLOSES. Only a backslash
+        # that escapes the NEWLINE continues; a backslash that escapes another
+        # backslash is spent. Read the wrong way, the string stays open, swallows the
+        # next line, and the miss propagates for as long as the file has quotes.
+        src = 'let s = "a\\\\"; add_to_zone(after);\nlet y = 1;\n'
+        code = code_of(src)
+        self.assertIn("add_to_zone(after);", code)
+        self.assertIn("let y = 1;", code)
+
+    def test_trailing_backslash_outside_a_string_continues_nothing(self) -> None:
+        # A `\` at the end of a line of ordinary code (Rust has no line-continuation
+        # outside literals; this shape shows up in doc/macro text) must not put the
+        # scanner into a string it never entered.
+        src = "let x = 1; \\\nadd_to_zone(after);\n"
+        self.assertIn("add_to_zone(after);", code_of(src))
+
+    def test_raw_string_is_not_continued_by_a_backslash(self) -> None:
+        # Raw strings honour NO escapes (CR-free Rust grammar): a trailing `\` inside
+        # one is content, and the very next `"` closes the literal regardless. The
+        # continuation branch must not reach into the raw branch and hold it open.
+        src = 'let s = r"a \\"; add_to_zone(after);\nlet y = 1;\n'
+        code = code_of(src)
+        self.assertIn("add_to_zone(after);", code)
+        self.assertIn("let y = 1;", code)
+
+
 class PreservedBehaviourTests(unittest.TestCase):
     """The scanner's existing contracts. The raw-string branch must not cost any
     of them."""

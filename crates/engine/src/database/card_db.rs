@@ -171,7 +171,12 @@ impl CardDatabase {
                     .copied()
                     .unwrap_or_default(),
             };
-            out.insert(face.name.clone(), entry);
+            // Preserve the database storage key, not merely the printed face
+            // name. Meld pairs have two distinct combined-back records with the
+            // same printed name and different oracle ids; oracle-gen keeps the
+            // loser under a hidden `[oracle-id]` key. Re-keying both by
+            // `face.name` here collapsed one half in AI-worker subsets.
+            out.insert(key, entry);
         }
         serde_json::to_string(&out).expect("CardExportEntry serialization is infallible")
     }

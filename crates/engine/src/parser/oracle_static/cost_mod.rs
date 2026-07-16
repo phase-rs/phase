@@ -320,6 +320,8 @@ fn parse_cast_spells_alternative_cost(text: &str) -> Option<StaticDefinition> {
     let def = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
         cost,
         timing_permission,
+        // CR 118.9: Primal Prayers grants an unlimited alternative cost.
+        frequency: CastFrequency::Unlimited,
     })
     .affected(affected)
     .description(text.to_string())
@@ -342,6 +344,22 @@ fn supported_alternative_cast_cost(cost: &AbilityCost) -> bool {
     )
 }
 
+/// CR 118.9 + CR 601.2b: Optional once-per-turn frequency prefix on an
+/// alternative-cost grant (As Foretold: "Once each turn, you may pay {0} ...").
+/// Consumes the phrase (on already-lowercased text) and yields
+/// `CastFrequency::OncePerTurn`; callers default to `Unlimited` when it is absent.
+/// Single authority shared by the classifier pre-filter and the lowering here.
+pub(crate) fn parse_alt_cost_frequency_prefix(input: &str) -> OracleResult<'_, CastFrequency> {
+    alt((
+        value(CastFrequency::OncePerTurn, tag("once each turn, ")),
+        value(
+            CastFrequency::OncePerTurn,
+            tag("once during each of your turns, "),
+        ),
+    ))
+    .parse(input)
+}
+
 /// CR 118.9 + CR 601.2f: Parse a mana-cost-alternative-grant static —
 /// "You may [pay] X rather than pay [the/its/this object's] mana cost for
 /// [filter] spells you cast." The permanent's controller may pay the
@@ -357,6 +375,17 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
 
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+
+    // CR 118.9 + CR 601.2b: peel an optional once-per-turn frequency prefix (As
+    // Foretold: "Once each turn, you may pay {0} ...") before the grant proper.
+    // Absent → `Unlimited` (Rooftop Storm / Fist of Suns / Jodah).
+    let (tp, frequency) = match parse_alt_cost_frequency_prefix(tp.lower) {
+        Ok((rest_lower, freq)) => {
+            let consumed = tp.lower.len() - rest_lower.len();
+            (TextPair::new(&tp.original[consumed..], rest_lower), freq)
+        }
+        Err(_) => (tp, CastFrequency::Unlimited),
+    };
 
     // Prefix: "you may pay " (Rooftop Storm / Fist of Suns / Jodah). The shorter
     // "you may " is accepted as a fallback so a payment verb other than "pay"
@@ -417,16 +446,24 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     let mv_filter = if after_spells.is_empty() {
         None
     } else {
-        let (prop, _consumed) =
-            parse_mana_value_suffix(after_spells, &mut ParseContext::default())?;
+        let (prop, consumed) = parse_mana_value_suffix(after_spells, &mut ParseContext::default())?;
         let FilterProp::Cmc { .. } = prop else {
             return None;
         };
+        // CR 202.3 + CR 107.3a: strict-fail if the MV suffix leaves an unconsumed
+        // tail (e.g. an unbound "where X is ..." clause `parse_mana_value_suffix`
+        // could not bind) rather than silently dropping it and mis-scoping the
+        // grant to MV ≤ 0.
+        let remainder = after_spells[consumed..].trim().trim_end_matches('.').trim();
+        if !remainder.is_empty() {
+            return None;
+        }
         Some(prop)
     };
 
-    let base_filter = if type_prefix_original.is_empty() {
-        // "spells you cast" (no type prefix) — any spell (Fist of Suns).
+    // CR 118.9: a bare leading article ("a"/"an") with no type word — "a spell you
+    // cast" (As Foretold) — scopes to any spell, same as the no-prefix case.
+    let base_filter = if matches!(type_prefix_lower.trim(), "" | "a" | "an") {
         TargetFilter::Typed(TypedFilter::card())
     } else {
         parse_type_phrase(type_prefix_original).0
@@ -443,6 +480,7 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
         StaticDefinition::new(StaticMode::CastWithAlternativeCost {
             cost,
             timing_permission: None,
+            frequency,
         })
         .affected(affected)
         .description(text.to_string())
@@ -512,6 +550,9 @@ pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefini
         StaticDefinition::new(StaticMode::CastWithAlternativeCost {
             cost,
             timing_permission: None,
+            // CR 118.9 + CR 701.59a: Conspiracy Unraveler grants an unlimited
+            // collect-evidence alternative cost.
+            frequency: CastFrequency::Unlimited,
         })
         .affected(affected)
         .description(text.to_string())

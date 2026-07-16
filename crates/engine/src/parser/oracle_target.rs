@@ -3,7 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{eof, not, opt, peek, success, value};
+use nom::combinator::{eof, map, not, opt, peek, success, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -34,8 +34,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
-    merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
-    SELF_REF_TYPE_PHRASES,
+    merge_or_filters, parse_subtype, strip_possessive, strip_where_x_is_clause, TextPair,
+    SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 
 /// CR 115.1: Whether a parsed target phrase used the "target" keyword
@@ -410,6 +410,24 @@ fn parse_disjunct_mana_value(
             value: mv,
         },
     ))
+}
+
+/// CR 102.1 + CR 103.1: seat-relative neighbor phrase → [`SeatDirection`].
+/// Matches "the player to {their|your} {left|right}" — the reflexive "their"
+/// form for "each player …" chooser scopes, the "your" form for
+/// controller-relative references. Single authority for seat-direction phrase
+/// parsing on already-lowercased text; the `TargetFilter::Neighbor` arms and the
+/// `EachPlayerCopyChosen` controller-clause dispatch both delegate here so the
+/// phrase lives in exactly one combinator.
+pub(crate) fn parse_neighbor_seat_direction(input: &str) -> OracleResult<'_, SeatDirection> {
+    preceded(
+        (tag("the player to "), alt((tag("their "), tag("your ")))),
+        alt((
+            value(SeatDirection::Left, tag("left")),
+            value(SeatDirection::Right, tag("right")),
+        )),
+    )
+    .parse(input)
 }
 
 /// Context-aware variant of `parse_target`. TargetFallback diagnostics are
@@ -1189,22 +1207,14 @@ pub fn parse_target_with_syntax<'a>(
                 TargetFilter::ParentTargetSlot { index: 0 },
                 tag("the second player"),
             ),
-            // CR 102.1 + CR 103.1: "the player to your right/left" —
+            // CR 102.1 + CR 103.1: "the player to {your|their} {right|left}" —
             // seating-relative neighbor. Right = previous seat (clockwise turn
             // order proceeds to the left). Placed before the bare "the player"
             // arm so the longer phrase wins under longest-match-first dispatch.
-            value(
-                TargetFilter::Neighbor {
-                    direction: SeatDirection::Right,
-                },
-                tag("the player to your right"),
-            ),
-            value(
-                TargetFilter::Neighbor {
-                    direction: SeatDirection::Left,
-                },
-                tag("the player to your left"),
-            ),
+            // Delegates to the single `parse_neighbor_seat_direction` authority.
+            map(parse_neighbor_seat_direction, |direction| {
+                TargetFilter::Neighbor { direction }
+            }),
             value(TargetFilter::ParentTarget, tag("the player")),
             value(TargetFilter::ParentTarget, tag("the creature")),
             value(TargetFilter::ParentTarget, tag("the spell")),
@@ -2954,6 +2964,21 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 302.6 + CR 508.1a: trailing continuity exemption "..., except for
+    // creatures [the/that player] hasn't controlled continuously since the
+    // beginning of the turn" (Total War). The exempted set — creatures NOT
+    // controlled continuously — is removed from the population, so only
+    // creatures the player HAS controlled continuously are affected. Placed
+    // after the controller/"didn't attack" relative clauses because the
+    // exemption trails them; the early `except for <type-list>` block sees the
+    // text before those clauses are consumed and does not reach it. Reuses the
+    // same `ControlledContinuouslySinceTurnBegan` restriction Siren's Call
+    // attaches via the ActivePlayerPunisher continuity path.
+    if let Some((prop, consumed)) = parse_except_continuity_exemption_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
     if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
         properties.extend(zone_props);
@@ -3703,7 +3728,19 @@ fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
     }
 }
 
-fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
+/// CR 109.2: a bare "spell"/"spells" head noun means the filter denotes an
+/// object on the stack, not a permanent — rewrites a plain `Typed` filter into
+/// `TargetFilter::StackSpell` (or `And{[StackSpell, Typed]}` when other
+/// type/controller constraints remain). `phrase` must be the lowercase slice of
+/// the source text the filter was parsed from, so the word-boundary scan sees
+/// the original wording (e.g. "artifact or enchantment spell").
+///
+/// Public within the crate so static-ability subject resolution
+/// (`oracle_static::parse_continuous_subject_filter`'s fallback) can apply the
+/// same stack-scoping to a "you control"-suffixed subject conjunct that
+/// mentions "spell(s)" (Secret Arcade's "permanent spells you control") — not
+/// just target-noun-phrase grammar.
+pub(crate) fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
     if !target_phrase_mentions_spell_word(phrase) {
         return filter;
     }
@@ -4952,7 +4989,45 @@ pub(crate) fn parse_mana_value_suffix(
                 after_num,
             )
         };
+    // CR 107.3a + CR 202.3: rebind a bare `X` mana-value gate from a trailing
+    // ", where X is <quantity>" clause (As Foretold). No-op for every other caller.
+    let (prop, after) = rebind_bare_x_mana_value(prop, after);
     Some((prop, text.len() - after.len()))
+}
+
+/// CR 107.3a + CR 202.3: Rebind a bare-`X` mana-value gate from an immediately
+/// following ", where X is <quantity>" clause (As Foretold: "mana value X or
+/// less, where X is the number of time counters on ~"). Only a `Cmc` gate whose
+/// value is exactly the unbound `Variable("X")` and whose trailing clause parses
+/// through `parse_cda_quantity` is rebound; every existing no-binder caller is
+/// returned byte-for-byte unchanged. Input is already lowercase (the whole
+/// suffix parser operates on lowercased Oracle text), so `strip_where_x_is_clause`
+/// matches directly.
+fn rebind_bare_x_mana_value(prop: FilterProp, after: &str) -> (FilterProp, &str) {
+    let FilterProp::Cmc { comparator, value } = &prop else {
+        return (prop, after);
+    };
+    if !matches!(
+        value,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X"
+    ) {
+        return (prop, after);
+    }
+    let Some(description) = strip_where_x_is_clause(after.trim_start()) else {
+        return (prop, after);
+    };
+    let Some(bound) = crate::parser::oracle_quantity::parse_cda_quantity(description) else {
+        return (prop, after);
+    };
+    (
+        FilterProp::Cmc {
+            comparator: *comparator,
+            value: bound,
+        },
+        "",
+    )
 }
 
 fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
@@ -6410,6 +6485,9 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             "was dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
+        // CR 120.1: active voice — the creature dealt damage (was the source),
+        // distinct from the passive "was dealt damage" above (Red Guardian).
+        ("dealt damage this turn", FilterProp::DealtDamageThisTurn),
         (
             "entered the battlefield this turn",
             FilterProp::EnteredThisTurn,
@@ -6720,6 +6798,49 @@ fn parse_except_for_type_list_suffix(
     }
 
     Some((neg_types, props, consumed))
+}
+
+/// CR 302.6 + CR 508.1a: a trailing continuity exemption on a target filter —
+/// "..., except for creatures [the/that player] hasn't controlled continuously
+/// since the beginning of the turn" (Total War). The exempted set is the
+/// creatures NOT controlled continuously since the turn began, so excluding it
+/// restricts the population to creatures the player HAS controlled continuously:
+/// `FilterProp::ControlledContinuouslySinceTurnBegan`. This is the "except
+/// for <predicate>" sibling of the type-list exclusion above; it reaches the
+/// same restriction Siren's Call attaches via its `ignore this effect for each
+/// creature ... didn't control continuously ...` ActivePlayerPunisher path
+/// (`parser/oracle.rs::parse_continuity_exemption_clause`), for the destroy /
+/// affect-all shape that trails the population phrase instead.
+fn parse_except_continuity_exemption_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    // Optional list/clause comma the exemption trails ("didn't attack, except…").
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(",")).parse(trimmed).ok()?;
+    let rest = rest.trim_start();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("except for creatures")
+        .parse(rest)
+        .ok()?;
+    // Optional subject anaphor: " the player" / " that player" / "".
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>(" the player"),
+        tag(" that player"),
+    )))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" hasn't controlled"),
+        tag(" haven't controlled"),
+        tag(" didn't control"),
+        tag(" doesn't control"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" continuously since the beginning of the turn")
+        .parse(rest)
+        .ok()?;
+    Some((
+        FilterProp::ControlledContinuouslySinceTurnBegan,
+        text.len() - rest.len(),
+    ))
 }
 
 /// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"
@@ -9963,6 +10084,22 @@ mod tests {
                         zone: Zone::Graveyard
                     }])
             )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    // Necromancy building block (#640): "target creature card from a graveyard"
+    // must parse to a creature+card `Typed` filter, zone Graveyard, with NO owner
+    // constraint ("a graveyard", not "your graveyard"). This is the target the
+    // reanimator-Aura GRANT-shape ETB chain feeds into its root ChangeZone.
+    #[test]
+    fn target_creature_card_from_a_graveyard() {
+        let (f, rest) = parse_target("target creature card from a graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
         );
         assert_eq!(rest.trim(), "");
     }
@@ -13849,6 +13986,37 @@ mod tests {
         );
     }
 
+    // CR 120.1: active-voice "that dealt damage this turn" (creature is the damage
+    // source) must parse to `DealtDamageThisTurn`, NOT the passive
+    // `WasDealtDamageThisTurn` (creature is the damage recipient). Red Guardian,
+    // Super-Soldier: "destroy target creature an opponent controls that dealt
+    // damage this turn."
+    #[test]
+    fn that_dealt_damage_this_turn_is_active_voice() {
+        let (filter, rest) =
+            parse_target("target creature an opponent controls that dealt damage this turn");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::DealtDamageThisTurn)),
+            "Expected DealtDamageThisTurn (active), got: {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
+            "must NOT collapse to the passive WasDealtDamageThisTurn: {:?}",
+            tf.properties
+        );
+        assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
+    }
+
     #[test]
     fn that_entered_this_turn() {
         let (filter, rest) = parse_type_phrase("token you control that entered this turn");
@@ -15244,6 +15412,26 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 102.1 + CR 103.1: the shared seat-direction combinator accepts both the
+    /// reflexive "their" (each-player chooser scopes) and the "your"
+    /// (controller-relative) possessives, in both directions.
+    #[test]
+    fn parse_neighbor_seat_direction_covers_their_your_left_right() {
+        for (phrase, expected) in [
+            ("the player to their left", SeatDirection::Left),
+            ("the player to their right", SeatDirection::Right),
+            ("the player to your left", SeatDirection::Left),
+            ("the player to your right", SeatDirection::Right),
+        ] {
+            let (rest, dir) =
+                parse_neighbor_seat_direction(phrase).expect("seat direction phrase parses");
+            assert_eq!(dir, expected, "{phrase}");
+            assert_eq!(rest, "", "{phrase} fully consumed");
+        }
+        // A non-neighbor phrase is declined (fail-closed).
+        assert!(parse_neighbor_seat_direction("the player who cast it").is_err());
+    }
+
     #[test]
     fn parse_target_bare_possessive_graveyard() {
         // CR 110.1/108.3/109.5: bare "their graveyard" scopes by owner to the
@@ -15720,6 +15908,83 @@ mod tests {
             }
             other => panic!("expected Or eligible set, got {other:?}"),
         }
+    }
+
+    /// CR 107.3a + CR 202.3 + CR 122.1: "with mana value X or less, where X is
+    /// the number of time counters on ~" binds the bare `X` gate to a dynamic
+    /// counter quantity on the source (As Foretold). Building-block win: every
+    /// mana-value-suffix consumer inherits "where X is <dynamic>" uniformly.
+    #[test]
+    fn mana_value_suffix_binds_where_x_dynamic_counters() {
+        let mut ctx = ParseContext::default();
+        // Input is lowercased upstream (the whole suffix parser runs on lowercase).
+        let input = "with mana value x or less, where x is the number of time counters on ~";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("dynamic where-X suffix parses");
+        assert_eq!(
+            consumed,
+            input.len(),
+            "must consume the whole suffix including the where-clause"
+        );
+        assert!(
+            matches!(
+                prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: ObjectScope::Source,
+                            counter_type: Some(CounterType::Time),
+                        },
+                    },
+                }
+            ),
+            "expected Cmc LE CountersOn(Source, Time), got {prop:?}"
+        );
+    }
+
+    /// CR 202.3: control — a fixed "with mana value 3 or less" gate is unchanged
+    /// by the where-X binder logic (no binder present).
+    #[test]
+    fn mana_value_suffix_fixed_unchanged_by_where_binder() {
+        let mut ctx = ParseContext::default();
+        let input = "with mana value 3 or less";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("fixed suffix parses");
+        assert_eq!(consumed, input.len());
+        assert!(
+            matches!(
+                prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }
+            ),
+            "expected Cmc LE Fixed(3), got {prop:?}"
+        );
+    }
+
+    /// CR 107.3a: control — a bare "with mana value X or less" with NO binder
+    /// still yields the unbound `Variable("X")` gate (guard proof: the rebind
+    /// fires only when a parseable where-clause follows).
+    #[test]
+    fn mana_value_suffix_bare_x_without_binder_stays_variable() {
+        let mut ctx = ParseContext::default();
+        let input = "with mana value x or less";
+        let (prop, _consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("bare X suffix parses");
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name },
+                    },
+                } if name == "X"
+            ),
+            "expected Cmc LE Variable(X), got {prop:?}"
+        );
     }
 
     #[test]

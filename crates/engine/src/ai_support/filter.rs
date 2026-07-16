@@ -706,6 +706,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // SAFE — read only candidate fingerprint fields.
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Tapped
         | FilterProp::Untapped
@@ -767,6 +768,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         // CR 302.6: per-turn control-continuity marker — a turn/history-relative
         // predicate like the siblings here (POISON for memoization).
@@ -809,6 +811,14 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::Unpaired
+        // CR 205.3m + CR 903.3: POISON, and deliberately NOT grouped with
+        // `IsCommander` above. `IsCommander` reads `obj.is_commander` — a field ON
+        // the candidate. This one reads the CONTROLLER'S COMMANDER (the deck-pool
+        // registration, falling back to an is_commander object scan) and compares it
+        // against the candidate, so its answer depends on state outside the
+        // candidate's fingerprint entirely. Memoizing on the candidate alone would
+        // cache a verdict that a commander change invalidates.
+        | FilterProp::SharesCreatureTypeWithCommander
         // CR 608.2c: Reads the resolution-chain tracked-set side-table
         // (`tracked_object_sets` / `chain_tracked_set_id`), not the candidate's
         // own fingerprint — POISON for memoization.

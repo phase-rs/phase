@@ -58,6 +58,141 @@ if [ -n "${GIT_INDEX_FILE:-}" ] || [ "$BASE" = "$(git rev-parse HEAD 2>/dev/null
     DIFF_MODE="--cached"
 fi
 
+# ---------------------------------------------------------------------------
+# (G) ROUTER/GRANT ARCHITECTURE GATE  — Plan 02 step 5 item 13 / step 7.
+#
+# WHOLE-FILE, not diff-based: this is an architecture invariant, so it is
+# checked on every invocation regardless of what the diff touches.
+#
+# THE BOUNDARY. There are two keyword-parsing surfaces and they are NOT
+# interchangeable:
+#
+#   parse_router_keyword_line()      STRICT, whole line. All-consuming: returns a
+#   parse_router_keyword_list()      STRICT, keyword list (comma parts + MTGJSON).
+#   parse_router_keyword_fragment()  STRICT, one keyword phrase.
+#                                    These return a typed keyword ONLY when the text
+#                                    parses completely (keyword + permitted P/R/M
+#                                    tail). They are the ONLY surfaces that may
+#                                    license a router to CONSUME a line.
+#
+#   parse_granted_keyword_fragment() PERMISSIVE. By design they take the leading
+#   extract_granted_keyword_list()   keyword and DISCARD the remainder — correct
+#                                    for an EMBEDDED grant ("...gains vanishing 3
+#                                    if ..." inside a static/token/vote payload),
+#                                    and invalid at a whole-line router boundary,
+#                                    where the discarded remainder is dropped
+#                                    SEMANTICS with no Unimplemented raised.
+#
+# A router that advances a line on a permissive parse is a SILENT SWALLOW: no
+# keyword recorded, no diagnostic, and the card renders as fully supported.
+#
+# STATUS: MIGRATION COMPLETE (task #123). Plan 02 step 5 wired the strict router into
+# priorities 9 and 13; task #123 migrated the remaining 16 permissive calls (priorities
+# 0, 1b, 8f, the flashback/suspend/specialize/buyback/escalate/commander-ninjutsu/d20
+# intercepts, and the two routing classifiers) onto the strict surfaces. The permissive
+# symbols are now ABSENT from oracle.rs entirely — not merely unused, but not imported.
+#
+# This gate is therefore no longer a ratchet with an allowlist. It is the plain
+# invariant Plan 02 step 7 asks for: NO permissive keyword-parser symbol may appear in
+# a router context, at any count, ever. A reintroduction fails the build.
+#
+# SPAN EXTRACTION: from the `fn NAME(` signature at column 0 to the next `}` at
+# column 0. Brace COUNTING would be wrong here — oracle.rs is saturated with mana
+# symbols ("{T}", "{2}{B}") inside string literals, and a naive counter reads
+# those as scope. rustfmt guarantees a top-level fn closes with `}` at column 0,
+# so the anchor is exact. Full-line comments are excluded so that prose NAMING a
+# permissive symbol is not miscounted as a call.
+# ---------------------------------------------------------------------------
+ORACLE_RS='crates/engine/src/parser/oracle.rs'
+PERMISSIVE_SYMS='parse_granted_keyword_fragment|extract_granted_keyword_list'
+# Pre-rename spellings. These must not come back under any name, in any context.
+LEGACY_SYMS='parse_keyword_from_oracle|extract_keyword_line'
+
+# NOT a router-context symbol: `parse_crew_keyword`. Plan 02 step 5 item 11 groups it
+# with the remainder-discarding helpers, but that describes the PRE-step-5 code. As it
+# stands it is strict: its cadence tail is `all_consuming(tag("activate only once each
+# turn"))`, so "Crew 2 if you control an artifact" returns None rather than eating the
+# suffix, and its call site advances only inside `if let Some`.
+
+arch_fail=0
+
+router_span() {
+    # $1 = fn name. Emits that fn's body with full-line comments stripped.
+    awk -v fn="$1" '
+        $0 ~ "^([a-z(),: ]*)?fn " fn "\\(" { inside = 1 }
+        inside && /^\}$/                   { exit }
+        inside && $0 !~ /^[[:space:]]*\/\// { print }
+    ' "$ORACLE_RS"
+}
+
+for ctx in parse_oracle_ir is_semicolon_keyword_line is_spell_resolution_instruction_line; do
+    span="$(router_span "$ctx")"
+    if [ -z "$span" ]; then
+        echo "✗ (G) router context '$ctx' not found in $ORACLE_RS — the gate is blind; fix the span anchor." >&2
+        arch_fail=1
+        continue
+    fi
+    actual="$(printf '%s\n' "$span" | grep -cE "$PERMISSIVE_SYMS" || true)"
+    if [ "$actual" -ne 0 ]; then
+        echo "✗ (G) $ctx: $actual permissive keyword-parser call(s), expected 0." >&2
+        echo "      Routers must consume a line only via the STRICT surfaces" >&2
+        echo "      (parse_router_keyword_line / _list / _fragment). The permissive" >&2
+        echo "      surface discards the remainder and silently swallows semantics —" >&2
+        echo "      no keyword, no diagnostic, and the card renders as fully supported." >&2
+        echo "      This migration is COMPLETE (task #123); do not reintroduce it." >&2
+        arch_fail=1
+    fi
+done
+
+legacy_hits="$(grep -nE "$LEGACY_SYMS" "$ORACLE_RS" | grep -vE '^[0-9]+:[[:space:]]*//' || true)"
+if [ -n "$legacy_hits" ]; then
+    echo "✗ (G) legacy permissive symbol reintroduced in $ORACLE_RS:" >&2
+    printf '%s\n' "$legacy_hits" >&2
+    echo "      parse_keyword_from_oracle/extract_keyword_line were RENAMED to the" >&2
+    echo "      grant-context names to make this boundary nameable. Do not resurrect them." >&2
+    arch_fail=1
+fi
+
+if [ "$arch_fail" -ne 0 ]; then
+    echo "" >&2
+    echo "Gate G FAIL (router/grant architecture)." >&2
+    exit 1
+fi
+printf 'Gate G PASS (router/grant architecture: strict router vs permissive grant boundary intact)\n'
+
+# ---------------------------------------------------------------------------
+# DO NOT "harden" families (A), (B), (E), (F) by filtering them through the
+# census lexer (scripts/zone_authority_census.py `strip_noncode`). It looks like
+# the obvious single-authority move. It would BLIND this gate. (#76)
+#
+# Those families match ON the string literal itself:
+#
+#     .contains("        "lit" =>        == "long sentence"        name: "..."
+#
+# `strip_noncode` returns a code stream with literals REMOVED, so the very quote
+# each pattern keys on is gone: every one of them would silently stop matching
+# real violations, and the gate would pass string-matching parser code forever
+# while reporting green. (Measured during #76: routing these through stripped
+# code misread 194 REAL match arms as non-matches.)
+#
+# What they are exposed to is the mirror-image, and it is BENIGN: a forbidden
+# pattern written inside a COMMENT or a literal is a FALSE HIT. That is loud (it
+# blocks a commit, the author sees exactly why) and it already has an escape
+# hatch (`// allow-noncombinator:`). #76 measured 10 such lines in the whole
+# parser scope, all of them doc comments describing the forbidden pattern.
+# A false MISS from this class is structurally impossible here: these greps read
+# raw text, so literal-awareness could only ever REMOVE matches, never add them.
+#
+# If the false hits ever become a real cost, the fix is NOT strip_noncode: it is
+# a POSITION mask (which character offsets are code vs comment vs literal), and
+# these greps would filter candidates by match offset. Two APIs, one grammar.
+#
+# Family (D) is the opposite case and DOES delegate: it needs paren counting on
+# CODE (see scripts/lib/detect-cross-product-alts.py), where a `)` inside
+# `take_until(")")` is data. It reads structure from the code stream and arms
+# from the raw text.
+# ---------------------------------------------------------------------------
+
 # (A) String-method dispatch. The "..." suffix on `.contains` / `.starts_with`
 # / `.ends_with` / `.find` / `.rfind` / `.split` / `.trim_*_matches` matches
 # only string-literal arguments — `.contains(&item)` (Vec/slice op),
@@ -142,6 +277,23 @@ files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" \
 if [ -z "$files" ]; then
     printf 'Gate A PASS head=%s base=%s\n' "$HEAD_SHA" "$BASE_SHA"
     exit 0
+fi
+
+# (D0) Family (D)'s own seam suite, ahead of the scan it protects — the same
+# shape as section (B0) of check-engine-authorities.sh, and for the same reason.
+# The cross-product detector finds an `alt` block's end by COUNTING PARENS, which
+# is a lex; a regression there does not fail this gate, it silently mis-scopes it
+# in both directions (a phantom block from an `alt((` in a comment BLOCKS a good
+# commit; a stray `))` in a comment truncates a real block so a cross product
+# SHIPS). Neither shows up as a failure here, so the suite that pins the lexing
+# runs first. It costs ~5ms and only when parser files actually changed.
+if command -v python3 >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" ]; then
+    if ! python3 "$SCRIPT_DIR/lib/detect_cross_product_alts_tests.py" >/dev/null 2>&1; then
+        echo "ERROR: the cross-product detector's own test suite is RED." >&2
+        echo "       Family (D) cannot be trusted until it passes:" >&2
+        echo "           python3 scripts/lib/detect_cross_product_alts_tests.py" >&2
+        exit 1
+    fi
 fi
 
 while IFS= read -r file; do

@@ -1,12 +1,4 @@
-//! Unified zone-change pipeline (Phase A carve-out).
-//!
-//! This module is the home of the single zone-change entry point. Phase A moves
-//! the most-complete pipeline copy (`change_zone::execute_zone_move` and its
-//! delivery tail) here verbatim, exposes the new request/cause types and the
-//! `move_object` wrapper, and seeds the `ApprovedZoneChange` proof token used to
-//! fence delivery in later phases. Existing callers continue to reach the moved
-//! functions through `pub(crate) use` shims left at their old `change_zone.rs`
-//! paths, so no behavior changes in this phase.
+//! Unified zone-change pipeline.
 //!
 //! Layer discipline (PLAN §2): `zones.rs` keeps every guard that must hold
 //! unconditionally (CR 111.8 token guard, CR 614.1d ETB block, CR 400.7 cleanup,
@@ -23,8 +15,9 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    BatchCompletion, ExileLinkKind, GameState, MergedCardComponentRoute, PendingBatchDeliveries,
-    PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    BatchCompletion, ExileLinkKind, GameState, LiminalEntryKind, MergedCardComponentRoute,
+    PendingBatchDeliveries, PendingCounterPostAction, PendingLiminalEntryResume,
+    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
 use std::collections::HashSet;
 
@@ -45,11 +38,6 @@ use crate::types::ability::FaceDownProfile;
 /// ordering); the exempt variants are pipeline-internal and skip the replacement
 /// consult. Each exempt variant carries its CR citation so adding one is a
 /// reviewable diff (PLAN §3 "exemptions are data, not a second function").
-//
-// Phase A introduces the request/cause/mods vocabulary; the call sites that
-// construct each variant land in Phases B–D, so several arms are unconstructed
-// in this phase.
-#[allow(dead_code)]
 pub enum ZoneChangeCause {
     /// Resolving effect or ability instruction. `source` feeds
     /// `ProposedEvent::ZoneChange.cause`.
@@ -144,7 +132,6 @@ impl ZoneChangeCause {
 /// Destination modifiers — the union of what the pipeline copies need to seed
 /// onto the proposed `ZoneChange` before the replacement consult.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct EntryMods {
     /// CR 614.1c effect seed. Reuses the three-state `EtbTapState`
     /// (`Unspecified` / `Tapped` / `Untapped`) rather than a bool, matching the
@@ -169,7 +156,6 @@ pub struct EntryMods {
 /// `exiled_by_source` bookkeeping always travel together, so they fold into one
 /// struct that also rides in `DeliveryCtx`.
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct ExileLinkSpec {
     /// `Some(Duration::UntilHostLeavesPlay)` installs a return-on-source-leave
     /// link; other durations / `None` fall back to `tracking`.
@@ -183,7 +169,6 @@ pub struct ExileLinkSpec {
 ///
 /// `from` is read from the object's current zone inside `move_object` (every
 /// pipeline copy except change_zone already did this).
-#[allow(dead_code)]
 pub struct ZoneMoveRequest {
     pub object_id: ObjectId,
     pub to: Zone,
@@ -195,10 +180,11 @@ pub struct ZoneMoveRequest {
     pub placement: Option<LibraryPosition>,
     /// Exile-link context (duration-bound returns + exiled-by-source tracking).
     pub exile_links: ExileLinkSpec,
+    /// CR 614.5: replacement definitions already applied to the event or
+    /// modified event from which this physical-card move was derived.
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
 }
 
-// Builder constructors are the Phase B+ call-site ergonomics; unused in Phase A.
-#[allow(dead_code)]
 impl ZoneMoveRequest {
     /// Effect- or ability-driven move with no destination modifiers.
     pub fn effect(object_id: ObjectId, to: Zone, source: ObjectId) -> Self {
@@ -209,6 +195,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -221,6 +208,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -237,6 +225,20 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+        }
+    }
+
+    /// CR 704: state-based action zone change with no destination modifiers.
+    pub fn state_based_action(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::StateBasedAction,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -253,10 +255,13 @@ impl ZoneMoveRequest {
         Self {
             object_id,
             to: Zone::Hand,
-            cause: ZoneChangeCause::Draw { seed_applied },
+            cause: ZoneChangeCause::Draw {
+                seed_applied: seed_applied.clone(),
+            },
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: seed_applied,
         }
     }
 
@@ -270,6 +275,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -285,6 +291,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -298,6 +305,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -310,6 +318,7 @@ impl ZoneMoveRequest {
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
         }
     }
 
@@ -356,6 +365,13 @@ impl ZoneMoveRequest {
     /// `NthFromTop`). Only meaningful when `to == Zone::Library`.
     pub fn at_library_position(mut self, position: LibraryPosition) -> Self {
         self.placement = Some(position);
+        self
+    }
+
+    /// CR 614.5: seed a child/modified move with the replacements already
+    /// applied to its originating event.
+    pub fn with_replacement_applied(mut self, applied: HashSet<AppliedReplacementKey>) -> Self {
+        self.replacement_applied = applied;
         self
     }
 
@@ -406,18 +422,11 @@ impl ZoneMoveRequest {
 /// these would mint a token outside the pipeline (deserialization, cloning a
 /// stashed token, `Default::default()`) and silently reopen the loophole. A CI
 /// grep for derives adjacent to this type backs the review rule.
-//
-// Phase A seeds the token + its three mint paths; the consuming callers
-// (`deliver`, the bucket-A migrations) arrive in Phase B, so the field and
-// constructors are not yet read in this phase.
-#[allow(dead_code)]
 pub struct ApprovedZoneChange {
     event: ProposedEvent,
     _seal: (),
 }
 
-// Phase B wires every mint path and `deliver` consumer; Phase A only seeds them.
-#[allow(dead_code)]
 impl ApprovedZoneChange {
     /// The third mint path (PLAN §6.2): seal an event that has already completed
     /// a full replacement pass OUTSIDE this module — the outer Destroy /
@@ -509,14 +518,9 @@ pub(crate) enum ZoneDeliveryResult {
     NeedsChoice(PlayerId),
 }
 
-/// THE single zone-change entry point (Phase A: thin wrapper over the carved-out
-/// `execute_zone_move` engine). Reads `from` from the object's current zone,
-/// unpacks `EntryMods` / `ExileLinkSpec`, and runs the proposal through the
-/// replacement pipeline + delivery tail.
-///
-/// In this phase the entry has no production callers yet — call-site migration
-/// is Phase B+ — so it preserves the exact behavior of `execute_zone_move` for
-/// every modifier combination it forwards.
+/// THE single zone-change entry point. Reads `from` from the object's current
+/// zone, unpacks `EntryMods` / `ExileLinkSpec`, and runs the proposal through
+/// the replacement pipeline + delivery tail.
 ///
 /// `pub(crate)` while `ZoneMoveResult` is `pub(crate)`: every caller lives in the
 /// engine crate. (PLAN §1.3 writes `pub fn`; widening to `pub` only matters once
@@ -617,13 +621,21 @@ pub(crate) fn move_object(
                         }
                         _ => None,
                     },
+                    // Digital-only Alchemy: `RandomWithinTop` only flows from the
+                    // Conjure resolver (`conjure.rs`), which places the card
+                    // directly and never routes through this rebuilt-tail path.
+                    // Exhaustiveness arm: default placement.
+                    LibraryPosition::RandomWithinTop { .. } => None,
                 };
                 zones::move_to_library_at_index(state, req.object_id, index, events);
                 return ZoneMoveResult::Done;
             }
             let source_id = req.source();
-            let proposed =
+            let mut proposed =
                 ProposedEvent::zone_change(req.object_id, from_zone, Zone::Library, source_id);
+            if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+                *applied = req.replacement_applied.clone();
+            }
             return match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
                     match deliver_replaced_zone_change(
@@ -690,7 +702,8 @@ pub(crate) fn move_object(
     if let ZoneChangeCause::Draw { seed_applied } = req.cause {
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
         if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
-            *applied = seed_applied;
+            *applied = req.replacement_applied;
+            applied.extend(seed_applied);
         }
         return match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => match deliver_replaced_zone_change(
@@ -758,6 +771,7 @@ pub(crate) fn move_object(
             controller_override,
             enter_with_counters,
             face_down_profile,
+            applied,
             ..
         } = &mut proposed
         {
@@ -768,6 +782,7 @@ pub(crate) fn move_object(
             *controller_override = req.mods.controller_override;
             enter_with_counters.extend(req.mods.enter_with_counters.iter().cloned());
             *face_down_profile = req.mods.face_down_profile.clone().map(Box::new);
+            *applied = req.replacement_applied;
         }
         let approved = ApprovedZoneChange::seal(proposed);
         return match deliver(
@@ -789,7 +804,7 @@ pub(crate) fn move_object(
         };
     }
 
-    execute_zone_move(
+    execute_zone_move_with_applied(
         state,
         req.object_id,
         from_zone,
@@ -807,6 +822,7 @@ pub(crate) fn move_object(
         track_exiled_by_source,
         None,
         None,
+        req.replacement_applied,
         events,
     )
 }
@@ -932,6 +948,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             exile_tracking: ZoneDeliveryExileTracking::None,
             library_placement: None,
             completion: None,
+            replacement_applied: HashSet::new(),
         })
 }
 
@@ -1018,6 +1035,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
     let enter_tapped = first.mods.enter_tapped;
     let exile_tracking = first.exile_links.tracking;
     let library_placement = first.placement.clone();
+    let replacement_applied = first.replacement_applied.clone();
     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
         remaining: tail.into_iter().map(|r| r.object_id).collect(),
         destination,
@@ -1025,6 +1043,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
         enter_tapped,
         exile_tracking,
         library_placement,
+        replacement_applied,
         // The post-loop cleanup (if any) is attached by the batch caller after
         // it observes the `NeedsChoice`; `move_objects_simultaneously` itself
         // has no completion to stash.
@@ -1080,6 +1099,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 if let Some(position) = pending.library_placement.clone() {
                     req = req.at_library_position(position);
                 }
+                req.replacement_applied = pending.replacement_applied.clone();
                 req
             })
             .collect();
@@ -1260,14 +1280,16 @@ pub(crate) fn apply_zone_delivery_tail(
         if let Some(source_id) = cause.or(source_id) {
             let kind = match duration {
                 Some(Duration::UntilHostLeavesPlay) => {
-                    ExileLinkKind::UntilSourceLeaves { return_zone: from }
+                    Some(ExileLinkKind::UntilSourceLeaves { return_zone: from })
                 }
                 _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource) => {
-                    ExileLinkKind::TrackedBySource
+                    Some(ExileLinkKind::TrackedBySource)
                 }
-                _ => return ZoneDeliveryResult::Done,
+                _ => None,
             };
-            crate::game::exile_links::push_with_kind(state, object_id, source_id, kind);
+            if let Some(kind) = kind {
+                crate::game::exile_links::push_with_kind(state, object_id, source_id, kind);
+            }
         }
     }
     // CR 614.12a: Drain mandatory replacement post-effects after the zone
@@ -1318,6 +1340,25 @@ pub(crate) fn apply_zone_delivery_tail(
         );
         if let Some(wf) = waiting_for {
             if !matches!(wf, WaitingFor::Priority { .. }) {
+                if matches!(wf, WaitingFor::CopyTargetChoice { .. }) {
+                    if let Some(LiminalEntryKind::Meld {
+                        context,
+                        attack_target,
+                        ..
+                    }) = state
+                        .liminal_entries
+                        .get(&object_id)
+                        .map(|entry| entry.kind.clone())
+                    {
+                        state.pending_liminal_entry_resume =
+                            Some(PendingLiminalEntryResume::Meld {
+                                source_id: object_id,
+                                player: wf.acting_player().unwrap_or(state.active_player),
+                                context,
+                                attack_target,
+                            });
+                    }
+                }
                 state.waiting_for = wf;
                 return replacement_pause_delivery_result(state);
             }
@@ -1388,6 +1429,85 @@ fn legal_aura_attachment_targets(
     }));
 
     targets
+}
+
+/// Disposition of an object that has just become an Aura while already on the
+/// battlefield (the copy path — see [`resolve_entering_aura_attachment`]).
+pub(crate) enum EnteringAuraAttachment {
+    /// The object is not an Aura needing attachment (not an Aura, an Aura that's
+    /// also a creature per CR 303.4d, or already attached).
+    NotApplicable,
+    /// Attachment resolved without a player choice — either auto-attached to the
+    /// sole legal host, or deliberately left unattached because there is no legal
+    /// host (CR 303.4g; the CR 704.5m unattached-Aura SBA will handle it).
+    Resolved,
+    /// CR 303.4f: multiple legal hosts, so the controller must choose one.
+    NeedsChoice {
+        controller: PlayerId,
+        legal_targets: Vec<TargetRef>,
+    },
+}
+
+/// CR 303.4f + CR 303.4g: Resolve the enter-time attachment for an object that
+/// has BECOME an Aura while already on the battlefield.
+///
+/// The normal aura entry attaches during `move_object`, before the permanent is
+/// on the battlefield, via the entry event's `attach_to` slot (see the
+/// `aura_enchant_filter` consult in `consult_and_deliver_zone_change`). A
+/// permanent that enters as a plain enchantment and only becomes an Aura when
+/// its `BecomeCopy` replacement resolves (Copy Enchantment, Estrid's Invocation)
+/// never passed through that slot — `BecomeCopy` is realized post-entry — so its
+/// attachment is resolved here, once the copy is realized and layers are
+/// flushed.
+///
+/// CR 303.4f: because the Aura is entering by a means other than resolving as an
+/// Aura spell and the effect doesn't specify a host, its controller chooses what
+/// it enchants. CR 303.4g: with no legal host the Aura would not enter at all;
+/// the engine's post-entry equivalent is to leave it unattached so the
+/// unattached-Aura SBA (CR 704.5m) moves it to the graveyard on the next check.
+pub(crate) fn resolve_entering_aura_attachment(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> EnteringAuraAttachment {
+    let Some(enchant_filter) = aura_enchant_filter(state, object_id) else {
+        return EnteringAuraAttachment::NotApplicable;
+    };
+    let Some(obj) = state.objects.get(&object_id) else {
+        return EnteringAuraAttachment::NotApplicable;
+    };
+    // CR 303.4 + CR 704.5m: entry-time attachment only applies to an Aura that is
+    // actually on the battlefield. Defensive guard — if an intermediate entry
+    // trigger or replacement moved the realized copy off the battlefield before
+    // this runs (it is the LAST step of `finish_copy_target_choice_entry`),
+    // attaching it or prompting for a host of a non-battlefield Aura would be
+    // invalid state; do nothing and let it resolve wherever it now lives.
+    if obj.zone != Zone::Battlefield {
+        return EnteringAuraAttachment::NotApplicable;
+    }
+    // Only resolve entry attachment for an as-yet-unattached Aura; a copy that
+    // was already attached by some other effect must not be re-homed here.
+    if obj.attached_to.is_some() {
+        return EnteringAuraAttachment::NotApplicable;
+    }
+    let controller = obj.controller;
+    let legal_targets =
+        legal_aura_attachment_targets(state, object_id, controller, &enchant_filter);
+    match legal_targets.as_slice() {
+        // CR 303.4g: no legal host — leave unattached for the CR 704.5m SBA.
+        [] => EnteringAuraAttachment::Resolved,
+        [TargetRef::Object(id)] => {
+            crate::game::effects::attach::attach_to(state, object_id, *id);
+            EnteringAuraAttachment::Resolved
+        }
+        [TargetRef::Player(id)] => {
+            crate::game::effects::attach::attach_to_player(state, object_id, *id);
+            EnteringAuraAttachment::Resolved
+        }
+        _ => EnteringAuraAttachment::NeedsChoice {
+            controller,
+            legal_targets,
+        },
+    }
 }
 
 /// CR 708.3 + CR 708.2a: Turn an object face down as part of its battlefield
@@ -1552,9 +1672,13 @@ pub(crate) fn deliver_replaced_zone_change(
         enter_with_counters,
         controller_override: ctrl_override,
         face_down_profile,
+        applied,
         ..
     } = event
     {
+        if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
+            entry.replacement_applied = applied;
+        }
         let exile_tracking = if track_exiled_by_source {
             ZoneDeliveryExileTracking::TrackBySource
         } else {
@@ -1685,6 +1809,11 @@ pub(crate) fn deliver_replaced_zone_change(
                         }
                         _ => None,
                     },
+                    // Digital-only Alchemy: `RandomWithinTop` only flows from the
+                    // Conjure resolver (`conjure.rs`), which places the card
+                    // directly and never routes through this path. Exhaustiveness
+                    // arm: default placement.
+                    LibraryPosition::RandomWithinTop { .. } => None,
                 };
                 zones::move_to_library_at_index(state, object_id, index, events);
             }
@@ -1967,7 +2096,49 @@ pub(crate) fn execute_zone_move(
     enter_attached_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
+    execute_zone_move_with_applied(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        HashSet::new(),
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_zone_move_with_applied(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    replacement_applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveResult {
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
+    if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+        *applied = replacement_applied;
+    }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement effects
     // preserve it through the pipeline.
@@ -2037,7 +2208,12 @@ pub(crate) fn execute_zone_move(
     // battlefield from any source (effect-driven entry — bounce-return,
     // reanimate, blink, etc.). Spell-cast entry is handled in stack.rs.
     if dest_zone == Zone::Battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
+        if let Some(obj) = state
+            .liminal_entries
+            .get(&obj_id)
+            .map(|entry| &entry.object)
+            .or_else(|| state.objects.get(&obj_id))
+        {
             // CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
             // double-faced card exiled and returned with its back face up, like
             // a creature-front // planeswalker-back DFC) will have its back

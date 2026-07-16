@@ -743,9 +743,19 @@ pub fn resolved_targets(
     // resolution `token_copy.rs` already performs for `CopyTokenOf`; this is
     // the general chokepoint for every effect that targets a cost-paid object.
     if matches!(target_filter, TargetFilter::CostPaidObject) {
+        // CR 608.2k: resolve through the documented `cost_paid_object →
+        // effect_context_object` ladder — slot 1 is the cost-paid referent
+        // (sacrifice/exile-as-cost), slot 2 is an object a *Sacrifice effect*
+        // moved earlier in the same resolution (captured into
+        // `effect_context_object`, never `cost_paid_object`). Mirrors the
+        // filter-layer `TargetFilter::CostPaidObject` arm in `game/filter.rs`
+        // and the `ObjectScope::CostPaidObject` P/T ladder in `game/quantity.rs`
+        // so every `CostPaidObject` reader binds the same referent.
         return ability
             .cost_paid_object
-            .iter()
+            .as_ref()
+            .or(ability.effect_context_object.as_ref())
+            .into_iter()
             .map(|snap| TargetRef::Object(snap.object_id))
             .collect();
     }
@@ -1420,6 +1430,36 @@ pub(crate) fn extract_source_from_event(
         // re-typed to the dedicated per-blocker event).
         GameEvent::AttackerBecameBlockedByFilteredBlocker { blocker, .. } => Some(*blocker),
         _ => None,
+    }
+}
+
+/// CR 603.2c + CR 508.1: Extract EVERY object the trigger event names as a
+/// subject — the set-valued widening of [`extract_source_from_event`].
+///
+/// A batched trigger's plural anaphor ("them", "those creatures", "their total
+/// power") refers to the whole triggering batch, so an aggregate reduced over
+/// that batch must see every member. `AttackersDeclared` is the only event that
+/// carries a multi-object batch *within a single event* (CR 508.1: attackers are
+/// declared together as one turn-based action), and the singleton extractor
+/// deliberately collapses a >1 attacker batch to `None` — there is no single
+/// "the" attacker to name. Reducing an aggregate over that `None` yields an
+/// empty set, i.e. 0: a silent wrong answer on every multi-attacker board.
+///
+/// Every other event names exactly one subject, so this widening DELEGATES to
+/// the singleton and lifts its answer into a 1-vec. That keeps the two
+/// extractors from drifting apart and leaves every existing singleton caller
+/// untouched.
+///
+/// CR 603.10a: batched *dies* triggers are unaffected — they emit one
+/// `ZoneChanged` event PER creature, so their batch is reconstructed by
+/// collecting ACROSS events, never within one. This function preserves that
+/// (each `ZoneChanged` contributes its own 1-vec).
+pub(crate) fn extract_sources_from_event(event: &crate::types::events::GameEvent) -> Vec<ObjectId> {
+    use crate::types::events::GameEvent;
+    match event {
+        // CR 508.1: the full declared-attackers batch.
+        GameEvent::AttackersDeclared { attacker_ids, .. } => attacker_ids.clone(),
+        _ => extract_source_from_event(event).into_iter().collect(),
     }
 }
 
@@ -2380,6 +2420,74 @@ mod tests {
         TargetFilter::Typed(TypedFilter::creature())
     }
 
+    // CR 120.1 (#5615): Red Guardian, Super-Soldier — "destroy target creature an
+    // opponent controls that dealt damage this turn." This drives the card's
+    // REAL parsed target filter through the production `find_legal_targets`
+    // authority: an opponent creature that dealt damage this turn is a legal
+    // target; an otherwise-identical one that did not is not. Fails if the
+    // `DealtDamageThisTurn` FilterProp or its parser wiring is reverted (the
+    // filter would drop back to "any opponent creature" and both would qualify).
+    #[test]
+    fn red_guardian_targets_only_a_creature_that_dealt_damage_this_turn() {
+        use crate::types::ability::Effect;
+        use crate::types::game_state::DamageRecord;
+
+        // Parse the card's actual Oracle text and pull the Destroy target filter.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When Red Guardian enters, destroy target creature an opponent controls that dealt damage this turn.",
+            "Red Guardian, Super-Soldier",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let filter = parsed
+            .triggers
+            .iter()
+            .find_map(|t| match t.execute.as_deref()?.effect.as_ref() {
+                Effect::Destroy { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Red Guardian must parse a Destroy-target trigger");
+
+        // P0 controls Red Guardian; both candidate creatures are P1's (opponent's).
+        let (mut state, red_guardian, dealer) = setup_with_creatures();
+        let bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bystander)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // `dealer` (P1's Goblin from the helper) dealt damage this turn.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: dealer,
+            source_controller: PlayerId(1),
+            target: TargetRef::Object(red_guardian),
+            target_controller: PlayerId(0),
+            amount: 1,
+            is_combat: true,
+            ..Default::default()
+        });
+
+        let legal = find_legal_targets(&state, &filter, PlayerId(0), red_guardian);
+        assert!(
+            legal.contains(&TargetRef::Object(dealer)),
+            "the opponent creature that dealt damage this turn must be targetable: {legal:?}"
+        );
+        assert!(
+            !legal.contains(&TargetRef::Object(bystander)),
+            "an opponent creature that dealt NO damage must not be targetable: {legal:?}"
+        );
+    }
+
     #[test]
     fn post_replacement_source_controller_resolves_to_event_source_controller() {
         // CR 615.5 + CR 609.7: When `state.post_replacement_event_source` is
@@ -3130,7 +3238,7 @@ mod tests {
     fn protection_from_each_color_blocks_every_color_source() {
         // CR 702.16b + CR 105.2: "Protection from each color" — Akroma's Will
         // / Iridescent Angel scenario. End-to-end: parse the Oracle text via
-        // `extract_keyword_line` (which routes through `expand_protection_parts`
+        // `extract_granted_keyword_list` (which routes through `expand_protection_parts`
         // and emits 5 typed `Protection(Color(X))` keywords), attach the
         // parsed keywords to a creature, and verify every monocolored source
         // is rejected by `find_legal_targets`. Regression test for the bug
@@ -3139,7 +3247,7 @@ mod tests {
         // like Dark Impostor target a creature buffed by Akroma's Will.
         use crate::types::mana::ManaColor;
 
-        let keywords = crate::parser::oracle_keyword::extract_keyword_line(
+        let keywords = crate::parser::oracle_keyword::extract_granted_keyword_list(
             "protection from each color",
             &["protection".to_string()],
         )
@@ -4893,6 +5001,56 @@ mod tests {
         );
         // Suppress unused-variable warning when setup_with_creatures changes.
         let _ = &mut state;
+    }
+
+    /// CR 508.1 + CR 603.2c: the SET-valued extractor is a pure widening of the
+    /// singleton.
+    ///
+    /// The singleton deliberately collapses a MULTI-attacker `AttackersDeclared`
+    /// to `None` — there is no single "the" attacker — and every one of its
+    /// callers depends on that. But an aggregate reduced over that `None` sees an
+    /// EMPTY set, i.e. 0, on every multi-attacker board. `extract_sources_from_event`
+    /// returns the whole batch instead, and delegates every other event arm back
+    /// to the singleton so the two cannot drift.
+    #[test]
+    fn set_extractor_widens_the_multi_attacker_batch_that_the_singleton_drops() {
+        use crate::types::events::GameEvent;
+
+        let a = ObjectId(11);
+        let b = ObjectId(12);
+        let batch = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a, b],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+
+        assert_eq!(
+            extract_source_from_event(&batch),
+            None,
+            "the singleton must STILL collapse a 2-attacker batch to None — this \
+             is the behavior its existing callers rely on, and it is untouched"
+        );
+        assert_eq!(
+            extract_sources_from_event(&batch),
+            vec![a, b],
+            "the set extractor must return EVERY attacker"
+        );
+
+        // Pure widening: a 1-attacker batch agrees with the singleton, and a
+        // non-batch event is lifted to a 1-vec rather than losing its subject.
+        let solo = GameEvent::AttackersDeclared {
+            attacker_ids: vec![a],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        };
+        assert_eq!(extract_source_from_event(&solo), Some(a));
+        assert_eq!(extract_sources_from_event(&solo), vec![a]);
+
+        assert_eq!(
+            extract_sources_from_event(&GameEvent::PermanentUntapped { object_id: b }),
+            vec![b],
+            "a singleton-subject event must be lifted, not dropped"
+        );
     }
 
     /// CR 509.1g + CR 608.2c: for "When this creature blocks a creature,

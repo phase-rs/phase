@@ -63,7 +63,10 @@ export function waitingPlayer(waitingFor: WaitingFor | null): PlayerId | null {
   // field is `proposer` (not `player`); mirror engine `acting_player()`
   // (game_state.rs). Without this the declare modal's actor gate returns false
   // and it never renders. `RespondToShortcut` carries `player` → default below.
-  if (waitingFor.type === "LoopShortcut") {
+  if (
+    waitingFor.type === "LoopShortcut"
+    || waitingFor.type === "PrecastCopyShortcutOffer"
+  ) {
     return waitingFor.data.proposer;
   }
   return "player" in waitingFor.data ? waitingFor.data.player : null;

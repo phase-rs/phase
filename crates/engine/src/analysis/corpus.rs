@@ -1,4 +1,4 @@
-//! Shared combo-corpus harness: the 53-row acceptance corpus + the bespoke driver
+//! Shared combo-corpus harness: the 54-row acceptance corpus + the bespoke driver
 //! toolkit, parameterized on a `&CardDatabase` so BOTH the `#[cfg(test)]`
 //! acceptance suite (`corpus_tests`) and the `combo-verify` CLI drive ONE shared
 //! implementation. Gated `#[cfg(any(test, feature = "combo-verify"))]`, so it is
@@ -18,16 +18,18 @@ use crate::analysis::resource::ResourceAxis;
 use crate::analysis::{detect_loop, LoopCertificate, LoopProbe, WinKind};
 use crate::database::CardDatabase;
 use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+use crate::game::scenario_db::GameScenarioDbExt;
 use crate::types::ability::TargetRef;
-use crate::types::actions::GameAction;
+use crate::types::actions::{GameAction, PrecastCopyShortcutResponse};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaType;
+use crate::types::mana::{ManaType, ManaUnit};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 // ===========================================================================
-// Data layer: the 53-row corpus.
+// Data layer: the 54-row corpus.
 // ===========================================================================
 
 /// One row of the acceptance corpus: a combo, its documented unbounded resource
@@ -103,7 +105,7 @@ pub enum DeferralBucket {
     Other,
 }
 
-/// The full 53-row acceptance corpus: 3 driving combos + the 50 card-disjoint
+/// The full 54-row acceptance corpus: 3 driving combos + the 51 card-disjoint
 /// corpus combos. The 4 `gated_on`-nonempty rows correspond to the cards with
 /// Unimplemented parts; the 37 `deferral`-nonempty rows are the non-driven,
 /// non-gated combos with a measured structural deferral reason.
@@ -292,6 +294,14 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         family: ResourceFamily::Drain,
         win_kind: WinKind::LethalDamage,
         gated_on: Some("Professor Onyx"),
+        deferral: None,
+    },
+    ComboRow {
+        name: "Witherbloom Apprentice + Chain of Smog",
+        cards: &["Witherbloom Apprentice", "Chain of Smog"],
+        family: ResourceFamily::Drain,
+        win_kind: WinKind::LethalDamage,
+        gated_on: None,
         deferral: None,
     },
     ComboRow {
@@ -661,12 +671,15 @@ pub struct RowReport {
 /// `Offline` drives the combo's bespoke action cycle and classifies the offline
 /// [`detect_loop`] certificate; `LiveDrain` drives the two drain cascades through
 /// the per-beat `apply(PassPriority)` reducer and classifies the live `GameOver`.
+/// `PrecastShortcut` uses the separate finite reducer route, proving nonlethal
+/// priority, life drain, and copy lineage without requiring a `GameOver` endpoint.
 pub(crate) enum ComboDriver {
     Offline(fn(&CardDatabase) -> Option<LoopCertificate>),
     LiveDrain,
+    PrecastShortcut,
 }
 
-/// Static map `idx -> driver` for the 12 confirmable rows. The single source of
+/// Static map `idx -> driver` for the 13 confirmable rows. The single source of
 /// truth for "which rows are driven" (the `#[cfg(test)]` meta/partition tests read
 /// it, so adding a driver here is automatically reflected — no hand-listed index
 /// array to drift).
@@ -682,7 +695,8 @@ pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
     (14, ComboDriver::Offline(drive_offline_marwyn_sword)),
     (17, ComboDriver::LiveDrain),
     (18, ComboDriver::LiveDrain),
-    (49, ComboDriver::Offline(drive_offline_spike_archangel)),
+    (22, ComboDriver::PrecastShortcut),
+    (50, ComboDriver::Offline(drive_offline_spike_archangel)),
 ];
 
 /// Number of rows in the corpus.
@@ -756,6 +770,62 @@ pub(crate) fn classify_live(row: &ComboRow, outcome: Option<(usize, PlayerId)>) 
     }
 }
 
+struct PrecastShortcutOutcome {
+    original_chain_id: ObjectId,
+    copy_lineage: Vec<(ObjectId, ObjectId)>,
+    drained_opponent: bool,
+    ended_at_nonlethal_priority: bool,
+}
+
+/// Classify the finite Witherbloom route without treating a nonlethal shortcut
+/// as a live `GameOver`. The pre-cast engine route proves one fixed, terminating
+/// copy lineage; the corpus records the combo's documented drain / lethal family
+/// while the runtime assertion keeps the actual driven state nonlethal.
+fn classify_precast_shortcut(row: &ComboRow, outcome: Option<PrecastShortcutOutcome>) -> RowStatus {
+    let Some(outcome) = outcome else {
+        return RowStatus::Failed {
+            detail: "pre-cast shortcut driver did not reach its finite route".to_string(),
+        };
+    };
+    let Some((first_original_id, _)) = outcome.copy_lineage.first() else {
+        return RowStatus::Failed {
+            detail: "pre-cast shortcut produced no copied-spell lineage".to_string(),
+        };
+    };
+    let lineage_is_exact = outcome.copy_lineage.len() == 3
+        && *first_original_id == outcome.original_chain_id
+        && outcome
+            .copy_lineage
+            .iter()
+            .enumerate()
+            .all(|(index, (original, copy))| {
+                *original
+                    == if index == 0 {
+                        outcome.original_chain_id
+                    } else {
+                        outcome.copy_lineage[index - 1].1
+                    }
+                    && original != copy
+            });
+    if outcome.drained_opponent
+        && outcome.ended_at_nonlethal_priority
+        && lineage_is_exact
+        && row.family == ResourceFamily::Drain
+        && row.win_kind == WinKind::LethalDamage
+    {
+        RowStatus::Confirmed {
+            unbounded: vec![ResourceAxis::Life(P1)],
+            win_kind: WinKind::LethalDamage,
+        }
+    } else {
+        RowStatus::Failed {
+            detail:
+                "pre-cast shortcut did not prove drain, nonlethal priority, and exact copy lineage"
+                    .to_string(),
+        }
+    }
+}
+
 /// THE shared entry point both the `#[cfg(test)]` tests and the CLI call. Pure
 /// dispatch (no game logic): gated → `Gated`; a driven row → run its driver and
 /// classify; otherwise → `Deferred` with the row's declared structural bucket.
@@ -767,6 +837,9 @@ pub fn drive_row(db: &CardDatabase, idx: usize) -> RowReport {
         match driver {
             ComboDriver::Offline(f) => classify_status(row, f(db)),
             ComboDriver::LiveDrain => classify_live(row, drive_live_drain(db, idx)),
+            ComboDriver::PrecastShortcut => {
+                classify_precast_shortcut(row, drive_precast_shortcut(db))
+            }
         }
     } else {
         match row.deferral {
@@ -784,6 +857,101 @@ pub fn drive_row(db: &CardDatabase, idx: usize) -> RowReport {
         expected_win_kind: row.win_kind,
         status,
     }
+}
+
+/// Drive the fixed, nonlethal Witherbloom Apprentice + Chain of Smog route
+/// through the actual cast and pre-cast reducer protocol. The test starts with
+/// enough life to make the engine's three-copy route finite and nonlethal; it
+/// never infers life totals in a consumer layer or waits for a `GameOver`.
+fn drive_precast_shortcut(db: &CardDatabase) -> Option<PrecastShortcutOutcome> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 20);
+    scenario.add_real_card(P0, "Witherbloom Apprentice", Zone::Battlefield, db);
+    let chain = scenario.add_real_card(P0, "Chain of Smog", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_900), false, Vec::new()),
+            ManaUnit::new(ManaType::Black, ObjectId(9_901), false, Vec::new()),
+        ],
+    );
+    let mut runner = scenario.build();
+    let chain_card_id = runner.state().objects.get(&chain)?.card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: chain,
+            card_id: chain_card_id,
+            targets: Vec::new(),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        })
+        .ok()?;
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P0)),
+                    })
+                    .ok()?;
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).ok()?;
+            }
+            WaitingFor::PrecastCopyShortcutOffer { .. } => break,
+            _ => return None,
+        }
+    }
+
+    let epoch = match &runner.state().waiting_for {
+        WaitingFor::PrecastCopyShortcutOffer { epoch, .. } => *epoch,
+        _ => return None,
+    };
+    if runner.state().stack.len() != 2 {
+        return None;
+    }
+    runner
+        .act(GameAction::PrecastCopyShortcut {
+            epoch,
+            response: PrecastCopyShortcutResponse::Propose { route_id: epoch },
+        })
+        .ok()?;
+    let response_epoch = match &runner.state().waiting_for {
+        WaitingFor::RespondToPrecastCopyShortcut { player, epoch, .. } if *player == P1 => *epoch,
+        _ => return None,
+    };
+    let result = runner
+        .act(GameAction::PrecastCopyShortcut {
+            epoch: response_epoch,
+            response: PrecastCopyShortcutResponse::Accept,
+        })
+        .ok()?;
+    let copy_lineage = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            crate::types::events::GameEvent::SpellCopied {
+                original_id,
+                object_id,
+                ..
+            } => Some((*original_id, *object_id)),
+            _ => None,
+        })
+        .collect();
+    let opponent = runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.id == P1)?;
+    Some(PrecastShortcutOutcome {
+        original_chain_id: chain,
+        copy_lineage,
+        drained_opponent: opponent.life < 20,
+        ended_at_nonlethal_priority: !opponent.is_eliminated
+            && runner.state().stack.is_empty()
+            && matches!(&runner.state().waiting_for, WaitingFor::Priority { .. }),
+    })
 }
 
 // ===========================================================================
@@ -1442,7 +1610,7 @@ pub(crate) fn drive_offline_grim_power(db: &CardDatabase) -> Option<LoopCertific
 /// removes a counter to gain 2 life; Archangel returns a counter to each creature.
 /// Board identical modulo counters; unbounded axes are counters + life.
 pub(crate) fn drive_offline_spike_archangel(db: &CardDatabase) -> Option<LoopCertificate> {
-    let mut board = build_board(db, CORPUS[49].cards)?;
+    let mut board = build_board(db, CORPUS[50].cards)?;
     let spike = board.ids[0];
     {
         // CR 122: Spike Feeder "enters with two +1/+1 counters" — seed them (the
