@@ -28,12 +28,15 @@ use crate::types::ability::ChosenSubtypeKind;
 /// and applied by id during lowering. Closed set.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum DocumentRelationIr {
-    /// CR 607.1 + CR 610.3: A two-trigger exile/return design (Journey to
-    /// Nowhere, Oblivion Ring). An ETB "exile target X" trigger (`etb_exile`)
-    /// pairs with an LTB "return the exiled card" trigger (`ltb_return`); because
-    /// the ETB exile has no printed duration, the exiled card would never return.
-    /// Applying the relation stamps `Duration::UntilHostLeavesPlay` on the ETB
-    /// exile so the existing `ExileLink::UntilSourceLeaves` mechanism returns it.
+    /// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: A two-trigger exile/return
+    /// design. An ETB "exile ..." trigger (`etb_exile`) pairs with an LTB "return
+    /// the exiled card(s)" trigger (`ltb_return`); because the ETB exile has no
+    /// printed duration, the exiled card(s) would never return. Applying the
+    /// relation stamps `Duration::UntilHostLeavesPlay` on the ETB exile so the
+    /// existing `ExileLink::UntilSourceLeaves` mechanism returns them. Covers both
+    /// the single-target class (Journey to Nowhere, Oblivion Ring) and the
+    /// mass-exile class (Worldgorger Dragon's "exile all other permanents you
+    /// control"; Realm Razer's "exile all lands").
     EtbExileLtbReturn {
         etb_exile: OracleItemId,
         ltb_return: OracleItemId,

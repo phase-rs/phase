@@ -3050,8 +3050,13 @@ fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
         })
 }
 
-/// Whether a trigger is the ETB "exile target X" side with no printed duration
-/// (the side that must gain `Duration::UntilHostLeavesPlay`).
+/// Whether a trigger is the ETB "exile ..." side with no printed duration (the
+/// side that must gain `Duration::UntilHostLeavesPlay`). Covers both the
+/// single-target exile (`Effect::ChangeZone`, Journey to Nowhere / Oblivion
+/// Ring) and the mass exile (`Effect::ChangeZoneAll`, "exile all other
+/// permanents you control" — Worldgorger Dragon; "exile all lands" — Realm
+/// Razer). The two effect variants share the CR 610.3 "until"-duration vehicle,
+/// so the duration stamp applies identically to either.
 fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::ChangesZone
         && def.destination == Some(Zone::Battlefield)
@@ -3062,14 +3067,19 @@ fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
                     Effect::ChangeZone {
                         destination: Zone::Exile,
                         ..
+                    } | Effect::ChangeZoneAll {
+                        destination: Zone::Exile,
+                        ..
                     }
                 )
         })
 }
 
-/// CR 607.1 + CR 610.3: Pair each ETB "exile target X" trigger with the LTB
-/// "return the exiled card" trigger (Journey to Nowhere, Oblivion Ring, and the
-/// broader two-trigger class). Emitted only when the LTB-return side exists.
+/// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: Pair each ETB "exile ..."
+/// trigger with the LTB "return the exiled card(s)" trigger. Covers both the
+/// single-target class (Journey to Nowhere, Oblivion Ring) and the mass-exile
+/// class ("exile all other permanents you control" — Worldgorger Dragon; "exile
+/// all lands" — Realm Razer). Emitted only when the LTB-return side exists.
 fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
     let Some(ltb) = items
         .iter()
