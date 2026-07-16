@@ -272,3 +272,54 @@ fn eyetwitch_learn_rummage_does_not_offer_lesson() {
         "rummage draws the seeded library card after discarding"
     );
 }
+
+/// Declining to discard with no Lesson card anywhere in the sideboard must
+/// still settle the ability (priority returns) instead of leaving Learn
+/// stuck waiting on an offer that will never be made.
+#[test]
+fn eyetwitch_learn_decline_with_no_lesson_in_sideboard_settles_priority() {
+    let mut state = state_with_sideboard(vec![DeckEntry {
+        card: face("Lightning Bolt", CoreType::Instant, &[]),
+        count: 1,
+    }]);
+    create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Forest".to_string(),
+        Zone::Hand,
+    );
+
+    let ability = eyetwitch_learn_ability(&mut state);
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    let player = match &state.waiting_for {
+        WaitingFor::LearnChoice { player, .. } => *player,
+        other => panic!("expected LearnChoice, got {other:?}"),
+    };
+
+    apply(
+        &mut state,
+        player,
+        GameAction::LearnDecision {
+            choice: LearnOption::Skip,
+        },
+    )
+    .expect("declining to discard should be a legal Learn decision");
+
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::OutsideGameChoice { .. }),
+        "no Lesson card is available to offer"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "resolution must settle back to priority instead of stalling, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        hand_names(&state, player),
+        vec!["Forest"],
+        "the undiscarded card stays in hand and nothing is added"
+    );
+}
