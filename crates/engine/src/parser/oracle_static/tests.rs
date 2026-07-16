@@ -11717,25 +11717,17 @@ fn parse_spells_quoted_single_keyword_grant() {
 }
 
 // Decline guard: a quoted grant whose content is a triggered ABILITY (not a
-// keyword list) must NOT be claimed here — every listed token must parse as a
-// keyword, so this falls through to the granted-ability path instead.
+// keyword list) must NOT be claimed here. A spell-cast trigger needs its own
+// runtime representation; it cannot be lowered to `CastWithKeyword`, so the
+// keyword-list parser must leave this unsupported shape unclaimed rather than
+// misrepresenting it as a keyword grant.
 #[test]
 fn parse_spells_quoted_ability_grant_declines() {
     let defs =
         parse_static_line_multi("Spells you cast have \"When you cast this spell, draw a card.\"");
     assert!(
-        !defs
-            .iter()
-            .any(|d| matches!(d.mode, StaticMode::CastWithKeyword { .. })),
-        "a quoted ability grant must not be misread as a keyword grant: {defs:?}"
-    );
-    assert!(
-        defs.iter().any(|def| {
-            def.modifications.iter().any(|modification| {
-                matches!(modification, ContinuousModification::GrantTrigger { .. })
-            })
-        }),
-        "a quoted triggered ability must reach the granted-trigger path, not be dropped: {defs:?}"
+        defs.is_empty(),
+        "a quoted non-keyword ability must be left unclaimed by the keyword-list parser: {defs:?}"
     );
 }
 
