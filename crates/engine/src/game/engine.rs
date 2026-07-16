@@ -4617,7 +4617,7 @@ fn apply_action(
             // effect is decided independently; `begin_deferred_target_selection`
             // re-prompts for any remaining groups, so the controller may pick the
             // same or different opponents per effect (Volcanic Offering).
-            if !casting_costs::assign_next_announcing_opponent(state, &mut pending.ability, chosen) {
+            if !casting_costs::assign_next_announcing_opponent(&mut pending.ability, chosen) {
                 return Err(EngineError::InvalidAction(
                     "No opponent-choice effect is awaiting an announcing opponent".to_string(),
                 ));
