@@ -1,9 +1,8 @@
 import type { GameObject, GameState, PlayerId } from "../adapter/types.ts";
 
 /**
- * Single source of truth for what the commander column (CommanderCardZone +
- * CommanderDamage) renders, and therefore whether PlayerArea should render the
- * column wrapper + its divider at all.
+ * Single source of truth for the command-zone cards (commanders and
+ * Oathbreaker signature spells) that the command-zone card rail renders.
  *
  * These selectors exist because the visibility predicate was previously
  * duplicated across PlayerArea (the wrapper gate), CommanderCardZone, and
@@ -15,17 +14,17 @@ import type { GameObject, GameState, PlayerId } from "../adapter/types.ts";
  */
 
 /**
- * Commanders this player owns that are currently in the command zone — the
- * exact set CommanderCardZone renders. Used both there and by PlayerArea's
- * column-visibility gate so the wrapper appears iff the card zone will.
+ * Command-zone leaders this player owns that are currently in the command
+ * zone — the exact set CommanderCardZone renders. A signature spell shares
+ * commander tax and command-zone casting rules but is not itself a commander.
  */
-export function commandersInZone(gameState: GameState, playerId: PlayerId): GameObject[] {
+export function commandZoneLeaders(gameState: GameState, playerId: PlayerId): GameObject[] {
   return (gameState.command_zone ?? [])
     .map((id) => gameState.objects[id])
     .filter(
       (obj): obj is GameObject =>
         obj != null &&
-        obj.is_commander === true &&
+        (obj.is_commander === true || obj.signature_spell != null) &&
         obj.owner === playerId &&
         obj.zone === "Command",
     );

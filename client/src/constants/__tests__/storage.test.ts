@@ -7,6 +7,7 @@ import {
   listFolders,
   loadSavedDeck,
   loadSavedDeckBracket,
+  loadSavedDeckFormat,
   migrateDeckMeta,
   renameFolder,
   saveSavedDeckBracket,
@@ -23,6 +24,16 @@ beforeEach(() => {
 });
 
 describe("saved-deck bracket sidecar", () => {
+  it("reads the persisted deck format without projecting deck data", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Oathbreaker Deck",
+      JSON.stringify({ main: [], sideboard: [], format: "Oathbreaker" }),
+    );
+
+    expect(loadSavedDeckFormat("Oathbreaker Deck")).toBe("Oathbreaker");
+    expect(loadSavedDeckFormat("Missing Deck")).toBeUndefined();
+  });
+
   it.each(["Commander", "Brawl"] as const)(
     "keeps a dedicated companion and removes one stale sideboard copy for %s reads",
     (format) => {

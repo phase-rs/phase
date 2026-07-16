@@ -333,6 +333,26 @@ function removeCommandersFromMain(deck: ParsedDeck): ParsedDeck {
   return { ...deck, main };
 }
 
+/**
+ * Moves the user-selected Oathbreaker and signature spell out of the main
+ * deck and into their dedicated command-zone slots. Candidate legality comes
+ * from the engine; this helper only preserves the parsed deck partition.
+ */
+export function assignOathbreakerSlots(
+  deck: ParsedDeck,
+  oathbreaker: string,
+  signatureSpell: string,
+): ParsedDeck {
+  const normalized = repairParsedDeck(deck);
+  const mainWithoutOathbreaker = removeOneCopy(normalized.main, oathbreaker);
+  return {
+    ...normalized,
+    main: removeOneCopy(mainWithoutOathbreaker, signatureSpell),
+    commander: [oathbreaker],
+    signature_spell: [signatureSpell],
+  };
+}
+
 function normalizeParsedDeck(
   deck: ParsedDeck,
   options: { explicitCommander: boolean; explicitSideboard: boolean },

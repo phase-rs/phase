@@ -949,6 +949,8 @@ export interface GameObject {
    */
   phase_status?: PhaseStatus;
   is_commander?: boolean;
+  /** Oathbreaker RC: this command-zone card is the player's signature spell. */
+  signature_spell?: Record<string, never> | null;
   commander_tax?: number;
   /**
    * Stable identity of the printed card this object was instantiated from.

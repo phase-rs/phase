@@ -319,6 +319,19 @@ export function loadSavedDeck(deckName: string): ParsedDeck | null {
   }
 }
 
+/** Read the persisted deck-construction format without projecting deck data. */
+export function loadSavedDeckFormat(deckName: string): string | undefined {
+  if (isRandomDeckSelection(deckName)) return undefined;
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as { format?: unknown };
+    return typeof parsed.format === "string" ? parsed.format : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Read the bracket sidecar field from a persisted saved-deck JSON. Bracket
  * is pre-game metadata stored alongside `format` — kept off the
