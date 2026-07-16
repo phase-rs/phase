@@ -14426,7 +14426,7 @@ fn find_eligible_hand_cost_targets(
     source: ObjectId,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    let effective_filter = super::cost_payability::exile_cost_effective_filter(filter);
+    let effective_filter = super::cost_payability::pitch_bound_x_effective_filter(filter);
     let filter_ref = effective_filter.as_ref();
     let ctx = super::filter::FilterContext::from_source(state, source);
     state
@@ -14469,7 +14469,7 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     zone: ExileCostSourceZone,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    let effective_filter = super::cost_payability::exile_cost_effective_filter(filter);
+    let effective_filter = super::cost_payability::pitch_bound_x_effective_filter(filter);
     let filter_ref = effective_filter.as_ref();
     match zone {
         ExileCostSourceZone::Hand => {
@@ -14959,12 +14959,20 @@ fn find_pay_life_cost(
 /// CR 118.3: Find permanents controlled by `player` matching `filter` on the battlefield.
 /// The source is eligible when it matches the printed filter; "another" is
 /// represented by `FilterProp::Another` and enforced by `matches_target_filter`.
+///
+/// CR 107.3a + CR 118.9: `filter` is relaxed via `pitch_bound_x_effective_filter`
+/// first, so a Shoal-style "with mana value X" sacrifice constraint (Sidisi,
+/// Regent of the Mire) does not require X to already be announced — any
+/// otherwise-matching permanent is eligible, and `X` is bound from the chosen
+/// permanent's own mana value once the sacrifice is made (`handle_sacrifice_for_cost`).
 pub(super) fn find_eligible_sacrifice_targets(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    let effective_filter = super::cost_payability::pitch_bound_x_effective_filter(Some(filter))
+        .unwrap_or_else(|| filter.clone());
     state
         .battlefield
         .iter()
@@ -14982,7 +14990,7 @@ pub(super) fn find_eligible_sacrifice_targets(
             super::filter::matches_target_filter(
                 state,
                 id,
-                filter,
+                &effective_filter,
                 &super::filter::FilterContext::from_source(state, source_id),
             )
         })

@@ -2301,6 +2301,29 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // CR 107.3a + CR 118.9: Shoal-style "with mana value X" sacrifice costs on
+    // activated abilities (Sidisi, Regent of the Mire: "Sacrifice a creature
+    // you control with mana value X") define X from the sacrificed
+    // permanent's own mana value rather than a prior announcement. Bind
+    // `chosen_x` here, mirroring the analogous exile-pitch binding for
+    // Shoal-style alternative casting costs above.
+    if pending.ability.chosen_x.is_none() {
+        if let Some(&first) = chosen.first() {
+            let sac_filter = pending
+                .activation_cost
+                .as_ref()
+                .and_then(super::casting::find_non_self_sacrifice_cost)
+                .map(|(_, filter)| filter);
+            if sac_filter.is_some_and(super::cost_payability::target_filter_has_pitch_bound_x) {
+                if let Some(obj) = state.objects.get(&first) {
+                    pending
+                        .ability
+                        .set_chosen_x_recursive(obj.effective_mana_value());
+                }
+            }
+        }
+    }
+
     // CR 702.48c / CR 702.119a: Offering and Emerge use different reduction
     // rules, but both must read the sacrificed permanent before it leaves.
     if let Some(reduction_source) = reduction_source {
@@ -3724,7 +3747,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
 
     if let Some((count, exile_filter)) = super::casting::find_battlefield_exile_cost(cost) {
         let effective_filter =
-            super::cost_payability::exile_cost_effective_filter(Some(exile_filter));
+            super::cost_payability::pitch_bound_x_effective_filter(Some(exile_filter));
         let eligible = super::cost_payability::eligible_exile_cost_objects(
             state,
             player,
@@ -5930,7 +5953,7 @@ fn pay_additional_cost_with_source(
             == Zone::Battlefield =>
         {
             let effective_filter =
-                super::cost_payability::exile_cost_effective_filter(filter.as_ref());
+                super::cost_payability::pitch_bound_x_effective_filter(filter.as_ref());
             let eligible = super::cost_payability::eligible_exile_cost_objects(
                 state,
                 player,

@@ -184,9 +184,14 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
     }
 }
 
-/// CR 107.3a + CR 118.9: Until the player chooses the pitched card, relax the
-/// CMC=X constraint for 601.2b eligibility on Shoal-style exile costs.
-pub(crate) fn exile_cost_effective_filter(filter: Option<&TargetFilter>) -> Option<TargetFilter> {
+/// CR 107.3a + CR 118.9: Until the player chooses the pitched/sacrificed
+/// object, relax the CMC=X constraint for 601.2b eligibility on Shoal-style
+/// costs. Zone-agnostic — used by hand/graveyard exile costs (Shoal
+/// creatures) and by sacrifice costs (Sidisi, Regent of the Mire: "Sacrifice
+/// a creature you control with mana value X").
+pub(crate) fn pitch_bound_x_effective_filter(
+    filter: Option<&TargetFilter>,
+) -> Option<TargetFilter> {
     filter.map(|f| {
         if target_filter_has_pitch_bound_x(f) {
             relax_pitch_bound_x_filter(f)
@@ -383,7 +388,7 @@ impl AbilityCost {
                     };
                 }
                 let zone = exile_cost_effective_zone(*zone, filter.as_ref());
-                let effective_filter = exile_cost_effective_filter(filter.as_ref());
+                let effective_filter = pitch_bound_x_effective_filter(filter.as_ref());
                 eligible_exile_cost_objects(
                     state,
                     player,
@@ -761,7 +766,7 @@ pub(super) fn eligible_exile_cost_objects(
                 .collect();
         }
     };
-    let effective_filter = exile_cost_effective_filter(filter);
+    let effective_filter = pitch_bound_x_effective_filter(filter);
     let filter_ref = effective_filter.as_ref();
     let ctx = FilterContext::from_source(state, source);
     ids.filter(|&id| {
