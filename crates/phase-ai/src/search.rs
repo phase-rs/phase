@@ -11,8 +11,8 @@ use engine::types::ability::{
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CostResume, GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase,
-    PendingMulliganAction, WaitingFor,
+    CastOfferKind, CompanionDeclaration, CostResume, GameState, ManaChoice, ManaChoicePrompt,
+    MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -1489,9 +1489,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         }),
 
         // Companion reveal: decline.
-        WaitingFor::CompanionReveal { .. } => {
-            Some(GameAction::DeclareCompanion { card_index: None })
-        }
+        WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {
+            choice: CompanionDeclaration::Decline,
+        }),
 
         // Explore choice: pick the first choosable creature.
         WaitingFor::ExploreChoice { choosable, .. } => {

@@ -13552,6 +13552,16 @@ pub(super) fn pay_effect_mana_cost_with_resume(
     )
 }
 
+/// The result of a special-action mana payment attempt. A paused result is a
+/// successful suspension: a mana source's own cost is awaiting a replacement
+/// choice, so the outer action must remain uncommitted until its typed root
+/// resumes (CR 605.3b + CR 616.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpecialActionManaPayment {
+    Paid,
+    Paused,
+}
+
 /// CR 116.2m + CR 709.5e: Pay a special action's mana cost (e.g. a Room's unlock
 /// cost) through a `PaymentContext::SpecialAction`, so CR 106.6 special-action
 /// spend restrictions (Smoky Lounge's "spend this mana only to … unlock doors")
@@ -13565,15 +13575,49 @@ pub(crate) fn pay_special_action_mana_cost(
     action: crate::types::mana::SpecialAction,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    pay_non_cast_mana_cost(
+    match pay_special_action_mana_cost_with_resume(
+        state, player, source_id, cost, action, None, events,
+    )? {
+        SpecialActionManaPayment::Paid => Ok(()),
+        // Existing callers do not carry an outer continuation. Leave their
+        // historical error contract intact rather than committing their action
+        // while the mana-source cost is unresolved.
+        SpecialActionManaPayment::Paused => Err(EngineError::InvalidAction(
+            "Mana payment is awaiting a replacement choice".to_string(),
+        )),
+    }
+}
+
+/// CR 116.2 + CR 605.3b + CR 616.1: Special-action payment core for callers
+/// that retain a typed continuation. Unlike the compatibility wrapper above,
+/// a paused mana-source cost is surfaced as success so the continuation can
+/// resume the exact original action after the replacement choice.
+pub(crate) fn pay_special_action_mana_cost_with_resume(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+    action: crate::types::mana::SpecialAction,
+    resume: Option<&ManaAbilityResume>,
+    events: &mut Vec<GameEvent>,
+) -> Result<SpecialActionManaPayment, EngineError> {
+    match pay_non_cast_mana_cost(
         state,
         player,
         source_id,
         cost,
         PaymentContext::SpecialAction(action),
-        None,
+        resume,
         events,
-    )
+    ) {
+        Ok(()) => Ok(SpecialActionManaPayment::Paid),
+        // CR 605.3b + CR 616.1: The auto-tapped source owns the live cost
+        // cursor. It is an in-progress payment, not an affordability failure.
+        Err(_) if mana_ability_cost_payment_is_paused(state) => {
+            Ok(SpecialActionManaPayment::Paused)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn can_pay_special_action_mana_cost_after_auto_tap(

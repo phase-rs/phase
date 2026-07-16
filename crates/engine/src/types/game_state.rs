@@ -2837,6 +2837,15 @@ pub enum CollectEvidenceResume {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaAbilityResume {
     Priority,
+    /// CR 116.2g + CR 702.139a + CR 605.3b + CR 616.1: A companion special
+    /// action whose auto-tapped mana source paused on a replacement-aware cost
+    /// move. `cost` is the final cost locked at action initiation, after
+    /// special-action reductions; resumption must not recompute it against a
+    /// changed board.
+    CompanionToHand {
+        player: PlayerId,
+        cost: ManaCost,
+    },
     ManaPayment {
         /// The payer of the outer spell/ability cost. This is intentionally
         /// independent from `PendingManaAbility::player`: Assist can activate
@@ -3276,6 +3285,14 @@ pub struct PlayerDeckPool {
     pub registered_sideboard: std::sync::Arc<Vec<DeckEntry>>,
     pub current_main: std::sync::Arc<Vec<DeckEntry>>,
     pub current_sideboard: std::sync::Arc<Vec<DeckEntry>>,
+    /// Commander-family companion registered outside the 100-card deck. This
+    /// is intentionally distinct from `current_sideboard`: Commander games do
+    /// not use sideboards (CR 903.5e), while a companion remains outside the
+    /// game until it is revealed (CR 702.139a).
+    #[serde(default)]
+    pub registered_companion: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_companion: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
@@ -3303,6 +3320,67 @@ pub struct PlayerDeckPool {
     /// compatibility with saved states and test fixtures that omit the field.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+}
+
+/// The authoritative source of a companion offered during pre-game setup.
+///
+/// Keeping the provenance in the offered value (rather than exposing an
+/// untyped index) makes a response self-validating across independent deck
+/// pools and prevents a stale client from selecting a different card after a
+/// pool changes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CompanionChoiceSource {
+    Sideboard { index: usize },
+    Dedicated,
+}
+
+/// One companion offer published by `WaitingFor::CompanionReveal`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct CompanionRevealChoice {
+    pub name: String,
+    pub source: CompanionChoiceSource,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CompanionRevealChoiceWire {
+    Current {
+        name: String,
+        source: CompanionChoiceSource,
+    },
+    /// Legacy saves encoded each normal-format offer as `(name, sideboard_index)`.
+    /// The old engine never offered a Commander companion, so that representation
+    /// unambiguously maps to the typed sideboard source.
+    LegacySideboard((String, usize)),
+}
+
+impl<'de> Deserialize<'de> for CompanionRevealChoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match CompanionRevealChoiceWire::deserialize(deserializer)? {
+            CompanionRevealChoiceWire::Current { name, source } => Ok(Self { name, source }),
+            CompanionRevealChoiceWire::LegacySideboard((name, index)) => Ok(Self {
+                name,
+                source: CompanionChoiceSource::Sideboard { index },
+            }),
+        }
+    }
+}
+
+/// A player's complete response to a pre-game companion offer.
+///
+/// This is deliberately an enum rather than `Option<CompanionRevealChoice>`:
+/// serde treats a missing `Option` field as `None`, which would turn an
+/// incompatible legacy `card_index` payload into a silent decline. The wire
+/// response must make both revealing and declining explicit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CompanionDeclaration {
+    Reveal(CompanionRevealChoice),
+    Decline,
 }
 
 /// CR 400.11/400.11a/400.11b: Tracks sideboard cards brought into this game
@@ -5533,8 +5611,9 @@ pub enum WaitingFor {
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
-        /// Eligible companion cards from sideboard: (card_name, sideboard_index).
-        eligible_companions: Vec<(String, usize)>,
+        /// The exact companions the player may reveal, including their source.
+        /// Responses must exactly equal one of these offered values.
+        eligible_companions: Vec<CompanionRevealChoice>,
     },
     /// CR 704.5j: Player chooses which legendary permanent to keep.
     /// The rest are put into their owners' graveyards (not destroyed — indestructible does not apply).
@@ -13841,6 +13920,40 @@ mod tests {
                 contributions: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn companion_reveal_legacy_sideboard_offer_deserializes() {
+        let json = r#"{
+            "type":"CompanionReveal",
+            "data":{
+                "player":0,
+                "eligible_companions":[["Lurrus of the Dream-Den",2]]
+            }
+        }"#;
+        let waiting_for: WaitingFor = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            waiting_for,
+            WaitingFor::CompanionReveal {
+                player: PlayerId(0),
+                eligible_companions: vec![CompanionRevealChoice {
+                    name: "Lurrus of the Dream-Den".to_string(),
+                    source: CompanionChoiceSource::Sideboard { index: 2 },
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn deck_pool_without_dedicated_companion_defaults_to_empty() {
+        let mut json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("registered_companion");
+        fields.remove("current_companion");
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert!(pool.registered_companion.is_empty());
+        assert!(pool.current_companion.is_empty());
     }
 
     #[test]

@@ -21902,6 +21902,7 @@ fn static_reduce_action_cost_registry_round_trip() {
     // CR 116.2: Display/from_str must round-trip the action + direction so a
     // serialized special-action reduction does not silently decode wrong.
     for (action, mode) in [
+        (SpecialAction::CompanionToHand, CostModifyMode::Reduce),
         (SpecialAction::Plot, CostModifyMode::Reduce),
         (SpecialAction::UnlockDoor, CostModifyMode::Reduce),
         (SpecialAction::Plot, CostModifyMode::Raise),

@@ -1074,9 +1074,27 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             pool.registered_sideboard = Arc::new(Vec::new());
             pool.current_main = Arc::new(Vec::new());
             pool.current_sideboard = Arc::new(Vec::new());
+            pool.registered_companion = Arc::new(Vec::new());
+            pool.current_companion = Arc::new(Vec::new());
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+        }
+    }
+
+    // CR 702.139a: A companion is outside the game and stays private until
+    // its owner reveals it. The offer is therefore visible only to the owner
+    // (or an authorized turn controller); the public player.companion field is
+    // populated only after the reveal action succeeds.
+    if let WaitingFor::CompanionReveal { player, .. } = &state.waiting_for {
+        if !can_view_private_for_player(*player) {
+            if let WaitingFor::CompanionReveal {
+                eligible_companions,
+                ..
+            } = &mut filtered.waiting_for
+            {
+                eligible_companions.clear();
+            }
         }
     }
 

@@ -997,6 +997,19 @@ export interface CompanionInfo {
   used: boolean;
 }
 
+export type CompanionChoiceSource =
+  | { type: "Sideboard"; data: { index: number } }
+  | { type: "Dedicated" };
+
+export interface CompanionRevealChoice {
+  name: string;
+  source: CompanionChoiceSource;
+}
+
+export type CompanionDeclaration =
+  | { type: "Reveal"; data: CompanionRevealChoice }
+  | { type: "Decline" };
+
 // ── Player ───────────────────────────────────────────────────────────────
 
 /**
@@ -1475,7 +1488,7 @@ export type WaitingFor =
   | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "PopulateChoice"; data: { player: PlayerId; source_id: ObjectId; valid_tokens: ObjectId[] } }
-  | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
+  | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: CompanionRevealChoice[] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
   | { type: "CommanderZoneChoice"; data: { player: PlayerId; commander_id: ObjectId; current_zone: string } }
   | { type: "BattleProtectorChoice"; data: { player: PlayerId; battle_id: ObjectId; candidates: PlayerId[] } }
@@ -1948,7 +1961,7 @@ export type GameAction =
   | { type: "ChooseExert"; data: { exert: boolean } }
   | { type: "ChooseEnlist"; data: { target: ObjectId | null } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
-  | { type: "DeclareCompanion"; data: { card_index: number | null } }
+  | { type: "DeclareCompanion"; data: { choice: CompanionDeclaration } }
   | { type: "CompanionToHand" }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "GraveyardPaidCastChoice"; data: { choice: CastChoice } }

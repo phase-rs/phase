@@ -1,6 +1,7 @@
 import { isCommanderBracket, type CommanderBracket } from "../types/bracket";
 import type { FeedSubscription } from "../types/feed";
 import { repairParsedDeck, type ParsedDeck } from "../services/deckParser";
+import { projectSavedDeckSpecialSlots } from "../services/savedDeckProjection";
 
 /** Prefix for saved deck data in localStorage. Full key: `${STORAGE_KEY_PREFIX}${deckName}` */
 export const STORAGE_KEY_PREFIX = "phase-deck:";
@@ -312,11 +313,7 @@ export function loadSavedDeck(deckName: string): ParsedDeck | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as ParsedDeck & Record<string, unknown>;
-    const repaired = repairParsedDeck(parsed);
-    if (parsed.companion && !repaired.sideboard.some((e) => e.name === parsed.companion)) {
-      repaired.sideboard.push({ count: 1, name: parsed.companion });
-    }
-    return repaired;
+    return projectSavedDeckSpecialSlots(parsed, repairParsedDeck(parsed));
   } catch {
     return null;
   }
