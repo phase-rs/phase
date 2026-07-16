@@ -11,11 +11,11 @@ use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode, CastingVariant,
-    CastingVariantChoiceOption, ConvokeMode, CostResume, GameState, ManaAbilityCostParent,
-    ManaAbilityResume, NextSpellModifier, PayCostKind, PendingCast, PendingCostMoveResume,
-    SneakPlacement, SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind,
-    TargetSelectionSlot, WaitingFor,
+    ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode,
+    CastingPermissionIndex, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
+    GameState, ManaAbilityCostParent, ManaAbilityResume, NextSpellModifier, PayCostKind,
+    PendingCast, PendingCostMoveResume, SneakPlacement, SpellCastRecord, SpellCostSource,
+    StackEntry, StackEntryKind, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -447,6 +447,7 @@ struct PreparedSpellCast {
     base_mana_cost: crate::types::mana::ManaCost,
     modal: Option<crate::types::ability::ModalChoice>,
     casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
     cast_timing_permission: Option<CastTimingPermission>,
     /// CR 601.2a: Zone the card was in before announcement (hand / command /
     /// graveyard / exile). Threaded onto `PendingCast.origin_zone` so that
@@ -2178,40 +2179,87 @@ pub(super) fn exile_alt_cost_permission_supports_cast(
     }
 }
 
+/// CR 601.2a: Read the object-attached alternative-cost permission elected for
+/// this cast. New casts carry an exact vector index; `None` preserves the
+/// legacy first-compatible lookup for old serialized pending casts only.
+fn selected_exile_alt_cost_permission<'a>(
+    state: &GameState,
+    obj: &'a crate::game::game_object::GameObject,
+    player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<&'a CastingPermission> {
+    match casting_permission_index {
+        Some(CastingPermissionIndex(index)) => {
+            obj.casting_permissions.get(index).filter(|permission| {
+                exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+            })
+        }
+        None => obj.casting_permissions.iter().find(|permission| {
+            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        }),
+    }
+}
+
 pub(super) fn selected_exile_alt_cost_permission_accepts_resulting_mv(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
     resulting_mv: u32,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) -> bool {
     let Some(obj) = state.objects.get(&object_id) else {
-        return true;
+        return casting_permission_index.is_none();
     };
 
-    let Some(permission) = obj.casting_permissions.iter().find(|permission| {
-        exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
-    }) else {
-        return true;
+    let permission = if let Some(CastingPermissionIndex(index)) = casting_permission_index {
+        let Some(permission) = obj.casting_permissions.get(index) else {
+            return false;
+        };
+        // A valid exact non-alt permission (PlayFromExile / Foretold) carries no
+        // resulting-MV constraint. Only alternative-cost grants are evaluated
+        // by this helper.
+        if !matches!(
+            permission,
+            CastingPermission::ExileWithAltCost { .. }
+                | CastingPermission::ExileWithAltAbilityCost { .. }
+        ) {
+            return true;
+        }
+        permission
+    } else {
+        let Some(permission) = selected_exile_alt_cost_permission(state, obj, player, None) else {
+            return true;
+        };
+        permission
     };
 
-    exile_alt_cost_permission_supports_cast(state, obj, player, permission, Some(resulting_mv))
+    match permission {
+        CastingPermission::ExileWithAltCost { .. }
+        | CastingPermission::ExileWithAltAbilityCost { .. } => {
+            exile_alt_cost_permission_supports_cast(
+                state,
+                obj,
+                player,
+                permission,
+                Some(resulting_mv),
+            )
+        }
+        _ => true,
+    }
 }
 
 pub(super) fn selected_exile_alt_cost_permission_casts_transformed(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) -> bool {
     let Some(obj) = state.objects.get(&object_id) else {
         return false;
     };
 
-    obj.casting_permissions
-        .iter()
-        .find(|permission| {
-            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
-        })
-        .is_some_and(|permission| {
+    selected_exile_alt_cost_permission(state, obj, player, casting_permission_index).is_some_and(
+        |permission| {
             matches!(
                 permission,
                 crate::types::ability::CastingPermission::ExileWithAltCost {
@@ -2219,7 +2267,8 @@ pub(super) fn selected_exile_alt_cost_permission_casts_transformed(
                     ..
                 }
             )
-        })
+        },
+    )
 }
 
 // CR 614.1c + CR 122.1: read the enters-with rider from the *consumed* cast-this-way
@@ -2230,20 +2279,18 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_counter(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) -> Option<crate::types::counter::CounterType> {
     let obj = state.objects.get(&object_id)?;
-    obj.casting_permissions
-        .iter()
-        .find(|permission| {
-            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
-        })
-        .and_then(|permission| match permission {
+    selected_exile_alt_cost_permission(state, obj, player, casting_permission_index).and_then(
+        |permission| match permission {
             crate::types::ability::CastingPermission::ExileWithAltCost {
                 enters_with_counter,
                 ..
             } => enters_with_counter.clone(),
             _ => None,
-        })
+        },
+    )
 }
 
 // CR 122.1 + CR 614.1c + CR 607.1: read the enters-with counter rider carried by
@@ -2317,15 +2364,12 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) -> Vec<crate::types::ability::ContinuousModification> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
-    obj.casting_permissions
-        .iter()
-        .find(|permission| {
-            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
-        })
+    selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)
         .map(|permission| match permission {
             crate::types::ability::CastingPermission::ExileWithAltCost {
                 enters_with_modifications,
@@ -2347,20 +2391,18 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) -> Option<crate::types::ability::SpellStackToGraveyardReplacement> {
     let obj = state.objects.get(&object_id)?;
-    obj.casting_permissions
-        .iter()
-        .find(|permission| {
-            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
-        })
-        .and_then(|permission| match permission {
-            crate::types::ability::CastingPermission::ExileWithAltCost {
-                graveyard_replacement,
-                ..
-            } => graveyard_replacement.clone(),
-            _ => None,
-        })
+    let permission =
+        selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)?;
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost {
+            graveyard_replacement,
+            ..
+        } => graveyard_replacement.clone(),
+        _ => None,
+    }
 }
 
 pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
@@ -2436,54 +2478,179 @@ pub(crate) fn play_from_exile_permission_source(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
-    _turn_number: u32,
+    turn_number: u32,
 ) -> Option<(ObjectId, CastFrequency)> {
-    obj.casting_permissions.iter().find_map(|p| match p {
-        crate::types::ability::CastingPermission::PlayFromExile {
-            granted_to,
-            frequency,
-            source_id,
-            exiled_by_ability_controller,
-            card_filter,
-            single_use_group,
-            single_use,
-            ..
-        } if *granted_to == player => {
-            let source = source_id.unwrap_or(obj.id);
-            // CR 601.2a: A typed grant ("you may cast an instant or sorcery
-            // spell from among those exiled cards") authorizes only exiled cards
-            // matching `card_filter`. The filter is a printed object quality, so
-            // evaluate it with a neutral (source/controller-free) context.
-            if let Some(filter) = card_filter {
-                let ctx = crate::game::filter::FilterContext::neutral();
-                if !crate::game::filter::matches_target_filter(state, obj.id, filter, &ctx) {
-                    return None;
-                }
-            }
-            // CR 601.2a + CR 611.2a: A single-use grant authorizes at most one
-            // cast across its whole duration window. The tracked set, not the
-            // source permanent, is the grant identity because one source may
-            // create overlapping "those exiled cards" effects.
-            if *single_use {
-                let group = single_use_group.as_ref()?;
-                if state.exile_play_single_use_consumed.contains(group) {
-                    return None;
-                }
-            }
-            if *frequency == CastFrequency::OncePerTurn {
-                if *exiled_by_ability_controller == Some(player) {
-                    return has_collection_counter(obj)
-                        .then(|| live_collection_counter_play_permission_source(state, player))
-                        .flatten()
-                        .map(|live_source| (live_source, *frequency));
-                }
-                if state.exile_play_permissions_used.contains(&source) {
-                    return None;
-                }
-            }
-            Some((source, *frequency))
+    play_from_exile_permission_source_with_index(state, obj, player, turn_number)
+        .map(|(_, source, frequency)| (source, frequency))
+}
+
+fn play_from_exile_permission_source_with_index(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    _turn_number: u32,
+) -> Option<(CastingPermissionIndex, ObjectId, CastFrequency)> {
+    obj.casting_permissions
+        .iter()
+        .enumerate()
+        .find_map(|(index, _)| {
+            let index = CastingPermissionIndex(index);
+            play_from_exile_permission_source_at_index(state, obj, player, index)
+                .map(|(source, frequency)| (index, source, frequency))
+        })
+}
+
+/// CR 601.2a: Validate one exact object-attached exile-play permission without
+/// consulting sibling vector order. Discovery callers scan indices; an
+/// announced cast calls this directly for its already-elected authority.
+fn play_from_exile_permission_source_at_index(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    CastingPermissionIndex(index): CastingPermissionIndex,
+) -> Option<(ObjectId, CastFrequency)> {
+    let crate::types::ability::CastingPermission::PlayFromExile {
+        granted_to,
+        frequency,
+        source_id,
+        exiled_by_ability_controller,
+        card_filter,
+        single_use_group,
+        single_use,
+        ..
+    } = obj.casting_permissions.get(index)?
+    else {
+        return None;
+    };
+    if *granted_to != player {
+        return None;
+    }
+    let source = source_id.unwrap_or(obj.id);
+    // CR 601.2a: A typed grant authorizes only cards matching its printed-card
+    // filter, evaluated without source/controller context.
+    if let Some(filter) = card_filter {
+        let ctx = crate::game::filter::FilterContext::neutral();
+        if !crate::game::filter::matches_target_filter(state, obj.id, filter, &ctx) {
+            return None;
         }
-        _ => None,
+    }
+    // CR 601.2a + CR 611.2a: A consumed single-use tracked-set grant no longer
+    // authorizes another cast.
+    if *single_use {
+        let group = single_use_group.as_ref()?;
+        if state.exile_play_single_use_consumed.contains(group) {
+            return None;
+        }
+    }
+    if *frequency == CastFrequency::OncePerTurn {
+        if *exiled_by_ability_controller == Some(player) {
+            return has_collection_counter(obj)
+                .then(|| live_collection_counter_play_permission_source(state, player))
+                .flatten()
+                .map(|live_source| (live_source, *frequency));
+        }
+        if state.exile_play_permissions_used.contains(&source) {
+            return None;
+        }
+    }
+    Some((source, *frequency))
+}
+
+/// CR 601.2a: Resolve source/frequency only from the permission elected for
+/// this cast. The vector-order discovery path remains solely for legacy casts
+/// serialized before `CastingPermissionIndex` existed.
+pub(super) fn selected_play_from_exile_permission_source(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<(ObjectId, CastFrequency)> {
+    match casting_permission_index {
+        Some(index) => play_from_exile_permission_source_at_index(state, obj, player, index),
+        None => play_from_exile_permission_source(state, obj, player, state.turn_number),
+    }
+}
+
+/// CR 601.2a: Select the exact object-attached permission that authorizes this
+/// cast. Alternative-cost permissions take precedence because cost preparation
+/// already elects the first matching alternative-cost grant; otherwise the
+/// first functioning `PlayFromExile` grant is the authority.
+fn selected_object_cast_permission_index(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    variant_override: Option<CastingVariant>,
+) -> Option<CastingPermissionIndex> {
+    // CR 601.2a-b: An explicit casting variant elects only a permission
+    // compatible with that method. When there is no override, Foretell is the
+    // existing default for an active `Foretold` card in exile; otherwise the
+    // ordinary object-grant path elects its first functioning permission.
+    let inferred_foretell = variant_override.is_none()
+        && obj.zone == Zone::Exile
+        && obj.owner == player
+        && obj.casting_permissions.iter().any(|permission| {
+            matches!(
+                permission,
+                CastingPermission::Foretold { turn_foretold, .. }
+                    if state.turn_number > *turn_foretold
+            )
+        });
+    let selected_variant =
+        variant_override.or(inferred_foretell.then_some(CastingVariant::Foretell));
+
+    if selected_variant == Some(CastingVariant::Foretell) {
+        return obj
+            .casting_permissions
+            .iter()
+            .enumerate()
+            .find_map(|(index, permission)| {
+                matches!(
+                    permission,
+                    CastingPermission::Foretold { turn_foretold, .. }
+                        if obj.owner == player && state.turn_number > *turn_foretold
+                )
+                .then_some(CastingPermissionIndex(index))
+            });
+    }
+
+    let selected_alt_cost = matches!(
+        selected_variant,
+        None | Some(CastingVariant::Normal | CastingVariant::Suspend)
+    )
+    .then(|| {
+        obj.casting_permissions
+            .iter()
+            .enumerate()
+            .find_map(|(index, permission)| {
+                exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+                    .then_some(CastingPermissionIndex(index))
+            })
+    })
+    .flatten();
+
+    // CR 601.2a + CR 118.9a: A PlayFromExile grant supplies zone authority,
+    // independently of the card-native casting method chosen for the spell
+    // (Adventure, Bestow, Evoke, Prototype, Sneak, Web-slinging, etc.). It does
+    // not replace that method's cost. Native exile-authority variants instead
+    // use their own permission and must not consume/inherit a sibling grant.
+    let play_from_exile_can_authorize_variant = match selected_variant {
+        None | Some(CastingVariant::Normal) => true,
+        Some(
+            CastingVariant::Foretell
+            | CastingVariant::Plot
+            | CastingVariant::Madness
+            | CastingVariant::Suspend
+            | CastingVariant::ExilePermission { .. },
+        ) => false,
+        Some(_) => obj.zone == Zone::Exile,
+    };
+
+    selected_alt_cost.or_else(|| {
+        if !play_from_exile_can_authorize_variant {
+            return None;
+        }
+        play_from_exile_permission_source_with_index(state, obj, player, state.turn_number)
+            .map(|(index, _, _)| index)
     })
 }
 
@@ -2518,15 +2685,30 @@ pub(crate) fn player_may_look_at_facedown_exile(
 /// raise is a property of the grant, not a board-wide static, so it applies only
 /// to spells cast via this permission.
 fn exile_play_cast_cost_raise(
+    state: &GameState,
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    casting_variant: Option<CastingVariant>,
 ) -> Option<ManaCost> {
-    obj.casting_permissions.iter().find_map(|p| match p {
+    let CastingPermissionIndex(index) = casting_permission_index
+        .or_else(|| selected_object_cast_permission_index(state, obj, player, casting_variant))?;
+    obj.casting_permissions.get(index).and_then(|p| match p {
         CastingPermission::PlayFromExile {
             granted_to,
             cast_cost_raise: Some(raise),
             ..
-        } if *granted_to == player => Some(raise.clone()),
+        } if *granted_to == player
+            && play_from_exile_permission_source_at_index(
+                state,
+                obj,
+                player,
+                CastingPermissionIndex(index),
+            )
+            .is_some() =>
+        {
+            Some(raise.clone())
+        }
         _ => None,
     })
 }
@@ -2562,15 +2744,24 @@ pub(crate) fn single_use_play_from_exile_group(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
+    CastingPermissionIndex(index): CastingPermissionIndex,
 ) -> Option<TrackedSetId> {
-    obj.casting_permissions.iter().find_map(|p| match p {
+    obj.casting_permissions.get(index).and_then(|p| match p {
         crate::types::ability::CastingPermission::PlayFromExile {
             granted_to,
             card_filter,
             single_use_group,
             single_use: true,
             ..
-        } if *granted_to == player => {
+        } if *granted_to == player
+            && play_from_exile_permission_source_at_index(
+                state,
+                obj,
+                player,
+                CastingPermissionIndex(index),
+            )
+            .is_some() =>
+        {
             let group = single_use_group.as_ref()?;
             if state.exile_play_single_use_consumed.contains(group) {
                 return None;
@@ -2636,42 +2827,95 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
         ),
         None => super::static_abilities::player_can_spend_as_any_color(state, player),
     };
-    static_grant
-        || source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| {
-                obj.casting_permissions.iter().any(|permission| {
-                    use crate::types::ability::{CastingPermission, ManaSpendPermission};
-                    matches!(
-                        permission,
-                        CastingPermission::PlayFromExile {
-                            granted_to,
-                            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
-                            ..
-                        } if *granted_to == player
-                    )
-                    // CR 609.4b: Mirror of the `PlayFromExile` arm for the
-                    // in-place graveyard cast-from-zone grant (Quistis Trepe,
-                    // Tinybones the Pickpocket). Same single consumption
-                    // authority — the concession lives on the grant scoped to
-                    // `granted_to`, never as a global player permission.
-                    || matches!(
-                        permission,
-                        CastingPermission::ExileWithAltCost {
-                            granted_to: Some(g),
-                            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
-                            ..
-                        } if *g == player
-                    )
+    if static_grant {
+        return true;
+    }
+    let Some(spell_id) = source_id else {
+        return false;
+    };
+    let pending = state
+        .pending_cast
+        .as_deref()
+        .filter(|pending| pending.object_id == spell_id);
+    let casting_variant = pending.map(|pending| pending.casting_variant).or_else(|| {
+        state.stack.iter().rev().find_map(|entry| {
+            (entry.source_id == spell_id)
+                .then_some(&entry.kind)
+                .and_then(|kind| {
+                    if let StackEntryKind::Spell {
+                        casting_variant, ..
+                    } = kind
+                    {
+                        Some(*casting_variant)
+                    } else {
+                        None
+                    }
                 })
+        })
+    });
+
+    // CR 601.2a + CR 609.4b: The static source recorded on the elected
+    // `ExilePermission` is the only static permission whose rider applies.
+    if let Some(CastingVariant::ExilePermission { source, .. }) = casting_variant {
+        return exile_static_permission_grants_any_color(state, player, spell_id, source);
+    }
+
+    let permission_index = pending
+        .and_then(|pending| pending.casting_permission_index)
+        .or(state.active_casting_permission_index)
+        // Pre-announcement affordability has no PendingCast yet. Select through
+        // the same first-authority helper that preparation records.
+        .or_else(|| {
+            state.objects.get(&spell_id).and_then(|obj| {
+                selected_object_cast_permission_index(state, obj, player, casting_variant)
             })
-        // CR 609.4b: A battlefield `StaticMode::ExileCastPermission` static may
-        // grant "mana of any type can be spent to cast those spells" (Azula,
-        // Cunning Usurper) for the cards in its exile pool. Unlike the per-card
-        // `PlayFromExile` grant above, the concession lives on the static, so it
-        // is re-derived from the source's pool + filter at spend time.
-        || source_id
-            .is_some_and(|id| exile_static_permission_grants_any_color(state, player, id))
+        });
+    if let Some(index) = permission_index {
+        return object_cast_permission_grants_any_color(state, player, spell_id, index);
+    }
+
+    // Static-only pre-announcement affordability: bind to the same source the
+    // prepared cast will elect instead of scanning every functioning source.
+    exile_cast_permission_source(state, player, spell_id).is_some_and(|(source, _, _)| {
+        exile_static_permission_grants_any_color(state, player, spell_id, source)
+    })
+}
+
+fn object_cast_permission_grants_any_color(
+    state: &GameState,
+    player: PlayerId,
+    spell_id: ObjectId,
+    CastingPermissionIndex(index): CastingPermissionIndex,
+) -> bool {
+    let Some(obj) = state.objects.get(&spell_id) else {
+        return false;
+    };
+    let Some(permission) = obj.casting_permissions.get(index) else {
+        return false;
+    };
+    let spend_permission = match permission {
+        CastingPermission::PlayFromExile {
+            mana_spend_permission,
+            ..
+        } if play_from_exile_permission_source_at_index(
+            state,
+            obj,
+            player,
+            CastingPermissionIndex(index),
+        )
+        .is_some() =>
+        {
+            *mana_spend_permission
+        }
+        CastingPermission::ExileWithAltCost {
+            mana_spend_permission,
+            ..
+        } if exile_alt_cost_permission_supports_cast(state, obj, player, permission, None) => {
+            *mana_spend_permission
+        }
+        _ => None,
+    };
+    spend_permission.is_some_and(|permission| permission.allows_spending_as_any_color())
 }
 
 pub(super) fn player_can_spend_as_any_color_for_payment(
@@ -2806,9 +3050,9 @@ struct ExilePermissionSource<'a> {
     pool: ExileCardPool,
     /// CR 117.1c: When the permission functions — `AnyTime` or `YourTurnOnly`.
     timing: ExileCastTiming,
-    /// CR 609.4b: Optional any-type-mana spend concession riding alongside the
-    /// permission (Azula, Cunning Usurper). `Some(AnyTypeOrColor)` lets the
-    /// controller spend mana of any type to cast a spell offered by this source.
+    /// CR 609.4b: Optional typed mana-spend concession riding alongside the
+    /// permission. Both variants relax colored requirements; `AnyTypeOrColor`
+    /// additionally models the broader any-type wording.
     mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
     /// CR 601.3b + CR 702.8a: When `true`, spells cast via this permission may
     /// be cast as though they had flash (Azula, Cunning Usurper).
@@ -3096,13 +3340,15 @@ pub(crate) fn exile_static_permission_grants_any_color(
     state: &GameState,
     player: PlayerId,
     exiled_id: ObjectId,
+    elected_source: ObjectId,
 ) -> bool {
-    exile_cast_permission_source_full(state, player, exiled_id, None).is_some_and(|source| {
-        matches!(
-            source.mana_spend_permission,
-            Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor)
-        )
-    })
+    exile_cast_permission_source_full(state, player, exiled_id, Some(elected_source)).is_some_and(
+        |source| {
+            source.mana_spend_permission.is_some_and(
+                crate::types::ability::ManaSpendPermission::allows_spending_as_any_color,
+            )
+        },
+    )
 }
 
 /// CR 601.3b + CR 702.8a: True when an `ExileCastPermission` static granting
@@ -4077,6 +4323,7 @@ fn prepare_spell_cast(
         object_id,
         None,
         None,
+        None,
         CastingMode::Actual,
     )
 }
@@ -4090,6 +4337,7 @@ fn prepare_spell_cast_for_display(
         state,
         player,
         object_id,
+        None,
         None,
         None,
         CastingMode::Display,
@@ -4110,6 +4358,7 @@ fn prepare_spell_cast_with_variant_override(
         player,
         object_id,
         variant_override,
+        None,
         None,
         CastingMode::Actual,
     )
@@ -4432,6 +4681,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     object_id: ObjectId,
     variant_override: Option<CastingVariant>,
     latched_alt_cost: Option<crate::types::mana::ManaCost>,
+    casting_permission_index_override: Option<CastingPermissionIndex>,
     mode: CastingMode,
 ) -> Result<PreparedSpellCast, EngineError> {
     let obj = state
@@ -4494,6 +4744,40 @@ fn prepare_spell_cast_with_variant_override_inner(
     // graveyard alt-cost.
     let has_during_resolution_alt_cost =
         has_during_resolution_alt_cost_permission(state, obj, player);
+    // CR 601.2a: A static exile permission is identified by
+    // `CastingVariant::ExilePermission.source`; every other cast path that is
+    // authorized by an object-attached grant records that exact vector slot.
+    let casting_permission_index = if let Some(index) = casting_permission_index_override {
+        // CR 601.2a: A cast offered during resolution elects the exact grant
+        // created for that offer. Never rediscover a sibling permission by
+        // vector order; a stale or mismatched index fails closed.
+        let permission = obj.casting_permissions.get(index.0).ok_or_else(|| {
+            EngineError::ActionNotAllowed(
+                "The casting permission selected for this offer is no longer available".to_string(),
+            )
+        })?;
+        if !matches!(
+            permission,
+            CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(_),
+                ..
+            }
+        ) || !exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "The casting permission selected for this offer no longer authorizes the cast"
+                    .to_string(),
+            ));
+        }
+        Some(index)
+    } else if matches!(
+        variant_override,
+        Some(CastingVariant::ExilePermission { .. })
+    ) {
+        None
+    } else {
+        selected_object_cast_permission_index(state, obj, player, variant_override)
+    };
 
     // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static permission
     // (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card must be the
@@ -4635,8 +4919,10 @@ fn prepare_spell_cast_with_variant_override_inner(
         // exiled card (theoretical — gated by `has_exile_cast_permission`
         // first) cannot accidentally inherit Jeleva's "without paying its mana
         // cost" cost-zero on cards exiled with Jeleva.
-        obj.casting_permissions
-            .iter()
+        let selected_permission = casting_permission_index
+            .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index));
+        selected_permission
+            .into_iter()
             .find_map(|p| match p {
                 crate::types::ability::CastingPermission::ExileWithAltCost { cost, .. }
                     if exile_alt_cost_permission_supports_cast(state, obj, player, p, None) =>
@@ -5521,6 +5807,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         object_id,
         &mut mana_cost,
         Some(casting_variant),
+        casting_permission_index,
     );
 
     // CR 702.96b-c: When casting with Overload, transform the spell's ability
@@ -5593,6 +5880,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         base_mana_cost,
         modal: obj.modal.clone(),
         casting_variant,
+        casting_permission_index,
         cast_timing_permission,
         origin_zone,
         payment_mode: CastPaymentMode::Auto,
@@ -5610,6 +5898,7 @@ fn apply_non_floor_cost_modifiers(
     object_id: ObjectId,
     mana_cost: &mut ManaCost,
     casting_variant: Option<CastingVariant>,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) {
     // CR 601.2f: A spell cast via a `PlayFromExile` grant may carry a printed
     // cost increase ("Each spell cast this way costs {N} more to cast." —
@@ -5618,7 +5907,13 @@ fn apply_non_floor_cost_modifiers(
     // the total as base + increases − reductions, and a reduction can never take
     // the mana component below {0}.
     if let Some(obj) = state.objects.get(&object_id) {
-        if let Some(raise) = exile_play_cast_cost_raise(obj, player) {
+        if let Some(raise) = exile_play_cast_cost_raise(
+            state,
+            obj,
+            player,
+            casting_permission_index,
+            casting_variant,
+        ) {
             *mana_cost = super::restrictions::add_mana_cost(mana_cost, &raise);
         }
     }
@@ -5659,8 +5954,16 @@ pub(super) fn apply_all_cost_modifiers(
     object_id: ObjectId,
     mana_cost: &mut ManaCost,
     casting_variant: Option<CastingVariant>,
+    casting_permission_index: Option<CastingPermissionIndex>,
 ) {
-    apply_non_floor_cost_modifiers(state, player, object_id, mana_cost, casting_variant);
+    apply_non_floor_cost_modifiers(
+        state,
+        player,
+        object_id,
+        mana_cost,
+        casting_variant,
+        casting_permission_index,
+    );
     // CR 601.2b + CR 601.2f: Cost-floor statics (Trinisphere class) — LAST, after
     // every additive/subtractive modifier so the floor sees the final mana
     // component. While the cost still contains `{X}`, X has mana value 0
@@ -5740,7 +6043,7 @@ pub(super) fn concrete_cost_for_x(
 ) -> ManaCost {
     let mut cost = base.clone();
     cost.concretize_x(x);
-    apply_non_floor_cost_modifiers(state, player, object_id, &mut cost, None);
+    apply_non_floor_cost_modifiers(state, player, object_id, &mut cost, None, None);
     apply_target_dependent_cost_modifiers(state, player, object_id, ability, &mut cost);
     apply_cost_floor(state, player, object_id, &mut cost);
     apply_cost_floor_with_selected_targets(state, player, object_id, ability, &mut cost);
@@ -5788,6 +6091,7 @@ pub(super) fn recompute_pending_mana_total(
         pending.object_id,
         &mut cost,
         Some(pending.casting_variant),
+        pending.casting_permission_index,
     );
     apply_target_dependent_cost_modifiers(
         state,
@@ -5922,7 +6226,7 @@ pub(super) fn apply_cost_modifiers_to_base(
     // recompute ever to reach here, the `fused_split_spell` marker would already be
     // set by finalization and `spell_cast_record_for`'s OR-gate would still yield
     // the combined projection, so this is not a silent front-half leak either way.
-    apply_all_cost_modifiers(state, player, object_id, &mut mana_cost, None);
+    apply_all_cost_modifiers(state, player, object_id, &mut mana_cost, None, None);
     Some(mana_cost)
 }
 
@@ -7304,8 +7608,8 @@ pub fn handle_adventure_choice_with_payment_mode(
         swap_to_alternative_spell_face(obj);
     }
 
-    let mut prepared = prepare_spell_cast(state, player, object_id)?;
-    prepared.casting_variant = casting_variant;
+    let mut prepared =
+        prepare_spell_cast_with_variant_override(state, player, object_id, Some(casting_variant))?;
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
 }
@@ -9120,6 +9424,7 @@ pub fn handle_cast_spell_as_miracle_with_payment_mode(
         object_id,
         Some(CastingVariant::Miracle),
         latched_cost,
+        None,
         CastingMode::Actual,
     )?;
     prepared.payment_mode = payment_mode;
@@ -9276,7 +9581,7 @@ pub(super) fn initiate_cast_during_resolution(
             (alt_cost, None, CastPaymentMode::Auto)
         }
     };
-    if let Some(obj) = state.objects.get_mut(&hit_card) {
+    let casting_permission_index = if let Some(obj) = state.objects.get_mut(&hit_card) {
         // CR 601.2a + CR 601.2i: zero-cost permission consumed by
         // `prepare_spell_cast_with_variant_override`'s exile alt-cost scan.
         // `resolution_cleanup` is always `Some` here: it is the
@@ -9285,6 +9590,7 @@ pub(super) fn initiate_cast_during_resolution(
         // disposition; Suspend (CR 702.62a) carries an empty-misses /
         // `RemainExiled` cleanup that has no dig and no MV gate, so it never
         // enters the cascade reject path.
+        let index = CastingPermissionIndex(obj.casting_permissions.len());
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
                 cost: perm_cost,
@@ -9298,23 +9604,33 @@ pub(super) fn initiate_cast_during_resolution(
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission,
             });
-        // CR 614.1a + CR 608.2n: apply the graveyard-redirect rider HERE — this is
-        // the sole application point for during-resolution casts. The pushed
-        // permission carries `resolution_cleanup: Some(_)`, so
-        // `evaluate_cascade_constraint_with_resulting_mv` (casting_costs.rs) strips
-        // it during `finalize_cast_with_phyrexian_choices` BEFORE the finalize
-        // graveyard-replacement read runs, re-homing only a concession-only
-        // permission without the rider. The finalize read therefore returns `None`
-        // for these casts, so applying here does NOT double-install: the finalize
-        // read (normal exile/graveyard casts) and this read (during-resolution
-        // casts) are mutually exclusive per cast.
-        if let Some(dest) = graveyard_replacement {
-            crate::game::casting_costs::apply_spell_graveyard_replacement_rider(
-                state, hit_card, dest,
-            );
-        }
+        index
+    } else {
+        return Err(EngineError::InvalidAction("Object not found".to_string()));
+    };
+    // CR 614.1a + CR 608.2n: apply the graveyard-redirect rider HERE — this is
+    // CR 614.1a + CR 608.2n: apply the graveyard-redirect rider HERE — this is
+    // the sole application point for during-resolution casts. The pushed
+    // permission carries `resolution_cleanup: Some(_)`, so
+    // `evaluate_cascade_constraint_with_resulting_mv` (casting_costs.rs) strips
+    // it during `finalize_cast_with_phyrexian_choices` BEFORE the finalize
+    // graveyard-replacement read runs, re-homing only a concession-only
+    // permission without the rider. The finalize read therefore returns `None`
+    // for these casts, so applying here does NOT double-install: the finalize
+    // read (normal exile/graveyard casts) and this read (during-resolution
+    // casts) are mutually exclusive per cast.
+    if let Some(dest) = graveyard_replacement {
+        crate::game::casting_costs::apply_spell_graveyard_replacement_rider(state, hit_card, dest);
     }
-    let mut prepared = prepare_spell_cast_with_variant_override(state, player, hit_card, None)?;
+    let mut prepared = prepare_spell_cast_with_variant_override_inner(
+        state,
+        player,
+        hit_card,
+        None,
+        None,
+        Some(casting_permission_index),
+        CastingMode::Actual,
+    )?;
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
 }
@@ -10690,6 +11006,7 @@ fn continue_with_prepared(
                     prepared.mana_cost.clone(),
                     Some(prepared.base_mana_cost.clone()),
                     prepared.casting_variant,
+                    prepared.casting_permission_index,
                     prepared.cast_timing_permission,
                     modal_choice.clone(),
                     ability_def.distribute.clone(),
@@ -10725,6 +11042,7 @@ fn continue_with_prepared(
             );
             pending_modal.base_cost = Some(prepared.base_mana_cost.clone());
             pending_modal.casting_variant = prepared.casting_variant;
+            pending_modal.casting_permission_index = prepared.casting_permission_index;
             pending_modal.cast_timing_permission = prepared.cast_timing_permission;
             pending_modal.distribute = ability_def.distribute.clone();
             pending_modal.target_constraints = target_constraints;
@@ -10823,6 +11141,7 @@ fn continue_with_prepared(
                     &prepared.mana_cost,
                     Some(prepared.base_mana_cost.clone()),
                     prepared.casting_variant,
+                    prepared.casting_permission_index,
                     prepared.cast_timing_permission,
                     prepared.origin_zone,
                     prepared.payment_mode,
@@ -10838,6 +11157,7 @@ fn continue_with_prepared(
                 );
                 pending_aura.base_cost = Some(prepared.base_mana_cost.clone());
                 pending_aura.casting_variant = prepared.casting_variant;
+                pending_aura.casting_permission_index = prepared.casting_permission_index;
                 pending_aura.cast_timing_permission = prepared.cast_timing_permission;
                 pending_aura.distribute = prepared
                     .ability_def
@@ -10893,6 +11213,7 @@ fn continue_with_prepared(
                 &prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
                 prepared.casting_variant,
+                prepared.casting_permission_index,
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
@@ -10908,6 +11229,7 @@ fn continue_with_prepared(
             );
             pending_mutate.base_cost = Some(prepared.base_mana_cost.clone());
             pending_mutate.casting_variant = prepared.casting_variant;
+            pending_mutate.casting_permission_index = prepared.casting_permission_index;
             pending_mutate.cast_timing_permission = prepared.cast_timing_permission;
             pending_mutate.distribute = prepared
                 .ability_def
@@ -10939,6 +11261,7 @@ fn continue_with_prepared(
             prepared.mana_cost.clone(),
             prepared.base_mana_cost.clone(),
             prepared.casting_variant,
+            prepared.casting_permission_index,
             prepared.cast_timing_permission,
             prepared
                 .ability_def
@@ -10967,6 +11290,7 @@ fn continue_with_prepared(
             casting_costs::emerge_sacrifice_cost(),
             SpellCostSource::Emerge,
             prepared.casting_variant,
+            prepared.casting_permission_index,
             prepared.cast_timing_permission,
             prepared
                 .ability_def
@@ -11001,6 +11325,7 @@ fn continue_with_prepared(
                 required_cost,
                 SpellCostSource::Other,
                 prepared.casting_variant,
+                prepared.casting_permission_index,
                 prepared.cast_timing_permission,
                 prepared
                     .ability_def
@@ -11020,6 +11345,7 @@ fn continue_with_prepared(
             );
             pending_x.base_cost = Some(prepared.base_mana_cost.clone());
             pending_x.casting_variant = prepared.casting_variant;
+            pending_x.casting_permission_index = prepared.casting_permission_index;
             pending_x.cast_timing_permission = prepared.cast_timing_permission;
             pending_x.distribute = prepared
                 .ability_def
@@ -11055,6 +11381,7 @@ fn continue_with_prepared(
             prepared.mana_cost,
             Some(prepared.base_mana_cost.clone()),
             prepared.casting_variant,
+            prepared.casting_permission_index,
             prepared.cast_timing_permission,
             prepared
                 .ability_def
@@ -11101,6 +11428,7 @@ fn continue_with_prepared(
                 );
                 pending.base_cost = Some(prepared.base_mana_cost.clone());
                 pending.casting_variant = prepared.casting_variant;
+                pending.casting_permission_index = prepared.casting_permission_index;
                 pending.cast_timing_permission = prepared.cast_timing_permission;
                 pending.distribute = prepared
                     .ability_def
@@ -11138,6 +11466,7 @@ fn continue_with_prepared(
                 casualty_cost,
                 SpellCostSource::Other,
                 prepared.casting_variant,
+                prepared.casting_permission_index,
                 prepared.cast_timing_permission,
                 prepared
                     .ability_def
@@ -11165,6 +11494,7 @@ fn continue_with_prepared(
                 replicate_cost,
                 SpellCostSource::Other,
                 prepared.casting_variant,
+                prepared.casting_permission_index,
                 prepared.cast_timing_permission,
                 prepared
                     .ability_def
@@ -11203,6 +11533,7 @@ fn continue_with_prepared(
                     casting_costs::offering_sacrifice_cost(&offering_quality),
                     SpellCostSource::Offering,
                     prepared.casting_variant,
+                    prepared.casting_permission_index,
                     prepared.cast_timing_permission,
                     prepared
                         .ability_def
@@ -11224,6 +11555,7 @@ fn continue_with_prepared(
                     offering_cost,
                     SpellCostSource::Offering,
                     prepared.casting_variant,
+                    prepared.casting_permission_index,
                     prepared.cast_timing_permission,
                     prepared
                         .ability_def
@@ -11250,6 +11582,7 @@ fn continue_with_prepared(
                 &prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
                 prepared.casting_variant,
+                prepared.casting_permission_index,
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
@@ -11271,6 +11604,7 @@ fn continue_with_prepared(
         );
         pending_targets.base_cost = Some(prepared.base_mana_cost.clone());
         pending_targets.casting_variant = prepared.casting_variant;
+        pending_targets.casting_permission_index = prepared.casting_permission_index;
         pending_targets.cast_timing_permission = prepared.cast_timing_permission;
         pending_targets.distribute = prepared
             .ability_def
@@ -11298,6 +11632,7 @@ fn continue_with_prepared(
         &prepared.mana_cost,
         Some(prepared.base_mana_cost.clone()),
         prepared.casting_variant,
+        prepared.casting_permission_index,
         prepared.cast_timing_permission,
         prepared.origin_zone,
         prepared.payment_mode,
@@ -11403,6 +11738,7 @@ fn continue_with_no_ability(
             casting_costs::emerge_sacrifice_cost(),
             SpellCostSource::Emerge,
             prepared.casting_variant,
+            prepared.casting_permission_index,
             prepared.cast_timing_permission,
             None,
             prepared.origin_zone,
@@ -11419,6 +11755,7 @@ fn continue_with_no_ability(
         &prepared.mana_cost,
         Some(prepared.base_mana_cost.clone()),
         prepared.casting_variant,
+        prepared.casting_permission_index,
         prepared.cast_timing_permission,
         prepared.origin_zone,
         prepared.payment_mode,

@@ -452,6 +452,297 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
     assert_eq!(state.players[0].mana_pool.mana.len(), 0);
 }
 
+fn add_play_from_exile_test_spell(
+    state: &mut GameState,
+    owner: PlayerId,
+    granted_to: PlayerId,
+    cost_shard: ManaCostShard,
+    mana_spend_permission: Option<ManaSpendPermission>,
+) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let spell = create_object(
+        state,
+        card_id,
+        owner,
+        "AnyColor Exile Spell".to_string(),
+        Zone::Exile,
+    );
+    let obj = state.objects.get_mut(&spell).unwrap();
+    obj.card_types.core_types.push(CoreType::Sorcery);
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![cost_shard],
+        generic: 0,
+    };
+    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    ));
+    obj.casting_permissions
+        .push(CastingPermission::PlayFromExile {
+            duration: Duration::Permanent,
+            granted_to,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        });
+    spell
+}
+
+/// CR 609.4b + CR 106.1a: `AnyColor` is a card-scoped payment concession.
+/// Both red and colorless mana may satisfy `{U}`, while the owner who was not
+/// granted the permission cannot cast the card at all.
+#[test]
+fn play_from_exile_any_color_pays_colored_cost_and_respects_grantee() {
+    for available_mana in [ManaType::Red, ManaType::Colorless] {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_play_from_exile_test_spell(
+            &mut state,
+            PlayerId(1),
+            PlayerId(0),
+            ManaCostShard::Blue,
+            Some(ManaSpendPermission::AnyColor),
+        );
+        add_mana(&mut state, PlayerId(0), available_mana, 1);
+
+        assert!(
+            spell_objects_available_to_cast(&state, PlayerId(0)).contains(&spell),
+            "the bound grantee must be offered the exiled spell"
+        );
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(1)).contains(&spell),
+            "the non-grantee owner must not inherit the permission"
+        );
+
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        let outcome = runner.cast(spell).resolve();
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        assert!(
+            outcome.state().players[0].mana_pool.mana.is_empty(),
+            "{available_mana:?} must be spent to pay the blue pip"
+        );
+    }
+}
+
+/// CR 601.2a + CR 609.4b: payment reads the elected object permission only.
+/// A later AnyColor grant cannot lend its rider to an earlier plain grant, and
+/// an elected AnyColor grant keeps its rider when followed by a plain sibling.
+#[test]
+fn play_from_exile_any_color_is_bound_to_elected_object_permission() {
+    fn state_with_permissions(any_color_first: bool) -> (GameState, ObjectId) {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_play_from_exile_test_spell(
+            &mut state,
+            PlayerId(0),
+            PlayerId(0),
+            ManaCostShard::Blue,
+            Some(ManaSpendPermission::AnyColor),
+        );
+        let any_color = state.objects[&spell].casting_permissions[0].clone();
+        let mut plain = any_color.clone();
+        if let CastingPermission::PlayFromExile {
+            mana_spend_permission,
+            ..
+        } = &mut plain
+        {
+            *mana_spend_permission = None;
+        }
+        state.objects.get_mut(&spell).unwrap().casting_permissions = if any_color_first {
+            vec![any_color, plain]
+        } else {
+            vec![plain, any_color]
+        };
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        (state, spell)
+    }
+
+    let (mut denied, denied_spell) = state_with_permissions(false);
+    let denied_card = denied.objects[&denied_spell].card_id;
+    assert!(apply_as_current(
+        &mut denied,
+        GameAction::CastSpell {
+            object_id: denied_spell,
+            card_id: denied_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .is_err());
+    assert_eq!(denied.objects[&denied_spell].zone, Zone::Exile);
+
+    let (mut allowed, allowed_spell) = state_with_permissions(true);
+    let allowed_card = allowed.objects[&allowed_spell].card_id;
+    apply_as_current(
+        &mut allowed,
+        GameAction::CastSpell {
+            object_id: allowed_spell,
+            card_id: allowed_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("the elected AnyColor permission must pay the off-color cost");
+    assert!(allowed
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == allowed_spell));
+    assert!(allowed.players[0].mana_pool.mana.is_empty());
+}
+
+#[test]
+fn pending_cast_missing_casting_permission_index_defaults_to_none() {
+    let pending = PendingCast::new(
+        ObjectId(41),
+        CardId(41),
+        ResolvedAbility::new(
+            Effect::unimplemented("serde fixture", ""),
+            vec![],
+            ObjectId(41),
+            PlayerId(0),
+        ),
+        ManaCost::NoCost,
+    );
+    let value = serde_json::to_value(&pending).unwrap();
+    assert!(value.get("casting_permission_index").is_none());
+    let restored: PendingCast = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.casting_permission_index, None);
+}
+
+/// CR 609.4b + CR 107.4c: `AnyColor` relaxes colored requirements only; it
+/// cannot turn colored mana into the colorless mana required by `{C}`. The
+/// positive sibling proves the cast path is live when genuine colorless mana
+/// is supplied.
+#[test]
+fn play_from_exile_any_color_preserves_strict_colorless_requirement() {
+    let mut denied = setup_game_at_main_phase();
+    let denied_spell = add_play_from_exile_test_spell(
+        &mut denied,
+        PlayerId(0),
+        PlayerId(0),
+        ManaCostShard::Colorless,
+        Some(ManaSpendPermission::AnyColor),
+    );
+    add_mana(&mut denied, PlayerId(0), ManaType::Red, 1);
+    let denied_card = denied.objects[&denied_spell].card_id;
+    let error = apply_as_current(
+        &mut denied,
+        GameAction::CastSpell {
+            object_id: denied_spell,
+            card_id: denied_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect_err("colored mana must not pay a strict {C} cost under AnyColor");
+    assert!(
+        error.to_string().to_lowercase().contains("mana"),
+        "the cast must fail at mana payment, got {error:?}"
+    );
+    assert_eq!(denied.objects[&denied_spell].zone, Zone::Exile);
+
+    let mut allowed = setup_game_at_main_phase();
+    let allowed_spell = add_play_from_exile_test_spell(
+        &mut allowed,
+        PlayerId(0),
+        PlayerId(0),
+        ManaCostShard::Colorless,
+        Some(ManaSpendPermission::AnyColor),
+    );
+    add_mana(&mut allowed, PlayerId(0), ManaType::Colorless, 1);
+    let allowed_card = allowed.objects[&allowed_spell].card_id;
+    apply_as_current(
+        &mut allowed,
+        GameAction::CastSpell {
+            object_id: allowed_spell,
+            card_id: allowed_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("genuine colorless mana must pay the strict {C} cost");
+    assert!(allowed
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == allowed_spell));
+    assert!(allowed.players[0].mana_pool.mana.is_empty());
+}
+
+/// CR 609.4b + CR 107.4h: `AnyColor` does not waive the snow-source quality
+/// required by `{S}`. The snow-produced sibling reaches the same cast branch
+/// and succeeds.
+#[test]
+fn play_from_exile_any_color_preserves_snow_source_requirement() {
+    let mut denied = setup_game_at_main_phase();
+    let denied_spell = add_play_from_exile_test_spell(
+        &mut denied,
+        PlayerId(0),
+        PlayerId(0),
+        ManaCostShard::Snow,
+        Some(ManaSpendPermission::AnyColor),
+    );
+    add_mana(&mut denied, PlayerId(0), ManaType::Red, 1);
+    let denied_card = denied.objects[&denied_spell].card_id;
+    let error = apply_as_current(
+        &mut denied,
+        GameAction::CastSpell {
+            object_id: denied_spell,
+            card_id: denied_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect_err("nonsnow mana must not pay a strict {S} cost under AnyColor");
+    assert!(
+        error.to_string().to_lowercase().contains("mana"),
+        "the cast must fail at mana payment, got {error:?}"
+    );
+    assert_eq!(denied.objects[&denied_spell].zone, Zone::Exile);
+
+    let mut allowed = setup_game_at_main_phase();
+    let allowed_spell = add_play_from_exile_test_spell(
+        &mut allowed,
+        PlayerId(0),
+        PlayerId(0),
+        ManaCostShard::Snow,
+        Some(ManaSpendPermission::AnyColor),
+    );
+    allowed.players[0].mana_pool.add(ManaUnit {
+        color: ManaType::Red,
+        source_id: ObjectId(0),
+        pip_id: crate::types::mana::ManaPipId(0),
+        supertype: Some(crate::types::mana::ManaSupertype::Snow),
+        source_could_produce_two_or_more_colors: false,
+        restrictions: Vec::new(),
+        grants: vec![],
+        expiry: None,
+    });
+    let allowed_card = allowed.objects[&allowed_spell].card_id;
+    apply_as_current(
+        &mut allowed,
+        GameAction::CastSpell {
+            object_id: allowed_spell,
+            card_id: allowed_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("mana from a snow source must pay the strict {S} cost");
+    assert!(allowed
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == allowed_spell));
+    assert!(allowed.players[0].mana_pool.mana.is_empty());
+}
+
 #[test]
 fn cast_permanent_from_granted_permission_enters_under_caster_control() {
     // GitHub phase-rs/phase#696 (Evelyn, the Covetous) — surfaced independently
@@ -1205,6 +1496,78 @@ fn foretell_cast_uses_foretell_cost_only_after_current_turn() {
     let prepared = prepare_spell_cast(&state, PlayerId(0), object_id).unwrap();
     assert_eq!(prepared.casting_variant, CastingVariant::Foretell);
     assert_eq!(prepared.mana_cost, foretell_test_cost());
+}
+
+/// CR 601.2a-b: choosing the Foretell cast method elects its `Foretold`
+/// permission. A conflicting object-attached alternative-cost grant cannot
+/// replace that cost or lend its AnyColor rider to the Foretell payment.
+#[test]
+fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
+    let mut state = setup_game_at_main_phase();
+    let spell = add_foretell_sorcery(&mut state);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+    handle_foretell(&mut state, PlayerId(0), spell, CardId(143), &mut Vec::new()).unwrap();
+    state.turn_number += 1;
+    let foretell_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    };
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        let CastingPermission::Foretold { cost, .. } = &mut obj.casting_permissions[0] else {
+            panic!("foretell setup must stamp a Foretold permission");
+        };
+        *cost = foretell_cost.clone();
+        obj.casting_permissions
+            .push(CastingPermission::ExileWithAltCost {
+                cost: ManaCost::zero(),
+                cast_transformed: false,
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                resolution_cleanup: None,
+                duration: None,
+                graveyard_replacement: None,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+            });
+    }
+
+    let prepared = prepare_spell_cast(&state, PlayerId(0), spell).unwrap();
+    assert_eq!(prepared.casting_variant, CastingVariant::Foretell);
+    assert_eq!(prepared.mana_cost, foretell_cost);
+    assert_eq!(
+        prepared.casting_permission_index,
+        Some(CastingPermissionIndex(0))
+    );
+
+    let mut denied = state.clone();
+    add_mana(&mut denied, PlayerId(0), ManaType::Colorless, 1);
+    assert!(apply_as_current(
+        &mut denied,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(143),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .is_err());
+    assert_eq!(denied.objects[&spell].zone, Zone::Exile);
+
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(143),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Foretell must pay its elected blue cost through the public cast path");
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert!(state.players[0].mana_pool.mana.is_empty());
 }
 
 #[test]
@@ -8775,6 +9138,7 @@ fn undaunted_reduces_generic_by_living_opponent_count() {
         obj_id,
         &mut mana_cost,
         None,
+        None,
     );
     assert_eq!(
         mana_cost,
@@ -8798,6 +9162,7 @@ fn undaunted_no_op_without_keyword() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
+        None,
         None,
     );
     assert_eq!(
@@ -8854,6 +9219,7 @@ fn play_from_exile_cast_cost_raise_increases_generic() {
         obj_id,
         &mut mana_cost,
         None,
+        None,
     );
     assert_eq!(
         mana_cost,
@@ -8889,6 +9255,7 @@ fn play_from_exile_cast_cost_raise_only_applies_to_grantee() {
         obj_id,
         &mut mana_cost,
         None,
+        None,
     );
     assert_eq!(
         mana_cost,
@@ -8897,6 +9264,37 @@ fn play_from_exile_cast_cost_raise_only_applies_to_grantee() {
             generic: 6,
         },
         "a raise granted to P1 must not tax P0's cast",
+    );
+}
+
+/// CR 601.2a + CR 601.2f: the elected plain permission is the sole authority
+/// for its cast. A later compatible grant's cost raise must not leak backward
+/// through an independent rider scan.
+#[test]
+fn elected_plain_play_from_exile_does_not_inherit_later_cost_raise() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id =
+        create_black_sorcery_with_keywords(&mut state, 16014, "Plain-first Spell", 1, Vec::new());
+    let obj = state.objects.get_mut(&obj_id).unwrap();
+    obj.zone = Zone::Exile;
+    obj.casting_permissions = vec![
+        play_from_exile_raise(PlayerId(0), None),
+        play_from_exile_raise(PlayerId(0), Some(ManaCost::generic(3))),
+    ];
+
+    let prepared = prepare_spell_cast(&state, PlayerId(0), obj_id)
+        .expect("the plain first permission must authorize the cast");
+    assert_eq!(
+        prepared.casting_permission_index,
+        Some(CastingPermissionIndex(0))
+    );
+    assert_eq!(
+        prepared.mana_cost,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        },
+        "the elected plain permission must not inherit the later grant's {{3}} raise"
     );
 }
 
@@ -8929,6 +9327,7 @@ fn undaunted_multiple_instances_scale_by_living_opponents() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
+        None,
         None,
     );
     assert_eq!(
@@ -8969,6 +9368,7 @@ fn undaunted_does_not_count_eliminated_opponents() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
+        None,
         None,
     );
     assert_eq!(
@@ -16659,6 +17059,160 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
     );
 }
 
+/// CR 601.2a + CR 614.1c + CR 122.1: an exact second accepted permission keeps
+/// its finality rider through resolution cleanup without inheriting the first
+/// compatible sibling's stun rider. The prepared cast then runs through the
+/// production continuation/finalizer.
+#[test]
+fn exact_permission_does_not_inherit_sibling_etb_counter() {
+    let mut state = setup_game_at_main_phase();
+    let creature = create_object(
+        &mut state,
+        CardId(8203),
+        PlayerId(0),
+        "Exact Counter Creature".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::zero();
+        for (index, enters_with_counter) in [Some(CounterType::Stun), Some(CounterType::Finality)]
+            .into_iter()
+            .enumerate()
+        {
+            obj.casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: (index == 1).then(|| {
+                        crate::types::ability::ResolutionCastCleanup {
+                            exiled_misses: Vec::new(),
+                            reject_action:
+                                crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                            success_action:
+                                crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                        }
+                    }),
+                    duration: Some(Duration::UntilEndOfTurn),
+                    graveyard_replacement: None,
+                    enters_with_counter,
+                    enters_with_modifications: Vec::new(),
+                    mana_spend_permission: None,
+                });
+        }
+    }
+    let prepared = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        PlayerId(0),
+        creature,
+        None,
+        None,
+        Some(CastingPermissionIndex(1)),
+        CastingMode::Actual,
+    )
+    .expect("the exact second permission must prepare");
+    continue_with_prepared(&mut state, PlayerId(0), prepared, &mut Vec::new())
+        .expect("the exact cast must finalize");
+    stack::resolve_top(&mut state, &mut Vec::new());
+
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&creature]
+            .counters
+            .get(&CounterType::Finality),
+        Some(&1),
+        "the exact accepted grant's finality rider must survive cleanup"
+    );
+    assert_eq!(
+        state.objects[&creature].counters.get(&CounterType::Stun),
+        None,
+        "the first sibling's stun rider must not apply"
+    );
+}
+
+/// CR 601.2a + CR 205.1b + CR 613.1d: an exact second accepted permission keeps
+/// its Vampire modification through resolution cleanup without inheriting a
+/// compatible first sibling's Zombie grant. Exercises the production
+/// continuation/finalizer used by the accepted offer.
+#[test]
+fn exact_permission_does_not_inherit_sibling_permanent_modification() {
+    let mut state = setup_game_at_main_phase();
+    let creature = create_object(
+        &mut state,
+        CardId(8204),
+        PlayerId(0),
+        "Exact Modification Creature".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Human".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::zero();
+        for (index, enters_with_modifications) in [
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Zombie".to_string(),
+            }],
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Vampire".to_string(),
+            }],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            obj.casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: (index == 1).then(|| {
+                        crate::types::ability::ResolutionCastCleanup {
+                            exiled_misses: Vec::new(),
+                            reject_action:
+                                crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                            success_action:
+                                crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                        }
+                    }),
+                    duration: Some(Duration::UntilEndOfTurn),
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications,
+                    mana_spend_permission: None,
+                });
+        }
+    }
+    let prepared = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        PlayerId(0),
+        creature,
+        None,
+        None,
+        Some(CastingPermissionIndex(1)),
+        CastingMode::Actual,
+    )
+    .expect("the exact second permission must prepare");
+    continue_with_prepared(&mut state, PlayerId(0), prepared, &mut Vec::new())
+        .expect("the exact cast must finalize");
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+
+    let subtypes = &state.objects[&creature].card_types.subtypes;
+    assert!(
+        subtypes.contains(&"Human".to_string()) && subtypes.contains(&"Vampire".to_string()),
+        "the exact accepted grant's Vampire modification must survive cleanup"
+    );
+    assert!(
+        !subtypes.contains(&"Zombie".to_string()),
+        "the first sibling's permanent Zombie grant must not apply"
+    );
+}
+
 #[test]
 fn hand_alt_cost_permission_overrides_printed_mana_cost() {
     let mut state = setup_game_at_main_phase();
@@ -19710,6 +20264,7 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
         },
         None,
         CastingVariant::Normal,
+        None,
         None,
         None,
         Zone::Hand,
@@ -23150,6 +23705,93 @@ fn adventure_cast_choice_from_hand() {
         "Expected AdventureCastChoice, got {:?}",
         result
     );
+}
+
+/// CR 601.2a + CR 609.4b: A card-native Prototype choice does not use a
+/// sibling `ExileWithAltCost` grant, but it remains authorized by the elected
+/// `PlayFromExile` grant and keeps that grant's mana-spend concession.
+#[test]
+fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = create_object(
+        &mut state,
+        CardId(7_150),
+        PlayerId(0),
+        "Hostile Prototype".to_string(),
+        Zone::Exile,
+    );
+    let obj = state.objects.get_mut(&obj_id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.base_card_types = obj.card_types.clone();
+    obj.mana_cost = ManaCost::generic(7);
+    obj.base_mana_cost = obj.mana_cost.clone();
+    obj.power = Some(3);
+    obj.toughness = Some(3);
+    obj.base_power = obj.power;
+    obj.base_toughness = obj.toughness;
+    obj.keywords.push(Keyword::Prototype {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        },
+        power: Some(1),
+        toughness: Some(1),
+    });
+    obj.base_keywords = obj.keywords.clone();
+    obj.casting_permissions = vec![
+        CastingPermission::ExileWithAltCost {
+            cost: ManaCost::zero(),
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(PlayerId(0)),
+            resolution_cleanup: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            graveyard_replacement: None,
+            mana_spend_permission: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+        },
+        CastingPermission::PlayFromExile {
+            duration: Duration::UntilEndOfTurn,
+            granted_to: PlayerId(0),
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        },
+    ];
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 2);
+
+    let card_id = state.objects[&obj_id].card_id;
+    handle_prototype_cost_choice_with_payment_mode(
+        &mut state,
+        PlayerId(0),
+        obj_id,
+        card_id,
+        AlternativeCastDecision::Alternative,
+        CastPaymentMode::Auto,
+        &mut Vec::new(),
+    )
+    .expect("the elected PlayFromExile AnyColor grant must pay the Prototype cost");
+
+    assert!(state.stack.iter().any(|entry| {
+        entry.id == obj_id
+            && matches!(
+                entry.kind,
+                StackEntryKind::Spell {
+                    casting_variant: CastingVariant::Prototype,
+                    ..
+                }
+            )
+    }));
+    assert!(state.players[0].mana_pool.mana.is_empty());
 }
 
 #[test]
@@ -37494,7 +38136,7 @@ fn cost_floor_deferred_while_x_symbolic() {
     );
 
     let mut cost = state.objects[&spell].mana_cost.clone();
-    apply_all_cost_modifiers(&state, PlayerId(0), spell, &mut cost, None);
+    apply_all_cost_modifiers(&state, PlayerId(0), spell, &mut cost, None, None);
 
     assert_eq!(
         cost,
@@ -38692,7 +39334,7 @@ fn play_from_exile_single_use_blocks_second_cast() {
     // The single-use group for the first card is discovered, then spent.
     let resolved_group = {
         let obj = state.objects.get(&first).unwrap();
-        single_use_play_from_exile_group(&state, obj, player)
+        single_use_play_from_exile_group(&state, obj, player, CastingPermissionIndex(0))
     };
     assert_eq!(
         resolved_group,
@@ -38709,6 +39351,50 @@ fn play_from_exile_single_use_blocks_second_cast() {
     assert!(
         state.objects[&second].casting_permissions.is_empty(),
         "the void single-use grant must be stripped from sibling exiled cards"
+    );
+}
+
+/// CR 601.2a + CR 603.7 + CR 611.2a: a later single-use grant is not spent
+/// when an earlier plain permission is elected for the cast. This is the
+/// hostile opposite-order shape that an independent `single_use` scan gets
+/// wrong by skipping the elected plain entry.
+#[test]
+fn elected_plain_play_from_exile_does_not_consume_later_single_use_group() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let group = TrackedSetId(77);
+    let spell = add_impulse_exiled_card(
+        &mut state,
+        player,
+        "Plain-authorized Bolt",
+        CoreType::Instant,
+        ObjectId(9999),
+        group,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions
+        .insert(0, play_from_exile_raise(player, None));
+    add_mana(&mut state, player, ManaType::Colorless, 1);
+    let card_id = state.objects[&spell].card_id;
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("the elected plain permission must cast the spell");
+
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert!(
+        !state.exile_play_single_use_consumed.contains(&group),
+        "the non-elected later single-use allowance must remain unspent"
     );
 }
 
@@ -38748,7 +39434,7 @@ fn play_from_exile_single_use_consumes_with_rider_fields() {
 
     let resolved_group = {
         let obj = state.objects.get(&first).unwrap();
-        single_use_play_from_exile_group(&state, obj, player)
+        single_use_play_from_exile_group(&state, obj, player, CastingPermissionIndex(0))
     };
     assert_eq!(
         resolved_group,
@@ -38803,7 +39489,7 @@ fn play_from_exile_single_use_tracks_overlapping_sets_from_same_source() {
 
     let resolved_group = {
         let obj = state.objects.get(&first).unwrap();
-        single_use_play_from_exile_group(&state, obj, player)
+        single_use_play_from_exile_group(&state, obj, player, CastingPermissionIndex(0))
     };
     assert_eq!(resolved_group, Some(first_set));
     consume_single_use_play_from_exile(&mut state, first_set);
@@ -39094,6 +39780,18 @@ fn persistent_exile_play_permission_plays_linked_land_through_action() {
 /// source carrying the Azula, Cunning Usurper concessions: any-type-mana
 /// spend (CR 609.4b) and flash-grant (CR 702.8a).
 fn add_azula_exile_cast_source(state: &mut GameState, player: PlayerId) -> ObjectId {
+    add_exile_cast_source_with_spend_permission(
+        state,
+        player,
+        Some(ManaSpendPermission::AnyTypeOrColor),
+    )
+}
+
+fn add_exile_cast_source_with_spend_permission(
+    state: &mut GameState,
+    player: PlayerId,
+    mana_spend_permission: Option<ManaSpendPermission>,
+) -> ObjectId {
     use crate::types::ability::StaticDefinition;
     let card_id = crate::types::identifiers::CardId(state.next_object_id);
     let source = create_object(
@@ -39109,7 +39807,7 @@ fn add_azula_exile_cast_source(state: &mut GameState, player: PlayerId) -> Objec
         cost: ExileCastCost::PayNormalCost,
         pool: ExileCardPool::Persistent,
         timing: ExileCastTiming::YourTurnOnly,
-        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+        mana_spend_permission,
         grants_flash: true,
         extra_cost: None,
         enters_with_counter: None,
@@ -39223,6 +39921,88 @@ fn azula_exile_static_grants_any_type_mana_spend() {
         can_pay_cost_after_auto_tap(&state, player, spell, &state.objects[&spell].mana_cost),
         "a {{U}} cost must be payable from a red-only pool under the concession"
     );
+}
+
+/// CR 609.4b + CR 106.1a: a linked/elected `ExileCastPermission` carrying
+/// `AnyColor` authorizes only its controller and lets the elected cast pay `{U}`
+/// from red mana through the normal public cast path.
+#[test]
+fn exile_static_any_color_casts_off_color_for_authorized_controller_only() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_source_with_spend_permission(
+        &mut state,
+        player,
+        Some(ManaSpendPermission::AnyColor),
+    );
+    let spell = add_linked_blue_sorcery(&mut state, PlayerId(1), source, "Borrowed Blue Spell");
+    add_mana(&mut state, player, ManaType::Red, 1);
+
+    assert!(spell_objects_available_to_cast(&state, player).contains(&spell));
+    assert!(
+        !spell_objects_available_to_cast(&state, PlayerId(1)).contains(&spell),
+        "the card owner must not inherit the source controller's static permission"
+    );
+    assert!(exile_static_permission_grants_any_color(
+        &state, player, spell, source
+    ));
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    let outcome = runner.cast(spell).resolve();
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+    assert!(outcome.state().players[0].mana_pool.mana.is_empty());
+}
+
+/// CR 601.2a + CR 609.4b: two static permissions may authorize the same
+/// exiled spell, but only the source recorded in `CastingVariant` contributes
+/// its payment rider.
+#[test]
+fn exile_static_any_color_is_bound_to_elected_source() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let any_color_source = add_exile_cast_source_with_spend_permission(
+        &mut state,
+        player,
+        Some(ManaSpendPermission::AnyColor),
+    );
+    let plain_source = add_exile_cast_source_with_spend_permission(&mut state, player, None);
+    let spell =
+        add_linked_blue_sorcery(&mut state, player, any_color_source, "Contested Blue Spell");
+    link_exiled_to_source(&mut state, spell, plain_source);
+    add_mana(&mut state, player, ManaType::Red, 1);
+
+    let mut denied = state.clone();
+    let mut denied_events = Vec::new();
+    let denied_result = continue_cast_with_variant(
+        &mut denied,
+        player,
+        spell,
+        CastingVariant::ExilePermission {
+            source: plain_source,
+            frequency: CastFrequency::Unlimited,
+        },
+        CastPaymentMode::Auto,
+        &mut denied_events,
+    );
+    assert!(denied_result.is_err());
+    assert_eq!(denied.objects[&spell].zone, Zone::Exile);
+
+    let mut allowed = state;
+    let mut allowed_events = Vec::new();
+    continue_cast_with_variant(
+        &mut allowed,
+        player,
+        spell,
+        CastingVariant::ExilePermission {
+            source: any_color_source,
+            frequency: CastFrequency::Unlimited,
+        },
+        CastPaymentMode::Auto,
+        &mut allowed_events,
+    )
+    .expect("the elected AnyColor source must authorize the off-color payment");
+    assert!(allowed.stack.iter().any(|entry| entry.source_id == spell));
+    assert!(allowed.players[0].mana_pool.mana.is_empty());
 }
 
 /// Build a Vizier-of-the-Menagerie-class permanent carrying the
@@ -43929,6 +44709,14 @@ fn make_graveyard_blue_sorcery(state: &mut GameState, owner: PlayerId) -> Object
 /// Resolve a Quistis-class `CastFromZone` (during-resolution, full-cost, any-type
 /// concession) targeting `spell` and return the produced state via `state`.
 fn resolve_graveyard_paid_grant(state: &mut GameState, spell: ObjectId) {
+    resolve_graveyard_paid_grant_with_permission(state, spell, ManaSpendPermission::AnyTypeOrColor);
+}
+
+fn resolve_graveyard_paid_grant_with_permission(
+    state: &mut GameState,
+    spell: ObjectId,
+    mana_spend_permission: ManaSpendPermission,
+) {
     let grant = ResolvedAbility::new(
         Effect::CastFromZone {
             target: TargetFilter::ParentTarget,
@@ -43939,7 +44727,7 @@ fn resolve_graveyard_paid_grant(state: &mut GameState, spell: ObjectId) {
             constraint: None,
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
-            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            mana_spend_permission: Some(mana_spend_permission),
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -43963,7 +44751,7 @@ fn resolve_graveyard_paid_grant_with_exile_rider(state: &mut GameState, spell: O
             constraint: None,
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
-            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
         },
         vec![TargetRef::Object(spell)],
         ObjectId(9200),
@@ -44166,6 +44954,134 @@ fn graveyard_paid_cast_accept_off_color_pays_via_any_type_concession() {
     );
 }
 
+/// CR 608.2g + CR 609.4b + CR 106.1a: the typed `AnyColor` value survives the
+/// CastOffer -> GameAction -> during-resolution cast -> ExileWithAltCost chain,
+/// remains bound to the offer's player, and permits an off-color payment.
+#[test]
+fn graveyard_paid_cast_any_color_survives_offer_and_pays_off_color() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(1));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+    resolve_graveyard_paid_grant_with_permission(&mut state, spell, ManaSpendPermission::AnyColor);
+
+    assert!(matches!(
+        &state.waiting_for,
+        WaitingFor::CastOffer {
+            player: PlayerId(0),
+            kind: CastOfferKind::GraveyardPaidCast {
+                hit_card,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                ..
+            }
+        } if *hit_card == spell
+    ));
+
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("the bound offer player must be able to accept");
+    assert!(
+        state.objects[&spell]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::ExileWithAltCost {
+                    granted_to: Some(PlayerId(0)),
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    ..
+                }
+            )),
+        "acceptance must stamp the typed, player-bound ExileWithAltCost grant"
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            ..
+        }
+    ));
+
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("red mana must pay {U} under the carried AnyColor concession");
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == spell),
+        "the off-color-paid spell must reach the stack"
+    );
+    assert!(state.players[0].mana_pool.mana.is_empty());
+}
+
+/// CR 601.2a + CR 608.2g + CR 609.4b: accepting a during-resolution offer
+/// elects the exact permission appended for that offer. An older compatible
+/// sibling must not donate its free cost, cleanup, or graveyard destination,
+/// nor suppress the accepted offer's AnyColor rider.
+#[test]
+fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let hostile_miss = create_object(
+        &mut state,
+        CardId(8303),
+        PlayerId(0),
+        "Hostile cleanup card".to_string(),
+        Zone::Exile,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions
+        .push(CastingPermission::ExileWithAltCost {
+            cost: ManaCost::zero(),
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(PlayerId(0)),
+            resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+                exiled_misses: vec![hostile_miss],
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            }),
+            duration: None,
+            graveyard_replacement: Some(
+                crate::types::ability::SpellStackToGraveyardReplacement::Hand,
+            ),
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        });
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+    resolve_graveyard_paid_grant_with_exile_rider(&mut state, spell);
+
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("the accepted offer must use its appended permission");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert_eq!(
+        state.objects[&hostile_miss].zone,
+        Zone::Exile,
+        "the older sibling's cleanup must not run"
+    );
+
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("the accepted offer's AnyColor rider must pay {U} with red mana");
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert!(state.players[0].mana_pool.mana.is_empty());
+
+    stack::resolve_top(&mut state, &mut Vec::new());
+    assert_eq!(
+        state.objects[&spell].zone,
+        Zone::Exile,
+        "the accepted offer's exile destination must beat the sibling's hand destination"
+    );
+}
+
 /// TEST 3 (decline): declining leaves the card in the graveyard, casts nothing,
 /// and stamps no lingering permission. Resolution continues past the offer.
 #[test]
@@ -44264,6 +45180,152 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
     assert!(
         state.stack.iter().any(|e| e.source_id == spell),
         "a Free cast must reach the stack with no mana paid"
+    );
+}
+
+/// CR 601.2a + CR 701.27: the exact during-resolution grant controls whether
+/// a transforming double-faced card is cast transformed. A compatible older
+/// sibling with `cast_transformed: true` must not transform an offer whose
+/// appended permission says `false`.
+#[test]
+fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_object(
+        &mut state,
+        CardId(8304),
+        PlayerId(0),
+        "Front Face".to_string(),
+        Zone::Exile,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::zero();
+        obj.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Back Face".to_string(),
+            power: Some(3),
+            toughness: Some(3),
+            loyalty: None,
+            defense: None,
+            card_types: {
+                let mut types = crate::types::card_type::CardType::default();
+                types.core_types.push(CoreType::Creature);
+                types
+            },
+            mana_cost: ManaCost::zero(),
+            keywords: Vec::new(),
+            abilities: Vec::new(),
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: Vec::new(),
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Transform),
+        });
+        obj.casting_permissions
+            .push(CastingPermission::ExileWithAltCost {
+                cost: ManaCost::zero(),
+                cast_transformed: true,
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                resolution_cleanup: None,
+                duration: Some(Duration::UntilEndOfTurn),
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+                mana_spend_permission: None,
+            });
+    }
+    let cleanup = crate::types::ability::ResolutionCastCleanup {
+        exiled_misses: Vec::new(),
+        reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+        success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+    };
+    initiate_cast_during_resolution(
+        &mut state,
+        PlayerId(0),
+        spell,
+        ResolutionCastRequest {
+            constraint: None,
+            cast_transformed: false,
+            cleanup,
+            graveyard_replacement: None,
+            cost: crate::types::ability::ResolutionCastCost::Free,
+        },
+        &mut Vec::new(),
+    )
+    .expect("the exact appended offer must cast");
+
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert_eq!(
+        state.objects[&spell].name, "Front Face",
+        "the older sibling's transformed-cast rider must not apply"
+    );
+}
+
+/// CR 601.2a + CR 611.2a: a free during-resolution offer authorized by its
+/// exact appended `ExileWithAltCost` must not consume an older sibling
+/// `PlayFromExile` once-per-turn allowance.
+#[test]
+fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
+    let mut state = setup_game_at_main_phase();
+    let source = ObjectId(9_204);
+    let spell = create_object(
+        &mut state,
+        CardId(8305),
+        PlayerId(0),
+        "Exact Offer Spell".to_string(),
+        Zone::Exile,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = ManaCost::zero();
+        obj.casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::OncePerTurn,
+                source_id: Some(source),
+                invalidation: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            });
+    }
+    let cleanup = crate::types::ability::ResolutionCastCleanup {
+        exiled_misses: Vec::new(),
+        reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+        success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+    };
+    initiate_cast_during_resolution(
+        &mut state,
+        PlayerId(0),
+        spell,
+        ResolutionCastRequest {
+            constraint: None,
+            cast_transformed: false,
+            cleanup,
+            graveyard_replacement: None,
+            cost: crate::types::ability::ResolutionCastCost::Free,
+        },
+        &mut Vec::new(),
+    )
+    .expect("the exact appended offer must cast");
+
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert!(
+        !state.exile_play_permissions_used.contains(&source),
+        "the non-elected sibling's once-per-turn allowance must remain unused"
     );
 }
 

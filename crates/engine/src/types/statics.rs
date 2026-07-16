@@ -1353,8 +1353,9 @@ pub enum StaticMode {
         /// CR 609.4b: Optional payment concession riding alongside the cast
         /// permission — "Mana of any type can be spent to cast those spells."
         /// (Azula, Cunning Usurper). `None` (default) preserves the existing
-        /// shapes (Maralen, The Matrix of Time). `Some(AnyTypeOrColor)` scopes
-        /// the any-type-mana spend to spells cast via this permission, mirroring
+        /// shapes (Maralen, The Matrix of Time). `AnyColor` and
+        /// `AnyTypeOrColor` remain distinct while sharing the colored-payment
+        /// relaxation for spells cast via this permission, mirroring
         /// the per-card `CastingPermission::PlayFromExile.mana_spend_permission`
         /// for the persistent-static seam. Consulted in
         /// `casting::player_can_spend_as_any_color_for_spell`.
@@ -2399,10 +2400,9 @@ impl Hash for StaticMode {
                 pool.hash(state);
                 timing.hash(state);
                 cost.hash(state);
-                // `ManaSpendPermission` does not derive `Hash` (mirrors the
-                // `TopOfLibraryCastPermission.alt_cost` treatment above) — hash
-                // its presence so the two payment-concession shapes don't collide.
-                mana_spend_permission.is_some().hash(state);
+                // CR 609.4b: Hash the typed concession so None, AnyColor, and
+                // AnyTypeOrColor remain distinct static definitions.
+                mana_spend_permission.hash(state);
                 grants_flash.hash(state);
                 // `AbilityCost` (inside `CastExtraCost`) lacks `Hash` — hash the
                 // mode marker only so the alternative/additional shapes differ.
@@ -2802,8 +2802,14 @@ impl fmt::Display for StaticMode {
                 if matches!(timing, ExileCastTiming::YourTurnOnly) {
                     write!(f, ",timing={timing}")?;
                 }
-                if mana_spend_permission.is_some() {
-                    write!(f, ",anymana")?;
+                match mana_spend_permission {
+                    Some(crate::types::ability::ManaSpendPermission::AnyColor) => {
+                        write!(f, ",anycolor")?;
+                    }
+                    Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor) => {
+                        write!(f, ",anymana")?;
+                    }
+                    None => {}
                 }
                 if *grants_flash {
                     write!(f, ",flash")?;
@@ -3331,6 +3337,10 @@ impl FromStr for StaticMode {
                         // CR 609.4b: any-type-mana spend concession.
                         mana_spend_permission =
                             Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor);
+                    } else if seg == "anycolor" {
+                        // CR 609.4b: any-color-only spend concession.
+                        mana_spend_permission =
+                            Some(crate::types::ability::ManaSpendPermission::AnyColor);
                     } else if seg == "flash" {
                         // CR 601.3b: cast-as-though-flash concession.
                         grants_flash = true;
@@ -3821,6 +3831,84 @@ fn deserialize_legacy_modify_cost_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn static_mode_hash(mode: &StaticMode) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        mode.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn exile_cast_mode_with_spend_permission(
+        mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+    ) -> StaticMode {
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission,
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+        }
+    }
+
+    /// CR 609.4b + CR 106.1a + CR 106.1b: diagnostic static strings preserve the narrow
+    /// `anycolor` marker while the historical `anymana` marker remains mapped
+    /// to the broader `AnyTypeOrColor` concession.
+    #[test]
+    fn exile_cast_permission_spend_markers_roundtrip_distinctly() {
+        let any_color = exile_cast_mode_with_spend_permission(Some(
+            crate::types::ability::ManaSpendPermission::AnyColor,
+        ));
+        let any_type_or_color = exile_cast_mode_with_spend_permission(Some(
+            crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
+        ));
+
+        let any_color_text = any_color.to_string();
+        let any_type_text = any_type_or_color.to_string();
+        assert!(any_color_text.contains(",anycolor"), "{any_color_text}");
+        assert!(any_type_text.contains(",anymana"), "{any_type_text}");
+        assert_eq!(StaticMode::from_str(&any_color_text).unwrap(), any_color);
+        assert_eq!(
+            StaticMode::from_str(&any_type_text).unwrap(),
+            any_type_or_color
+        );
+
+        let legacy_anymana =
+            "ExileCastPermission(Cast,unlimited,pool=persistent,timing=your_turn_only,anymana)";
+        assert_eq!(
+            StaticMode::from_str(legacy_anymana).unwrap(),
+            any_type_or_color,
+            "the historical anymana marker must remain backward-compatible"
+        );
+    }
+
+    /// CR 609.4b: custom static hashing must distinguish absent, any-color,
+    /// and any-type-or-color concessions so state-analysis keys cannot collide.
+    #[test]
+    fn exile_cast_permission_hash_distinguishes_spend_permission() {
+        let none = exile_cast_mode_with_spend_permission(None);
+        let any_color = exile_cast_mode_with_spend_permission(Some(
+            crate::types::ability::ManaSpendPermission::AnyColor,
+        ));
+        let any_type_or_color = exile_cast_mode_with_spend_permission(Some(
+            crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
+        ));
+
+        assert_ne!(static_mode_hash(&none), static_mode_hash(&any_color));
+        assert_ne!(
+            static_mode_hash(&none),
+            static_mode_hash(&any_type_or_color)
+        );
+        assert_ne!(
+            static_mode_hash(&any_color),
+            static_mode_hash(&any_type_or_color)
+        );
+    }
 
     #[test]
     fn legacy_block_restriction_string_deserializes_with_flying_filter() {

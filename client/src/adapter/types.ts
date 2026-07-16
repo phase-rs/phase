@@ -1310,10 +1310,10 @@ export type CastOfferKind =
   | {
       type: "GraveyardPaidCast";
       hit_card: ObjectId;
-      // Mirrors the engine `ManaSpendPermission` enum (single fieldless variant,
-      // serialized as a bare string). Not consumed by the modal — the paid-cast
+      // Mirrors the engine `ManaSpendPermission` enum (fieldless variants,
+      // serialized as bare strings). Not consumed by the modal — the paid-cast
       // copy is fixed — but carried to mirror the serialized shape.
-      mana_spend_permission?: "AnyTypeOrColor";
+      mana_spend_permission?: "AnyTypeOrColor" | "AnyColor";
       cast_transformed?: boolean;
     }
   | {

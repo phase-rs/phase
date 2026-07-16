@@ -2384,6 +2384,12 @@ pub struct DeferredSacrificeSelection {
     pub filter: TargetFilter,
 }
 
+/// Stable identity of a permission in a spell object's `casting_permissions`
+/// vector while that spell is being cast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CastingPermissionIndex(pub usize);
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
     pub object_id: ObjectId,
@@ -2420,6 +2426,11 @@ pub struct PendingCast {
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
     #[serde(default)]
     pub casting_variant: CastingVariant,
+    /// CR 601.2a: Object-attached permission elected for this cast. Keeping the
+    /// exact index prevents payment concessions from leaking between competing
+    /// `PlayFromExile` / `ExileWithAltCost` grants on the same object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub casting_permission_index: Option<CastingPermissionIndex>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
@@ -2739,6 +2750,7 @@ impl PendingCast {
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
@@ -7512,6 +7524,11 @@ pub struct GameState {
     /// state equality — it is empty outside the synchronous finalize window.
     #[serde(skip)]
     pub active_payment_pins: Vec<ManaPipId>,
+    /// CR 601.2a: transient copy of the object-attached casting permission
+    /// identity while finalization owns the `PendingCast` by value. Payment
+    /// consults it only inside that synchronous window; it is never serialized.
+    #[serde(skip)]
+    pub active_casting_permission_index: Option<CastingPermissionIndex>,
 
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
@@ -10509,6 +10526,7 @@ impl GameState {
             // `ManaPipId(0)` unstamped sentinel.
             next_pip_id: 1,
             active_payment_pins: Vec::new(),
+            active_casting_permission_index: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
             stack_paid_facts: HashMap::new(),
@@ -11508,6 +11526,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_object_id: _,
         next_pip_id: _,
         active_payment_pins: _,
+        active_casting_permission_index: _,
         battlefield: _,
         stack: _,
         stack_paid_facts: _,
@@ -13190,6 +13209,7 @@ mod tests {
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
                 casting_variant: CastingVariant::Normal,
+                casting_permission_index: None,
                 cast_timing_permission: None,
                 distribute: None,
                 origin_zone: Zone::Hand,
@@ -13561,6 +13581,7 @@ mod tests {
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,

@@ -2565,9 +2565,8 @@ pub enum CastingPermission {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enters_with_modifications: Vec<ContinuousModification>,
         /// CR 609.4b: Optional payment permission scoped to this specific grant.
-        /// When `Some(AnyTypeOrColor)`, mana of any type/color may be spent to
-        /// pay this card's cast cost (Quistis Trepe, Tinybones the Pickpocket:
-        /// "mana of any type can be spent to cast that spell"). Read at payment
+        /// `AnyColor` and `AnyTypeOrColor` both relax colored mana requirements;
+        /// only the latter also relaxes mana-type requirements. Read at payment
         /// time by `casting::player_can_spend_as_any_color_for_optional_spell`,
         /// keyed on `granted_to == player`. Mirrors
         /// `PlayFromExile.mana_spend_permission`; `None` (the common case) leaves
@@ -2715,12 +2714,26 @@ pub enum PlayPermissionInvalidation {
 }
 
 /// CR 609.4b: Permission modifying how mana may be spent to pay a cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaSpendPermission {
-    /// Mana may be spent as though it were mana of any type or color for this
-    /// payment. This preserves the Oracle distinction without changing the
-    /// actual mana spent.
+    /// CR 609.4b + CR 106.1a: Mana may be spent as though it were mana of any
+    /// color for this payment. This relaxes colored requirements but does not
+    /// make colored mana satisfy a colorless (`{C}`) or snow (`{S}`) requirement.
+    AnyColor,
+    /// CR 609.4b + CR 106.1b: Mana may be spent as though it were mana of any
+    /// type or color for this payment. This preserves the broader Oracle
+    /// distinction without changing the actual mana spent.
     AnyTypeOrColor,
+}
+
+impl ManaSpendPermission {
+    /// CR 609.4b: Projects the shared colored-requirement relaxation without
+    /// claiming that `AnyColor` and `AnyTypeOrColor` are semantically equal.
+    pub const fn allows_spending_as_any_color(self) -> bool {
+        match self {
+            Self::AnyColor | Self::AnyTypeOrColor => true,
+        }
+    }
 }
 
 /// CR 611.2a + CR 108.3: Identifies which player a `CastingPermission` is granted
@@ -11338,8 +11351,8 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "CastFromZoneDriver::is_default")]
         driver: CastFromZoneDriver,
         /// CR 609.4b: Optional payment permission carried by the same effect
-        /// that grants the cast-from-zone permission. When `Some(AnyTypeOrColor)`,
-        /// "mana of any type can be spent to cast that spell" is forwarded onto
+        /// that grants the cast-from-zone permission. `AnyColor` and
+        /// `AnyTypeOrColor` are forwarded distinctly onto
         /// the constructed `ExileWithAltCost` grant (Quistis Trepe, Tinybones the
         /// Pickpocket) so the concession is scoped to the specific granted cast
         /// rather than creating a global player permission. Mirrors
@@ -20661,6 +20674,31 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// CR 609.4b + CR 106.1a + CR 106.1b: the two spend permissions are distinct wire
+    /// discriminants even though both project the colored-payment relaxation.
+    #[test]
+    fn mana_spend_permission_serde_preserves_color_vs_type_distinction() {
+        let any_color = ManaSpendPermission::AnyColor;
+        let any_type_or_color = ManaSpendPermission::AnyTypeOrColor;
+
+        assert_eq!(serde_json::to_string(&any_color).unwrap(), r#""AnyColor""#);
+        assert_eq!(
+            serde_json::to_string(&any_type_or_color).unwrap(),
+            r#""AnyTypeOrColor""#
+        );
+        assert_eq!(
+            serde_json::from_str::<ManaSpendPermission>(r#""AnyColor""#).unwrap(),
+            any_color
+        );
+        assert_eq!(
+            serde_json::from_str::<ManaSpendPermission>(r#""AnyTypeOrColor""#).unwrap(),
+            any_type_or_color
+        );
+        assert!(any_color.allows_spending_as_any_color());
+        assert!(any_type_or_color.allows_spending_as_any_color());
+        assert_ne!(any_color, any_type_or_color);
+    }
 
     #[test]
     fn number_range_distinctness_serde_is_backward_compatible() {

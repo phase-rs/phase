@@ -1497,6 +1497,7 @@ mod tests {
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
