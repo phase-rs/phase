@@ -18533,6 +18533,17 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         // surfaces a player target slot and `resolve_sacrifice_scope` reads the
         // chosen player at resolution — identical to the "target opponent" path.
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        // CR 508.5 + CR 701.21a: A bare "defending player" subject on an
+        // attack-trigger edict ("Whenever ~ attacks, defending player
+        // sacrifices an artifact of their choice" — Kibo, Uktabi Prince). Like
+        // "target player" this lowers to a unit player filter
+        // (`TargetFilter::DefendingPlayer`) that otherwise fell through to
+        // `None`, dropping the controller scope so the edict defaulted to the
+        // attacking controller. Promoting it to `DefendingPlayer` lets the
+        // Sacrifice injection arm stamp the filter's `controller` and
+        // `resolve_sacrifice_scope` route the sacrifice to the defending player
+        // (resolved from combat state, no target slot) at resolution time.
+        TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
         _ => None,
     }
 }
