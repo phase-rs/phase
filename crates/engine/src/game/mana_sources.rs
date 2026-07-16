@@ -473,30 +473,22 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
 /// the object carries no self-referential harmful `Taps` trigger.
 fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option<Option<u16>> {
     let obj = state.objects.get(&object_id)?;
-    let mut found = false;
-    let mut total = Some(0_u16);
-    for trigger in obj.trigger_definitions.iter_all() {
-        if trigger.mode != TriggerMode::Taps {
-            continue;
-        }
-        let self_referential = match &trigger.valid_card {
-            None => true,
-            Some(filter) => super::trigger_matchers::target_filter_matches_object(
-                state, object_id, filter, object_id,
-            ),
-        };
-        if !self_referential {
-            continue;
-        }
-        let Some(execute) = trigger.execute.as_deref() else {
-            continue;
-        };
-        if let Some(amount) = chain_harms_controller_amount(execute) {
-            found = true;
-            total = fold_amount(total, amount);
-        }
-    }
-    found.then_some(total)
+    let mut harm_amounts = obj
+        .trigger_definitions
+        .iter_all()
+        .filter(|trigger| trigger.mode == TriggerMode::Taps)
+        .filter(|trigger| {
+            trigger.valid_card.as_ref().is_none_or(|filter| {
+                super::trigger_matchers::target_filter_matches_object(
+                    state, object_id, filter, object_id,
+                )
+            })
+        })
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .filter_map(chain_harms_controller_amount)
+        .peekable();
+    harm_amounts.peek()?;
+    Some(harm_amounts.fold(Some(0_u16), fold_amount))
 }
 
 /// CR 605.3b: Single classification authority for a mana-source OBJECT's full
