@@ -11745,6 +11745,80 @@ fn parse_spells_unquoted_single_keyword_grant_unchanged() {
     );
 }
 
+// CR 702.83a + CR 113.2c: the quoted-list handler must DECLINE a duplicate of a
+// keyword whose cast-time multiplicity the runtime does NOT preserve. Exalted is
+// the DISCRIMINATING case: it is admitted by `parse_keyword_name` (KEYWORDS), so
+// both tokens parse and the duplicate gate is actually reached, and it functions
+// separately by rule, yet its cast-grant count is never consumed, so it is
+// excluded from `Keyword::cast_merge_preserves_instances`. Without the gate this
+// line would lower to two `CastWithKeyword { Exalted }` statics that
+// `merge_spell_keyword` then coalesces by kind — an under-count. The paired
+// single-Exalted reach guard below proves the keyword genuinely parses here, so
+// this decline is the gate firing, not the list parse failing on an unknown token.
+// (Storm — the CR 702.40b example — is NOT in KEYWORDS, so it never reaches this
+// gate and could not exercise it.)
+#[test]
+fn parse_spells_quoted_duplicate_unpreserved_keyword_declines() {
+    let defs = parse_static_line_multi("Spells you cast have \"Exalted, exalted.\"");
+    assert!(
+        defs.is_empty(),
+        "a duplicate Exalted grant must be declined by the duplicate gate (Exalted \
+         multiplicity is not preserved at the cast merge), not silently deduped: {defs:?}"
+    );
+}
+
+// Reach guard that makes the decline above DISCRIMINATING: a SINGLE Exalted quoted
+// grant IS accepted (one `CastWithKeyword { Exalted }`). So both tokens of
+// "Exalted, exalted" reach the duplicate gate — the decline is the gate rejecting
+// an unpreserved duplicate, not the list parse bailing on an unknown keyword.
+#[test]
+fn parse_spells_quoted_single_unpreserved_keyword_reaches() {
+    let defs = parse_static_line_multi("Spells you cast have \"Exalted.\"");
+    assert_eq!(defs.len(), 1, "{defs:?}");
+    assert!(
+        matches!(
+            defs[0].mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Exalted
+            }
+        ),
+        "{defs:?}"
+    );
+}
+
+// CR 702.85c: the Cascade duplicate the runtime DOES preserve stays claimed — two
+// `CastWithKeyword { Cascade }` statics (Zhulodok / Maelstrom Wanderer's
+// "Cascade, cascade"). The positive counterpart to the Exalted decline.
+#[test]
+fn parse_spells_quoted_duplicate_cascade_kept() {
+    let defs = parse_static_line_multi("Spells you cast have \"Cascade, cascade.\"");
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    assert!(
+        defs.iter().all(|d| matches!(
+            d.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Cascade
+            }
+        )),
+        "{defs:?}"
+    );
+}
+
+// The parser's duplicate gate consults `cast_merge_preserves_instances`, which is
+// deliberately NARROWER than the semantic `instances_function_separately`: Exalted
+// (reachable in the quoted grammar) and Storm (not) both function separately by
+// rule but their cast-grant counts are not consumed, so both are excluded and any
+// duplicate grant that reaches the gate declines.
+#[test]
+fn cast_merge_preserves_instances_is_narrower_than_functions_separately() {
+    assert!(Keyword::Cascade.instances_function_separately());
+    assert!(Keyword::Cascade.cast_merge_preserves_instances());
+    assert!(Keyword::Exalted.instances_function_separately());
+    assert!(!Keyword::Exalted.cast_merge_preserves_instances());
+    assert!(Keyword::Storm.instances_function_separately());
+    assert!(!Keyword::Storm.cast_merge_preserves_instances());
+}
+
 #[test]
 fn static_grant_replicate_hatchery_sliver() {
     // Issue #5323 — Hatchery Sliver: "Each Sliver spell you cast has replicate.

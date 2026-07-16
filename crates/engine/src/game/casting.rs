@@ -1414,20 +1414,12 @@ fn requires_per_instance_keyword(keyword: &Keyword) -> bool {
         return true;
     }
 
-    matches!(
-        keyword,
-        // CR 702.153b: each Casualty instance is paid and triggers separately.
-        Keyword::Casualty(_)
-            // CR 702.157b: each Squad instance is paid and triggers separately.
-            | Keyword::Squad(_)
-            // CR 702.85c: if a spell has multiple instances of Cascade, each
-            // triggers separately. Granted duplicate Cascades (Zhulodok, Void
-            // Gorger's "Cascade, cascade") must therefore be preserved as distinct
-            // instances rather than folded together by kind, so each fires its own
-            // cascade trigger. Unlike Casualty/Squad, Cascade carries no per-
-            // instance cost — it is preserved purely for the separate triggers.
-            | Keyword::Cascade
-    )
+    // CR 113.2c: Casualty (CR 702.153b) / Squad (CR 702.157b) / Cascade
+    // (CR 702.85c) — the single authority for "the cast-time merge must preserve
+    // duplicate instances of this keyword" lives on `Keyword` so the quoted
+    // keyword-list parser (`parse_spells_have_quoted_keyword_list`) cannot diverge
+    // from this merge gate and over-claim a duplicate it would then silently drop.
+    keyword.cast_merge_preserves_instances()
 }
 
 fn merge_spell_keyword(keywords: &mut Vec<Keyword>, keyword: Keyword, preserve_instances: bool) {

@@ -980,6 +980,27 @@ fn parse_spells_have_quoted_keyword_list(text: &str) -> Option<Vec<StaticDefinit
         def = def.description(text.to_string());
         defs.push(def);
     }
+
+    // CR 113.2c: A quoted list may REPEAT a keyword ("Cascade, cascade" —
+    // CR 702.85c), but only for keywords whose duplicate cast-time instances the
+    // runtime actually preserves and consumes (`Keyword::cast_merge_preserves_
+    // instances` — the same authority `casting.rs::requires_per_instance_keyword`
+    // gates the merge on). A duplicate of any other keyword that reaches here (e.g.
+    // "Exalted, exalted" — Exalted is in KEYWORDS and functions separately by rule
+    // but its cast-grant count is unconsumed) would emit two grants that
+    // `merge_spell_keyword` coalesces by kind, silently under-counting. Decline the
+    // whole line rather than over-claim a grammar the runtime cannot realize.
+    let mut seen: Vec<&Keyword> = Vec::new();
+    for def in &defs {
+        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+            continue;
+        };
+        if seen.contains(&keyword) && !keyword.cast_merge_preserves_instances() {
+            return None;
+        }
+        seen.push(keyword);
+    }
+
     Some(defs)
 }
 
