@@ -17,6 +17,9 @@ function announcingOpponentWaitingFor(): AnnouncingOpponentWaitingFor {
     data: {
       player: 0,
       candidates: [2, 1],
+      choice_index: 1,
+      choice_count: 2,
+      target_type: "Land",
       pending_cast: {},
     },
   };
@@ -54,7 +57,10 @@ describe("AnnouncingOpponentModalContent", () => {
     const dispatch = renderModal(announcingOpponentWaitingFor());
 
     expect(
-      screen.getByRole("heading", { name: "Choose Announcing Opponent" }),
+      screen.getByRole("heading", { name: "Choose Announcing Opponent (1 of 2)" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Choose which opponent announces the land target (1 of 2)."),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Bob" }));
 

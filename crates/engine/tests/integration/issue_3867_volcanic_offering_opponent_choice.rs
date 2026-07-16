@@ -22,6 +22,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -393,10 +394,17 @@ fn controller_may_choose_different_announcing_opponents_per_effect() {
     // First prompt — the second-LAND effect's announcer. Choose P1.
     match &runner.state().waiting_for {
         WaitingFor::ChooseAnnouncingOpponent {
-            player, candidates, ..
+            player,
+            candidates,
+            choice_index,
+            choice_count,
+            target_type,
+            ..
         } => {
             assert_eq!(*player, P0);
             assert!(candidates.contains(&P1) && candidates.contains(&p2));
+            assert_eq!((*choice_index, *choice_count), (1, 2));
+            assert_eq!(*target_type, Some(CoreType::Land));
         }
         other => panic!("expected ChooseAnnouncingOpponent (land), got {other:?}"),
     }
@@ -406,7 +414,17 @@ fn controller_may_choose_different_announcing_opponents_per_effect() {
 
     // Second prompt — the second-CREATURE effect's announcer. Choose P2.
     match &runner.state().waiting_for {
-        WaitingFor::ChooseAnnouncingOpponent { player, .. } => assert_eq!(*player, P0),
+        WaitingFor::ChooseAnnouncingOpponent {
+            player,
+            choice_index,
+            choice_count,
+            target_type,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!((*choice_index, *choice_count), (2, 2));
+            assert_eq!(*target_type, Some(CoreType::Creature));
+        }
         other => panic!("expected ChooseAnnouncingOpponent (creature), got {other:?}"),
     }
     runner

@@ -11081,7 +11081,7 @@ fn continue_with_prepared(
         // no decision and proceeds straight through. Each opponent-choice effect
         // is decided independently — `begin_deferred_target_selection` re-prompts
         // for every remaining group after this first one is recorded.
-        if casting_costs::has_pending_announcing_opponent_choice(&resolved) {
+        if let Some(choice) = casting_costs::next_announcing_opponent_choice(&resolved) {
             let candidates = crate::game::players::opponents(state, player);
             if candidates.len() >= 2 {
                 let mut pending = PendingCast::new(
@@ -11104,6 +11104,9 @@ fn continue_with_prepared(
                 return Ok(WaitingFor::ChooseAnnouncingOpponent {
                     player,
                     candidates,
+                    choice_index: choice.index,
+                    choice_count: choice.count,
+                    target_type: choice.target_type,
                     pending_cast: Box::new(pending),
                 });
             }

@@ -1706,8 +1706,11 @@
     "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
   },
   "announcingOpponent": {
-    "title": "Choose Announcing Opponent",
-    "subtitle": "Choose which opponent announces the target."
+    "title": "Choose Announcing Opponent ({{current}} of {{total}})",
+    "subtitle": "Choose which opponent announces {{target}} ({{current}} of {{total}}).",
+    "targetLand": "the land target",
+    "targetCreature": "the creature target",
+    "targetChoice": "this target choice"
   },
   "clashOpponent": {
     "title": "Choose Clash Opponent",

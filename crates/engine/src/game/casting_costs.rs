@@ -10,6 +10,7 @@ use crate::types::ability::{
     SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
     TapCreaturesAggregate, TargetFilter, TypeFilter, TypedFilter, EXILE_COST_X,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActivationResidual, AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume,
@@ -1189,23 +1190,67 @@ pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
         .unwrap_or(waiting_for)
 }
 
-/// CR 601.2c + CR 115.1: true while some "of an opponent's choice" slot group —
-/// an ability link whose `target_chooser` is `Opponent` — still has no announcing
-/// opponent recorded. Each opponent-choice effect is decided
+/// CR 601.2c + CR 115.1: Find the next "of an opponent's choice" slot group — an
+/// ability link whose `target_chooser` is `Opponent` — which still has no
+/// announcing opponent recorded. The returned one-based position and total let a
+/// display client distinguish consecutive prompts without inspecting or
+/// reinterpreting the in-flight spell. Each opponent-choice effect is decided
 /// independently, so the controller may name the same or different opponents per
 /// effect (e.g. Volcanic Offering's second land vs. its second creature). Paired
 /// with `assign_next_announcing_opponent` to drive one prompt per group.
-pub(crate) fn has_pending_announcing_opponent_choice(ability: &ResolvedAbility) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AnnouncingOpponentChoice {
+    pub index: usize,
+    pub count: usize,
+    pub target_type: Option<CoreType>,
+}
+
+pub(crate) fn next_announcing_opponent_choice(
+    ability: &ResolvedAbility,
+) -> Option<AnnouncingOpponentChoice> {
+    let mut next = None;
+    let mut count = 0;
     let mut node = Some(ability);
     while let Some(link) = node {
-        if link.context.announcing_opponent.is_none()
-            && matches!(link.target_chooser, Some(TargetFilter::Opponent))
-        {
-            return true;
+        if matches!(link.target_chooser, Some(TargetFilter::Opponent)) {
+            count += 1;
+            if link.context.announcing_opponent.is_none() && next.is_none() {
+                next = Some(AnnouncingOpponentChoice {
+                    index: count,
+                    count: 0,
+                    target_type: target_type_for_announcing_opponent_choice(link),
+                });
+            }
         }
         node = link.sub_ability.as_deref();
     }
-    false
+    next.map(|choice| AnnouncingOpponentChoice { count, ..choice })
+}
+
+fn target_type_for_announcing_opponent_choice(ability: &ResolvedAbility) -> Option<CoreType> {
+    let TargetFilter::Typed(filter) = ability.effect.target_filter()? else {
+        return None;
+    };
+    filter
+        .type_filters
+        .iter()
+        .find_map(|type_filter| match type_filter {
+            TypeFilter::Artifact => Some(CoreType::Artifact),
+            TypeFilter::Creature => Some(CoreType::Creature),
+            TypeFilter::Enchantment => Some(CoreType::Enchantment),
+            TypeFilter::Instant => Some(CoreType::Instant),
+            TypeFilter::Land => Some(CoreType::Land),
+            TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
+            TypeFilter::Sorcery => Some(CoreType::Sorcery),
+            TypeFilter::Battle => Some(CoreType::Battle),
+            TypeFilter::Kindred => Some(CoreType::Kindred),
+            TypeFilter::Permanent
+            | TypeFilter::Card
+            | TypeFilter::Any
+            | TypeFilter::Non(_)
+            | TypeFilter::Subtype(_)
+            | TypeFilter::AnyOf(_) => None,
+        })
 }
 
 /// CR 601.2c + CR 115.1: record `chosen` as the announcing opponent for the first
@@ -1241,13 +1286,17 @@ pub(crate) fn begin_deferred_target_selection(
     // among), raise that decision before declaring targets. This loops once per
     // unassigned group, so each opponent-choice effect gets its own announcer.
     let announcing_candidates = crate::game::players::opponents(state, player);
-    if announcing_candidates.len() >= 2 && has_pending_announcing_opponent_choice(&pending.ability)
-    {
-        return Ok(WaitingFor::ChooseAnnouncingOpponent {
-            player,
-            candidates: announcing_candidates,
-            pending_cast: Box::new(pending),
-        });
+    if announcing_candidates.len() >= 2 {
+        if let Some(choice) = next_announcing_opponent_choice(&pending.ability) {
+            return Ok(WaitingFor::ChooseAnnouncingOpponent {
+                player,
+                candidates: announcing_candidates,
+                choice_index: choice.index,
+                choice_count: choice.count,
+                target_type: choice.target_type,
+                pending_cast: Box::new(pending),
+            });
+        }
     }
     pending.deferred_target_selection = false;
     // CR 700.2 + CR 601.2b: For modal casts whose target legality depended on
@@ -10678,7 +10727,7 @@ mod tests {
         ability.scoped_player = Some(PlayerId(1));
 
         assert!(
-            !has_pending_announcing_opponent_choice(&ability),
+            next_announcing_opponent_choice(&ability).is_none(),
             "an existing scoped-player chooser must not prompt the caster to choose an opponent"
         );
         assert!(

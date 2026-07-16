@@ -5049,11 +5049,20 @@ pub enum WaitingFor {
     /// is being cast in a multiplayer game; the controller (`player`) chooses
     /// which opponent will announce that slot's target. Only entered with two or
     /// more opponents (one opponent has no decision). `candidates` is the legal
-    /// opponent set; `pending_cast` carries the in-flight cast so target
+    /// opponent set; `choice_index` and `choice_count` identify the printed
+    /// opponent-choice target group currently being assigned, so a display
+    /// client can distinguish consecutive prompts without reinterpreting the
+    /// pending spell. `pending_cast` carries the in-flight cast so target
     /// declaration resumes (deferred) once the announcer is chosen.
     ChooseAnnouncingOpponent {
         player: PlayerId,
         candidates: Vec<PlayerId>,
+        choice_index: usize,
+        choice_count: usize,
+        /// The primary type constraint of the target group, when there is one.
+        /// This is a display fact only: target legality remains engine-owned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_type: Option<crate::types::card_type::CoreType>,
         pending_cast: Box<PendingCast>,
     },
     /// CR 701.30c: After a clash, each player puts their revealed card on top or
@@ -13313,6 +13322,9 @@ mod tests {
         let announcing_opponent = WaitingFor::ChooseAnnouncingOpponent {
             player: PlayerId(0),
             candidates: vec![PlayerId(1), PlayerId(2)],
+            choice_index: 1,
+            choice_count: 2,
+            target_type: Some(crate::types::card_type::CoreType::Land),
             pending_cast: pending.clone(),
         };
         assert!(announcing_opponent.pending_cast_ref().is_some());

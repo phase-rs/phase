@@ -1669,8 +1669,11 @@
     "subtitle": "{{name}} necessita di un nuovo protettore. Scegli quale avversario la difenderà."
   },
   "announcingOpponent": {
-    "title": "Scegli l'avversario che annuncia",
-    "subtitle": "Scegli quale avversario annuncia il bersaglio."
+    "title": "Scegli l'avversario che annuncia ({{current}} di {{total}})",
+    "subtitle": "Scegli quale avversario annuncia {{target}} ({{current}} di {{total}}).",
+    "targetLand": "il bersaglio terra",
+    "targetCreature": "il bersaglio creatura",
+    "targetChoice": "questa scelta del bersaglio"
   },
   "clashOpponent": {
     "title": "Scegli l'avversario per lo scontro",

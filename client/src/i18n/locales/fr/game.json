@@ -1669,8 +1669,11 @@
     "subtitle": "{{name}} a besoin d'un nouveau protecteur. Choisissez quel adversaire la défendra."
   },
   "announcingOpponent": {
-    "title": "Choisir l'adversaire qui annonce",
-    "subtitle": "Choisissez quel adversaire annonce la cible."
+    "title": "Choisir l'adversaire qui annonce ({{current}} sur {{total}})",
+    "subtitle": "Choisissez quel adversaire annonce {{target}} ({{current}} sur {{total}}).",
+    "targetLand": "la cible de terrain",
+    "targetCreature": "la cible de créature",
+    "targetChoice": "ce choix de cible"
   },
   "clashOpponent": {
     "title": "Choisir l'adversaire pour la confrontation",

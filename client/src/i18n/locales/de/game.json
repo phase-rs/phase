@@ -1669,8 +1669,11 @@
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
   },
   "announcingOpponent": {
-    "title": "Ansagenden Gegner wählen",
-    "subtitle": "Wähle, welcher Gegner das Ziel ansagt."
+    "title": "Ansagenden Gegner wählen ({{current}} von {{total}})",
+    "subtitle": "Wähle, welcher Gegner {{target}} ansagt ({{current}} von {{total}}).",
+    "targetLand": "das Länderziel",
+    "targetCreature": "das Kreaturenziel",
+    "targetChoice": "diese Zielwahl"
   },
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",

@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import type { GameAction, PlayerId, WaitingFor } from "../../adapter/types.ts";
@@ -16,6 +17,15 @@ interface AnnouncingOpponentModalContentProps {
   waitingFor: AnnouncingOpponentWaitingFor;
   seatOrder?: PlayerId[];
   dispatch: (action: GameAction) => void | Promise<void>;
+}
+
+function targetLabel(
+  targetType: AnnouncingOpponentWaitingFor["data"]["target_type"],
+  t: TFunction<"game">,
+) {
+  if (targetType === "Land") return t("announcingOpponent.targetLand");
+  if (targetType === "Creature") return t("announcingOpponent.targetCreature");
+  return t("announcingOpponent.targetChoice");
 }
 
 /**
@@ -37,8 +47,15 @@ export function AnnouncingOpponentModalContent({
 
   return (
     <ChoiceModal
-      title={t("announcingOpponent.title")}
-      subtitle={t("announcingOpponent.subtitle")}
+      title={t("announcingOpponent.title", {
+        current: waitingFor.data.choice_index,
+        total: waitingFor.data.choice_count,
+      })}
+      subtitle={t("announcingOpponent.subtitle", {
+        target: targetLabel(waitingFor.data.target_type, t),
+        current: waitingFor.data.choice_index,
+        total: waitingFor.data.choice_count,
+      })}
       options={candidates.map((opponent) => ({
         id: String(opponent),
         label: getOpponentDisplayName(opponent),
