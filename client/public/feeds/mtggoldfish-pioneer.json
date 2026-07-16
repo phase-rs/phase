@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-07-15T00:00:00Z",
+  "updated": "2026-07-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1276,10 +1276,11 @@
       ]
     },
     {
-      "name": "Mono-Black Midrange",
+      "name": "Izzet Lessons",
       "author": "MTGGoldfish",
       "colors": [
-        "B"
+        "U",
+        "R"
       ],
       "tags": [
         "metagame"
@@ -1287,149 +1288,141 @@
       "main": [
         {
           "count": 1,
-          "name": "Cecil, Dark Knight"
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Vivi Ornitier"
+        },
+        {
+          "count": 4,
+          "name": "Divide by Zero"
+        },
+        {
+          "count": 2,
+          "name": "Igneous Inspiration"
+        },
+        {
+          "count": 4,
+          "name": "Consider"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 2,
+          "name": "Accumulate Wisdom"
         },
         {
           "count": 3,
-          "name": "Castle Locthwain"
-        },
-        {
-          "count": 14,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "End of the Hunt"
+          "name": "Boomerang Basics"
         },
         {
           "count": 4,
-          "name": "Fatal Push"
+          "name": "Gran-Gran"
         },
         {
-          "count": 2,
-          "name": "Field of Ruin"
+          "count": 1,
+          "name": "Abandon Attachments"
         },
         {
           "count": 3,
-          "name": "Gifted Aetherborn"
+          "name": "Firebending Lesson"
         },
         {
-          "count": 1,
-          "name": "Go for the Throat"
+          "count": 2,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 2,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 2,
+          "name": "Shivan Reef"
         },
         {
           "count": 3,
-          "name": "Graveyard Trespasser"
-        },
-        {
-          "count": 2,
-          "name": "Invoke Despair"
-        },
-        {
-          "count": 1,
-          "name": "Liliana of the Veil"
-        },
-        {
-          "count": 1,
-          "name": "Morlun, Devourer of Spiders"
+          "name": "Combustion Technique"
         },
         {
           "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 1,
-          "name": "Preacher of the Schism"
-        },
-        {
-          "count": 2,
-          "name": "Sheoldred, the Apocalypse"
-        },
-        {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "The Meathook Massacre"
-        },
-        {
-          "count": 1,
-          "name": "The Soul Stone"
+          "name": "Steam Vents"
         },
         {
           "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
+          "name": "Riverglide Pathway"
         },
         {
           "count": 2,
-          "name": "Bitterbloom Bearer"
+          "name": "It'll Quench Ya!"
         },
         {
           "count": 1,
-          "name": "Takenuma, Abandoned Mire"
+          "name": "Abandon Attachments"
         },
         {
-          "count": 1,
-          "name": "Go Blank"
+          "count": 4,
+          "name": "Island"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Gifted Aetherborn"
+          "name": "Firebending Lesson"
         },
         {
           "count": 1,
-          "name": "Duress"
+          "name": "Combustion Technique"
         },
         {
           "count": 1,
-          "name": "End of the Hunt"
-        },
-        {
-          "count": 1,
-          "name": "Extinction Event"
+          "name": "Brazen Borrower"
         },
         {
           "count": 2,
-          "name": "Necromentia"
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
         },
         {
           "count": 2,
-          "name": "Ray of Enfeeblement"
+          "name": "Accumulate Wisdom"
         },
         {
           "count": 1,
-          "name": "Strategic Betrayal"
+          "name": "Boomerang Basics"
         },
         {
           "count": 1,
-          "name": "The Meathook Massacre"
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Improvisation Capstone"
         },
         {
           "count": 2,
-          "name": "Unlicensed Hearse"
+          "name": "Quantum Riddler"
         },
         {
-          "count": 1,
-          "name": "Invoke Despair"
-        },
-        {
-          "count": 1,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 1,
-          "name": "Go Blank"
+          "count": 2,
+          "name": "Abrade"
         }
       ]
     }
