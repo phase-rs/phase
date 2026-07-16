@@ -18435,7 +18435,7 @@ fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
 /// (`Controller`), a bare "that player" placeholder (`Player`), or the generic
 /// subject-parser default (`ParentTargetController`). Does not touch effects
 /// that already carry an explicit owner anaphor (`ParentTargetOwner`).
-fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
+fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherits_anchor: bool) {
     if !target_filter_can_target_player(anchor) {
         return;
     }
@@ -18468,13 +18468,22 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
         // player puts the cards in their hand on the bottom of their library …,
         // then draws that many cards" (Teferi's Puzzle Box, #4241; CR 102.1).
         // Mirrors the `Shuffle` arm above (same caster-default set).
+        //
+        // CR 121.1 + CR 601.2c (issue #5998): gated on `draw_inherits_anchor` —
+        // only a subject-less CONJUGATED continuation ("…, then draws …") carries
+        // the earlier player. A bare IMPERATIVE sentence ("Exile target player's
+        // graveyard. Draw a card." — Stone of Erech) is addressed to the ability's
+        // controller, so it must keep its `Controller` default; inheriting the
+        // anchor there both draws for the wrong player and surfaces a second
+        // target slot.
         Effect::Draw { target, .. }
-            if matches!(
-                *target,
-                TargetFilter::Controller
-                    | TargetFilter::Player
-                    | TargetFilter::ParentTargetController
-            ) =>
+            if draw_inherits_anchor
+                && matches!(
+                    *target,
+                    TargetFilter::Controller
+                        | TargetFilter::Player
+                        | TargetFilter::ParentTargetController
+                ) =>
         {
             *target = anchor.clone();
         }
@@ -18487,14 +18496,26 @@ fn apply_anchor_subject_to_clause(
     anchor: &TargetFilter,
     text_lower: &str,
 ) {
+    let draw_inherits_anchor = chunk_continues_anchored_subject(text_lower);
     apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
-    apply_anchor_subject(&mut clause.effect, anchor);
+    apply_anchor_subject(&mut clause.effect, anchor, draw_inherits_anchor);
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
         apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
-        apply_anchor_subject(def.effect.as_mut(), anchor);
+        apply_anchor_subject(def.effect.as_mut(), anchor, draw_inherits_anchor);
         sub = def.sub_ability.as_deref_mut();
     }
+}
+
+/// CR 121.1 + CR 601.2c: True iff `text_lower` is a subject-less CONJUGATED
+/// continuation of the anchored player's instruction ("…, then draws a card")
+/// rather than a bare IMPERATIVE addressed to the ability's controller ("Draw a
+/// card."). A conjugated verb ("draws") is not itself a clause starter but
+/// deconjugates to one, which is exactly the shared grammar distinction
+/// `inherits_carried_targeted_player_subject` uses for the same question.
+fn chunk_continues_anchored_subject(text_lower: &str) -> bool {
+    !sequence::starts_clause_text(text_lower)
+        && sequence::starts_clause_text_or_conjugated(text_lower)
 }
 
 /// CR 608.2c: A subjectless reveal continuation that explicitly says
@@ -18551,6 +18572,17 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         // surfaces a player target slot and `resolve_sacrifice_scope` reads the
         // chosen player at resolution — identical to the "target opponent" path.
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        // CR 508.5 + CR 701.21a: A bare "defending player" subject on an
+        // attack-trigger edict ("Whenever ~ attacks, defending player
+        // sacrifices an artifact of their choice" — Kibo, Uktabi Prince). Like
+        // "target player" this lowers to a unit player filter
+        // (`TargetFilter::DefendingPlayer`) that otherwise fell through to
+        // `None`, dropping the controller scope so the edict defaulted to the
+        // attacking controller. Promoting it to `DefendingPlayer` lets the
+        // Sacrifice injection arm stamp the filter's `controller` and
+        // `resolve_sacrifice_scope` route the sacrifice to the defending player
+        // (resolved from combat state, no target slot) at resolution time.
+        TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
         _ => None,
     }
 }
