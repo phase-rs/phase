@@ -2692,7 +2692,8 @@ pub enum PendingSacrificeCostCompletion {
 /// the zone pipeline's delivery tail owns its delivered-only exile link.
 /// `SacrificeForCost` owns a full selected sacrifice component across one or
 /// more replacement-choice action boundaries, including its event span and
-/// LKI record identities.
+/// LKI record identities. `CollectEvidencePayment` and `UnlessBouncePayment`
+/// retain their selected-object program counters and exact completion tails.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PendingCostMoveResume {
     Cast {
@@ -2743,6 +2744,26 @@ pub enum PendingCostMoveResume {
     DelveManaPayment {
         player: PlayerId,
         fuel_id: ObjectId,
+    },
+    /// CR 701.59a + CR 614.1 + CR 616.1: The selected evidence cards are
+    /// exiled one at a time as a cost. A replacement choice settles the card
+    /// at `paused_at_index`; resumption continues with the unpaid suffix and
+    /// performs the linked completion exactly once.
+    CollectEvidencePayment {
+        player: PlayerId,
+        chosen: Vec<ObjectId>,
+        paused_at_index: usize,
+        resume: Box<CollectEvidenceResume>,
+    },
+    /// CR 118.12 + CR 614.1 + CR 616.1: A selected return-to-hand unless cost
+    /// awaits its replacement outcome. Its typed tail either surfaces the next
+    /// return choice or records that the unless payment avoided the effect.
+    UnlessBouncePayment {
+        player: PlayerId,
+        moved: ObjectId,
+        permanents: Vec<ObjectId>,
+        pending_effect: Box<ResolvedAbility>,
+        remaining: u32,
     },
     ManaAbilityPayment {
         pending: Box<PendingManaAbility>,
