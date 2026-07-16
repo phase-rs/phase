@@ -746,8 +746,14 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_number_of_cards_discarded_this_turn,
             parse_cards_in_zone_ref,
         )),
-        parse_self_power_ref,
-        parse_self_toughness_ref,
+        // CR 208.3 / CR 306.5c: source-scoped power / toughness / loyalty
+        // self-possessives ("~'s power", "~'s loyalty"). Nested to keep the
+        // outer `alt` within nom 8.0's 21-item tuple arity.
+        alt((
+            parse_self_power_ref,
+            parse_self_toughness_ref,
+            parse_self_loyalty_ref,
+        )),
         parse_damage_dealt_this_turn_ref,
         parse_life_lost_ref,
         parse_life_gained_ref,
@@ -2447,6 +2453,28 @@ fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         rest,
         QuantityRef::Power {
             scope: crate::types::ability::ObjectScope::Source,
+        },
+    ))
+}
+
+/// Parse "its loyalty" / "~'s loyalty" / "this creature's loyalty" /
+/// "this card's loyalty" — the loyalty of the ability's source planeswalker.
+///
+/// CR 306.5c: The loyalty of a planeswalker on the battlefield is equal to the
+/// number of loyalty counters on it, so a source-scoped loyalty reference is the
+/// count of `Loyalty` counters on the source (Nissa, Ascended Animist:
+/// "Create an X/X green Phyrexian Horror creature token, where X is ~'s
+/// loyalty"). Composed from the shared `parse_self_possessive` prefix so every
+/// self-referent phrasing routes to `CountersOn { Source, Loyalty }`, mirroring
+/// `parse_self_power_ref`.
+fn parse_self_loyalty_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = parse_self_possessive(input)?;
+    let (rest, _) = tag(" loyalty").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::CountersOn {
+            scope: crate::types::ability::ObjectScope::Source,
+            counter_type: Some(CounterType::Loyalty),
         },
     ))
 }
