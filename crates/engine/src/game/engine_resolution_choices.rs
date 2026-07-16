@@ -1675,7 +1675,20 @@ pub(super) fn handle_resolution_choice(
                     );
                     let _ = effects::resolve_ability_chain(state, &draw_ability, events, 0);
                 }
-                LearnOption::Skip => {}
+                LearnOption::Skip => {
+                    // CR 701.48a: "if you didn't discard a card" — offer the
+                    // Lesson search from outside the game.
+                    let lesson_search = effects::learn::lesson_search_ability(ObjectId(0), player);
+                    let _ = effects::resolve_ability_chain(state, &lesson_search, events, 0);
+                    if matches!(state.waiting_for, WaitingFor::OutsideGameChoice { .. }) {
+                        events.push(GameEvent::EffectResolved {
+                            kind: EffectKind::Learn,
+                            source_id: ObjectId(0),
+                            subject: None,
+                        });
+                        return Ok(action_result_outcome(events, state.waiting_for.clone()));
+                    }
+                }
             }
 
             events.push(GameEvent::EffectResolved {

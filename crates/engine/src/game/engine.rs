@@ -2200,6 +2200,8 @@ pub(crate) fn drain_pending_cost_move_resume(
                 PendingCostMoveResume::Cast { .. }
                     | PendingCostMoveResume::SacrificeForCost { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::CollectEvidencePayment { .. }
+                    | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
             )
@@ -2211,6 +2213,8 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::SacrificeForCost { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
                     | PendingCostMoveResume::Foretell { .. }
+                    | PendingCostMoveResume::CollectEvidencePayment { .. }
+                    | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
             )
@@ -2249,6 +2253,16 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::Foretell { .. })
     ) {
         super::casting::resume_foretell_cost_move(state, events)
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CollectEvidencePayment { .. })
+    ) {
+        super::effects::collect_evidence::resume_cost_move_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::UnlessBouncePayment { .. })
+    ) {
+        engine_payment_choices::resume_unless_bounce_cost_move(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::DelveManaPayment { .. })

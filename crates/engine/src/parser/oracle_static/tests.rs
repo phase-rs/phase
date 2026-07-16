@@ -17821,6 +17821,60 @@ fn imprisoned_in_the_moon_becomes_colorless_land_with_granted_mana_ability() {
     }
 }
 
+// CR 205.1a + CR 613.1f (issue #6000): Minimus Containment — the sibling of
+// Imprisoned in the Moon whose grant is NOT prefixed "colorless" and whose strip
+// clause reads "and it loses all other abilities" (no "card types and"). It must
+// still emit the full type change + Treasure subtype + RemoveAllAbilities +
+// GrantAbility, but WITHOUT a SetColor (Minimus never recolors the permanent).
+#[test]
+fn minimus_containment_becomes_treasure_artifact_with_granted_mana_ability() {
+    let def = parse_static_line(
+        "Enchanted permanent is a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Artifact],
+        }),
+        "must become an artifact: {mods:?}"
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Treasure"
+        )),
+        "must gain the Treasure subtype: {mods:?}"
+    );
+    // The permanent is NOT recolored — Minimus never says "colorless".
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetColor { .. })),
+        "must NOT emit SetColor (Minimus does not recolor the permanent): {mods:?}"
+    );
+    let remove_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::RemoveAllAbilities))
+        .expect("must strip the permanent's own abilities");
+    let grant_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("must grant the quoted mana ability");
+    assert!(
+        remove_idx < grant_idx,
+        "RemoveAllAbilities must precede GrantAbility so the granted ability survives: {mods:?}"
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::EnchantedBy),
+            "affected must be the enchanted permanent: {tf:?}"
+        ),
+        other => panic!("expected Typed EnchantedBy filter, got {other:?}"),
+    }
+}
+
 // CR 205.1a + CR 702.6: Bram, Baguette Brawler / Bludgeon Brawl — "Each
 // <subject> is an Equipment with equip {N} and "Equipped creature gets +N/+M.""
 // Each matching permanent gains the Equipment subtype (replacing its artifact
