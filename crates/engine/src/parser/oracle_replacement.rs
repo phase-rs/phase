@@ -412,20 +412,33 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // "would draw a card" hooks one individual draw; a count-form "would draw one
     // or more cards" hooks the instruction, which CR 121.2a modifies "before
     // considering any of the individual card draws".
-    let draw_scope = nom_primitives::scan_at_word_boundaries(&lower, |i| {
+    // The count-form arm captures N via `parse_number` (build for the class: any
+    // "<N> or more cards" threshold, not a "two or more" special case). A count
+    // form scopes the whole instruction (InstructionCount); "N >= 2" additionally
+    // carries a typed threshold (Alms Collector) wired below as an OnlyIfQuantity
+    // over the pending draw count. "one or more" (N == 1) is vacuously true, so it
+    // takes no threshold — its InstructionCount comes from the antecedent alone.
+    let draw_antecedent = nom_primitives::scan_at_word_boundaries(&lower, |i| {
         alt((
             value(
-                DrawReplacementScope::IndividualDraw,
+                (DrawReplacementScope::IndividualDraw, None),
                 tag::<_, _, OracleError<'_>>("would draw a card"),
             ),
-            value(
-                DrawReplacementScope::InstructionCount,
-                tag("would draw one or more cards"),
-            ),
+            (
+                tag("would draw "),
+                nom_primitives::parse_number,
+                tag(" or more cards"),
+            )
+                .map(|(_, n, _)| {
+                    (
+                        DrawReplacementScope::InstructionCount,
+                        if n >= 2 { Some(n) } else { None },
+                    )
+                }),
         ))
         .parse(i)
     });
-    if let Some(draw_scope) = draw_scope {
+    if let Some((draw_scope, threshold_n)) = draw_antecedent {
         // CR 614.1a: An "As long as <state>, if you would draw a
         // card, ..." gate (Archmage Ascension) precedes the draw antecedent with
         // its own comma clause. Split it off so effect extraction anchors on the
@@ -546,6 +559,29 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
                 WhileAntecedent::Unparsed => return None,
                 WhileAntecedent::Absent => {}
             }
+        }
+        // CR 121.2a: a "draw N or more cards" antecedent (N >= 2) gates the
+        // replacement on the pending draw *instruction* being for at least N
+        // cards. Carry N as a typed `OnlyIfQuantity` over the event's draw count
+        // (`EventContextAmount`), evaluated at the instruction stage before the
+        // draw decomposes into individual card draws — composed (And) with any
+        // as-long-as / while / except-first gate already set. Alms Collector:
+        // "If an opponent would draw two or more cards, ...".
+        if let Some(n) = threshold_n {
+            let threshold = ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: n as i32 },
+                active_player_req: None,
+            };
+            def.condition = Some(match def.condition.take() {
+                Some(existing) => ReplacementCondition::And {
+                    conditions: vec![existing, threshold],
+                },
+                None => threshold,
+            });
         }
         return Some(def);
     }
@@ -17041,6 +17077,42 @@ mod tests {
                     qty: QuantityRef::EventContextAmount
                 }
             ) && *offset == 1
+        ));
+    }
+
+    #[test]
+    fn alms_collector_count_form_threshold_gates_on_instruction_draw_count() {
+        // #5678 / CR 121.2a: "If an opponent would draw two or more cards, instead
+        // you and that player each draw a card." The count-form antecedent must
+        // (1) scope the whole instruction (InstructionCount), (2) carry N=2 as a
+        // typed OnlyIfQuantity over the pending draw count (EventContextAmount) so
+        // a one-card draw does not match, and (3) apply only to an opponent's draw.
+        let def = parse_replacement_line(
+            "If an opponent would draw two or more cards, instead you and that player each draw a card.",
+            "Alms Collector",
+        )
+        .expect("Alms Collector's count-form antecedent must lower to a Draw replacement");
+        assert_eq!(def.event, ReplacementEvent::Draw);
+        assert_eq!(def.draw_scope, Some(DrawReplacementScope::InstructionCount));
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+                active_player_req: None,
+            }),
+            "N=2 must lower to OnlyIfQuantity(EventContextAmount >= 2)"
+        );
+        // The substitute is a fixed per-player draw (you + the drawing opponent),
+        // not a count-modifier -- InstructionCount comes from the antecedent
+        // threshold, not the execute shape (the discipline the maintainer required).
+        assert!(matches!(
+            def.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Draw { .. })
         ));
     }
 
