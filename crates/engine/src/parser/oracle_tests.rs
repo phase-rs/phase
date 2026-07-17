@@ -22001,3 +22001,78 @@ fn t123_advance_on_partial_intercepts_no_longer_eat_their_tails() {
         );
     }
 }
+
+/// Issue #6004: Azor's Gateway's transform condition — "If cards with five or
+/// more different mana values are exiled with Azor's Gateway, you gain 5
+/// life, untap Azor's Gateway, and transform it" — was entirely swallowed
+/// (the "cards with N or more different <quality>" noun phrase had no
+/// `ExiledBySource` variant of the "you control N or more with different
+/// <quality>" family, CR 201.2 + CR 603.10a + CR 607.2a). The whole `If`
+/// clause dropped, leaving an unconditional `GainLife` and losing the untap /
+/// transform effects outright. Now parses with zero swallowed clauses, and
+/// the condition (an `ObjectCountDistinct[ManaValue]` threshold over the
+/// `ExiledBySource` pool) gates each of the three effects.
+#[test]
+fn azors_gateway_transform_condition_parses_with_zero_swallowed_clauses() {
+    let text = "{1}, {T}: Draw a card, then exile a card from your hand. If cards with five \
+                or more different mana values are exiled with Azor's Gateway, you gain 5 life, \
+                untap Azor's Gateway, and transform it.";
+    let parsed = parse(text, "Azor's Gateway", &[], &["Artifact"], &[]);
+
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "expected zero swallowed clauses, got {:#?}",
+        parsed.parse_warnings
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+
+    let expected_ability_condition = Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountDistinct {
+                filter: TargetFilter::ExiledBySource,
+                qualities: vec![SharedQuality::ManaValue],
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 5 },
+    });
+
+    let draw = &parsed.abilities[0];
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    assert!(draw.condition.is_none());
+
+    let exile = draw.sub_ability.as_deref().expect("exile sub-ability");
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    assert!(exile.condition.is_none());
+
+    let gain_life = exile.sub_ability.as_deref().expect("gain life sub-ability");
+    assert!(matches!(gain_life.effect.as_ref(), Effect::GainLife { .. }));
+    assert_eq!(gain_life.condition, expected_ability_condition);
+
+    let untap = gain_life.sub_ability.as_deref().expect("untap sub-ability");
+    assert!(matches!(
+        untap.effect.as_ref(),
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    assert_eq!(untap.condition, expected_ability_condition);
+
+    let transform = untap.sub_ability.as_deref().expect("transform sub-ability");
+    assert!(matches!(
+        transform.effect.as_ref(),
+        Effect::Transform {
+            target: TargetFilter::ParentTarget
+        }
+    ));
+    assert_eq!(transform.condition, expected_ability_condition);
+    assert!(transform.sub_ability.is_none());
+}
