@@ -129,6 +129,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Draw { .. }
         | Effect::Token { .. }
         | Effect::Scry { .. }
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Explore
         | Effect::Investigate
         | Effect::Mana { .. }

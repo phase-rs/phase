@@ -194,6 +194,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::InZone { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -435,6 +436,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::InZone { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -3328,6 +3330,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Counters { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -3848,6 +3851,11 @@ fn matches_filter_prop(
         // CR 702.143c-d: Foretold is a designation of a card in exile, tracked
         // directly on the object. It is not equivalent to `KeywordKind::Foretell`.
         FilterProp::Foretold => obj.foretold,
+        // CR 715.2: A card has an Adventure when its stored alternate face is
+        // an Adventure face; the front face is normally a permanent card.
+        FilterProp::HasAdventure => obj.back_face.as_ref().is_some_and(|face| {
+            face.layout_kind == Some(crate::types::card::LayoutKind::Adventure)
+        }),
         // CR 107.3 + CR 202.1: "spell with {X} in its mana cost" — inspects the
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
@@ -4998,6 +5006,7 @@ fn zone_change_record_matches_property(
         | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
         // — a zone-change snapshot cannot represent it. Fail closed.
         | FilterProp::NameMatchesAnyPermanent { .. } => false,

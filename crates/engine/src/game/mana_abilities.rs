@@ -2511,6 +2511,9 @@ fn resume_mana_ability_root(
         ManaAbilityResume::FinalizePendingManaPayment { player } => {
             super::casting_costs::finalize_automatic_mana_payment(state, player, events)
         }
+        ManaAbilityResume::CompanionToHand { player, cost } => {
+            super::companion::resume_companion_to_hand_payment(state, player, cost, events)
+        }
         resume => Ok(resume_waiting_for(mana_source_controller, resume)),
     }
 }
@@ -3727,7 +3730,8 @@ fn resume_waiting_for(mana_source_controller: PlayerId, resume: ManaAbilityResum
         },
         ManaAbilityResume::EffectPayCost { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
-        | ManaAbilityResume::FinalizePendingManaPayment { .. } => {
+        | ManaAbilityResume::FinalizePendingManaPayment { .. }
+        | ManaAbilityResume::CompanionToHand { .. } => {
             unreachable!("effect-cost resume is handled by resume_mana_ability_root")
         }
     }

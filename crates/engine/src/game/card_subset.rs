@@ -69,6 +69,8 @@ pub fn collect_game_card_universe(state: &GameState, db: &CardDatabase) -> BTree
             &pool.current_main,
             &pool.registered_sideboard,
             &pool.current_sideboard,
+            &pool.registered_companion,
+            &pool.current_companion,
             &pool.registered_commander,
             &pool.current_commander,
             &pool.registered_signature_spell,
