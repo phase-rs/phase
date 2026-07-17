@@ -1647,6 +1647,37 @@ fn check_static_other_by_name(state: &GameState, name: &str, context: &StaticChe
             ) {
                 continue;
             }
+            // CR 101.2 + CR 109.5 + CR 115.10: per-affected-player applicability
+            // gate — the same read `check_static_ability` performs for typed
+            // prohibition modes. An `Other` static carrying a per-player
+            // relative-count predicate (Ward of Bones: "each opponent who controls
+            // more lands than you can't play lands" → `CantPlayLand` +
+            // `per_player_condition`) applies to the queried player ONLY when that
+            // predicate holds for them. Evaluated against the affected player
+            // (target-owner, else the queried `player_id`) with `ScopedPlayer`
+            // bound to them and "you" to the source's controller. Fail closed when
+            // no affected player is in context so an under-specified query never
+            // over-applies the prohibition.
+            if let Some(ref cond) = def.per_player_condition {
+                let affected_player = context
+                    .target_id
+                    .and_then(|id| state.objects.get(&id))
+                    .map(|o| o.controller)
+                    .or(context.player_id);
+                match affected_player {
+                    Some(p) => {
+                        if !crate::game::restrictions::evaluate_condition(
+                            state,
+                            p,
+                            source_obj.id,
+                            cond,
+                        ) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
             return true;
         }
     }

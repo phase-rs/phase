@@ -910,11 +910,28 @@ pub(crate) fn parse_per_player_conditional_prohibition(
             ParsedCondition::YouCastSpellThisTurn { filter: None },
             tag::<_, _, OracleError<'_>>("cast a spell this turn"),
         ),
-        // NOTE: the relative-count predicate "controls more <type> than you can't
-        // cast <type> spells" (Ward of Bones) is NOT an arm here — each type is an
-        // independent prohibition with its own count, so it needs a multi-def
-        // result. It is owned by `parse_relative_count_typed_cast_prohibitions` on
-        // the multi-static path, which runs before this single-def parser.
+        // CR 109.4 + CR 109.5 + CR 115.10 (Ward of Bones line 2): the board-state
+        // relative-count predicate "controls more <type> than you". Unlike the
+        // turn-activity predicates above, this is a LIVE per-affected-player board
+        // comparison (re-evaluated on each query), built by the shared
+        // `controls_more_than_you_condition` as
+        // `ObjectCount(<type>, ScopedPlayer) GT ObjectCount(<type>, You)`. Pairs
+        // with the "play lands" verb branch below for "each opponent who controls
+        // more lands than you can't play lands".
+        map(
+            preceded(
+                tag::<_, _, OracleError<'_>>("controls more "),
+                terminated(nom_target::parse_type_filter_word, tag(" than you")),
+            ),
+            controls_more_than_you_condition,
+        ),
+        // NOTE: the *multi-type cast* relative-count predicate ("... can't cast
+        // <type> spells. The same is true for <T1> and <T2>", Ward of Bones line 1)
+        // is NOT routed here — each type is an independent prohibition needing a
+        // multi-def result, owned by `parse_relative_count_typed_cast_prohibitions`
+        // on the multi-static path, which runs before this single-def parser. The
+        // condition arm above only ever pairs with a single-type verb (play lands);
+        // the multi-type cast verbs fall through to `None` below.
     ))
     .parse(rest)
     .ok()?;
@@ -949,6 +966,30 @@ pub(crate) fn parse_per_player_conditional_prohibition(
                 TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
             return Some(
                 StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(affected)
+                    .per_player_condition(cond)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
+    // CR 305.1 (Ward of Bones line 2): "... can't play lands" — land-play
+    // prohibition. `CantPlayLand` is a player-scoped `Other` mode with no `who`
+    // field, so the opponent scope rides on the `affected` filter (opponents'
+    // player scope: `ControllerRef::Opponent` resolves against the source's
+    // controller in `static_filter_matches`). The per-player relative-count gate
+    // ("controls more lands than you") rides on `per_player_condition`; the
+    // runtime CantPlayLand seam (`check_static_other_by_name`) evaluates it and
+    // bars ONLY an opponent controlling strictly more lands than the source's
+    // controller. This emits the exact `StaticMode::Other("CantPlayLand")` string
+    // the unconditional dispatch.rs path uses, so `player_has_static_other` /
+    // `handle_play_land` enforce both the conditional and unconditional forms.
+    if let Some(tail) = nom_tag_lower(rest, rest, "play lands") {
+        if tail.trim_end_matches('.').is_empty() {
+            let affected =
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+            return Some(
+                StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string()))
                     .affected(affected)
                     .per_player_condition(cond)
                     .description(text.to_string()),
@@ -3313,6 +3354,58 @@ mod per_player_conditional_prohibition_tests {
             "Each opponent who controls more creatures than you can't cast artifact spells."
         )
         .is_none());
+    }
+
+    /// CR 305.1 + CR 109.4 + CR 115.10 (Ward of Bones line 2): "Each opponent who
+    /// controls more lands than you can't play lands" lowers to a single
+    /// player-scoped `CantPlayLand` `Other` static — opponent-scoped via the
+    /// `affected` filter (the mode has no `who` field) and gated on the
+    /// per-affected-player "controls more lands than you" count. Revert either the
+    /// relative-count condition arm or the "play lands" verb branch and this parse
+    /// returns `None`, panicking the `parse` helper.
+    #[test]
+    fn parses_ward_of_bones_land_clause_as_conditional_cant_play_land() {
+        let def = parse("Each opponent who controls more lands than you can't play lands.");
+        assert_eq!(def.mode, StaticMode::Other("CantPlayLand".to_string()));
+        // Opponent scope rides on the affected filter (Other mode has no `who`).
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        // Gate = "this opponent controls more lands than you" (ScopedPlayer GT You).
+        assert_eq!(
+            def.per_player_condition,
+            Some(ParsedCondition::QuantityComparison {
+                lhs: object_count(TypeFilter::Land, ControllerRef::ScopedPlayer),
+                comparator: Comparator::GT,
+                rhs: object_count(TypeFilter::Land, ControllerRef::You),
+            })
+        );
+    }
+
+    /// Regression: the UNCONDITIONAL "<subject> can't play lands" cards (Rock
+    /// Jockey, Limited Resources, plain "You can't play lands") carry no "who
+    /// controls more <type> than you" relative-clause frame, so the per-player
+    /// conditional parser must DECLINE them and let the generic `CantPlayLand`
+    /// dispatch in `dispatch.rs` claim them (unchanged). Revert the `who` /
+    /// relative-clause gates and the conditional parser would greedily swallow
+    /// every "can't play lands" line, dropping their unconditional enforcement.
+    #[test]
+    fn per_player_parser_declines_unconditional_cant_play_lands() {
+        for text in [
+            "You can't play lands.",
+            "Players can't play lands.",
+            "Each opponent can't play lands.",
+        ] {
+            let lower = text.to_ascii_lowercase();
+            let tp = TextPair::new(text, &lower);
+            assert!(
+                parse_per_player_conditional_prohibition(&tp, text).is_none(),
+                "unconditional line must not be claimed by the per-player parser: {text}"
+            );
+        }
     }
 }
 

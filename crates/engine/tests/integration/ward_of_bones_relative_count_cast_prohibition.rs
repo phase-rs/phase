@@ -152,3 +152,56 @@ fn more_artifacts_blocks_only_artifact_spells() {
          (revert-probe for the collapsed single-count model)"
     );
 }
+
+/// The ENCHANTMENT arm of the per-type independence. P1 controls MORE enchantments
+/// than P0 (1 vs 0) but NOT more creatures (0 vs 0) nor more artifacts (0 vs Ward
+/// of Bones' 1). Only P1's ENCHANTMENT spell is prohibited; its creature and
+/// artifact spells stay castable. The existing tests never proved an enchantment
+/// cast is BLOCKED — this closes that gap and, together with the creature/artifact
+/// tests, pins the enchantment count as its OWN independent gate.
+#[test]
+fn more_enchantments_blocks_only_enchantment_spells() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Ward of Bones is an artifact P0 controls (P0 artifacts = 1, creatures = 0,
+    // enchantments = 0).
+    scenario
+        .add_creature(P0, "Ward of Bones", 0, 0)
+        .as_artifact()
+        .from_oracle_text(WARD_OF_BONES_CAST_LINE);
+
+    // P1 controls a single enchantment permanent — strictly more than P0's zero.
+    // `as_enchantment` strips the creature type, so this counts ONLY as an
+    // enchantment (not toward P1's creature count).
+    scenario
+        .add_creature(P1, "P1 Enchantment", 0, 0)
+        .as_enchantment();
+
+    let creature_spell = zero_creature_spell(&mut scenario, P1);
+    let artifact_spell = zero_artifact_spell(&mut scenario, P1);
+    let enchantment_spell = zero_enchantment_spell(&mut scenario, P1);
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+
+    // CR 601.3a: P1 controls more enchantments → enchantment spells prohibited.
+    assert!(
+        !can_cast_object_now(runner.state(), P1, enchantment_spell),
+        "P1 controls more enchantments than you → enchantment spell must be prohibited"
+    );
+    // Per-type independence + reach-guard: P1 does NOT control more creatures
+    // (0 vs 0) nor more artifacts (0 vs Ward of Bones' 1), so those spells stay
+    // castable. FAILS under any model that collapses the enchantment gate onto a
+    // shared (creature) count.
+    assert!(
+        can_cast_object_now(runner.state(), P1, creature_spell),
+        "P1 does NOT control more creatures than you → creature spell must stay castable"
+    );
+    assert!(
+        can_cast_object_now(runner.state(), P1, artifact_spell),
+        "P1 does NOT control more artifacts than you → artifact spell must stay castable"
+    );
+}
