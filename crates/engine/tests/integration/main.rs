@@ -771,6 +771,7 @@ mod vivien_invocation_reflexive_power;
 mod vizier_of_many_faces_embalm_copy_panic_5278;
 mod volatile_fault_that_player_search;
 mod vraska_betrayals_sting;
+mod ward_of_bones_relative_count_cast_prohibition;
 mod wedding_ring_etb_token_copy;
 mod well_of_lost_dreams_may_pay_x;
 mod wernog_riders_chaplain_investigate_count;

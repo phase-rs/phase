@@ -910,11 +910,11 @@ pub(crate) fn parse_per_player_conditional_prohibition(
             ParsedCondition::YouCastSpellThisTurn { filter: None },
             tag::<_, _, OracleError<'_>>("cast a spell this turn"),
         ),
-        // CR 109.4 + CR 109.5 + CR 115.10: relative-count predicate — "controls
-        // more <plural type> than you" (Ward of Bones). A board-state comparison
-        // rather than a turn-activity predicate, so it is a full combinator arm
-        // (not a `value(..)` constant).
-        parse_controls_more_than_you_condition,
+        // NOTE: the relative-count predicate "controls more <type> than you can't
+        // cast <type> spells" (Ward of Bones) is NOT an arm here — each type is an
+        // independent prohibition with its own count, so it needs a multi-def
+        // result. It is owned by `parse_relative_count_typed_cast_prohibitions` on
+        // the multi-static path, which runs before this single-def parser.
     ))
     .parse(rest)
     .ok()?;
@@ -927,23 +927,6 @@ pub(crate) fn parse_per_player_conditional_prohibition(
         if tail.trim_end_matches('.').is_empty() {
             return Some(
                 StaticDefinition::new(StaticMode::CantBeCast { who })
-                    .per_player_condition(cond)
-                    .description(text.to_string()),
-            );
-        }
-    }
-
-    // CR 601.3a: "... can't cast <type> spells[. The same is true for <type> and
-    // <type>]" — typed cast-side prohibition (Ward of Bones). The restricted
-    // spell types (the primary type plus any "the same is true for" continuation)
-    // widen into a single `TargetFilter::Or` on `.affected(...)`; the per-affected-
-    // player count condition (`cond`) gates all of them. This branch is tried after
-    // the bare "cast spells" arm so the untyped Angelic Arbiter path is unaffected.
-    if let Ok((tail, affected)) = parse_cast_typed_spells_predicate(rest) {
-        if tail.trim().is_empty() {
-            return Some(
-                StaticDefinition::new(StaticMode::CantBeCast { who })
-                    .affected(affected)
                     .per_player_condition(cond)
                     .description(text.to_string()),
             );
@@ -976,62 +959,44 @@ pub(crate) fn parse_per_player_conditional_prohibition(
     None
 }
 
-/// CR 109.4 + CR 109.5 + CR 115.10: Parse the per-affected-player predicate
-/// "controls more <plural type> than you" (Ward of Bones) into a
-/// `ParsedCondition::QuantityComparison`.
+/// CR 109.4 + CR 109.5 + CR 115.10: Build the per-affected-player predicate
+/// "controls more `<type>` than you" as a board-count comparison.
 ///
-/// The affected candidate — the player the enclosing prohibition scopes over —
+/// The evaluated candidate — the player the enclosing prohibition scopes over —
 /// is `ControllerRef::ScopedPlayer` (CR 115.10: bound to the evaluated player by
 /// `resolve_quantity_scoped`); "you" is the source's controller
 /// (CR 109.5 → `ControllerRef::You`). The predicate holds when the candidate
 /// controls strictly more (`Comparator::GT`) permanents of `<type>` than the
-/// source's controller.
-///
-/// Built entirely from existing building blocks (`QuantityRef::ObjectCount` over
-/// two controller-scoped `TypedFilter`s) so it reuses the shared
-/// `game::restrictions::evaluate_condition` evaluator — no new condition variant
-/// and no new evaluator arm.
-fn parse_controls_more_than_you_condition(input: &str) -> OracleResult<'_, ParsedCondition> {
-    let (input, _) = tag::<_, _, OracleError<'_>>("controls more ").parse(input)?;
-    let (input, type_filter) = nom_target::parse_type_filter_word(input)?;
-    let (input, _) = tag(" than you").parse(input)?;
-
-    let count_controlled_by = |ctrl: ControllerRef| QuantityExpr::Ref {
+/// source's controller. Built entirely from the shared `QuantityRef::ObjectCount`
+/// building block — no new condition variant, no new evaluator arm. Takes the
+/// filter by value and clones it once for the `lhs`, moving it into the `rhs`.
+fn controls_more_than_you_condition(type_filter: TypeFilter) -> ParsedCondition {
+    let count_controlled_by = |ctrl: ControllerRef, tf: TypeFilter| QuantityExpr::Ref {
         qty: QuantityRef::ObjectCount {
-            filter: TargetFilter::Typed(TypedFilter::new(type_filter.clone()).controller(ctrl)),
+            filter: TargetFilter::Typed(TypedFilter::new(tf).controller(ctrl)),
         },
     };
-    Ok((
-        input,
-        ParsedCondition::QuantityComparison {
-            lhs: count_controlled_by(ControllerRef::ScopedPlayer),
-            comparator: Comparator::GT,
-            rhs: count_controlled_by(ControllerRef::You),
-        },
-    ))
+    ParsedCondition::QuantityComparison {
+        lhs: count_controlled_by(ControllerRef::ScopedPlayer, type_filter.clone()),
+        comparator: Comparator::GT,
+        rhs: count_controlled_by(ControllerRef::You, type_filter),
+    }
 }
 
-/// CR 601.3a + CR 101.2: Parse the typed cast-prohibition verb phrase
-/// "cast <type> spells[. The same is true for <type> and <type>]" (Ward of
-/// Bones) into a single `TargetFilter` for the static's affected spell set.
-///
-/// The primary spell type plus every type named in the optional "the same is
-/// true for X and Y" continuation are widened into one `TargetFilter::Or` of
-/// per-type spell filters (a lone type collapses to the bare `Typed`). The
-/// continuation reuses the two-conjunct "and"-only grammar of
-/// `same_is_true.rs::parse_sentence` via `separated_list1(tag(" and "), ..)`.
-///
-/// MODELING NOTE (deliberate approximation): a `StaticDefinition` carries ONE
-/// `per_player_condition`, so the enclosing prohibition gates ALL collected spell
-/// types on the single count predicate supplied by the caller (Ward of Bones'
-/// creature-count comparison). Rules-literally, "The same is true for artifacts
-/// and enchantments" repeats the WHOLE sentence per type (CR 101.2) — each with
-/// its own "controls more <that type> than you" count. Collapsing the three
-/// per-type counts to the one creature count is the accepted single-static model;
-/// Ward of Bones is the only printed card in this class.
-fn parse_cast_typed_spells_predicate(input: &str) -> OracleResult<'_, TargetFilter> {
-    let (input, _) = tag::<_, _, OracleError<'_>>("cast ").parse(input)?;
-    let (input, primary) = nom_target::parse_type_filter_word(input)?;
+/// Parse the Ward-of-Bones predicate frame (the subject is already stripped):
+/// "who controls more `<T0>` than you can't cast `<T0>` spells\[. the same is true
+/// for `<T1>` and `<T2>`\]\[.\]". `input` is the already-lowercase predicate.
+/// Returns `(count_type, primary_spell_type, continuation)` — the caller gates on
+/// `count_type == primary_spell_type` and full consumption. The continuation
+/// reuses the two-conjunct "and"-only "the same is true for" grammar.
+#[allow(clippy::type_complexity)]
+fn parse_relative_count_prohibition_frame(
+    input: &str,
+) -> OracleResult<'_, (TypeFilter, TypeFilter, Option<Vec<TypeFilter>>)> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("who controls more ").parse(input)?;
+    let (input, count_type) = nom_target::parse_type_filter_word(input)?;
+    let (input, _) = tag(" than you can't cast ").parse(input)?;
+    let (input, spell_type) = nom_target::parse_type_filter_word(input)?;
     let (input, _) = tag(" spells").parse(input)?;
     let (input, continuation) = opt(preceded(
         tag(". the same is true for "),
@@ -1039,20 +1004,63 @@ fn parse_cast_typed_spells_predicate(input: &str) -> OracleResult<'_, TargetFilt
     ))
     .parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, (count_type, spell_type, continuation)))
+}
 
-    let mut types = vec![primary];
+/// CR 101.2 + CR 109.4 + CR 109.5 + CR 115.10 + CR 601.3a (Ward of Bones): "Each
+/// opponent who controls more `<T0>` than you can't cast `<T0>` spells\[. The same
+/// is true for `<T1>` and `<T2>`\]." — a *relative-count* cast prohibition.
+///
+/// Each type is an INDEPENDENT prohibition: an opponent controlling more `<Ti>`
+/// than you can't cast `<Ti>` spells, gated on its OWN "controls more `<Ti>` than
+/// you" count. This emits one `CantBeCast` static per type. Collapsing all types
+/// onto a single (creature) count is rules-incorrect per the card's 2008-08-01
+/// ruling: an opponent with more artifacts but not more creatures would be
+/// wrongly ALLOWED to cast artifact spells (and the converse wrongly prohibited).
+///
+/// The "the same is true for" continuation replicates the WHOLE sentence — both
+/// the count subject and the cast predicate — per type, so the count-type and the
+/// spell-type move together and are the SAME `TypeFilter` in each emitted static
+/// (the caller enforces `count_type == spell_type`). Mirrors the
+/// one-static-per-listed-item pattern of `parse_keyword_grant_from_exiled_object_static`
+/// (Rayami) and `parse_color_conditional_keyword_grants` (Scion of Draco).
+pub(crate) fn parse_relative_count_typed_cast_prohibitions(
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // Subject → scope. Only opponent-scoped text is printed in this class.
+    let (who, predicate) = strip_casting_prohibition_subject(tp.lower)?;
+    if who != ProhibitionScope::Opponents {
+        return None;
+    }
+
+    let (rest, (count_type, spell_type, continuation)) =
+        parse_relative_count_prohibition_frame(predicate).ok()?;
+    // The whole frame must be consumed, and the count-type must name the same
+    // type as the primary spell-type ("more creatures … creature spells"); a
+    // leftover tail or a type mismatch means another parser should claim the line.
+    if !rest.trim().is_empty() || count_type != spell_type {
+        return None;
+    }
+
+    let mut types = vec![spell_type];
     if let Some(more) = continuation {
         types.extend(more);
     }
-    let filters: Vec<TargetFilter> = types
+    // One independent static per type: an opponent controlling more `<Ti>` than
+    // you can't cast `<Ti>` spells (CR 601.3a), gated on that type's own count.
+    let defs = types
         .into_iter()
-        .map(|tf| TargetFilter::Typed(TypedFilter::new(tf)))
+        .map(|tf| {
+            StaticDefinition::new(StaticMode::CantBeCast { who: who.clone() })
+                .affected(TargetFilter::Typed(TypedFilter::new(tf.clone())))
+                .per_player_condition(controls_more_than_you_condition(tf))
+                .description(text.to_string())
+        })
         .collect();
-    let affected = match filters.as_slice() {
-        [only] => only.clone(),
-        _ => TargetFilter::Or { filters },
-    };
-    Ok((input, affected))
+    Some(defs)
 }
 
 /// CR 101.2: Parse casting prohibition from Oracle text.
@@ -3188,60 +3196,73 @@ mod per_player_conditional_prohibition_tests {
         }
     }
 
-    /// CR 101.2 + CR 109.4 + CR 115.10: Ward of Bones' first line lowers to a
-    /// single `CantBeCast { Opponents }` static whose `affected` is the Or of the
-    /// creature/artifact/enchantment spell filters and whose `per_player_condition`
-    /// is the creature-count comparison (candidate `ScopedPlayer` GT source's `You`).
+    /// CR 101.2 + CR 109.4 + CR 115.10: Ward of Bones' first line lowers to THREE
+    /// INDEPENDENT `CantBeCast { Opponents }` statics — one per type
+    /// (creature/artifact/enchantment) — each `affected` by only THAT type's spells
+    /// and each gated on ITS OWN "controls more <that type> than you" count.
+    /// Modeling all three under a single creature count is rules-incorrect (the
+    /// card's 2008-08-01 ruling): an opponent with more artifacts but not more
+    /// creatures could still cast artifact spells.
     #[test]
-    fn parses_ward_of_bones_first_line() {
-        let def = parse(
+    fn parses_ward_of_bones_first_line_as_independent_per_type_prohibitions() {
+        let defs = parse_relative_count_typed_cast_prohibitions(
             "Each opponent who controls more creatures than you can't cast creature spells. \
              The same is true for artifacts and enchantments.",
-        );
+        )
+        .expect("Ward of Bones must lower to per-type prohibitions");
 
+        // One static per type, in written order — NOT one Or-of-three under a
+        // shared creature count.
+        let expected = [
+            TypeFilter::Creature,
+            TypeFilter::Artifact,
+            TypeFilter::Enchantment,
+        ];
         assert_eq!(
-            def.mode,
-            StaticMode::CantBeCast {
-                who: ProhibitionScope::Opponents
-            }
+            defs.len(),
+            expected.len(),
+            "one independent prohibition per type: {defs:?}"
         );
-
-        // Widened spell-type set: creature ∪ artifact ∪ enchantment.
-        assert_eq!(
-            def.affected,
-            Some(TargetFilter::Or {
-                filters: vec![
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
-                ],
-            })
-        );
-
-        // Per-affected-player gate: candidate controls MORE creatures than "you".
-        assert_eq!(
-            def.per_player_condition,
-            Some(ParsedCondition::QuantityComparison {
-                lhs: object_count(TypeFilter::Creature, ControllerRef::ScopedPlayer),
-                comparator: Comparator::GT,
-                rhs: object_count(TypeFilter::Creature, ControllerRef::You),
-            })
-        );
+        for (def, tf) in defs.iter().zip(expected) {
+            assert_eq!(
+                def.mode,
+                StaticMode::CantBeCast {
+                    who: ProhibitionScope::Opponents
+                }
+            );
+            // Affected = ONLY this type's spells.
+            assert_eq!(
+                def.affected,
+                Some(TargetFilter::Typed(TypedFilter::new(tf.clone())))
+            );
+            // Gate = THIS type's own count (candidate `ScopedPlayer` GT `You`),
+            // not a shared creature count.
+            assert_eq!(
+                def.per_player_condition,
+                Some(ParsedCondition::QuantityComparison {
+                    lhs: object_count(tf.clone(), ControllerRef::ScopedPlayer),
+                    comparator: Comparator::GT,
+                    rhs: object_count(tf, ControllerRef::You),
+                })
+            );
+        }
     }
 
-    /// The single-type shape (no "the same is true" continuation) must collapse to
-    /// a bare `Typed` affected filter, not a one-element `Or` — exercises the
-    /// building block's `[only]` arm so the widening logic is covered per-class.
+    /// The single-type shape (no "the same is true" continuation) yields exactly
+    /// one prohibition, gated on that type's own count.
     #[test]
     fn parses_single_type_without_continuation() {
-        let def =
-            parse("Each opponent who controls more creatures than you can't cast creature spells.");
+        let defs = parse_relative_count_typed_cast_prohibitions(
+            "Each opponent who controls more creatures than you can't cast creature spells.",
+        )
+        .expect("single-type relative-count prohibition must parse");
+        assert_eq!(defs.len(), 1, "exactly one prohibition: {defs:?}");
         assert_eq!(
-            def.affected,
+            defs[0].affected,
             Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
         );
         assert_eq!(
-            def.per_player_condition,
+            defs[0].per_player_condition,
             Some(ParsedCondition::QuantityComparison {
                 lhs: object_count(TypeFilter::Creature, ControllerRef::ScopedPlayer),
                 comparator: Comparator::GT,
@@ -3270,13 +3291,28 @@ mod per_player_conditional_prohibition_tests {
         );
     }
 
-    /// The typed helper must decline a bare "cast spells" verb phrase (it has no
-    /// `<type>` before "spells"), so the bare arm — not the typed arm — claims it.
-    /// Non-vacuous: `parse_cast_typed_spells_predicate` consuming "spells" as the
-    /// type leaves no trailing " spells", so the inner `tag(" spells")` fails.
+    /// The relative-count parser must DECLINE a bare (untyped) Angelic Arbiter
+    /// cast-lock — it carries no "controls more <type> than you" frame — so the
+    /// single-def per-player path claims it instead (proven by
+    /// `bare_cast_spells_path_unchanged` above). Guards against the multi-def arm
+    /// greedily swallowing every "Each opponent who … can't cast …" line.
     #[test]
-    fn typed_helper_declines_untyped_cast_spells() {
-        assert!(parse_cast_typed_spells_predicate("cast spells.").is_err());
+    fn relative_count_parser_declines_bare_cast_spells() {
+        assert!(parse_relative_count_typed_cast_prohibitions(
+            "Each opponent who attacked with a creature this turn can't cast spells."
+        )
+        .is_none());
+    }
+
+    /// The count-type and the primary spell-type must name the SAME type. A
+    /// mismatched frame ("more creatures … can't cast artifact spells") is not a
+    /// printed card and must be declined, not silently mis-modeled.
+    #[test]
+    fn relative_count_parser_declines_type_mismatch() {
+        assert!(parse_relative_count_typed_cast_prohibitions(
+            "Each opponent who controls more creatures than you can't cast artifact spells."
+        )
+        .is_none());
     }
 }
 
