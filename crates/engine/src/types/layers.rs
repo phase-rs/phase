@@ -166,7 +166,8 @@ impl ContinuousModification {
             // CopyValues / SetName so downstream copy effects observe the
             // retained ability when reading copiable values.
             ContinuousModification::RetainPrintedTriggerFromSource { .. }
-            | ContinuousModification::RetainPrintedAbilityFromSource { .. } => Layer::Copy,
+            | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+            | ContinuousModification::RetainAllOtherAbilitiesFromSource => Layer::Copy,
         }
     }
 }

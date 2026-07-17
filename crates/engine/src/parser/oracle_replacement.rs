@@ -16141,6 +16141,55 @@ mod tests {
         );
     }
 
+    /// CR 707.9a (issue #6009): Sakashima of a Thousand Faces — "except it has
+    /// Sakashima's other abilities" must retain ALL of Sakashima's own printed
+    /// abilities (the legend-rule exemption static, Partner) on the copy, not
+    /// just a single indexed ability like the "except it has this ability"
+    /// class (Irma / Cryptoplasm).
+    #[test]
+    fn clone_sakashima_of_a_thousand_faces_retains_all_other_abilities() {
+        let def = parse_replacement_line(
+            "You may have Sakashima enter as a copy of another creature you control, \
+             except it has Sakashima's other abilities.",
+            "Sakashima of a Thousand Faces",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::BecomeCopy {
+                additional_modifications,
+                target,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::RetainAllOtherAbilitiesFromSource
+                    )),
+                    "expected RetainAllOtherAbilitiesFromSource, got {additional_modifications:?}"
+                );
+                // "another creature you control" — copy source is restricted to
+                // the controller's own OTHER creatures (CR 707.2).
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.properties
+                                .iter()
+                                .any(|p| matches!(p, FilterProp::Another)),
+                            "expected Another filter property, got {target:?}"
+                        );
+                    }
+                    other => panic!("expected Typed target filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+    }
+
     #[test]
     fn clone_enchantment() {
         // Estrid's Invocation, Copy Enchantment
