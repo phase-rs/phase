@@ -3937,6 +3937,8 @@ fn bind_search_found_definition(
         return None;
     }
 
+    // CR 611.2b + CR 601.3: only the exact permanent exile-play permission
+    // rider is bound here; its resolved copy is installed after delivery.
     let grant = match execute.sub_ability.as_deref() {
         None => None,
         Some(child) => {
