@@ -20248,7 +20248,7 @@ pub struct ResolvedAbility {
     /// inherently single-object even when the cost consumed several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_paid_object: Option<CostPaidObjectSnapshot>,
-    /// CR 117.1 + CR 601.2h + CR 602.2b (issue #4948): EVERY object paid as
+    /// CR 601.2h + CR 602.2b (issue #4948): EVERY object paid as
     /// part of this resolving ability's own cost — unlike `cost_paid_object`
     /// above, not just the first. This engine pays non-self
     /// Sacrifice/Discard/Exile costs BEFORE choosing this SAME ability's own
@@ -20505,7 +20505,7 @@ impl ResolvedAbility {
         }
     }
 
-    /// CR 117.1 + CR 601.2h + CR 602.2b (issue #4948): Record EVERY object
+    /// CR 601.2h + CR 602.2b (issue #4948): Record EVERY object
     /// paid as part of this ability's own cost (mirrors
     /// `set_cost_paid_object_recursive`'s recursion into `sub_ability` /
     /// `else_ability`, but accumulates every id instead of overwriting a

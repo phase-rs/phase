@@ -4172,7 +4172,7 @@ fn collect_target_slot_specs(
 /// the battlefield (Tap, Blight, RemoveCounter) never made it newly eligible
 /// for a different zone, so they are correctly left untouched by this gate.
 ///
-/// CR 117.1 (issue #4948 — Samwise Gamgee): checks EVERY object the cost
+/// Issue #4948 — Samwise Gamgee: checks EVERY object the cost
 /// consumed (`ability.cost_paid_object_ids`), not just the single referent in
 /// `ability.cost_paid_object`. A multi-object non-self cost (e.g. "Sacrifice
 /// three Foods") can move several objects into the same zone this ability's
