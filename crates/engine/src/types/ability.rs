@@ -20638,6 +20638,10 @@ pub enum EffectError {
     ChainTooDeep,
     #[error("unregistered effect type: {0}")]
     Unregistered(String),
+    #[error("a library search session is already active")]
+    SearchAlreadyActive,
+    #[error("scoped library search produced incompatible dispositions for one object")]
+    ConflictingScopedSearchDisposition,
 }
 
 fn is_false(value: &bool) -> bool {

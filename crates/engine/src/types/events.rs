@@ -8,10 +8,12 @@ use super::ability::{
     AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind, FilterProp, TargetFilter,
     TargetRef, ThisWayCause, TypeFilter, TypedFilter,
 };
-use super::card_type::{CoreType, Supertype};
+use super::card::PrintedCardRef;
+use super::card_type::{CardType, CoreType, Supertype};
 use super::game_state::ZoneChangeRecord;
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::Keyword;
+use super::mana::ManaCost;
 use super::mana::{ManaColor, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -28,6 +30,36 @@ fn default_nth_in_step() -> u32 {
 
 fn default_nth_in_turn() -> u32 {
     1
+}
+
+/// A passive, viewer-safe snapshot of one face seen during a hidden-zone search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibrarySearchCardFaceView {
+    pub name: String,
+    pub mana_cost: ManaCost,
+    pub mana_value: u32,
+    pub colors: Vec<ManaColor>,
+    pub card_type: CardType,
+    pub keywords: Vec<Keyword>,
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+}
+
+/// CR 400.7: search knowledge is bound to the exact incarnation that was
+/// looked at, never merely to a reusable object storage id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibrarySearchCardView {
+    pub owner: PlayerId,
+    pub zone: Zone,
+    pub identity: ObjectIncarnationRef,
+    pub card_id: CardId,
+    pub current_face: LibrarySearchCardFaceView,
+    pub front_face: LibrarySearchCardFaceView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_face: Option<LibrarySearchCardFaceView>,
 }
 
 /// CR 605.1a + CR 605.1b + CR 605.4a: Records whether a `ManaAdded` event was
@@ -671,6 +703,14 @@ impl EventObjectSnapshot {
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
     GameStarted,
+    /// CR 400.2 + CR 701.23e: private knowledge captured while searching a
+    /// hidden zone is transported only to its latched audience; it is not a
+    /// public reveal or a searched-a-library marker.
+    HiddenSearchViewed {
+        searcher: PlayerId,
+        cards: Vec<LibrarySearchCardView>,
+        audience: Vec<PlayerId>,
+    },
     TurnStarted {
         player_id: PlayerId,
         turn_number: u32,

@@ -16,8 +16,9 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BatchCompletion, ExileLinkKind, GameState, LiminalEntryKind, MergedCardComponentRoute,
-    PendingBatchDeliveries, PendingCounterPostAction, PendingLiminalEntryResume,
-    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    PendingBatchDeliveries, PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest,
+    PendingCounterPostAction, PendingLiminalEntryResume, PostReplacementDrainOwner, WaitingFor,
+    ZoneDeliveryExileTracking,
 };
 use std::collections::HashSet;
 
@@ -186,6 +187,92 @@ pub struct ZoneMoveRequest {
 }
 
 impl ZoneMoveRequest {
+    fn into_pending(self) -> PendingBatchZoneMoveRequest {
+        let cause = match self.cause {
+            ZoneChangeCause::Effect { source } => PendingBatchZoneChangeCause::Effect { source },
+            ZoneChangeCause::Cost { source } => PendingBatchZoneChangeCause::Cost { source },
+            ZoneChangeCause::SpellResolutionDefault => {
+                PendingBatchZoneChangeCause::SpellResolutionDefault
+            }
+            ZoneChangeCause::StateBasedAction => PendingBatchZoneChangeCause::StateBasedAction,
+            ZoneChangeCause::CommanderRuleReturn => {
+                PendingBatchZoneChangeCause::CommanderRuleReturn
+            }
+            ZoneChangeCause::Draw { seed_applied } => {
+                PendingBatchZoneChangeCause::Draw { seed_applied }
+            }
+            ZoneChangeCause::CastingToStack { source } => {
+                PendingBatchZoneChangeCause::CastingToStack { source }
+            }
+            ZoneChangeCause::PregameProcedure => PendingBatchZoneChangeCause::PregameProcedure,
+            ZoneChangeCause::PlayerLeftGame => PendingBatchZoneChangeCause::PlayerLeftGame,
+            ZoneChangeCause::MergedComponentRouting => {
+                PendingBatchZoneChangeCause::MergedComponentRouting
+            }
+            ZoneChangeCause::DebugCommand => PendingBatchZoneChangeCause::DebugCommand,
+        };
+        PendingBatchZoneMoveRequest {
+            object_id: self.object_id,
+            destination: self.to,
+            cause,
+            enter_tapped: self.mods.enter_tapped,
+            enter_transformed: self.mods.enter_transformed,
+            controller_override: self.mods.controller_override,
+            enter_with_counters: self.mods.enter_with_counters,
+            face_down_profile: self.mods.face_down_profile,
+            attach_to: self.mods.attach_to,
+            library_placement: self.placement,
+            exile_duration: self.exile_links.duration,
+            exile_tracking: self.exile_links.tracking,
+            replacement_applied: self.replacement_applied,
+        }
+    }
+
+    fn from_pending(pending: PendingBatchZoneMoveRequest) -> Self {
+        let cause = match pending.cause {
+            PendingBatchZoneChangeCause::Effect { source } => ZoneChangeCause::Effect { source },
+            PendingBatchZoneChangeCause::Cost { source } => ZoneChangeCause::Cost { source },
+            PendingBatchZoneChangeCause::SpellResolutionDefault => {
+                ZoneChangeCause::SpellResolutionDefault
+            }
+            PendingBatchZoneChangeCause::StateBasedAction => ZoneChangeCause::StateBasedAction,
+            PendingBatchZoneChangeCause::CommanderRuleReturn => {
+                ZoneChangeCause::CommanderRuleReturn
+            }
+            PendingBatchZoneChangeCause::Draw { seed_applied } => {
+                ZoneChangeCause::Draw { seed_applied }
+            }
+            PendingBatchZoneChangeCause::CastingToStack { source } => {
+                ZoneChangeCause::CastingToStack { source }
+            }
+            PendingBatchZoneChangeCause::PregameProcedure => ZoneChangeCause::PregameProcedure,
+            PendingBatchZoneChangeCause::PlayerLeftGame => ZoneChangeCause::PlayerLeftGame,
+            PendingBatchZoneChangeCause::MergedComponentRouting => {
+                ZoneChangeCause::MergedComponentRouting
+            }
+            PendingBatchZoneChangeCause::DebugCommand => ZoneChangeCause::DebugCommand,
+        };
+        Self {
+            object_id: pending.object_id,
+            to: pending.destination,
+            cause,
+            mods: EntryMods {
+                enter_tapped: pending.enter_tapped,
+                enter_transformed: pending.enter_transformed,
+                controller_override: pending.controller_override,
+                enter_with_counters: pending.enter_with_counters,
+                face_down_profile: pending.face_down_profile,
+                attach_to: pending.attach_to,
+            },
+            placement: pending.library_placement,
+            exile_links: ExileLinkSpec {
+                duration: pending.exile_duration,
+                tracking: pending.exile_tracking,
+            },
+            replacement_applied: pending.replacement_applied,
+        }
+    }
+
     /// Effect- or ability-driven move with no destination modifiers.
     pub fn effect(object_id: ObjectId, to: Zone, source: ObjectId) -> Self {
         Self {
@@ -886,10 +973,18 @@ pub(crate) fn move_objects_simultaneously_then(
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    let event_start = events.len();
+    let zone_change_record_start = state.zone_changes_this_turn.len();
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
     let destination = reqs.first().map(|r| r.to);
-    match deliver_batch(state, reqs, &ids, events) {
+    match deliver_batch(state, reqs, events) {
         BatchMoveResult::Done => {
+            finish_simultaneous_batch(
+                state,
+                &mut events[event_start..],
+                zone_change_record_start,
+                &ids,
+            );
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now, and surface a pause it raises to the enclosing caller.
             completion.map_or(BatchMoveResult::Done, |completion| {
@@ -904,10 +999,11 @@ pub(crate) fn move_objects_simultaneously_then(
             // paused object's redirect resolves. `destination` is irrelevant for
             // an empty tail (no object re-delivers), so the first request's
             // destination is a safe placeholder.
-            if let Some(completion) = completion {
-                ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard)).completion =
-                    Some(completion);
-            }
+            let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
+            pending.completion = completion;
+            pending.attempted = ids;
+            pending.zone_change_record_start = zone_change_record_start;
+            pending.deferred_events.extend(events.drain(event_start..));
             BatchMoveResult::NeedsChoice
         }
     }
@@ -941,6 +1037,7 @@ pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: Batch
 /// paused-on-last-card case) if `deliver_batch` did not stash a tail. Used only
 /// to hang a [`BatchCompletion`] off a paused batch.
 fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut PendingBatchDeliveries {
+    let zone_change_record_start = state.zone_changes_this_turn.len();
     state
         .pending_batch_deliveries
         .get_or_insert_with(|| PendingBatchDeliveries {
@@ -952,18 +1049,20 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             library_placement: None,
             completion: None,
             replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start,
+            deferred_events: Vec::new(),
         })
 }
 
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
 /// `move_object`; on a pause, parks the prompt and stashes the undelivered tail
-/// (rebuilt as `Effect`-cause requests to the same destination — the mill /
-/// mass-bounce attribution). `attempted` is the full id set whose departed
-/// subset is stamped on completion of this segment.
+/// with each request's exact heterogeneous context. The enclosing action stamps
+/// its single co-departure/LKI set only after every request has settled.
 fn deliver_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
-    attempted: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let mut queue = reqs.into_iter();
@@ -1004,32 +1103,26 @@ fn deliver_batch(
             }
         }
     }
-    // CR 603.10a + CR 608.2f: every object that actually left the battlefield in
-    // this segment departed together — stamp co-departure so leaves-the-
-    // battlefield observers among the group see each other via last-known info.
-    // For non-battlefield origins (mill) this is a no-op via the EVENT gate, not
-    // the subset filter: `departed_subset` includes milled cards (their current
-    // zone — graveyard — is not Battlefield), but `mark_simultaneous_departures`
-    // only stamps `ZoneChanged` events with `from: Some(Zone::Battlefield)`, and
-    // a library-origin move emits none.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, attempted));
     BatchMoveResult::Done
 }
 
+fn finish_simultaneous_batch(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    zone_change_record_start: usize,
+    attempted: &[ObjectId],
+) {
+    let departed = zones::departed_subset(state, attempted);
+    zones::mark_simultaneous_departures(events, &departed);
+    let record_indices: Vec<_> =
+        (zone_change_record_start..state.zone_changes_this_turn.len()).collect();
+    zones::mark_simultaneous_departure_records(state, &record_indices, &departed);
+}
+
 /// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
-/// can finish it. Captures the batch-uniform request context (CR 400.7
-/// attribution source, CR 614.1c tap-state, exile tracking, explicit library
-/// placement) from the first tail request so the rebuilt requests are
-/// equivalent to the originals — without this the re-stash collapsed every tail
-/// request to `ZoneMoveRequest::effect(obj, dest, obj)`, dropping seek's
-/// `enter_tapped` mod, ability-source attribution, and reveal-until bottom
-/// placement across the pause boundary.
-///
-/// Batch-uniform contract (mirrors the single-`destination` design): every
-/// batch caller builds requests with one shared mod/attribution set, so the
-/// first tail request is representative. A request whose source equals its own
-/// `object_id` is the self-anchor idiom (mill) and stashes `source_id: None` so
-/// the drain re-anchors each object to itself.
+/// can finish it. New saves serialize every request's complete heterogeneous
+/// context. The legacy uniform projection remains populated for old-save wire
+/// compatibility but is not authoritative for newly parked actions.
 fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destination: Zone) {
     let Some(first) = tail.first() else {
         return;
@@ -1039,8 +1132,13 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
     let exile_tracking = first.exile_links.tracking;
     let library_placement = first.placement.clone();
     let replacement_applied = first.replacement_applied.clone();
+    let remaining = tail.iter().map(|request| request.object_id).collect();
+    let requests = tail
+        .into_iter()
+        .map(ZoneMoveRequest::into_pending)
+        .collect();
     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
-        remaining: tail.into_iter().map(|r| r.object_id).collect(),
+        remaining,
         destination,
         source_id,
         enter_tapped,
@@ -1051,15 +1149,19 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
         // it observes the `NeedsChoice`; `move_objects_simultaneously` itself
         // has no completion to stash.
         completion: None,
+        requests,
+        attempted: Vec::new(),
+        zone_change_record_start: state.zone_changes_this_turn.len(),
+        deferred_events: Vec::new(),
     });
 }
 
 /// CR 603.10a + CR 616.1: Resume a parked batch-delivery tail after the
 /// per-object replacement choice that paused it resolved (and its object's
 /// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
-/// the next object surfaces its own prompt. Rebuilds each tail request with the
-/// stashed batch-uniform context (attribution source, tap-state, exile
-/// tracking, library placement) so the resumed deliveries match the originals.
+/// the next object surfaces its own prompt. Rebuilds each tail request from its
+/// exact serialized context so heterogeneous destinations, causes, entry mods,
+/// exile links, and placements all match the original action.
 ///
 /// RE-PAUSE CONTRACT (the explicit guarantee for "a LATER item in the same batch
 /// parks after the first one already parked and was resumed"): everything a batch
@@ -1068,11 +1170,9 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 /// resuming caller — so each park can re-stash it for the next one:
 ///   * the **undelivered tail** (`remaining`) — `deliver_batch` re-stashes the
 ///     still-undelivered suffix on every re-park, so no object is ever dropped;
-///   * the **batch-uniform request context** (`destination`, `source_id`,
-///     `enter_tapped`, `exile_tracking`, `library_placement`) — re-applied to
-///     every rebuilt request so the second-park resume produces requests
-///     equivalent to the originals (e.g. seek's `enter_tapped`, mill's
-///     self-anchored attribution, reveal-until's bottom placement);
+///   * the **exact request context** (`requests`) — every undelivered request
+///     retains its own destination, cause, entry mods, placement, exile links,
+///     and applied replacements;
 ///   * the **post-loop `completion`** — taken out here, then re-attached via
 ///     `ensure_batch_record` on the `NeedsChoice` arm so it survives the second
 ///     pause boundary and still runs EXACTLY ONCE, the moment the final tail
@@ -1087,28 +1187,51 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.pending_batch_deliveries.take() {
         let completion = pending.completion;
-        let ids = pending.remaining.clone();
-        let reqs: Vec<ZoneMoveRequest> = pending
-            .remaining
-            .into_iter()
-            .map(|obj_id| {
-                let mut req = ZoneMoveRequest::effect(
-                    obj_id,
-                    pending.destination,
-                    pending.source_id.unwrap_or(obj_id),
-                );
-                req.mods.enter_tapped = pending.enter_tapped;
-                req.exile_links.tracking = pending.exile_tracking;
-                if let Some(position) = pending.library_placement.clone() {
-                    req = req.at_library_position(position);
-                }
-                req.replacement_applied = pending.replacement_applied.clone();
-                req
-            })
-            .collect();
+        let mut deferred_events = pending.deferred_events;
+        deferred_events.append(events);
+        let attempted = if pending.attempted.is_empty() {
+            pending.remaining.clone()
+        } else {
+            pending.attempted
+        };
+        let zone_change_record_start = pending.zone_change_record_start;
+        let reqs: Vec<ZoneMoveRequest> = if pending.requests.is_empty() {
+            pending
+                .remaining
+                .into_iter()
+                .map(|obj_id| {
+                    let mut req = ZoneMoveRequest::effect(
+                        obj_id,
+                        pending.destination,
+                        pending.source_id.unwrap_or(obj_id),
+                    );
+                    req.mods.enter_tapped = pending.enter_tapped;
+                    req.exile_links.tracking = pending.exile_tracking;
+                    if let Some(position) = pending.library_placement.clone() {
+                        req = req.at_library_position(position);
+                    }
+                    req.replacement_applied = pending.replacement_applied.clone();
+                    req
+                })
+                .collect()
+        } else {
+            pending
+                .requests
+                .into_iter()
+                .map(ZoneMoveRequest::from_pending)
+                .collect()
+        };
         let destination = pending.destination;
-        match deliver_batch(state, reqs, &ids, events) {
+        match deliver_batch(state, reqs, events) {
             BatchMoveResult::Done => {
+                deferred_events.append(events);
+                finish_simultaneous_batch(
+                    state,
+                    &mut deferred_events,
+                    zone_change_record_start,
+                    &attempted,
+                );
+                events.append(&mut deferred_events);
                 // CR 603.10a + CR 616.1: the whole pile has now landed. Run the
                 // post-loop cleanup exactly once on true completion (it never ran
                 // inline because the loop paused). `Done` here is reachable only
@@ -1132,9 +1255,12 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // object was the last in the tail, stashed nothing — create an
                 // empty record). Re-attach the cleanup so it survives the next
                 // pause boundary and runs once the remaining tail finally drains.
-                if let Some(completion) = completion {
-                    ensure_batch_record(state, destination).completion = Some(completion);
-                }
+                let reparking = ensure_batch_record(state, destination);
+                reparking.completion = completion;
+                reparking.attempted = attempted;
+                reparking.zone_change_record_start = zone_change_record_start;
+                deferred_events.append(events);
+                reparking.deferred_events = deferred_events;
             }
         }
     }

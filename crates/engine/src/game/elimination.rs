@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{ActiveSearchDecisionAuthority, GameState, WaitingFor};
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -50,6 +50,40 @@ pub fn eliminate_players_simultaneously(
             }
         }
     }
+
+    let interrupted_ordinary_search = state
+        .pending_scoped_library_search
+        .is_none()
+        .then(|| {
+            state
+                .active_search_decision_controls
+                .iter()
+                .find(|(_, decision)| {
+                    leaving_set.contains(&decision.searched_zone_owner)
+                })
+                .map(|(&searcher, _)| {
+                    let split = match &state.waiting_for {
+                        WaitingFor::SearchChoice { player, split, .. } if *player == searcher => {
+                            split.clone()
+                        }
+                        _ => state.pending_search_found_batch.as_ref().and_then(|batch| {
+                            if batch.searcher != searcher {
+                                return None;
+                            }
+                            match &batch.continuation {
+                                crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                                    split,
+                                } => split.clone(),
+                                crate::types::game_state::PendingSearchFoundContinuation::Scoped => {
+                                    None
+                                }
+                            }
+                        }),
+                    };
+                    (searcher, split)
+                })
+        })
+        .flatten();
 
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
@@ -118,6 +152,59 @@ pub fn eliminate_players_simultaneously(
         // from the pending list. If the list becomes empty, advance the flow
         // by emitting MulliganStarted-equivalent transition state.
         prune_mulligan_pending(state, events);
+
+        if let Some((searcher, split)) = interrupted_ordinary_search {
+            if state
+                .pending_search_found_batch
+                .as_ref()
+                .is_some_and(|batch| batch.searcher == searcher)
+            {
+                state.pending_search_found_batch = None;
+                if state.pending_replacement.as_ref().is_some_and(|pending| {
+                    matches!(
+                        pending.proposed,
+                        crate::types::proposed_event::ProposedEvent::SearchFound {
+                            searcher: pending_searcher,
+                            ..
+                        } if pending_searcher == searcher
+                    )
+                }) {
+                    state.pending_replacement = None;
+                    state.replacement_may_cost_paused = false;
+                }
+                if state
+                    .pending_batch_deliveries
+                    .as_ref()
+                    .and_then(|pending| pending.completion.as_ref())
+                    .is_some_and(|completion| {
+                        matches!(
+                            completion,
+                            crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                                ..
+                            }
+                        )
+                    })
+                {
+                    state.pending_batch_deliveries = None;
+                }
+            }
+            if let Err(error) =
+                super::engine_resolution_choices::settle_search_after_zone_owner_elimination(
+                    state, searcher, split, events,
+                )
+            {
+                debug_assert!(false, "ordinary search elimination resume failed: {error}");
+            }
+        }
+
+        // CR 800.4a + CR 101.4: if the departing player owned the current
+        // scoped-search acceptance/selection prompt, continue the already
+        // pruned APNAP cursor instead of replacing it with unrelated priority.
+        if let Err(error) =
+            super::effects::scoped_library_search::resume_after_elimination(state, events)
+        {
+            debug_assert!(false, "scoped search elimination resume failed: {error}");
+        }
 
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
@@ -425,6 +512,104 @@ fn do_eliminate(
         && super::topology::normalize_shared_turn_recipient(state, state.active_player) == leaving
     {
         state.turn_decision_controller = None;
+    }
+
+    // CR 800.4a + CR 800.4b: a departing searcher/zone owner invalidates its
+    // live session, while a departing latched controller ends only that
+    // controller's decision/knowledge role and falls back to the searcher.
+    state.active_library_searches.retain(|searcher, search| {
+        if *searcher == player || search.searched_zone_owner() == player {
+            return false;
+        }
+        search.remove_from_audience(player);
+        true
+    });
+    state
+        .active_search_decision_controls
+        .retain(|searcher, decision| {
+            if *searcher == player {
+                return false;
+            }
+            if matches!(
+                decision.authority,
+                ActiveSearchDecisionAuthority::LatchedController { controller }
+                    if controller == player
+            ) {
+                decision.authority = ActiveSearchDecisionAuthority::SearcherFallback;
+            }
+            true
+        });
+    if let Some(pending) = state.pending_scoped_library_search.as_mut() {
+        match &mut pending.phase {
+            crate::types::game_state::ScopedLibrarySearchPhase::CollectAcceptance {
+                remaining_players,
+                accepted_players,
+                acceptance_authorities,
+                current_player,
+            } => {
+                remaining_players.retain(|participant| *participant != player);
+                accepted_players.retain(|participant| *participant != player);
+                acceptance_authorities.retain_mut(|(searcher, authority)| {
+                    if *searcher == player {
+                        return false;
+                    }
+                    if matches!(
+                        *authority,
+                        ActiveSearchDecisionAuthority::LatchedController { controller }
+                            if controller == player
+                    ) {
+                        *authority = ActiveSearchDecisionAuthority::SearcherFallback;
+                    }
+                    true
+                });
+                if *current_player == Some(player) {
+                    *current_player = None;
+                }
+            }
+            crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+                prepared_choices,
+                next_selection_index,
+                current_player,
+                selections,
+                frozen_dispositions,
+                pending_reveals,
+            } => {
+                let removed_before_cursor = prepared_choices
+                    .iter()
+                    .take(*next_selection_index)
+                    .filter(|choice| choice.player == player)
+                    .count();
+                prepared_choices.retain(|choice| choice.player != player);
+                *next_selection_index = next_selection_index
+                    .saturating_sub(removed_before_cursor)
+                    .min(prepared_choices.len());
+                selections.retain(|(searcher, _)| *searcher != player);
+                frozen_dispositions.retain(|frozen| frozen.searcher != player);
+                pending_reveals.retain(|(searcher, _)| *searcher != player);
+                if *current_player == Some(player) {
+                    *current_player = None;
+                }
+            }
+            crate::types::game_state::ScopedLibrarySearchPhase::Delivering { search_keys } => {
+                search_keys.retain(|searcher| *searcher != player);
+            }
+        }
+    }
+    if let Some(crate::types::game_state::PendingBatchDeliveries {
+        completion:
+            Some(crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                        search_keys,
+                        grants,
+                        ..
+                    },
+            }),
+        ..
+    }) = state.pending_batch_deliveries.as_mut()
+    {
+        search_keys.retain(|searcher| *searcher != player);
+        grants.retain(|(_, grant)| grant.grantee != player && grant.controller != player);
     }
 
     // CR 800.4a: A paused triggered ability on the stack is "an object on the
@@ -770,8 +955,11 @@ mod tests {
         crate::types::game_state::PendingSearchFoundBatch {
             searcher,
             library_owner: Some(searcher),
-            remaining: vec![object_id],
+            remaining: vec![crate::types::identifiers::ObjectIncarnationRef::of(
+                object_id, 0,
+            )],
             survivors: Vec::new(),
+            current: None,
             continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
                 split: None,
             },
@@ -796,7 +984,227 @@ mod tests {
                 },
             ),
             replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
         }
+    }
+
+    #[test]
+    fn searched_zone_owner_elimination_settles_ordinary_search_as_empty() {
+        use crate::types::ability::{
+            ControllerRef, QuantityExpr, SearchSelectionConstraint, TargetFilter, TypedFilter,
+        };
+
+        let mut state = setup_three_player();
+        let candidate = create_object(
+            &mut state,
+            CardId(90),
+            PlayerId(1),
+            "Departing library card".to_string(),
+            Zone::Library,
+        );
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::search_library::resolve(&mut state, &search, &mut events)
+            .expect("start opponent-library search");
+        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+            Box::new(shuffle),
+            &state,
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        events.clear();
+
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(state.active_library_searches.get(&PlayerId(0)).is_none());
+        assert!(state.active_search_decision_controls.is_empty());
+        assert!(state.pending_continuation.is_none());
+        assert!(state.pending_search_found_batch.is_none());
+        assert!(state.pending_replacement.is_none());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::Shuffle,
+                ..
+            }
+        )));
+        assert_ne!(
+            state.objects.get(&candidate).map(|object| object.zone),
+            Some(Zone::Hand)
+        );
+    }
+
+    #[test]
+    fn searched_zone_owner_elimination_reconciles_prompt_without_hidden_provenance() {
+        use crate::types::ability::{
+            ControllerRef, QuantityExpr, SearchSelectionConstraint, TargetFilter, TypedFilter,
+        };
+
+        for source_zones in [vec![Zone::Graveyard], vec![Zone::Hand, Zone::Graveyard]] {
+            let exercise_prompt_independent_reconciliation = source_zones.len() > 1;
+            let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+            state.turn_number = 1;
+            state.turn_decision_controller = Some(PlayerId(2));
+            create_object(
+                &mut state,
+                CardId(91),
+                PlayerId(1),
+                "Departing grave candidate".to_string(),
+                Zone::Graveyard,
+            );
+            let search = ResolvedAbility::new(
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: false,
+                    target_player: Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    )),
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(901),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            crate::game::effects::search_library::resolve(&mut state, &search, &mut events)
+                .expect("start cross-owner nonlibrary search");
+            assert!(state.active_library_searches.is_empty());
+            assert_eq!(
+                state
+                    .active_search_decision_controls
+                    .get(&PlayerId(0))
+                    .unwrap()
+                    .searched_zone_owner,
+                PlayerId(1)
+            );
+            assert!(matches!(
+                state
+                    .active_search_decision_controls
+                    .get(&PlayerId(0))
+                    .unwrap()
+                    .authority,
+                ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(2)
+                }
+            ));
+            eliminate_player(&mut state, PlayerId(2), &mut events);
+            assert!(matches!(
+                state
+                    .active_search_decision_controls
+                    .get(&PlayerId(0))
+                    .unwrap()
+                    .authority,
+                ActiveSearchDecisionAuthority::SearcherFallback
+            ));
+            if exercise_prompt_independent_reconciliation {
+                state.waiting_for = WaitingFor::Priority {
+                    player: PlayerId(0),
+                };
+            }
+
+            eliminate_player(&mut state, PlayerId(1), &mut events);
+
+            assert!(state.active_library_searches.get(&PlayerId(0)).is_none());
+            assert!(state.active_search_decision_controls.is_empty());
+            assert!(state.pending_search_found_batch.is_none());
+            assert!(!matches!(
+                state.waiting_for,
+                WaitingFor::SearchChoice { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn scoped_searcher_elimination_prunes_paused_delivery_resume_keys() {
+        let mut state = setup_three_player();
+        let ability = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(902),
+            PlayerId(0),
+        );
+        state.pending_scoped_library_search =
+            Some(crate::types::game_state::PendingScopedLibrarySearch {
+                ability: Box::new(ability),
+                phase: crate::types::game_state::ScopedLibrarySearchPhase::Delivering {
+                    search_keys: vec![PlayerId(0), PlayerId(1), PlayerId(2)],
+                },
+                after_scope: None,
+            });
+        let mut batch = pending_search_found_zone_delivery(ObjectId(77));
+        batch.completion = Some(
+            crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume: crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                    player: PlayerId(0),
+                    source_id: ObjectId(902),
+                    search_keys: vec![PlayerId(0), PlayerId(1), PlayerId(2)],
+                    grants: Vec::new(),
+                    after_scope: None,
+                },
+            },
+        );
+        state.pending_batch_deliveries = Some(batch);
+
+        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+
+        let phase_keys = match &state.pending_scoped_library_search.as_ref().unwrap().phase {
+            crate::types::game_state::ScopedLibrarySearchPhase::Delivering { search_keys } => {
+                search_keys
+            }
+            _ => panic!("delivery phase must remain parked"),
+        };
+        assert_eq!(phase_keys, &vec![PlayerId(0), PlayerId(2)]);
+        let resume_keys = match state
+            .pending_batch_deliveries
+            .as_ref()
+            .and_then(|batch| batch.completion.as_ref())
+            .unwrap()
+        {
+            crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                        search_keys, ..
+                    },
+            } => search_keys,
+            _ => panic!("scoped completion must remain parked"),
+        };
+        assert_eq!(resume_keys, &vec![PlayerId(0), PlayerId(2)]);
     }
 
     // --- 2-player elimination (immediate GameOver) ---
