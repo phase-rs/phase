@@ -2209,8 +2209,9 @@ pub fn compute_combat_tax(
         return None;
     }
 
-    // Drop creatures with no tax — keep per_creature as the subset that is actually taxed.
-    per_creature.retain(|(_, cost)| cost.mana_value() > 0 || !matches!(cost, ManaCost::NoCost));
+    // Drop creatures with no tax — the decline path uses this exact subset to
+    // remove only creatures that actually owe a cost from the declaration.
+    per_creature.retain(|(_, cost)| cost.mana_value() > 0);
     if per_creature.is_empty() {
         return None;
     }
