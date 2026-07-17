@@ -12,7 +12,6 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
-use super::activation::effective_activated_ability;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_cost::{
@@ -48,11 +47,15 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action else {
+        let GameAction::ActivateAbility {
+            source_id,
+            ability_index: _,
+        } = &ctx.candidate.action
+        else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
 
-        let Some(ability) = effective_activated_ability(ctx.state, &ctx.candidate.action) else {
+        let Some(ability) = ctx.effective_activated_ability() else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
 
@@ -1102,7 +1105,6 @@ mod tests {
 
         let mut state = GameState::new_two_player(42);
         state.active_player = OPP;
-        let me_creature = creature(&mut state, AI, "Defender", 2, 2);
         let cost = AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
@@ -1115,8 +1117,8 @@ mod tests {
             &[CoreType::Creature],
             activated(shroud_self_grant(), cost),
         );
-        // Opponent removal on the stack targeting an AI creature makes the
-        // protection grant a live payoff.
+        // Opponent removal on the stack targeting the creature that receives
+        // shroud makes the protection grant a live payoff.
         let spell_id = create_object(
             &mut state,
             CardId(next_id()),
@@ -1129,7 +1131,7 @@ mod tests {
                 target: TargetFilter::Any,
                 cant_regenerate: false,
             },
-            vec![TargetRef::Object(me_creature)],
+            vec![TargetRef::Object(source)],
             spell_id,
             OPP,
         );

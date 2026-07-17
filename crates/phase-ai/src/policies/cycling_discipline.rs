@@ -13,7 +13,6 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use super::activation::effective_activated_ability;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
@@ -40,7 +39,7 @@ impl TacticalPolicy for CyclingDisciplinePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let Some(ability) = effective_activated_ability(ctx.state, &ctx.candidate.action) else {
+        let Some(ability) = ctx.effective_activated_ability() else {
             return PolicyVerdict::neutral(PolicyReason::new("cycling_discipline_na"));
         };
 
@@ -124,6 +123,7 @@ mod tests {
     use super::*;
     use crate::config::AiConfig;
     use crate::context::AiContext;
+    use crate::policies::activation::effective_activated_ability;
     use crate::policies::registry::PolicyRegistry;
     use crate::policies::self_cost_value::SelfCostValuePolicy;
     use crate::session::AiSession;
