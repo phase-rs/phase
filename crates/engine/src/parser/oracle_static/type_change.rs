@@ -536,9 +536,6 @@ pub(crate) fn parse_additive_type_clause_modifications(
     }
 
     modifications.extend(granted_modifications);
-    if let Some(granted) = granted_original {
-        push_base_pt_mana_value_dynamic_modifications(&mut modifications, &granted.to_lowercase());
-    }
     (!modifications.is_empty()).then_some(modifications)
 }
 

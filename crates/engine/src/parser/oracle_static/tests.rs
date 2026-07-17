@@ -17004,6 +17004,37 @@ fn additive_type_clause_composes_trailing_bare_keyword() {
     );
 }
 
+// The trailing clause is parsed exactly once by `parse_continuous_modifications`.
+// This regression protects the mana-value dynamic P/T form that the previous
+// quoted-only path delegated to `push_base_pt_mana_value_dynamic_modifications`.
+#[test]
+fn additive_type_clause_does_not_duplicate_trailing_dynamic_base_pt() {
+    let mods = parse_additive_type_clause_modifications(
+        "is a Wall in addition to its other creature types and has base power and base toughness each equal to its mana value",
+    )
+    .expect("additive type clause must parse");
+    assert_eq!(
+        mods.iter()
+            .filter(|modification| matches!(
+                modification,
+                ContinuousModification::SetPowerDynamic { .. }
+            ))
+            .count(),
+        1,
+        "trailing P/T clause must produce exactly one power setter: {mods:?}"
+    );
+    assert_eq!(
+        mods.iter()
+            .filter(|modification| matches!(
+                modification,
+                ContinuousModification::SetToughnessDynamic { .. }
+            ))
+            .count(),
+        1,
+        "trailing P/T clause must produce exactly one toughness setter: {mods:?}"
+    );
+}
+
 // Aurification (root-cause #14): "Each creature with a gold counter on it is a
 // Wall in addition to its other creature types and has defender." — the whole
 // static must emit both the Wall subtype AND the defender keyword, so the
