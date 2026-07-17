@@ -43,7 +43,7 @@ crates/engine/src/game/elimination.rs	do_eliminate	container	1
 crates/engine/src/game/engine.rs	normalize_recast_frame	exempt	3
 crates/engine/src/game/engine_debug.rs	apply_debug_action	mover	1
 crates/engine/src/game/engine_resolution_choices.rs	handle_resolution_choice	container	6
-crates/engine/src/game/engine_resolution_choices.rs	handle_resolution_choice	mover	7
+crates/engine/src/game/engine_resolution_choices.rs	handle_resolution_choice	mover	5
 crates/engine/src/game/planechase.rs	finish_player_left_game_handoff	container	1
 crates/engine/src/game/planechase.rs	finish_player_left_game_handoff	zone-assign	1
 crates/engine/src/game/planechase.rs	planeswalk	container	2
