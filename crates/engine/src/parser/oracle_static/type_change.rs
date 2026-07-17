@@ -1079,7 +1079,7 @@ pub(crate) fn parse_enchanted_is_type(
     while let Ok((rest, color)) = nom_primitives::parse_color(color_rest) {
         colors.push(color);
         let rest = rest.trim_start();
-        let candidate = rest.strip_prefix("and ").unwrap_or(rest);
+        let (candidate, _) = opt(tag::<_, _, VE>("and ")).parse(rest).ok()?;
         if nom_primitives::parse_color(candidate).is_ok() {
             color_rest = candidate;
         } else {
@@ -1344,11 +1344,12 @@ pub(crate) fn parse_enchanted_is_type(
         // effect replaces the enchanted object's name in Layer 3. Preserve
         // printed capitalization from the original description.
         let lower_description = description.to_ascii_lowercase();
-        if let Some(index) = lower_description.rfind(" named ") {
-            let name = description[index + " named ".len()..]
-                .trim()
-                .trim_end_matches('.')
-                .trim();
+        if let Some((_, name)) = super::oracle_nom::bridge::split_once_on_lower(
+            description,
+            &lower_description,
+            " named ",
+        ) {
+            let name = name.trim().trim_end_matches('.').trim();
             if !name.is_empty() {
                 modifications.push(ContinuousModification::SetTextName {
                     name: name.to_string(),
