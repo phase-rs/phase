@@ -65,6 +65,8 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
     }
 }
 
+/// CR 723.5: The controller of a searching player makes that player's
+/// search-related choices while the latched search-control authority applies.
 fn search_decision_authority(
     state: &GameState,
     semantic_player: PlayerId,
