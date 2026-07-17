@@ -30,7 +30,6 @@ crates/engine/src/game/effects/copy_spell.rs	resolve	exempt	1
 crates/engine/src/game/effects/epic.rs	resolve	exempt	1
 crates/engine/src/game/effects/paradigm.rs	cast_paradigm_copy	exempt	1
 crates/engine/src/game/effects/prepare.rs	synthesize_prepared_copy_object	exempt	1
-crates/engine/src/game/effects/return_as_aura.rs	resolve	mover	1
 crates/engine/src/game/effects/token.rs	commit_liminal_token_entry_with_post_actions	exempt	1
 crates/engine/src/game/elimination.rs	do_eliminate	exempt	1
 crates/engine/src/game/engine.rs	normalize_recast_frame	exempt	3
