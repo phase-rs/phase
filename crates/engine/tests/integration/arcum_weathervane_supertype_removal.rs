@@ -44,6 +44,9 @@ use engine::types::PlayerId;
 const IS_NO_LONGER_SNOW: &str = "Target snow land is no longer snow.";
 // Thermal Flux's removal mode, as a standalone until-end-of-turn one-shot.
 const ISNT_SNOW_EOT: &str = "Target snow permanent isn't snow until end of turn.";
+// The expanded copula spelling is the third parser axis, distinct from Thermal
+// Flux's contraction while sharing its until-end-of-turn runtime behavior.
+const IS_NOT_SNOW_EOT: &str = "Target snow permanent is not snow until end of turn.";
 
 /// Put a snow land (Land + Snow supertype + Island subtype) onto `player`'s
 /// battlefield and return its id. Mirrors the direct-`state_mut` typed object
@@ -129,4 +132,9 @@ fn arcum_weathervane_is_no_longer_snow_strips_snow_supertype() {
 #[test]
 fn thermal_flux_isnt_snow_strips_snow_supertype_until_end_of_turn() {
     snow_removal_case(ISNT_SNOW_EOT, false);
+}
+
+#[test]
+fn is_not_snow_strips_snow_supertype_until_end_of_turn() {
+    snow_removal_case(IS_NOT_SNOW_EOT, false);
 }
