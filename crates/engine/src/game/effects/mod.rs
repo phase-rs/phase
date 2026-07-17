@@ -4772,6 +4772,13 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                     .any(|attr| matches!(attr, ChosenAttribute::Counter(_)))
             })
         }
+        // CR 122.1: "you may remove a <kind> counter from <object>. If you do, X"
+        // with zero matching counters cannot be performed — removing a counter
+        // that isn't there does nothing, so the up-front prompt (and its
+        // `OptionalEffectPerformed` rider) must be suppressed (Sun Droplet #4776).
+        Effect::RemoveCounter { .. } => {
+            counters::remove_counter_optional_is_infeasible(state, ability)
+        }
         _ => false,
     }
 }
@@ -5100,6 +5107,16 @@ pub(crate) fn controller_for_relative_filter(
         if filter_uses_relative_controller_scoped(target_filter) {
             return scoped;
         }
+    }
+    // CR 109.5 + CR 608.2c: a resolution-time "your hand and/or graveyard"
+    // choice still belongs to the spell's controller. A player targeted by an
+    // earlier instruction (for example, the damage half of Worldsoul's Rage)
+    // must not rebind "you" for the later untargeted zone choice.
+    if matches!(
+        ability.target_choice_timing,
+        crate::types::ability::TargetChoiceTiming::Resolution
+    ) {
+        return ability.controller;
     }
     if filter_uses_relative_controller_you(target_filter)
         && ability.scoped_player.is_none()
@@ -9174,12 +9191,16 @@ pub(crate) fn evaluate_condition(
         // the resolution" of the parent. For a cost-payment parent
         // (`Effect::PayCost`), an unpayable or declined cost is NOT a trigger
         // event occurrence, so the reflexive sub-ability must NOT fire — the
-        // `PayCost` handler signals this via `cost_payment_failed_flag`
-        // (mirrors `IfYouDo` above). For any non-cost parent (e.g. `BecomeCopy`
-        // reflexives, copy/exile replacement sub-abilities) the "do" always
-        // occurred, so the contract remains unconditionally true.
+        // `PayCost` and mandatory-discard handlers signal this via
+        // `cost_payment_failed_flag` (mirrors `IfYouDo` above). An accepted
+        // "you may discard a card" with an empty hand did not discard a card,
+        // so it cannot create the reflexive trigger. Other non-cost parents
+        // (e.g. `BecomeCopy` reflexives) remain unconditional.
         AbilityCondition::WhenYouDo => {
-            !(matches!(ability.effect, Effect::PayCost { .. }) && state.cost_payment_failed_flag)
+            !(matches!(
+                ability.effect,
+                Effect::PayCost { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
+            ) && state.cost_payment_failed_flag)
         }
         // CR 601.2a + CR 707.10: "was cast (from [zone])" — check cast origin.
         // `zone: None` = cast from any origin; a copy or put-into-play object has
@@ -21241,6 +21262,73 @@ mod tests {
                 ))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// CR 603.12 + CR 701.9a: If no card was discarded, a "when you do"
+    /// reflexive trigger must not ask for its required target.
+    #[test]
+    fn optional_empty_hand_discard_does_not_create_reflexive_target_choice() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Attacking Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        assert!(state.players[0].hand.is_empty());
+
+        let reflexive = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::WhenYouDo);
+        let mut discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(reflexive);
+        discard.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &discard, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        let waiting = crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            !matches!(waiting, WaitingFor::TriggerTargetSelection { .. }),
+            "an empty-hand discard must not create a reflexive target prompt"
+        );
+        assert!(state.objects[&attacker].counters.is_empty());
     }
 
     /// Abandon Attachments #81: interactive discard (player has 2+ cards) → IfYouDo draw 2.

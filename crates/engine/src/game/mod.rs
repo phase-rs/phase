@@ -139,7 +139,9 @@ pub mod restrictions;
 pub mod room;
 pub(crate) mod sacrifice;
 pub mod sba;
+#[cfg(any(test, feature = "test-support"))]
 pub mod scenario;
+#[cfg(any(test, feature = "test-support"))]
 pub mod scenario_db;
 pub mod specialize;
 pub mod speed;

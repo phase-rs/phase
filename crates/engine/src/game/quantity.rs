@@ -391,6 +391,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -661,6 +662,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -856,6 +858,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -2652,6 +2655,16 @@ fn resolve_ref(
             .and_then(|id| state.objects.get(&id))
             .and_then(|obj| obj.cost_x_paid)
             .map(u32_to_i32_saturating)
+            .unwrap_or(0),
+        // CR 700.2d + CR 601.2b: modes chosen for the triggering modal spell (see
+        // the variant doc). Reads `chosen_modes.len()` off the `SpellCast` event's
+        // source object, mirroring `EventContextSourceCostX`.
+        QuantityRef::EventContextSourceModesChosen => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| state.objects.get(&id))
+            .map(|obj| usize_to_i32_saturating(obj.chosen_modes.len()))
             .unwrap_or(0),
         // CR 106.3 + CR 601.2h: Mana spent to cast a spell, parameterized by
         // scope and metric. Source-qualified metrics read one payment-time

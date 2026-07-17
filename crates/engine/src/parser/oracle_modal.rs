@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, multispace0};
-use nom::combinator::{map, not, opt, success, value};
+use nom::character::complete::{alpha1, multispace0, multispace1};
+use nom::combinator::{map, map_opt, not, opt, peek, rest, success, value};
 use nom::multi::fold_many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -22,6 +22,7 @@ use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
+use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_static::{parse_pt_mod, parse_static_line};
 use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
@@ -668,14 +669,16 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
     };
 
     // CR 700.2 + CR 107.3m / CR 603.12a: a `Dynamic { qty }` header ("choose up
-    // to X / up to that many") has min 0 (decline all modes) and a placeholder
-    // max of `usize::MAX` that `build_modal_choice` clamps to `mode_count`; the
-    // live cap is carried in `dynamic_max_choices` and resolved at runtime from
-    // `qty` (cast {X} for CostXPaid, or the resolution-local repeated-payment
-    // count for TimesCostPaidThisResolution).
+    // to X / up to that many" / "choose up to X, where X is <expr>") has min 0
+    // (decline all modes) and a placeholder max of `usize::MAX` that
+    // `build_modal_choice` clamps to `mode_count`; the live cap is carried in
+    // `dynamic_max_choices` (already a `QuantityExpr`, no re-wrap) and resolved
+    // at runtime from `qty` (cast {X} for CostXPaid, the resolution-local
+    // repeated-payment count for TimesCostPaidThisResolution, or the redefining
+    // where-X-is quantity for Bumi/Riku).
     let (min_choices, max_choices, dynamic_max_choices) = match count_spec {
         ModalCountSpec::Fixed { min, max } => (min, max, None),
-        ModalCountSpec::Dynamic { qty } => (0, usize::MAX, Some(QuantityExpr::Ref { qty })),
+        ModalCountSpec::Dynamic { qty } => (0, usize::MAX, Some(qty)),
     };
     let mut allow_repeat_modes = false;
     let mut constraints = Vec::new();
@@ -1852,11 +1855,14 @@ pub(super) fn extract_ability_word_reminder_body(raw: &str) -> Option<String> {
 /// CR 700.2: The recognized shape of a modal header's count phrase. `Fixed`
 /// holds a statically-resolved `(min, max)` pair; `Dynamic { qty }` marks a
 /// "choose up to X / up to that many" header whose maximum resolves at runtime
-/// from `qty` and is clamped to `mode_count` (CR 700.2d). `qty` is
-/// `CostXPaid` for the cast-{X} subclass (CR 107.3m, The Ruinous Wrecking Crew)
-/// and `TimesCostPaidThisResolution` for the repeated-optional-payment subclass
-/// (CR 603.12a, Hawkeye, Master Marksman). LOW-1: `Copy` is dropped because
-/// `QuantityRef` is not `Copy`.
+/// from `qty` and is clamped to `mode_count` (CR 700.2d). `qty` is a full
+/// `QuantityExpr` matching the sink type `ModalChoice.dynamic_max_choices:
+/// Option<QuantityExpr>`: the cast-{X} subclass (CR 107.3m, The Ruinous Wrecking
+/// Crew) and the repeated-optional-payment subclass (CR 603.12a, Hawkeye, Master
+/// Marksman) wrap their `QuantityRef` in `QuantityExpr::Ref`, while the
+/// "where X is <expr>" subclass (CR 700.2 + CR 601.2b, Bumi/Riku) carries
+/// `parse_cda_quantity`'s `QuantityExpr` directly. LOW-1: `Copy` is dropped
+/// because `QuantityExpr` is not `Copy`.
 ///
 /// Known coverage gap (empty in the current corpus): the
 /// `TimesCostPaidThisResolution` cap is emitted cost-agnostically here, but the
@@ -1870,7 +1876,7 @@ pub(super) fn extract_ability_word_reminder_body(raw: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModalCountSpec {
     Fixed { min: usize, max: usize },
-    Dynamic { qty: QuantityRef },
+    Dynamic { qty: QuantityExpr },
 }
 
 /// Scan for modal count override phrases at word boundaries using nom combinators.
@@ -1905,23 +1911,58 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
                 },
                 alt((tag("one or more"), tag("any number"))),
             ),
+            // CR 700.2 + CR 700.2d + CR 601.2b: "choose up to X, where X is <expr>"
+            // REDEFINES the modal maximum to a dynamic quantity other than the cast
+            // {X} (Bumi: Lesson cards in your graveyard; Riku: modes chosen for the
+            // triggering spell), and such cards carry no cast {X}. Parse <expr> via
+            // the shared `parse_cda_quantity` where-X-is quantity parser, bounded by
+            // the header/bullets terminator (em-dash U+2014, en-dash, hyphen) or
+            // end-of-input; min_choices = 0. Placed BEFORE the `CostXPaid` arm so
+            // the where form is claimed by the quantity parser instead of resolving
+            // `CostXPaid` == 0 (which would silently make the modal choose nothing).
+            // `map_opt` fails (letting `alt` fall through) when <expr> is not a
+            // recognized CDA quantity, so an unrecognized where-clause falls to the
+            // fixed default rather than a wrong dynamic cap.
+            map_opt(
+                preceded(
+                    (
+                        tag::<_, _, OracleError<'_>>("choose up to x"),
+                        opt(tag(",")),
+                        multispace0,
+                        tag("where"),
+                        multispace1,
+                        tag("x"),
+                        multispace1,
+                        tag("is"),
+                        multispace1,
+                    ),
+                    alt((
+                        terminated(take_until("\u{2014}"), peek(tag("\u{2014}"))),
+                        terminated(take_until("\u{2013}"), peek(tag("\u{2013}"))),
+                        terminated(take_until(" -"), peek(tag(" -"))),
+                        rest,
+                    )),
+                ),
+                |expr_slice: &str| {
+                    parse_cda_quantity(expr_slice.trim()).map(|qty| ModalCountSpec::Dynamic { qty })
+                },
+            ),
             // CR 700.2 + CR 107.3m: "choose up to X —" — the maximum is the cast
             // {X}, resolved live at runtime; `parse_number` fails on bare "x" so
             // this arm cannot shadow the numeric "choose up to N" arm below.
             //
-            // A trailing ", where X is <expr>" clause REDEFINES X to a different
-            // quantity (e.g. Bumi "where X is the number of Lesson cards in your
-            // graveyard"; Riku "where X is the number of times you chose a
-            // mode") and the card carries no cast {X}. Such headers must NOT be
-            // read as the cast {X} — the negative lookahead guards them out so
-            // they fall through to the fixed default rather than resolving
-            // `CostXPaid` (which is 0 for a card with no {X}, silently making
-            // the modal choose nothing). Parsing the redefining quantity into
-            // `dynamic_max_choices` is a follow-up; this PR's scope is the
-            // cast-{X} subclass (The Ruinous Wrecking Crew).
+            // A trailing ", where X is <expr>" clause is handled by the
+            // where-X-is arm above (it REDEFINES X and the card carries no cast
+            // {X}). The negative lookahead here stays as belt-and-suspenders so a
+            // bare-{X}-with-trailing-"where" that the arm above failed to parse
+            // still falls through to the fixed default rather than resolving
+            // `CostXPaid` (which is 0 for a card with no {X}, silently making the
+            // modal choose nothing).
             value(
                 ModalCountSpec::Dynamic {
-                    qty: QuantityRef::CostXPaid,
+                    qty: QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid,
+                    },
                 },
                 terminated(
                     tag::<_, _, OracleError<'_>>("choose up to x"),
@@ -1938,7 +1979,9 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
             // so an unhandled card is never silently false-greened.
             value(
                 ModalCountSpec::Dynamic {
-                    qty: QuantityRef::TimesCostPaidThisResolution,
+                    qty: QuantityExpr::Ref {
+                        qty: QuantityRef::TimesCostPaidThisResolution,
+                    },
                 },
                 terminated(
                     tag::<_, _, OracleError<'_>>("choose up to that many"),
@@ -2251,7 +2294,9 @@ mod tests {
         assert_eq!(
             parse_modal_choose_count("choose up to x —"),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::CostXPaid
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
             }
         );
     }
@@ -2265,13 +2310,17 @@ mod tests {
         assert_eq!(
             parse_modal_choose_count("choose up to that many"),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::TimesCostPaidThisResolution
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
             }
         );
         assert_eq!(
             parse_modal_choose_count("choose up to that many."),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::TimesCostPaidThisResolution
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
             }
         );
     }
@@ -2284,7 +2333,9 @@ mod tests {
         assert_eq!(
             parse_modal_choose_count("choose up to that many \u{2014}"),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::TimesCostPaidThisResolution
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
             }
         );
         // Heroic Feast (non-modal selection clause).
@@ -2294,29 +2345,76 @@ mod tests {
         );
     }
 
-    // CR 700.2 + CR 107.3m: a trailing ", where X is <expr>" clause REDEFINES X
-    // to a quantity other than the cast {X} (Bumi → Lesson cards in graveyard;
-    // Riku → number of times you chose a mode), and such cards carry no {X} in
-    // their cost. These headers must NOT classify as `DynamicCostX` (which
-    // resolves `CostXPaid` == 0 for them, silently choosing nothing); they fall
-    // through to the fixed `(1, 1)` default. This negative discriminates the
-    // word-boundary `not(... "where")` guard — reverting it makes both match
-    // `DynamicCostX`.
+    // CR 700.2 + CR 700.2d + CR 601.2b: a trailing ", where X is <expr>" clause
+    // REDEFINES the modal maximum to a dynamic quantity other than the cast {X}
+    // (Bumi → Lesson cards in your graveyard; Riku → number of modes chosen for
+    // the triggering spell). The where-X-is arm parses <expr> via
+    // `parse_cda_quantity` and classifies the header as `Dynamic`, so the cap
+    // resolves live at runtime (clamped to mode_count, CR 700.2d) instead of
+    // silently falling to the fixed `(1, 1)` default. Revert probe: delete the
+    // where-X-is arm (Part 1.3) → both fall to `fixed(1, 1)`, failing these
+    // positive-shape assertions. These are the previously-pinned negatives,
+    // flipped now that the redefining quantity is parsed.
     #[test]
-    fn parse_modal_choose_count_up_to_x_redefined_is_not_dynamic() {
-        // Bumi, King of Three Trials.
+    fn parse_modal_choose_count_up_to_x_redefined_is_dynamic() {
+        use crate::types::ability::{CountScope, TypeFilter, ZoneRef};
+        // Bumi, King of Three Trials — the cap is the Lesson-card graveyard count.
         assert_eq!(
             parse_modal_choose_count(
                 "choose up to x, where x is the number of lesson cards in your graveyard —"
             ),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    }
+                }
+            }
         );
-        // Riku of Many Paths.
+        // Riku of Many Paths — the cap is the new modes-chosen event ref.
         assert_eq!(
             parse_modal_choose_count(
                 "choose up to x, where x is the number of times you chose a mode for that spell —"
             ),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourceModesChosen
+                }
+            }
+        );
+    }
+
+    // Full-header integration: both cards' complete modal headers must produce
+    // `min_choices == 0` (decline all) and carry a live `dynamic_max_choices`.
+    // Revert probe: delete the where-X-is arm → `dynamic_max_choices` becomes
+    // `None` and min_choices the fixed default, failing these assertions.
+    #[test]
+    fn parse_modal_header_ast_bumi_riku_carry_dynamic_max() {
+        let bumi = parse_modal_header_ast(
+            "choose up to x, where x is the number of lesson cards in your graveyard —",
+        )
+        .expect("Bumi header should parse");
+        assert_eq!(bumi.min_choices, 0);
+        assert!(matches!(
+            bumi.dynamic_max_choices,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount { .. }
+            })
+        ));
+
+        let riku = parse_modal_header_ast(
+            "choose up to x, where x is the number of times you chose a mode for that spell —",
+        )
+        .expect("Riku header should parse");
+        assert_eq!(riku.min_choices, 0);
+        assert_eq!(
+            riku.dynamic_max_choices,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceModesChosen
+            })
         );
     }
 

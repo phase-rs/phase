@@ -984,7 +984,20 @@ pub(crate) fn matches_stack_target_filter(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
-    let Some(entry) = state.stack.iter().find(|entry| entry.id == stack_obj_id) else {
+    let Some(entry) = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == stack_obj_id)
+        .or_else(|| {
+            state.resolving_stack_entry.as_ref().filter(|entry| {
+                entry.id == stack_obj_id
+                    && state
+                        .objects
+                        .get(&entry.id)
+                        .is_some_and(|obj| obj.zone == Zone::Stack)
+            })
+        })
+    else {
         return false;
     };
     match filter {

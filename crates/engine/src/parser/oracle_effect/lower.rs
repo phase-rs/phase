@@ -1652,14 +1652,16 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
         }
     }
 
-    let Effect::ChangeZone {
-        origin: Some(origin),
-        ..
-    } = &clause_ir.parsed.effect
-    else {
+    let Effect::ChangeZone { origin, target, .. } = &clause_ir.parsed.effect else {
         return TargetChoiceTiming::Stack;
     };
-    if *origin == Zone::Battlefield {
+    let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
+        || (clause_ir.multi_target.is_some() || clause_ir.parsed.multi_target.is_some())
+            && target
+                .extract_zones()
+                .iter()
+                .any(|zone| *zone != Zone::Battlefield);
+    if !off_battlefield_origin {
         return TargetChoiceTiming::Stack;
     }
 
@@ -6185,19 +6187,11 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
 /// CR 601.2d: Cap "any number of" target selection to the distribution pool.
 /// Without this, the controller can select more permanents than counters or
 /// damage and the assign step deadlocks (each chosen target must receive at
-/// least one). Fixed positive distributions still require at least one target;
-/// "up to" and variable amounts can legally resolve to an empty pool.
+/// least one). "Any number" always permits zero targets, even when the pool is
+/// fixed and positive (Stolen Goodies).
 fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> MultiTargetSpec {
-    let (inner, is_up_to) = distribution_amount.peel_up_to();
-    let min = if is_up_to {
-        QuantityExpr::Fixed { value: 0 }
-    } else {
-        match inner {
-            QuantityExpr::Fixed { value } if *value > 0 => QuantityExpr::Fixed { value: 1 },
-            _ => QuantityExpr::Fixed { value: 0 },
-        }
-    };
-    MultiTargetSpec::bounded_expr(min, inner.clone())
+    let (inner, _) = distribution_amount.peel_up_to();
+    MultiTargetSpec::bounded_expr(QuantityExpr::Fixed { value: 0 }, inner.clone())
 }
 
 /// CR 601.2d: The keywords that introduce a divided/distributed *damage* effect.
@@ -7813,6 +7807,21 @@ fn parse_amount_of_mana_paid_this_way(input: &str) -> OracleResult<'_, ()> {
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
+    // CR 702.51c + CR 603.3: Knight-Errant of Eos reads the number of
+    // creatures that convoked the spell which became this permanent. The
+    // casting pipeline preserves that count through the zone change, so the
+    // ETB reveal filter can use the existing source-relative quantity.
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("the number of creatures that convoked "),
+        alt((tag("this creature"), tag("~"))),
+    ))
+    .parse(expression_lower.as_str())
+    .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::ConvokedCreatureCount,
+        });
+    }
     // CR 107.3i + CR 608.2g: Within a single resolution, X has one value used
     // everywhere it appears. Join Forces ("Each player draws X cards, where
     // X is the total amount of mana paid this way") binds X to the total

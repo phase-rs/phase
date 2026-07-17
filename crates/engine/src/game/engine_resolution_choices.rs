@@ -1933,7 +1933,13 @@ pub(super) fn handle_resolution_choice(
                 },
                 events,
             )?;
-            ResolutionChoiceOutcome::WaitingFor(result)
+            // CR 608.2g: when the final free cast is announced, finish the
+            // parent spell (including Invoke's self-exile) before priority.
+            if matches!(result, WaitingFor::Priority { .. }) {
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            } else {
+                ResolutionChoiceOutcome::WaitingFor(result)
+            }
         }
         (WaitingFor::LearnChoice { player, hand_cards }, GameAction::LearnDecision { choice }) => {
             match choice {
@@ -3975,13 +3981,19 @@ pub(super) fn handle_resolution_choice(
                         "Selected card not in eligible set".to_string(),
                     ));
                 }
+                // CR 400.7: a multi-origin ChangeZone choice freezes its
+                // eligible IDs when the prompt is created; the cards can be
+                // in different zones, so there is no single zone to recheck.
                 let current_zone = state.objects.get(card_id).map(|obj| obj.zone);
                 // `PutAtLibraryPosition` permits either Hand or Library source
                 // cards. Partition them by current zone at delivery time.
                 let is_put_at_library_position_member =
                     matches!(effect_kind, EffectKind::PutAtLibraryPosition)
                         && matches!(current_zone, Some(Zone::Hand | Zone::Library));
-                if current_zone != Some(zone) && !is_put_at_library_position_member {
+                if !matches!(effect_kind, EffectKind::ChangeZone)
+                    && current_zone != Some(zone)
+                    && !is_put_at_library_position_member
+                {
                     return Err(EngineError::InvalidAction(format!(
                         "Selected card is no longer in {:?}",
                         zone
@@ -4153,6 +4165,11 @@ pub(super) fn handle_resolution_choice(
                     })?;
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
+                        let origin = state
+                            .objects
+                            .get(card_id)
+                            .map(|object| object.zone)
+                            .unwrap_or(zone);
                         let per_obj_enter_counters =
                             effects::change_zone::enter_with_counters_for_pending_object(
                                 state,
@@ -4164,7 +4181,7 @@ pub(super) fn handle_resolution_choice(
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
                             source_id,
                             controller: player,
-                            origin: Some(zone),
+                            origin: Some(origin),
                             destination: dest_zone,
                             enter_transformed,
                             enter_tapped,
@@ -4207,7 +4224,11 @@ pub(super) fn handle_resolution_choice(
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
-                                        origin: ctx.origin,
+                                        // EffectZoneChoice can select across multiple
+                                        // origins (for example, hand and graveyard).
+                                        // The paused object's origin must not become
+                                        // a gate for the remaining selected cards.
+                                        origin: None,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
                                         enter_tapped: ctx.enter_tapped,
@@ -4245,7 +4266,11 @@ pub(super) fn handle_resolution_choice(
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
-                                        origin: ctx.origin,
+                                        // EffectZoneChoice can select across multiple
+                                        // origins (for example, hand and graveyard).
+                                        // The paused object's origin must not become
+                                        // a gate for the remaining selected cards.
+                                        origin: None,
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
                                         enter_tapped: ctx.enter_tapped,
@@ -5281,21 +5306,40 @@ pub(super) fn handle_resolution_choice(
             }
         }
         // CR 903.9a: Owner decides whether to return their commander to the command zone.
-        // Accept = move to command zone; Decline = leave in current zone (marked as
-        // declined so SBA doesn't re-ask).
-        // Returning to Priority re-runs SBA, which will find any remaining commanders.
+        // Decline leaves it in its current zone and marks that stay so the SBA
+        // loop does not re-ask; a settled zone change clears that mark for a
+        // fresh arrival.
         (
             WaitingFor::CommanderZoneChoice { commander_id, .. },
             GameAction::DecideOptionalEffect { accept },
         ) => {
             if accept {
-                zones::move_to_zone(state, commander_id, Zone::Command, events);
+                // CR 614.1 + CR 616.1: The owner-elected return is a replaceable
+                // zone change. Preserve a centrally parked replacement prompt
+                // rather than clobbering it with Priority; its generic resume
+                // boundary finishes delivery and returns to priority.
+                let mut request = crate::game::zone_pipeline::ZoneMoveRequest::state_based_action(
+                    commander_id,
+                    Zone::Command,
+                );
+                request.cause = crate::game::zone_pipeline::ZoneChangeCause::CommanderRuleReturn;
+                match crate::game::zone_pipeline::move_object(state, request, events) {
+                    crate::game::zone_pipeline::ZoneMoveResult::Done => {
+                        ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                            player: state.active_player,
+                        })
+                    }
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                    | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                    }
+                }
             } else {
                 state.commander_declined_zone_return.insert(commander_id);
+                ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                    player: state.active_player,
+                })
             }
-            ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
-                player: state.active_player,
-            })
         }
         // CR 310.10 + CR 704.5w + CR 704.5x: controller assigns the battle's new
         // protector. Re-running the SBA fixpoint (via the Priority resumption) will
@@ -6131,6 +6175,12 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::ReturnAsAuraNoTargetComplete { source_id } => {
+            effects::return_as_aura::complete_no_target_delivery(source_id, events)
+        }
+        BatchCompletion::ExploreLandDeliveryComplete { explorer_id } => {
+            effects::explore::complete_land_delivery(explorer_id, events)
+        }
         BatchCompletion::CloakExileDeliveryComplete {
             player,
             source_id,

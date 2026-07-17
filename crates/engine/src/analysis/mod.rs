@@ -36,6 +36,7 @@ pub mod ability_graph;
 pub mod decision_template;
 pub mod loop_check;
 pub mod resource;
+#[cfg(any(test, feature = "test-support"))]
 pub mod sim;
 
 // The combo corpus + bespoke driver toolkit, shared by the `#[cfg(test)]`
@@ -62,4 +63,5 @@ pub use resource::{
     board_delta, loop_states_equal_modulo_resources, BoardDelta, CounterClass, ObjectClass,
     ResidualPermanent, ResourceAxis, ResourceVector, TriggerKind,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use sim::{accumulate_events, LoopProbe};

@@ -1532,6 +1532,12 @@ pub(crate) fn handle_discard_for_cost(
                 });
         }
     }
+    // CR 601.2h + CR 602.2b (issue #4948): Record EVERY discarded card, not
+    // just `chosen.first()` above, so this SAME ability's own target
+    // selection excludes all of them — a multi-card non-self discard cost
+    // paid before targets are chosen can otherwise let a just-discarded card
+    // leak into the ability's own "target card in your graveyard" pool.
+    pending.ability.add_cost_paid_object_ids_recursive(chosen);
 
     // CR 601.2h + CR 616.1: Discard each chosen card through the replacement pipeline
     // so Madness (CR 702.35) etc. can intercept.
@@ -2589,6 +2595,13 @@ pub(crate) fn handle_sacrifice_for_cost(
             }
         }
     }
+    // CR 601.2h + CR 602.2b (issue #4948): Record EVERY sacrificed object,
+    // not just `chosen.first()` above, so this SAME ability's own target
+    // selection excludes all of them (`exclude_cost_paid_object_that_left_battlefield`)
+    // — a sacrifice cost paid before targets are chosen (this engine's
+    // documented ordering shortcut, see issue #1301) can otherwise let a
+    // just-sacrificed object leak into the ability's own candidate pool.
+    pending.ability.add_cost_paid_object_ids_recursive(chosen);
 
     // CR 702.48c / CR 702.119a: Offering and Emerge use different reduction
     // rules, but both must read the sacrificed permanent before it leaves.
@@ -3722,6 +3735,14 @@ fn finish_exile_selection_for_cost(
                 });
         }
     }
+    // CR 601.2h + CR 602.2b (issue #4948): Record EVERY exiled object, not
+    // just `chosen.first()` above, so this SAME ability's own target
+    // selection excludes all of them. Covers both call sites that share this
+    // helper: non-self hand/graveyard exile costs and non-self
+    // battlefield-permanent exile costs (Food Chain class) — either can
+    // otherwise let a just-exiled object leak into an ability's own
+    // "target card/permanent in exile" pool.
+    pending.ability.add_cost_paid_object_ids_recursive(chosen);
 
     if pending.activation_ability_index.is_some() {
         pending.activation_cost = pending
@@ -7992,6 +8013,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // replacements on X-cost cards like Astral Cornucopia, Walking Ballista, etc.
     let cost_x_paid = ability.chosen_x;
     let kickers_paid = ability.context.kickers_paid.clone();
+    let chosen_modes = ability.context.chosen_modes.clone();
     let additional_cost_paid = ability.context.additional_cost_paid;
     let additional_cost_payment_count = ability.context.additional_cost_payment_count;
     let additional_cost_payments = ability.context.additional_cost_payments.clone();
@@ -8094,6 +8116,17 @@ fn finalize_cast_with_phyrexian_choices_inner(
     if !kickers_paid.is_empty() {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.kickers_paid.clone_from(&kickers_paid);
+        }
+    }
+    // CR 700.2a + CR 700.2d + CR 601.2b: Stamp chosen modal-mode indices onto the
+    // spell-on-stack object so cast-triggers (Riku: "the number of times you chose
+    // a mode for that spell") read the mode count. Cast-triggers resolve before the
+    // spell — see the kickers_paid stamp directly above for the CR-603 ordering
+    // rationale, which is why a permanent-entry stamp would be too late. Empty for
+    // non-modal spells.
+    if !chosen_modes.is_empty() {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.chosen_modes.clone_from(&chosen_modes);
         }
     }
     if additional_cost_payment_count > 0 {
@@ -8756,13 +8789,16 @@ fn handle_resolution_cast_success(
             if casts_left == 0 {
                 return None;
             }
-            let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
+            let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 controller,
                 &filter,
                 &zones,
                 budget_left,
             );
+            // CR 608.2g: Finalize runs before the chosen card is removed from
+            // its origin zone; it cannot be offered again while already cast.
+            candidates.retain(|&id| id != cast_object);
             if candidates.is_empty() {
                 return None;
             }

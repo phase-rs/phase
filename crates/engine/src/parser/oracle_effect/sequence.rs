@@ -4320,8 +4320,8 @@ pub(super) fn apply_clause_continuation(
             let bottom_def = AbilityDefinition::new(
                 kind,
                 Effect::PutAtLibraryPosition {
-                    target: TargetFilter::Any,
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ExiledBySource,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 0 },
                     position: crate::types::ability::LibraryPosition::Bottom,
                 },
             );
@@ -6265,6 +6265,8 @@ pub(super) fn parse_followup_continuation_ast(
                 tag("may choose "),
                 tag("you may exile "),
                 tag("may exile "),
+                tag("you may discard "),
+                tag("may discard "),
             ))
             .parse(lower.as_str())
             .is_ok();
@@ -6822,6 +6824,8 @@ pub(super) fn parse_followup_continuation_ast(
         // (e.g., Assassin's Trophy / Ranging Raptors / Harrow compound), the
         // explicit "put it onto the battlefield" chunk in the same sentence is
         // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
+        // Third-person search text uses "puts it" (Field of Ruin) and has the
+        // same meaning as the imperative "put it" form.
         //
         // CR 701.23i + CR 608.2c: Iterated-search variants (Winds of Abandon class)
         // surface a plural subject ("those players put those cards onto the
@@ -6841,10 +6845,14 @@ pub(super) fn parse_followup_continuation_ast(
                 bare,
                 "put that card onto the battlefield"
                     | "put it onto the battlefield"
+                    | "puts that card onto the battlefield"
+                    | "puts it onto the battlefield"
                     | "put them onto the battlefield"
                     | "put those cards onto the battlefield"
                     | "put that card onto the battlefield tapped"
                     | "put it onto the battlefield tapped"
+                    | "puts that card onto the battlefield tapped"
+                    | "puts it onto the battlefield tapped"
                     | "put them onto the battlefield tapped"
                     | "put those cards onto the battlefield tapped"
             )

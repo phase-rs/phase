@@ -1418,11 +1418,15 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // within nom's top-level `alt` arity (nom 8.0 max: 21 items).
         // All three arms must precede `parse_number_of_controlled_type` so the
         // leading type-word token does not commit to the generic controlled-type arm.
+        // CR 700.2d: the "times you chose a mode for that spell" event-context
+        // mode-count (Riku) shares this "times you <verb>" nest with the descended
+        // count; both lead with "times you" and must precede the generic arms.
         alt((
             parse_entered_this_turn_ref,
             parse_number_of_creatures_died_this_turn,
             parse_number_of_sacrificed_this_turn,
             parse_number_of_descended_this_turn,
+            parse_number_of_times_you_chose_a_mode,
         )),
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
@@ -4478,6 +4482,20 @@ fn parse_number_of_descended_this_turn(input: &str) -> OracleResult<'_, Quantity
             ])),
         },
     ))
+}
+
+/// CR 700.2 + CR 700.2a + CR 700.2d + CR 601.2b: "[the number of] times you chose
+/// a mode for that spell" — the count of modes chosen for the triggering modal
+/// spell (Riku of Many Paths). Resolves to `EventContextSourceModesChosen`, which
+/// reads `GameObject::chosen_modes.len()` off the `current_trigger_event` spell
+/// object (CR 700.2d counts a repeated mode "that many times in sequence"). The
+/// axes are factored: the fixed "times you chose a mode" phrase plus an optional
+/// " for that spell" tail that tolerates the bare form without changing the
+/// (triggering-spell) referent.
+fn parse_number_of_times_you_chose_a_mode(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("times you chose a mode").parse(input)?;
+    let (rest, _) = opt(tag(" for that spell")).parse(rest)?;
+    Ok((rest, QuantityRef::EventContextSourceModesChosen))
 }
 
 /// CR 701.21a: "[type] you['ve] sacrificed this turn" in a "for each" context →
@@ -8625,6 +8643,23 @@ mod tests {
         assert!(tf.properties.contains(&FilterProp::Owned {
             controller: ControllerRef::You,
         }));
+    }
+
+    // CR 700.2d + CR 601.2b: Riku of Many Paths' "the number of times you chose a
+    // mode for that spell" → the new event-context mode-count ref. Revert probe:
+    // delete `parse_number_of_times_you_chose_a_mode` (or drop it from the
+    // parse_number_of_inner nest) → the phrase falls through, `rest` is non-empty
+    // / the ref is wrong, failing these assertions.
+    #[test]
+    fn parse_number_of_times_you_chose_a_mode_for_that_spell() {
+        let (rest, q) =
+            parse_quantity_ref("the number of times you chose a mode for that spell").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::EventContextSourceModesChosen);
+        // Bare form (optional " for that spell" tail) also resolves.
+        let (rest, q) = parse_quantity_ref("the number of times you chose a mode").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::EventContextSourceModesChosen);
     }
 
     #[test]

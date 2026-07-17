@@ -23042,6 +23042,64 @@ fn rewrite_filter_parent_to_tracked_set(filter: &mut TargetFilter) {
     }
 }
 
+/// issue #6065: If `effect` is "draw a card for each `<filter>`" — a `Draw` whose
+/// count is `ObjectCount { filter }` — return that count filter. This is the
+/// antecedent a following "those creatures" grant refers to. Unlike a tracked-set
+/// publisher, `Draw` does not publish the counted objects at resolution (its
+/// `target` is the drawing player), so a `ParentTarget` grant chained after it
+/// must bind directly to this filter rather than to the tracked-set sentinel.
+pub(super) fn draw_object_count_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Draw {
+            count:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            ..
+        } => Some(filter),
+        _ => None,
+    }
+}
+
+/// Re-anchor a `ParentTarget` anaphor in `filter` to `replacement`. Mirrors
+/// `rewrite_filter_parent_to_tracked_set` but binds to a concrete antecedent
+/// filter (issue #6065: "those creatures" → the counted-creature filter).
+fn rewrite_filter_parent_to(filter: &mut TargetFilter, replacement: &TargetFilter) {
+    match filter {
+        TargetFilter::ParentTarget => *filter = replacement.clone(),
+        TargetFilter::Not { filter } => rewrite_filter_parent_to(filter, replacement),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for f in filters {
+                rewrite_filter_parent_to(f, replacement);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CR 603.7 + issue #6065: Re-anchor a "those creatures gain `<keyword>`" grant's
+/// `ParentTarget` to `replacement` — the filter of a preceding "draw a card for
+/// each `<creature filter>`" count (Inspiring Call). Only the grant surface
+/// (`GenericEffect`) is rewritten; the tracked-set path (`PutCounterAll` etc.)
+/// is untouched and keeps producing `TrackedSet(0)`.
+pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &TargetFilter) {
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    {
+        if let Some(target) = target {
+            rewrite_filter_parent_to(target, replacement);
+        }
+        for static_def in static_abilities {
+            if let Some(affected) = &mut static_def.affected {
+                rewrite_filter_parent_to(affected, replacement);
+            }
+        }
+    }
+}
+
 fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     let mut index = 0;
     while index + 1 < defs.len() {
@@ -28718,11 +28776,34 @@ pub(crate) fn parse_effect_chain_ir(
 
         // Non-absorbed followup continuation — store on the current clause
         // (it applies to the PREVIOUS clause in lowering).
-        let followup_for_this = if followup_continuation.is_some() && !absorb_followup {
+        let mut followup_for_this = if followup_continuation.is_some() && !absorb_followup {
             followup_continuation
         } else {
             None
         };
+
+        if let Some(ContinuationAst::RevealHandFilter {
+            card_filter,
+            choice_optional: true,
+        }) = &mut followup_for_this
+        {
+            if matches!(
+                card_filter,
+                None | Some(TargetFilter::Any | TargetFilter::None)
+            ) {
+                if let Effect::ChangeZone { target, .. } = &clause.effect {
+                    *card_filter = Some(target.clone());
+                }
+            }
+        }
+        let is_optional = is_optional
+            && !matches!(
+                followup_for_this,
+                Some(ContinuationAst::RevealHandFilter {
+                    choice_optional: true,
+                    ..
+                })
+            );
 
         // CR 603.6 + CR 608.2k: A reflexive zone-change trigger body ("When a
         // creature is put onto the battlefield this way, it deals damage equal to
@@ -29110,6 +29191,11 @@ fn try_parse_put_zone_change_parts(
             };
             let up_to = parse_up_to_one_target_prefix(before.lower) || choice_count.is_some();
             let (target, _) = parse_target(target_text);
+            let multi_origin_zones = put_hand_graveyard_origin_zones(before.lower);
+            let target = match multi_origin_zones.as_ref() {
+                Some(zones) => add_put_multi_origin_constraint(target, zones),
+                None => target,
+            };
             // CR 202.3 + CR 107.3i: A trailing "where X is <expression>"
             // defining clause (Birthing Ritual: "...with mana value X or less
             // ..., where X is 1 plus the sacrificed creature's mana value")
@@ -29197,7 +29283,7 @@ fn try_parse_put_zone_change_parts(
             // graveyard"); "into your graveyard" then yields `origin: None`,
             // matching the hand branch and letting the injected reveal target
             // drive the move uniformly across the whole destination class.
-            let origin = if is_tracked_anaphor {
+            let origin = if is_tracked_anaphor || multi_origin_zones.is_some() {
                 None
             } else {
                 let origin_text = format!("{}{}", before.lower, after.lower);
@@ -29287,6 +29373,44 @@ fn try_parse_put_zone_change_parts(
     }
 
     None
+}
+
+fn put_hand_graveyard_origin_zones(lower: &str) -> Option<Vec<Zone>> {
+    if [
+        "from your hand and/or graveyard",
+        "from your hand or graveyard",
+    ]
+    .iter()
+    .any(|phrase| scan_contains_phrase(lower, phrase))
+    {
+        Some(vec![Zone::Hand, Zone::Graveyard])
+    } else if [
+        "from your graveyard and/or hand",
+        "from your graveyard or hand",
+    ]
+    .iter()
+    .any(|phrase| scan_contains_phrase(lower, phrase))
+    {
+        Some(vec![Zone::Graveyard, Zone::Hand])
+    } else {
+        None
+    }
+}
+
+fn add_put_multi_origin_constraint(target: TargetFilter, zones: &[Zone]) -> TargetFilter {
+    match target {
+        TargetFilter::Typed(mut typed) => {
+            typed
+                .properties
+                .retain(|prop| !matches!(prop, FilterProp::InZone { .. }));
+            typed.properties.push(FilterProp::InAnyZone {
+                zones: zones.to_vec(),
+            });
+            typed.controller = Some(ControllerRef::You);
+            TargetFilter::Typed(typed)
+        }
+        other => other,
+    }
 }
 
 fn strip_put_resolution_choice_quantifier(target_text: &str) -> (&str, Option<MultiTargetSpec>) {

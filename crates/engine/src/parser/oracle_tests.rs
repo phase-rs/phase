@@ -4401,7 +4401,9 @@ fn priest_of_titania_mana_ability_supported() {
 
 #[test]
 fn distinct_card_type_choose_wires_remainder_on_bottom() {
-    use crate::types::ability::{ChooseFromZoneConstraint, LibraryPosition};
+    use crate::types::ability::{
+        ChooseFromZoneConstraint, LibraryPosition, QuantityExpr, TargetFilter,
+    };
     let r = parse(
             "Flying, vigilance, deathtouch, lifelink\nWhen Atraxa enters, reveal the top ten cards of your library. For each card type, you may put a card of that type from among the revealed cards into your hand. Put the rest on the bottom of your library in a random order.",
             "Atraxa, Grand Unifier",
@@ -4468,6 +4470,8 @@ fn distinct_card_type_choose_wires_remainder_on_bottom() {
         matches!(
             &*bottom_def.effect,
             Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
                 ..
             }
@@ -20374,6 +20378,149 @@ fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
             }
         ),
         "ETB execute must be ChangeZone→Exile"
+    );
+}
+
+/// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: the mass-exile arm of the
+/// two-trigger exile-return class. Worldgorger Dragon ("exile all other
+/// permanents you control") parses its ETB to `Effect::ChangeZoneAll`→Exile,
+/// not the single-target `ChangeZone`. The widened
+/// `trigger_is_etb_exile_pending_duration` predicate must stamp
+/// `Duration::UntilHostLeavesPlay` on the mass-exile ETB exactly as it does for
+/// the single-target Journey to Nowhere / Oblivion Ring class, so the engine's
+/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled cards when the
+/// source leaves. Oracle text verbatim from `data/card-data.json` (2026-07).
+#[test]
+fn mass_exile_ltb_return_etb_gets_until_host_leaves_duration() {
+    let oracle = "Flying, trample\n\
+             When this creature enters, exile all other permanents you control.\n\
+             When this creature leaves the battlefield, return the exiled cards to the \
+             battlefield under their owners' control.";
+    let name = "Worldgorger Dragon";
+    let result = parse(oracle, name, &[], &["Creature"], &[]);
+
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
+
+    let execute = etb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{name} ETB must have execute"));
+    assert_eq!(
+        execute.duration,
+        Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+        "{name}: mass-exile ETB must carry UntilHostLeavesPlay so the engine returns the cards"
+    );
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "{name}: ETB execute must be ChangeZoneAll→Exile"
+    );
+}
+
+/// CR 610.3: Realm Razer's LTB return carries an entry modifier ("return the
+/// exiled cards to the battlefield TAPPED") that the automatic
+/// `ExileLink::UntilSourceLeaves` return path can't apply — it performs a
+/// plain, unmodified zone move. `trigger_is_ltb_return` must reject a return
+/// trigger with any entry modifier, so `detect_etb_exile_ltb_return` never
+/// stamps `Duration::UntilHostLeavesPlay` on the ETB — correctly excluded
+/// rather than silently dropping the tapped rider. Because that leaves Realm
+/// Razer with no working return path, the unsupported return must be VISIBLE to
+/// the coverage tooling (an `Effect::unimplemented("modifier_bearing_linked_return")`
+/// marker on the LTB trigger) rather than the card showing as falsely
+/// supported. Oracle text verbatim from Scryfall (2026-07). Caught in review of
+/// #6055.
+#[test]
+fn mass_exile_ltb_return_with_entry_modifier_is_not_paired() {
+    use crate::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};
+    use crate::types::card::CardFace;
+
+    let oracle = "When this creature enters, exile all lands.\n\
+             When this creature leaves the battlefield, return the exiled cards to the \
+             battlefield tapped under their owners' control.";
+    let name = "Realm Razer";
+    let result = parse(oracle, name, &[], &["Creature"], &[]);
+
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
+
+    let execute = etb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{name} ETB must have execute"));
+    assert_eq!(
+        execute.duration, None,
+        "{name}: mass-exile ETB must NOT be stamped UntilHostLeavesPlay — its LTB return has a \
+         tapped modifier the automatic return path can't carry"
+    );
+
+    // Coverage-honesty gate (the maintainer's explicit ask, #6055): the
+    // unsupported modifier-bearing return must be visible to the coverage
+    // tooling, not silently green. Build a CardFace with BOTH triggers (the gap
+    // marker lives on the LTB return trigger) and assert the gap surfaces.
+    let face = CardFace {
+        name: name.to_string(),
+        triggers: result.triggers.clone(),
+        ..CardFace::default()
+    };
+    assert!(
+        card_face_has_unimplemented_parts(&face),
+        "{name}: the modifier-bearing linked return must report an Unimplemented part so the \
+         card is not falsely marked supported"
+    );
+    let gaps = card_face_gaps(&face);
+    assert!(
+        !gaps.is_empty(),
+        "{name}: coverage must report a non-empty gap set for the unsupported return"
+    );
+    assert!(
+        gaps.iter()
+            .any(|g| g == "Effect:modifier_bearing_linked_return"),
+        "{name}: coverage gaps must contain the modifier_bearing_linked_return marker, got: {gaps:?}"
+    );
+}
+
+/// Positive-safety companion to `mass_exile_ltb_return_with_entry_modifier_is_not_paired`:
+/// the already-merged unmodified class (Worldgorger Dragon) must still report
+/// ZERO coverage gaps after the modifier-unsupported path was added — proving
+/// the coverage-honesty fix did not regress the supported class. Oracle text
+/// verbatim from `crates/engine/tests/fixtures/integration_cards.json` (2026-07).
+#[test]
+fn mass_exile_ltb_return_unmodified_class_reports_no_gaps() {
+    use crate::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};
+    use crate::types::card::CardFace;
+
+    let oracle = "Flying, trample\n\
+             When this creature enters, exile all other permanents you control.\n\
+             When this creature leaves the battlefield, return the exiled cards to the \
+             battlefield under their owners' control.";
+    let name = "Worldgorger Dragon";
+    let result = parse(oracle, name, &[], &["Creature"], &[]);
+
+    let face = CardFace {
+        name: name.to_string(),
+        triggers: result.triggers.clone(),
+        ..CardFace::default()
+    };
+    assert!(
+        !card_face_has_unimplemented_parts(&face),
+        "{name}: the unmodified linked-return class must report no Unimplemented parts"
+    );
+    assert!(
+        card_face_gaps(&face).is_empty(),
+        "{name}: the unmodified linked-return class must report zero coverage gaps, got: {:?}",
+        card_face_gaps(&face)
     );
 }
 

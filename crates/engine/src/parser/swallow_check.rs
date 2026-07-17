@@ -4800,22 +4800,36 @@ mod tests {
     }
 
     /// Registration + real-pipeline positive: a "choose up to X, where X is ..."
-    /// modal keeps the fixed-default cap (the existing "where" guard blocks the
-    /// cast-{X} arm), so the real parser yields a modal node WITHOUT
-    /// `dynamic_max_choices`. Driven end-to-end through `parse_oracle_text` →
-    /// `check_swallowed_clauses`, so it discriminates the detector registration.
-    /// This "where X is" shape is unaffected by Sub-plan B's "that many" arm,
-    /// keeping the test stable across both commits. Revert the registration line
-    /// in `check_swallowed_clauses` → no diagnostic → fails.
+    /// modal whose `<expr>` `parse_cda_quantity` does NOT recognize keeps the
+    /// fixed-default cap — the where-X arm's `map_opt` fails, the `CostXPaid`
+    /// arm's `not(where)` lookahead rejects it, and it falls through with NO
+    /// `dynamic_max_choices`, so the detector fires. The `is_none()` guard below
+    /// pins the fixture expr as genuinely-unsupported: if a future quantity arm
+    /// ever supports it, that guard fails LOUDLY (never a silent vacuous pass),
+    /// signalling the fixture needs a still-dropped expr. Driven end-to-end
+    /// through `parse_oracle_text` → `check_swallowed_clauses`, so it
+    /// discriminates the detector registration. The positive where-X capability
+    /// (supported exprs → dynamic cap) is pinned separately by
+    /// `parse_modal_choose_count_up_to_x_redefined_is_dynamic`. Revert the
+    /// registration line in `check_swallowed_clauses` → no diagnostic → fails.
     #[test]
     fn modal_dynamic_max_dropped_registered_via_real_parse() {
-        let parsed = parse_named(
-            "Choose up to X, where X is the number of cards in your hand \u{2014}\n\
-             \u{2022} You gain 2 life.\n\
-             \u{2022} Draw a card.",
-            "Synthetic Dropped Cap Modal",
-            &["Sorcery"],
+        // A cross-player "greatest number of creatures" count that no
+        // `parse_cda_quantity` arm recognizes ⇒ the dynamic cap is genuinely
+        // dropped. Shared const feeds both the guard and the fixture so they
+        // cannot drift.
+        const DROPPED_EXPR: &str = "the greatest number of creatures a player controls";
+        assert!(
+            crate::parser::oracle_quantity::parse_cda_quantity(DROPPED_EXPR).is_none(),
+            "fixture expr must stay unsupported so the modal cap is genuinely \
+             dropped; pick another still-unsupported expr if this fails",
         );
+        let oracle = format!(
+            "Choose up to X, where X is {DROPPED_EXPR} \u{2014}\n\
+             \u{2022} You gain 2 life.\n\
+             \u{2022} Draw a card."
+        );
+        let parsed = parse_named(&oracle, "Synthetic Dropped Cap Modal", &["Sorcery"]);
         assert!(
             has_swallowed_detector(&parsed, "Modal_DynamicMaxDropped"),
             "real parse of a dropped-cap modal must surface the detector: {:?}",

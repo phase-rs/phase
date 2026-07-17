@@ -32,7 +32,7 @@ use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_nom::target::parse_event_context_ref;
+use super::super::oracle_nom::target::{parse_event_context_ref, parse_supertype_word};
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
@@ -196,6 +196,15 @@ pub(super) fn try_parse_subject_predicate_ast(
             },
             ctx,
         ));
+    }
+
+    // CR 205.4b + CR 611.2a: one-shot supertype removal — "target <filter> isn't
+    // / is not / is no longer <supertype>", the RemoveSupertype sibling of the
+    // "becomes <supertype>" AddSupertype one-shot above (Arcum's Weathervane,
+    // Thermal Flux). Runs after the become arm because its subject is always
+    // targeted, never a carried-over conjunct.
+    if let Some(ast) = try_parse_subject_supertype_removal_clause(text, ctx) {
+        return Some(ast);
     }
 
     // CR 509.1b + CR 611.2c: "<source> and up to N other target creature(s) can't
@@ -725,6 +734,103 @@ fn try_parse_subject_become_clause(
         parse_subject_application(subject, ctx)?
     };
     build_become_clause(application, &predicate, ctx)
+}
+
+/// CR 205.4b + CR 611.2a: One-shot supertype REMOVAL on a targeted permanent —
+/// "target <filter> isn't / is not / is no longer <supertype> [until end of
+/// turn]". This is the inverse of the "target <filter> becomes <supertype>"
+/// one-shot that [`build_become_clause`] already lowers (it emits
+/// [`ContinuousModification::AddSupertype`]); this arm emits the sibling
+/// [`ContinuousModification::RemoveSupertype`] into the SAME targeted
+/// [`Effect::GenericEffect`] continuous grant, which `game/layers.rs` already
+/// applies in both directions (CR 205.4 layer 4). Parser-only: no new effect
+/// variant and no resolver path.
+///
+/// Anchored on the AddSupertype sibling that ships on the very same cards:
+///   * Arcum's Weathervane pairs "{2}, {T}: Target snow land is no longer snow."
+///     (this arm) with "{2}, {T}: Target nonsnow basic land becomes snow."
+///     (already supported).
+///   * Thermal Flux pairs the "isn't snow until end of turn" mode with the
+///     already-supported "becomes snow until end of turn" mode.
+///
+/// Scoped strictly to the five CR 205.4a supertype words via `all_consuming`, so
+/// the copula-negation core-type removal path ("target creature isn't a creature
+/// until end of turn" -> `RemoveType`) is never claimed here, and gated on an
+/// explicit target so anaphoric / self-referential copy-exception forms
+/// ("it isn't legendary") do not match.
+fn try_parse_subject_supertype_removal_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
+    let lower = text.to_lowercase();
+    // The copula-negation seam. Keep recognition in the nom grammar and map the
+    // remainder back to original case through `nom_on_lower`; the three copulas
+    // are independent alternatives, not a full-string permutation list.
+    let (subject_lower, predicate) = nom_on_lower(text, &lower, |input| {
+        map(
+            alt((
+                terminated(
+                    take_until::<_, _, OracleError<'_>>(" isn't "),
+                    tag(" isn't "),
+                ),
+                terminated(
+                    take_until::<_, _, OracleError<'_>>(" is no longer "),
+                    tag(" is no longer "),
+                ),
+                terminated(
+                    take_until::<_, _, OracleError<'_>>(" is not "),
+                    tag(" is not "),
+                ),
+            )),
+            str::to_owned,
+        )
+        .parse(input)
+    })?;
+    let subject = text[..subject_lower.len()].trim();
+    if subject.is_empty() {
+        return None;
+    }
+    // Peel a trailing duration ("until end of turn"); CR 611.2a: a one-shot type
+    // change with no explicit duration is permanent.
+    let (supertype_text, duration) = super::strip_trailing_duration(predicate.trim());
+    let supertype_lower = supertype_text
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_lowercase();
+    let (_, supertype) = all_consuming(parse_supertype_word)
+        .parse(supertype_lower.as_str())
+        .ok()?;
+
+    // Only a genuinely targeted subject reaches the shared AddSupertype runtime
+    // as `ParentTarget`; decline anaphoric / self-referential subjects (no
+    // target) so an out-of-context "it isn't legendary" cannot animate here.
+    let application = parse_subject_application(subject, ctx)?;
+    application.target.as_ref()?;
+    let affected = static_affected_for_application(&application);
+    let duration = duration.or(Some(Duration::Permanent));
+    let effect = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::RemoveSupertype { supertype }])
+            .description(text.to_string())],
+        duration: duration.clone(),
+        target: application.target.clone(),
+    };
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: application.affected,
+            target: application.target,
+            multi_target: application.multi_target,
+            inherits_parent: application.inherits_parent,
+            is_optional: application.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Become {
+            effect,
+            duration,
+            sub_ability: None,
+        }),
+    })
 }
 
 /// CR 208.1: which base characteristic(s) a "base power [and toughness] become"

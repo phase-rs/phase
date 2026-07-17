@@ -5130,6 +5130,20 @@ fn dispatch_pending_trigger_context(
     // exists on the stack.
     if let Some(modal_ref) = trigger.modal.as_ref() {
         if !trigger.mode_abilities.is_empty() {
+            // CR 603.3c + CR 603.3d: a triggered modal's mode choice is announced as
+            // the ability is put on the stack, by the same process as casting a spell
+            // (CR 601.2c-d). The triggering event must be live for the ENTIRE choice,
+            // including the "choose up to X" dynamic cap resolved by
+            // modal_choice_for_player -- push the event window BEFORE cap resolution,
+            // not just around target-legality filtering, so event-context quantity
+            // refs (e.g. EventContextSourceModesChosen, Riku of Many Paths) resolve
+            // against the triggering spell rather than an unset event.
+            let context_snapshot = push_trigger_event_context(
+                state,
+                trigger.trigger_event.as_ref(),
+                &trigger_events,
+                trigger.subject_match_count,
+            );
             let modal_for_player = super::ability_utils::modal_choice_for_player(
                 state,
                 trigger.controller,
@@ -5141,12 +5155,6 @@ fn dispatch_pending_trigger_context(
                 state,
                 trigger.source_id,
                 &modal_for_player,
-            );
-            let context_snapshot = push_trigger_event_context(
-                state,
-                trigger.trigger_event.as_ref(),
-                &trigger_events,
-                trigger.subject_match_count,
             );
             super::ability_utils::filter_modes_by_target_legality(
                 state,
@@ -8145,6 +8153,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }

@@ -1728,6 +1728,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("mana spent to cast ({scope:?}, {metric:?})")
         }
         QuantityRef::EventContextSourceCostX => "X of triggering spell".into(),
+        QuantityRef::EventContextSourceModesChosen => {
+            "modes chosen for the triggering spell".into()
+        }
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
         }
@@ -7471,6 +7474,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TimesCostPaidThisResolution => ("TimesCostPaidThisResolution", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
+        QuantityRef::EventContextSourceModesChosen => ("EventContextSourceModesChosen", Handled),
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)
         }
