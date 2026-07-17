@@ -25,6 +25,7 @@ mod attack_qualifier_stack_conditions;
 mod auntie_ool_minus_one_counter_trigger;
 mod aura_graft_enchant_restriction;
 mod aura_on_player;
+mod aurification_gold_counter_defender_cant_attack;
 mod awaken_runtime;
 mod backup_becomes_target_trigger;
 mod balance_equalization;
