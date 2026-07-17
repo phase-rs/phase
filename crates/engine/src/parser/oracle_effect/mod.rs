@@ -61,6 +61,7 @@ pub(crate) use self::token::parse_token_description;
 pub(crate) use self::token::try_parse_token;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError};
+use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
@@ -3665,10 +3666,7 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
 
     let before_cant =
         strip_required_suffix(spell_tp.lower.trim_end_matches('.'), " can't be cast")?;
-    let spell_filter = {
-        use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
-        parse_passive_cant_be_cast_spell_filter(before_cant)?
-    };
+    let spell_filter = parse_passive_cant_be_cast_spell_filter(before_cant)?;
 
     let sub_ability = match land_tail_tp {
         None => None,

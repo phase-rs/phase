@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::*;
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::{BackFaceData, RoomDoor};
+use crate::game::scenario::{GameScenario, P0};
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
@@ -14,7 +15,7 @@ use crate::types::card_type::CardType;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::format::FormatConfig;
-use crate::types::game_state::CastingVariant;
+use crate::types::game_state::{CastPaymentMode, CastingVariant};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
@@ -3425,9 +3426,6 @@ fn apply_play_land_rejects_under_cant_play_lands_chosen_name_filter() {
 /// or its production gate is reverted.
 #[test]
 fn conjurers_ban_full_cast_resolve_blocks_named_land_and_spell() {
-    use crate::game::scenario::{GameScenario, P0};
-    use crate::types::actions::CastPaymentMode;
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
