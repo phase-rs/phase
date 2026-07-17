@@ -1,8 +1,9 @@
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -111,14 +112,13 @@ pub fn resolve(
         }
     }
 
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
     match hit_card {
         Some(hit) => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
             // CR 702.85a: Offer the cast. The caster's response is handled in
             // `engine_resolution_choices` — we do not bottom-shuffle misses
             // here because a rejection at cast time (X makes resulting MV
@@ -130,39 +130,54 @@ pub fn resolve(
                     hit_card: hit,
                     exiled_misses,
                     source_mv,
+                    source_id: ability.source_id,
                 },
             };
         }
         None => {
-            // CR 702.85a: Library exhausted with no eligible hit — emit a
-            // CascadeMissed event for the log/UI, then shuffle all exiled
-            // misses to the bottom in random order.
-            events.push(GameEvent::CascadeMissed {
-                controller,
-                source_id: ability.source_id,
-                exiled_count: exiled_misses.len() as u32,
-            });
-            shuffle_to_bottom(state, &exiled_misses, events);
+            // CR 702.85a + CR 616.1: Library exhausted with no eligible hit.
+            // The completion marker rides the batch so CascadeMissed and
+            // EffectResolved fire only after every randomized bottom placement
+            // (including any redirected placements) has settled.
+            shuffle_to_bottom(
+                state,
+                &exiled_misses,
+                ability.source_id,
+                Some(BatchCompletion::CascadeBottomComplete {
+                    controller,
+                    source_id: ability.source_id,
+                    exiled_count: exiled_misses.len() as u32,
+                }),
+                events,
+            );
         }
     }
 
     Ok(())
 }
 
-/// CR 702.85a: Put cards on the bottom of the player's library in random order.
+/// CR 702.85a + CR 401.4: Put cards on the bottom of the player's library in
+/// random order through the replacement-aware library-placement pipeline.
 pub(crate) fn shuffle_to_bottom(
     state: &mut GameState,
     cards: &[ObjectId],
+    source_id: ObjectId,
+    completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
-) {
+) -> BatchMoveResult {
     use rand::seq::SliceRandom;
 
     let mut shuffled = cards.to_vec();
     shuffled.shuffle(&mut state.rng);
 
-    for &card_id in &shuffled {
-        zones::move_to_library_position(state, card_id, false, events);
-    }
+    let requests = shuffled
+        .into_iter()
+        .map(|card_id| {
+            ZoneMoveRequest::effect(card_id, Zone::Library, source_id)
+                .at_library_position(LibraryPosition::Bottom)
+        })
+        .collect();
+    zone_pipeline::move_objects_simultaneously_then(state, requests, completion, events)
 }
 
 #[cfg(test)]
@@ -240,6 +255,7 @@ mod tests {
                         hit_card,
                         exiled_misses,
                         source_mv,
+                        ..
                     },
                 ..
             } => {

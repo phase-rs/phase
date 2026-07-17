@@ -2487,27 +2487,6 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     state.waiting_for = waiting.clone();
                     return waiting;
                 }
-                // CR 603.3b: combat-damage triggers ran inside resolve_combat_damage
-                // (process_combat_damage_triggers -> process_triggers). If 2+ triggers
-                // controlled by the same player fired simultaneously, process_triggers
-                // populated `pending_trigger_order` and set `waiting_for` to the
-                // OrderTriggers prompt. Those triggers sit in `pending_trigger_order`, NOT
-                // on the stack, so the `!state.stack.is_empty()` guard below would advance
-                // past the prompt and strand them forever (the turn-18 hang). Surface the
-                // ordering prompt now, mirroring finish_declare_attackers (engine_combat.rs).
-                // NOTE: a first-strike sub-step OrderTriggers prompt is surfaced earlier,
-                // via the `Some(waiting)` return from resolve_combat_damage above (CR 510.4
-                // Part A in combat_damage.rs); the mandatory regular sub-step is then resumed
-                // by the empty-stack completeness gate in priority.rs. This guard handles the
-                // regular-step case, where resolve_combat_damage returns None but set
-                // `waiting_for` to the OrderTriggers prompt internally.
-                if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-                    return state.waiting_for.clone();
-                }
-                // CR 704.3 / CR 800.4: SBAs may have ended the game during combat damage.
-                if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-                    return state.waiting_for.clone();
-                }
                 // CR 603.3b + issue #1350: deferred triggers collapsed during
                 // elimination must drain before advancing past combat damage.
                 if !state.deferred_triggers.is_empty() || state.pending_trigger.is_some() {

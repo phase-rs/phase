@@ -1725,6 +1725,37 @@ impl Keyword {
             Keyword::Crew { .. } | Keyword::Enchant(_) | Keyword::Saddle(_)
         )
     }
+
+    /// CR 113.2c: The runtime-REALIZED subset of [`Self::instances_function_separately`]
+    /// for cast-time spell-keyword grants — keywords whose multiple instances the
+    /// cast-time merge (`casting.rs::merge_spell_keyword`) must PRESERVE rather than
+    /// coalesce by kind, because a downstream path actually consumes the surviving
+    /// count. This is the single authority shared by that merge gate
+    /// (`casting.rs::requires_per_instance_keyword`) and the quoted keyword-list
+    /// parser (`parse_spells_have_quoted_keyword_list`), so the two cannot diverge:
+    /// the parser must not emit a duplicate `CastWithKeyword` grant the merge would
+    /// silently drop.
+    ///
+    /// - Cascade (CR 702.85c): each granted instance triggers separately, counted
+    ///   via `effective_spell_keyword_instances` in `game/triggers.rs`.
+    /// - Casualty (CR 702.153b) / Squad (CR 702.157b): each instance is paid and
+    ///   triggers separately.
+    ///
+    /// Deliberately NARROWER than [`Self::instances_function_separately`]: Storm
+    /// (CR 702.40b), Myriad, Increment, Provoke, Exalted, and DoubleTeam function
+    /// separately by their own rules, but their cast-GRANT consumption still reads
+    /// the kind-deduped keyword list, so preserving duplicate grants would be inert.
+    /// When such a keyword IS admitted by the quoted-list grammar (of these, only
+    /// Exalted is in `parse_keyword_name`'s KEYWORDS today), the parser declines a
+    /// duplicate of it rather than lower it to a single silently-deduped grant.
+    /// Promote a keyword here only once its granted instance count is genuinely
+    /// consumed end-to-end (with a discriminating runtime regression).
+    pub fn cast_merge_preserves_instances(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Cascade | Keyword::Casualty(_) | Keyword::Squad(_)
+        )
+    }
 }
 
 /// Capitalize the first character of a string (for type name normalization).

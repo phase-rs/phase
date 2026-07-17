@@ -1403,6 +1403,22 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     {
         return true;
     }
+    // CR 111.3 + CR 608.2c (issue #5844): a token/permanent granted-ability quote
+    // that ends a sentence can be followed by a fresh IMPERATIVE sibling sentence
+    // that acts on the created object — Alien Invasion: `… and "This token
+    // attacks each combat if able." Put a +1/+1 counter on it for each invasion
+    // counter on this enchantment, then …`. Without splitting here the whole
+    // remainder is swallowed into the token-creation clause: its "for each
+    // invasion counter" is mis-read as the token COUNT and the "+1/+1 counter"
+    // pump is dropped entirely. Split when the continuation begins with an
+    // imperative game-action verb; anaphoric-subject continuations ("It becomes
+    // a 2/2 …", "The token is goaded", "That creature gains …") begin with a
+    // pronoun/determiner, NOT a verb, and stay attached so the token-creation
+    // path handles them inline.
+    if starts_imperative_action_continuation(trimmed_lower.as_str()) {
+        return true;
+    }
+
     // CR 608.2c: read the whole text and apply the rules of English — a
     // granted-ability quote that ends a sentence can be followed by a fresh
     // causative "may have …" sentence directed at the affected object's
@@ -1414,6 +1430,48 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         tag::<_, _, OracleError<'_>>("may have ").parse(i)
     })
     .is_some()
+}
+
+/// True iff `remainder_lower` begins a fresh IMPERATIVE sibling sentence — a game-
+/// action verb such as "put "/"exile "/"create "/"tap " — as opposed to an
+/// anaphoric-subject continuation ("It becomes …", "The token is goaded", "That
+/// creature gains …") that the token-creation path keeps attached to the quote.
+///
+/// Reuses the shared clause-starter verb table (`starts_clause_text_lower`) but
+/// first excludes the pronoun/determiner/subject starters it also recognizes for
+/// comma / "then" / bare-"and" splits. Those subject starters, after a granted
+/// quote, are anaphors that must stay attached (per the guardrail in
+/// `quote_closes_sentence_before_sequence`); only a bare imperative verb marks a
+/// genuine sibling effect here.
+fn starts_imperative_action_continuation(remainder_lower: &str) -> bool {
+    !starts_anaphoric_subject(remainder_lower) && starts_clause_text_lower(remainder_lower)
+}
+
+/// True iff `remainder_lower` begins with a demonstrative/pronoun word that, after
+/// a token/permanent's granted-ability quote, refers back to the CREATED object —
+/// an anaphor ("It becomes …", "Its power …", "That creature gains …", "Those
+/// tokens …", "They gain haste") that must stay attached to the quote rather than
+/// split as a sibling imperative. Each starter carries a trailing space so only a
+/// complete word matches (e.g. "it " does not fire on "item").
+///
+/// Restricted to genuine last-created anaphors. Independent subject-led clauses
+/// that `starts_clause_text_lower` recognizes as fresh instructions — "You gain
+/// …", "Each opponent …", "All creatures …" — are NOT token anaphors and must be
+/// allowed to split, so they are deliberately absent here (issue #5844 review).
+/// "The …" is likewise absent: it is not a `starts_clause_text_lower` starter, so
+/// "The token is goaded" already fails the authority check and stays attached
+/// without an explicit guard.
+fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("it "),
+        tag("its "),
+        tag("that "),
+        tag("this "),
+        tag("those "),
+        tag("they "),
+    ))
+    .parse(remainder_lower)
+    .is_ok()
 }
 
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
@@ -7870,6 +7928,83 @@ mod tests {
             "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\" The token is goaded.",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn quoted_grant_splits_before_imperative_sibling_sentence() {
+        // CR 111.3 + CR 608.2c (issue #5844): Alien Invasion — the token's quoted
+        // ability ends the sentence (`able."`); the following IMPERATIVE sentence
+        // ("Put a +1/+1 counter on it …") is a sibling effect and must split off.
+        // Without the split the token-creation clause swallows it, mis-reading
+        // "for each invasion counter" as the token COUNT and dropping the pump.
+        let chunks = clause_texts(
+            "create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\" Put a +1/+1 counter on it for each invasion counter on this enchantment, then put an invasion counter on this enchantment.",
+        );
+        assert_eq!(
+            chunks[0],
+            "create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\"",
+            "the token + quoted ability must be its own chunk: {chunks:?}"
+        );
+        // allow-noncombinator: structural test assertion over the pre-tokenized chunk vector, not parser dispatch
+        let counter_clause_split_off = chunks.len() >= 2
+            && chunks[1].starts_with("Put a +1/+1 counter on it for each invasion counter"); // allow-noncombinator: same, on the `.starts_with` line
+        assert!(
+            counter_clause_split_off,
+            "the imperative counter sentence must split into its own chunk: {chunks:?}"
+        );
+    }
+
+    /// CR 608.2c (#5844 review): an INDEPENDENT subject-led continuation after a
+    /// granted-ability quote — "You gain …", "Each opponent …", "All creatures …" —
+    /// is a fresh sibling instruction, NOT an anaphor to the created token, so it
+    /// must split off. `starts_clause_text_lower` already recognizes `you `,
+    /// `each `/`each opponent `, and `all ` as clause starters; the anaphor guard
+    /// must not reject them before that authority is consulted, or they stay glued
+    /// to the token clause and are swallowed — the very bug class this PR fixes.
+    #[test]
+    fn quoted_grant_splits_before_independent_subject_continuation() {
+        for (text, expected_head) in [
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" You gain 3 life.",
+                "You gain 3 life",
+            ),
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" Each opponent loses 2 life.",
+                "Each opponent loses 2 life",
+            ),
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" All creatures you control get +1/+1 until end of turn.",
+                "All creatures you control get +1/+1 until end of turn",
+            ),
+        ] {
+            let chunks = clause_texts(text);
+            assert_eq!(
+                chunks[0],
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\"",
+                "the token + quoted ability must stay its own chunk: {chunks:?}"
+            );
+            assert_eq!(
+                chunks.get(1).map(String::as_str),
+                Some(expected_head),
+                "an independent subject-led continuation must split into its own chunk: {chunks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_grant_keeps_anaphoric_subject_continuation() {
+        // The exclusion side of #5844: an anaphoric-SUBJECT continuation after a
+        // token quote ("It gains …", "That creature gets …") refers back to the
+        // CREATED object, not a fresh instruction, so it must stay attached — the
+        // token-creation path resolves the anaphor inline.
+        let chunks = clause_texts(
+            "create a 1/1 white Soldier creature token with \"This creature can't block.\" It gains haste until end of turn.",
+        );
+        assert_eq!(
+            chunks.len(),
+            1,
+            "anaphoric 'It gains …' must not split: {chunks:?}"
+        );
     }
 
     // --- Bare " and " splitting: positive cases (should split) ---

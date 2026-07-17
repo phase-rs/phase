@@ -2723,6 +2723,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }

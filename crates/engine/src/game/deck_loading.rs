@@ -65,6 +65,11 @@ pub struct PlayerDeckPayload {
     pub sideboard: Vec<DeckEntry>,
     #[serde(default)]
     pub commander: Vec<DeckEntry>,
+    /// Commander-family companion held outside the game's 100-card deck.
+    /// The loader accepts this slot only for `GameFormat::uses_commander()`;
+    /// Oathbreaker keeps its separate signature-spell slot.
+    #[serde(default)]
+    pub companion: Vec<DeckEntry>,
     /// CR 717.2: Optional supplementary Attraction deck (typically 10 cards).
     #[serde(default)]
     pub attraction_deck: Vec<DeckEntry>,
@@ -117,6 +122,9 @@ pub struct PlayerDeckList {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    /// Commander-family companion held outside the game's 100-card deck.
+    #[serde(default)]
+    pub companion: Vec<String>,
     #[serde(default)]
     pub attraction_deck: Vec<String>,
     #[serde(default)]
@@ -182,6 +190,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
+        companion: resolve_names(db, &list.companion),
         attraction_deck: resolve_names(db, &list.attraction_deck),
         planar_deck: resolve_names(db, &list.planar_deck),
         scheme_deck: resolve_names(db, &list.scheme_deck),
@@ -205,6 +214,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
+            companion: resolve_names(db, &list.player.companion),
             attraction_deck: resolve_names(db, &list.player.attraction_deck),
             planar_deck: resolve_names(db, &list.player.planar_deck),
             scheme_deck: resolve_names(db, &list.player.scheme_deck),
@@ -217,6 +227,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             main_deck: resolve_names(db, &list.opponent.main_deck),
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
+            companion: resolve_names(db, &list.opponent.companion),
             attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
             planar_deck: resolve_names(db, &list.opponent.planar_deck),
             scheme_deck: resolve_names(db, &list.opponent.scheme_deck),
@@ -232,6 +243,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 main_deck: resolve_names(db, &deck.main_deck),
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
+                companion: resolve_names(db, &deck.companion),
                 attraction_deck: resolve_names(db, &deck.attraction_deck),
                 planar_deck: resolve_names(db, &deck.planar_deck),
                 scheme_deck: resolve_names(db, &deck.scheme_deck),
@@ -394,6 +406,7 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         main_deck: resolve_names(db, &momir_fixed_deck_names()),
         sideboard: Vec::new(),
         commander: Vec::new(),
+        companion: Vec::new(),
         attraction_deck: Vec::new(),
         planar_deck: Vec::new(),
         scheme_deck: Vec::new(),
@@ -678,13 +691,39 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             submitted.to_vec()
         }
     };
+    // CR 702.139a: The Commander-family external companion slot represents one
+    // card, even when a transport bypasses name-list validation and supplies a
+    // resolved entry with an aggregated count. Keep one normalized copy in the
+    // game pool; construction validation remains responsible for rejecting an
+    // oversized submitted list.
+    let dedicated_companion_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
+        if !state.format_config.format.uses_commander() {
+            return Vec::new();
+        }
+        submitted
+            .first()
+            .cloned()
+            .map(|mut entry| {
+                entry.count = 1;
+                vec![entry]
+            })
+            .unwrap_or_default()
+    };
+    let signature_spell_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
+        if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
+            submitted.to_vec()
+        } else {
+            Vec::new()
+        }
+    };
 
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
     // they start identical and diverge via Arc::make_mut on first mutation.
     let p0_main = std::sync::Arc::new(payload.player.main_deck.clone());
     let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
-    let p0_sig = std::sync::Arc::new(payload.player.signature_spell.clone());
+    let p0_companion = std::sync::Arc::new(dedicated_companion_for(&payload.player.companion));
+    let p0_sig = std::sync::Arc::new(signature_spell_for(&payload.player.signature_spell));
     let p0_planar = std::sync::Arc::new(payload.player.planar_deck.clone());
     let p0_scheme = std::sync::Arc::new(payload.player.scheme_deck.clone());
     state
@@ -695,6 +734,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_sideboard: std::sync::Arc::clone(&p0_side),
             current_main: p0_main,
             current_sideboard: p0_side,
+            registered_companion: std::sync::Arc::clone(&p0_companion),
+            current_companion: p0_companion,
             registered_commander: std::sync::Arc::clone(&p0_cmdr),
             current_commander: p0_cmdr,
             registered_signature_spell: std::sync::Arc::clone(&p0_sig),
@@ -707,7 +748,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
     let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
     let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
-    let p1_sig = std::sync::Arc::new(payload.opponent.signature_spell.clone());
+    let p1_companion = std::sync::Arc::new(dedicated_companion_for(&payload.opponent.companion));
+    let p1_sig = std::sync::Arc::new(signature_spell_for(&payload.opponent.signature_spell));
     let p1_scheme = std::sync::Arc::new(payload.opponent.scheme_deck.clone());
     state
         .deck_pools
@@ -717,6 +759,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_sideboard: std::sync::Arc::clone(&p1_side),
             current_main: p1_main,
             current_sideboard: p1_side,
+            registered_companion: std::sync::Arc::clone(&p1_companion),
+            current_companion: p1_companion,
             registered_commander: std::sync::Arc::clone(&p1_cmdr),
             current_commander: p1_cmdr,
             registered_signature_spell: std::sync::Arc::clone(&p1_sig),
@@ -731,7 +775,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         let main = std::sync::Arc::new(ai_deck.main_deck.clone());
         let side = std::sync::Arc::new(sideboard_for(&ai_deck.sideboard));
         let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
-        let sig = std::sync::Arc::new(ai_deck.signature_spell.clone());
+        let companion = std::sync::Arc::new(dedicated_companion_for(&ai_deck.companion));
+        let sig = std::sync::Arc::new(signature_spell_for(&ai_deck.signature_spell));
         let scheme = std::sync::Arc::new(ai_deck.scheme_deck.clone());
         state
             .deck_pools
@@ -741,6 +786,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 registered_sideboard: std::sync::Arc::clone(&side),
                 current_main: main,
                 current_sideboard: side,
+                registered_companion: std::sync::Arc::clone(&companion),
+                current_companion: companion,
                 registered_commander: std::sync::Arc::clone(&cmdr),
                 current_commander: cmdr,
                 registered_signature_spell: std::sync::Arc::clone(&sig),
@@ -825,25 +872,27 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         );
     }
 
-    // Oathbreaker RC: Place signature spells in the command zone at game start.
-    let sig_decks: Vec<(PlayerId, &[DeckEntry])> =
-        std::iter::once((PlayerId(0), payload.player.signature_spell.as_slice()))
-            .chain(std::iter::once((
-                PlayerId(1),
-                payload.opponent.signature_spell.as_slice(),
-            )))
-            .chain(
-                payload
-                    .ai_decks
-                    .iter()
-                    .enumerate()
-                    .map(|(i, d)| (PlayerId((2 + i) as u8), d.signature_spell.as_slice())),
-            )
-            .collect();
-    for (owner, entries) in sig_decks {
-        for entry in entries {
-            for _ in 0..entry.count {
-                create_signature_spell_from_card_face(state, &entry.card, owner);
+    if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
+        // Oathbreaker RC: Place signature spells in the command zone at game start.
+        let sig_decks: Vec<(PlayerId, &[DeckEntry])> =
+            std::iter::once((PlayerId(0), payload.player.signature_spell.as_slice()))
+                .chain(std::iter::once((
+                    PlayerId(1),
+                    payload.opponent.signature_spell.as_slice(),
+                )))
+                .chain(
+                    payload
+                        .ai_decks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, d)| (PlayerId((2 + i) as u8), d.signature_spell.as_slice())),
+                )
+                .collect();
+        for (owner, entries) in sig_decks {
+            for entry in entries {
+                for _ in 0..entry.count {
+                    create_signature_spell_from_card_face(state, &entry.card, owner);
+                }
             }
         }
     }
@@ -1466,6 +1515,56 @@ mod tests {
         assert!(state.deck_pools[0].registered_sideboard.is_empty());
         assert!(state.deck_pools[1].current_sideboard.is_empty());
         assert!(state.deck_pools[1].registered_sideboard.is_empty());
+    }
+
+    #[test]
+    fn load_deck_ignores_signature_spells_outside_oathbreaker() {
+        let mut state = GameState::new_two_player(42);
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                signature_spell: vec![DeckEntry {
+                    card: make_instant_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert!(state.deck_pools[0].current_signature_spell.is_empty());
+        assert!(state.deck_pools[0].registered_signature_spell.is_empty());
+        assert!(state.command_zone.is_empty());
+    }
+
+    #[test]
+    fn load_deck_keeps_oathbreaker_signature_spells_in_the_command_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config = crate::types::format::FormatConfig::oathbreaker();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                signature_spell: vec![DeckEntry {
+                    card: make_instant_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(state.deck_pools[0].current_signature_spell.len(), 1);
+        assert_eq!(state.command_zone.len(), 1);
+        let signature_spell = &state.objects[&state.command_zone[0]];
+        assert!(signature_spell.is_signature_spell());
+        assert_eq!(
+            serde_json::to_value(signature_spell).expect("signature spell must serialize")
+                ["signature_spell"],
+            serde_json::json!({}),
+            "the wire marker must be non-null so clients recognize the signature spell"
+        );
     }
 
     #[test]

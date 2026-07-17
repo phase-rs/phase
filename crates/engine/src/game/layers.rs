@@ -4360,6 +4360,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::GrantStaticAbility { .. }
             | ContinuousModification::RetainPrintedTriggerFromSource { .. }
             | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+            | ContinuousModification::RetainAllOtherAbilitiesFromSource
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
@@ -5082,6 +5083,27 @@ fn apply_continuous_effect_filtered(
     } else {
         None
     };
+    // CR 707.9a: Pre-read the source's entire "other abilities" surface —
+    // printed activated abilities, triggers, statics, and keywords — for the
+    // unbounded retain (Sakashima of a Thousand Faces: "except it has ~'s
+    // other abilities"). The ability granting the copy effect is a
+    // `ReplacementDefinition` (or lives outside these four lists), so no
+    // exclusion index is needed, unlike the single-index retains above.
+    let retained_other_abilities = if matches!(
+        effect.modification,
+        ContinuousModification::RetainAllOtherAbilitiesFromSource
+    ) {
+        state.objects.get(&effect.source_id).map(|src| {
+            (
+                src.base_abilities.as_ref().clone(),
+                src.base_trigger_definitions.as_ref().clone(),
+                src.base_static_definitions.as_ref().clone(),
+                src.base_keywords.clone(),
+            )
+        })
+    } else {
+        None
+    };
     let all_creature_types = state.all_creature_types.clone();
 
     for id in affected_ids {
@@ -5704,6 +5726,39 @@ fn apply_continuous_effect_filtered(
                     }
                 }
             }
+            // CR 707.9a: Retain ALL of the source's other printed abilities on
+            // the copy — activated abilities, triggers, statics, and keywords.
+            // After `CopyValues` overwrote these sets with the copy target's
+            // values, merge the source's own sets back in. Idempotent per-item
+            // (structurally-equal entries collapse into one), mirroring the
+            // single-index retains above.
+            ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+                if let Some((abilities, triggers, statics, keywords)) =
+                    retained_other_abilities.as_ref()
+                {
+                    let obj_abilities = Arc::make_mut(&mut obj.abilities);
+                    for ability in abilities.iter() {
+                        if !obj_abilities.contains(ability) {
+                            obj_abilities.push(ability.clone());
+                        }
+                    }
+                    for trigger in triggers.iter() {
+                        if !obj.trigger_definitions.iter_all().any(|t| t == trigger) {
+                            obj.trigger_definitions.push(trigger.clone());
+                        }
+                    }
+                    for static_def in statics.iter() {
+                        if !obj.static_definitions.iter_all().any(|s| s == static_def) {
+                            obj.static_definitions.push(static_def.clone());
+                        }
+                    }
+                    for keyword in keywords {
+                        if !obj.keywords.contains(keyword) {
+                            obj.keywords.push(keyword.clone());
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -5897,6 +5952,37 @@ pub(crate) fn compute_current_copiable_values(
                     let abilities = Arc::make_mut(&mut values.abilities);
                     if !abilities.iter().any(|a| a == &ability) {
                         abilities.push(ability);
+                    }
+                }
+            }
+            // CR 707.9a: The unbounded "~'s other abilities" retain makes the
+            // source's entire ability/trigger/static/keyword surface part of
+            // the copiable values, so a further copy of this copy (a Clone of
+            // Sakashima-copying-a-Bear, say) still sees them.
+            ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+                if let Some(src) = state.objects.get(&effect.source_id) {
+                    let abilities = Arc::make_mut(&mut values.abilities);
+                    for ability in src.base_abilities.iter() {
+                        if !abilities.contains(ability) {
+                            abilities.push(ability.clone());
+                        }
+                    }
+                    let triggers = Arc::make_mut(&mut values.trigger_definitions);
+                    for trigger in src.base_trigger_definitions.iter() {
+                        if !triggers.contains(trigger) {
+                            triggers.push(trigger.clone());
+                        }
+                    }
+                    let statics = Arc::make_mut(&mut values.static_definitions);
+                    for static_def in src.base_static_definitions.iter() {
+                        if !statics.contains(static_def) {
+                            statics.push(static_def.clone());
+                        }
+                    }
+                    for keyword in &src.base_keywords {
+                        if !values.keywords.contains(keyword) {
+                            values.keywords.push(keyword.clone());
+                        }
                     }
                 }
             }

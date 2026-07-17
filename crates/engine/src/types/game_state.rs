@@ -144,10 +144,9 @@ pub enum ConvokeMode {
     Delve,
 }
 
-/// CR 702.132a: Tracks the once-per-cast Assist offer/decision on a `PendingCast`.
-/// A typed enum (not a bool) so the offered-once guard and the committed
-/// contribution share one field. `Committed` defers the helper's actual mana
-/// spend to `finalize_cast`, so cancelling the cast never leaks tapped lands.
+/// CR 702.132a + CR 601.2h: Tracks the once-per-cast Assist offer and payment
+/// lifecycle on a `PendingCast`. A typed enum (not a bool) keeps the selected
+/// contribution distinct from the irreversible helper-payment boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AssistState {
     /// The Assist offer has not been made for this cast.
@@ -156,9 +155,17 @@ pub enum AssistState {
     /// The offer was made and the caster declined (or contributed nothing).
     Offered,
     /// The caster chose `helper`, who will pay `generic` of the spell's generic
-    /// mana. The caster's owed cost is reduced by `generic` now; the helper's
-    /// sources are tapped only at `finalize_cast` (the non-cancellable commit).
+    /// mana. The caster's owed cost is reduced by `generic` now, but the helper
+    /// has not yet begun paying; the cast remains cancellable.
     Committed { helper: PlayerId, generic: u32 },
+    /// The helper has started paying its committed contribution. This survives
+    /// a paused source-cost replacement so cancellation cannot strand a paid
+    /// prefix or allow the helper contribution to be applied twice on resume.
+    PaymentStarted { helper: PlayerId, generic: u32 },
+    /// The committed helper contribution has been paid. This checkpoint is
+    /// retained if the caster's later mana payment pauses on a replacement
+    /// choice, so the helper is never charged again on resume.
+    Paid { helper: PlayerId, generic: u32 },
 }
 
 /// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip lifecycle for a single
@@ -1600,6 +1607,11 @@ impl From<SearchFoundVisibility> for bool {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingSearchFoundBatch {
     pub searcher: PlayerId,
+    /// CR 701.23a: Owner of the library component actually searched. Bound
+    /// after search prohibitions remove impossible zones; never reconstructed
+    /// from an individual selected card's current zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_owner: Option<PlayerId>,
     pub remaining: Vec<ObjectId>,
     pub survivors: Vec<ObjectId>,
     pub continuation: PendingSearchFoundContinuation,
@@ -1803,6 +1815,73 @@ pub struct PendingBatchDeliveries {
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
+    /// CR 702.85a + CR 616.1: A no-hit Cascade's randomized bottom batch has
+    /// settled (including any redirected cards), so its completion events may
+    /// fire exactly once.
+    CascadeBottomComplete {
+        controller: PlayerId,
+        source_id: ObjectId,
+        exiled_count: u32,
+    },
+    /// CR 701.57a + CR 616.1: A no-hit Discover's randomized bottom batch has
+    /// settled, so the discover resolution completes exactly once.
+    DiscoverBottomComplete { source_id: ObjectId },
+    /// CR 701.57a + CR 616.1: A Discover that found a card has finished placing
+    /// every miss after its cast/hand decision. Its resolution event waits for
+    /// that batch.
+    DiscoverPlacementComplete { source_id: ObjectId },
+    /// CR 701.57a + CR 616.1: A declined Discover's miss batch settled; carry
+    /// the printed hit-to-hand instruction through its own replacement-aware
+    /// delivery before the Discover completion tail.
+    DiscoverDeclined {
+        player: PlayerId,
+        hit_card: ObjectId,
+        source_id: ObjectId,
+    },
+    /// CR 608.2g + CR 701.57a + CR 616.1: A Discover cast rejected at
+    /// finalization waits for the miss batch before its replacement-aware
+    /// hit-to-hand delivery and priority tail.
+    ResolutionCastRejectedToHand {
+        player: PlayerId,
+        hit_card: ObjectId,
+        source_id: ObjectId,
+    },
+    /// CR 701.57a + CR 616.1: The declined Discover's replacement-aware
+    /// hit-to-hand delivery settled, so its resolution event and continuation
+    /// may run exactly once.
+    DiscoverDeclinedComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
+    /// CR 608.2g + CR 701.57a + CR 616.1: The rejected Discover hit's
+    /// replacement-aware hand delivery settled, so its resolution event and
+    /// priority restoration may run exactly once.
+    ResolutionCastRejectionComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
+    /// CR 401.4 + CR 616.1: All requested library placements for one
+    /// PutAtLibraryPosition instruction have settled. Source-linked exile
+    /// bookkeeping and the resolution event occur only after the full batch.
+    PutOnTopComplete {
+        source_id: ObjectId,
+        removed_exile_links: Vec<ObjectId>,
+    },
+    /// CR 614.1 + CR 616.1: A PutOnTopOrBottom object's Library delivery has settled, so
+    /// its chained resolution tail may run exactly once.
+    TopOrBottomComplete { player: PlayerId },
+    /// CR 614.1 + CR 616.1 + CR 608.2c: A Dig kept-card batch settled outside
+    /// the battlefield. Its rest routing, tracked-set publication, and
+    /// continuation drain must follow the delivery, while the published set and
+    /// parent-target continuation set remain independently typed.
+    DigKeptDeliveryComplete {
+        player: PlayerId,
+        source_id: Option<ObjectId>,
+        rest_cards: Vec<ObjectId>,
+        rest_destination: Zone,
+        publish_tracked_set: Vec<ObjectId>,
+        continuation_targets: Vec<ObjectId>,
+    },
     /// CR 701.25a: After the surveil rest pile reaches the graveyard, the kept
     /// cards rest on top of the player's library in the chosen order
     /// (`top_cards[0]` becomes the topmost card).
@@ -1816,15 +1895,19 @@ pub enum BatchCompletion {
         player: PlayerId,
         revealed: Vec<ObjectId>,
     },
-    /// CR 303.4f / CR 616.1 + CR 701.20b: A reveal-until / dig kept card routed
-    /// onto the battlefield paused on an as-enters choice (aura host pick or a
-    /// replacement-ordering prompt) before the unkept "rest pile" was moved.
-    /// Defer the rest-pile move + reveal-marker cleanup onto the parked batch
-    /// tail so it runs exactly once after the kept card's entry resolves —
-    /// otherwise the rest cards strand in the library (the early-`return` bug).
+    /// CR 614.1 + CR 616.1 + CR 701.20b: A reveal-until / dig kept-card
+    /// delivery paused before its unkept "rest pile" was moved. Defer the
+    /// rest-pile move + reveal-marker cleanup onto the parked batch tail so it
+    /// runs exactly once after the kept delivery settles — otherwise the rest
+    /// cards strand in the library (the early-`return` bug).
     RevealRestPile {
         /// The player whose continuation drains after the pile lands.
         player: PlayerId,
+        /// CR 400.7: The resolving effect's source, preserved so any rest-pile
+        /// requests rebuilt after an earlier kept-card pause retain their
+        /// original attribution. `None` retains the legacy self-anchor only for
+        /// synthesized test/compatibility states that have no ability source.
+        source_id: Option<ObjectId>,
         /// Unkept cards to move once the kept card finishes entering.
         rest_cards: Vec<ObjectId>,
         /// Where the rest pile goes (`Library` => bottom in a reposition, else
@@ -1843,6 +1926,33 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+    },
+    /// CR 608.2c + CR 616.1: The rest half of a deterministic mass Dig settled
+    /// after a replacement choice. Resume its selected-card delivery only now,
+    /// preserving the printed rest-before-kept sequence across the pause.
+    DigMassPutAllRestComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        selected: Vec<ObjectId>,
+        destination: Zone,
+        enter_tapped: EtbTapState,
+    },
+    /// CR 608.2c + CR 616.1: Every selected card of a deterministic mass Dig
+    /// has settled. Publish only cards that actually reached `destination`, then
+    /// emit the parent Dig result; the normal resolver/resume path owns the
+    /// continuation drain.
+    DigMassPutAllComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        selected: Vec<ObjectId>,
+        destination: Zone,
+    },
+    /// CR 608.2c + CR 616.1: A prior-look Dig's automatic rest move settled.
+    /// The private-look window and parent resolution event remain live until the
+    /// full replacement-aware batch has finished.
+    DigPriorLookRestComplete {
+        player: PlayerId,
+        source_id: ObjectId,
     },
     /// CR 610.3 + CR 614.1c: An "exile until ~ leaves" return (Banisher Priest /
     /// Fiend Hunter / Oblivion Ring class) routed its exiled cards back to the
@@ -1910,7 +2020,11 @@ pub enum BatchCompletion {
     /// CR 701.23a + CR 616.1: A found-card replacement sent the card through a
     /// zone move that itself paused for replacement ordering. Resume the saved
     /// found-card batch only after that move finishes.
-    SearchFoundZoneDelivery { object_id: ObjectId },
+    SearchFoundZoneDelivery {
+        object_id: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<crate::types::proposed_event::BoundSearchFoundGrant>,
+    },
     /// CR 701.42 + CR 616.1: both selected meld referents have completed their
     /// simultaneous exile attempts. The typed context survives any replacement
     /// ordering pauses so physical-pair validation runs exactly once afterward.
@@ -2341,6 +2455,28 @@ pub enum ActivationResidual {
     ManaLeg,
 }
 
+/// CR 601.2c + CR 602.2b: Tracks whether an activation's target-declaration
+/// step has completed before a later payment continuation reaches the stack.
+///
+/// This is intentionally distinct from `ActivationResidual`: the latter owns
+/// unpaid cost legs, while this lifecycle records the completed target step.
+/// A typed state prevents an explicitly declined optional target from being
+/// presented again after a cost-move replacement pause.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ActivationTargetSelection {
+    #[default]
+    Pending,
+    Settled,
+}
+
+impl ActivationTargetSelection {
+    /// `true` iff target declaration has not completed; used to omit the
+    /// default from serialized pending roots for legacy save compatibility.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
 impl ActivationResidual {
     /// `true` iff no residual detour was taken. Used as the serde
     /// `skip_serializing_if` predicate so the default does not hit the wire.
@@ -2354,6 +2490,12 @@ pub struct DeferredSacrificeSelection {
     pub object_id: ObjectId,
     pub filter: TargetFilter,
 }
+
+/// Stable identity of a permission in a spell object's `casting_permissions`
+/// vector while that spell is being cast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CastingPermissionIndex(pub usize);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
@@ -2391,6 +2533,11 @@ pub struct PendingCast {
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
     #[serde(default)]
     pub casting_variant: CastingVariant,
+    /// CR 601.2a: Object-attached permission elected for this cast. Keeping the
+    /// exact index prevents payment concessions from leaking between competing
+    /// `PlayFromExile` / `ExileWithAltCost` grants on the same object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub casting_permission_index: Option<CastingPermissionIndex>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
@@ -2504,6 +2651,10 @@ pub struct PendingCast {
     /// across a multiplayer save/restore.
     #[serde(default, skip_serializing_if = "ActivationResidual::is_none")]
     pub activation_residual: ActivationResidual,
+    /// CR 601.2c + CR 602.2b: Preserves a completed activation target step
+    /// through a cost-payment continuation without conflating it with cost legs.
+    #[serde(default, skip_serializing_if = "ActivationTargetSelection::is_pending")]
+    pub activation_target_selection: ActivationTargetSelection,
     /// CR 118.9 + CR 601.2b: When this cast is offered a once-per-turn
     /// `CastWithAlternativeCost` grant (As Foretold), the granting permanent's id.
     /// Carried across the `OptionalCostChoice` round-trip so the accept handler can
@@ -2543,12 +2694,124 @@ pub enum PendingCostMoveCompletion {
     },
 }
 
-/// CR 601.2h + CR 614.12a + CR 616.1: A cost move paused for a replacement
+/// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
+/// the activator to choose the produced mana. An auto-tap plan already selected
+/// production; a direct activation has not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityCostResolutionMode {
+    #[default]
+    Interactive,
+    AutoResolved,
+}
+
+/// CR 605.3b + CR 616.1: Re-entry ownership for a costed parent mana ability.
+/// This state exists only with a parent frame, so a parentless cursor cannot be
+/// marked suspended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityCostParentLifecycle {
+    #[default]
+    Synchronous,
+    Suspended,
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A parent mana ability while
+/// one of its mana sub-cost sources is resolving. The parent cursor still
+/// contains its current Mana component, because that component is unpaid until
+/// the child has produced mana and the parent can spend it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityCostParent {
+    pub pending: Box<PendingManaAbility>,
+    pub cursor: Box<ManaAbilityCostCursor>,
+    #[serde(default)]
+    pub lifecycle: ManaAbilityCostParentLifecycle,
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: The unpaid suffix of an
+/// activated mana ability's cost. The selected-list cursors prevent a
+/// replacement-choice resume from re-paying components or selections that
+/// already completed before the interrupted move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityCostCursor {
+    pub remaining: Vec<AbilityCost>,
+    /// Direct auto-tap resolution has already chosen its production path and
+    /// therefore must not surface an output-color prompt after a paused cost
+    /// move resumes. Interactive activation retains the prompt.
+    #[serde(default)]
+    pub resolution_mode: ManaAbilityCostResolutionMode,
+    /// CR 605.3c: Ancestor mana sources excluded while a nested mana sub-cost
+    /// is being auto-paid. Serialized with the root so a replacement choice
+    /// cannot re-enable a suspended source after the move resumes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_sources: Vec<ObjectId>,
+    /// CR 107.4b + CR 118.10: Colored demand from an outer mana payment.
+    /// Preserving it prevents a resumed nested activation from consuming mana
+    /// reserved for the outer cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_cost_demand: Option<[u32; 5]>,
+    #[serde(default)]
+    pub next_tapper: usize,
+    #[serde(default)]
+    pub next_discard: usize,
+    #[serde(default)]
+    pub next_exiled: usize,
+    #[serde(default)]
+    pub next_sacrificed: usize,
+    /// The current selected-exile component, after the move that paused has
+    /// been consumed. Its remaining objects must move before the cost cursor
+    /// advances to the next component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_exile_remaining: Option<Vec<ObjectId>>,
+    /// The current selected-sacrifice component, after the sacrifice that
+    /// paused has been consumed. Its remaining objects must be sacrificed
+    /// before the cost cursor advances to the next component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_sacrifice_remaining: Option<Vec<ObjectId>>,
+    /// CR 603.2 + CR 603.3b: Cost events produced before a replacement-choice
+    /// pause cannot reach the ordinary post-action pipeline. Keep them with
+    /// their typed payment root so observers are collected exactly once when
+    /// that root completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_cost_events: Vec<GameEvent>,
+    /// Ephemeral split point for the active reducer action. It lets a newly
+    /// nested typed root prepend its parent's unscanned batch without copying
+    /// the local events this root already captured on pause. The split is
+    /// consumed before state is returned to a player, so it is not serialized.
+    #[serde(skip)]
+    pub current_action_deferred_start: usize,
+    /// A nested costed mana source owns this parent until it completes. This
+    /// is a typed activation stack, never an effect continuation: on child
+    /// completion the parent resumes its current unpaid Mana component without
+    /// replaying any paid prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Box<ManaAbilityCostParent>>,
+}
+
+/// CR 601.2h + CR 602.2b + CR 616.1: The typed terminal path for a
+/// replacement-paused sacrifice cost. Selected sacrifices remove their
+/// activation-cost component; a SelfRef sacrifice resumes the automatic
+/// additional-cost path without replaying the sacrifice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PendingSacrificeCostCompletion {
+    SelectedNonSelf,
+    SelfRef,
+}
+
+/// CR 601.2h + CR 614.1 + CR 616.1: A cost move paused for a replacement
 /// choice. `Cast` resumes a cast or activation after its next object is
 /// delivered. `ReplacementMayCost` keeps the outer optional replacement parked
 /// while an inner MayCost move finishes through the replacement pipeline.
 /// `Foretell` records the special action until its replacement-aware exile move
-/// has been delivered or prevented.
+/// has been delivered or prevented. `ManaAbilityPayment` owns the exact
+/// activation and unpaid payment cursor until the move has settled.
+/// `DelveManaPayment` owns the single Delve fuel's post-move payment state;
+/// the zone pipeline's delivery tail owns its delivered-only exile link.
+/// `SacrificeForCost` owns a full selected sacrifice component across one or
+/// more replacement-choice action boundaries, including its event span and
+/// LKI record identities. `CollectEvidencePayment` and `UnlessBouncePayment`
+/// retain their selected-object program counters and exact completion tails.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PendingCostMoveResume {
     Cast {
@@ -2560,6 +2823,24 @@ pub enum PendingCostMoveResume {
         paused_at_index: usize,
         destination: Zone,
         completion: PendingCostMoveCompletion,
+    },
+    SacrificeForCost {
+        player: PlayerId,
+        pending: Box<PendingCast>,
+        chosen: Vec<ObjectId>,
+        /// Index into `chosen` whose sacrifice completes or is prevented by
+        /// the replacement action. Resumption continues at the next index.
+        paused_at_index: usize,
+        completion: PendingSacrificeCostCompletion,
+        /// CR 603.2 + CR 603.10a: Cost events emitted in earlier actions of
+        /// this one logical sacrifice payment. They are stamped and settled
+        /// only when every selected sacrifice has completed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deferred_cost_events: Vec<GameEvent>,
+        /// CR 603.10a: Per-turn LKI record identities emitted by completed
+        /// sacrifices before a replacement-choice boundary.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        departure_record_indices: Vec<usize>,
     },
     ReplacementMayCost {
         source_id: ObjectId,
@@ -2577,6 +2858,34 @@ pub enum PendingCostMoveResume {
         object_id: ObjectId,
         cost: ManaCost,
         turn_foretold: u32,
+    },
+    DelveManaPayment {
+        player: PlayerId,
+        fuel_id: ObjectId,
+    },
+    /// CR 701.59a + CR 614.1 + CR 616.1: The selected evidence cards are
+    /// exiled one at a time as a cost. A replacement choice settles the card
+    /// at `paused_at_index`; resumption continues with the unpaid suffix and
+    /// performs the linked completion exactly once.
+    CollectEvidencePayment {
+        player: PlayerId,
+        chosen: Vec<ObjectId>,
+        paused_at_index: usize,
+        resume: Box<CollectEvidenceResume>,
+    },
+    /// CR 118.12 + CR 614.1 + CR 616.1: A selected return-to-hand unless cost
+    /// awaits its replacement outcome. Its typed tail either surfaces the next
+    /// return choice or records that the unless payment avoided the effect.
+    UnlessBouncePayment {
+        player: PlayerId,
+        moved: ObjectId,
+        permanents: Vec<ObjectId>,
+        pending_effect: Box<ResolvedAbility>,
+        remaining: u32,
+    },
+    ManaAbilityPayment {
+        pending: Box<PendingManaAbility>,
+        cursor: ManaAbilityCostCursor,
     },
 }
 
@@ -2612,6 +2921,7 @@ impl PendingCast {
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
@@ -2633,6 +2943,7 @@ impl PendingCast {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
         }
     }
@@ -2666,11 +2977,30 @@ pub enum CollectEvidenceResume {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaAbilityResume {
     Priority,
+    /// CR 116.2g + CR 702.139a + CR 605.3b + CR 616.1: A companion special
+    /// action whose auto-tapped mana source paused on a replacement-aware cost
+    /// move. `cost` is the final cost locked at action initiation, after
+    /// special-action reductions; resumption must not recompute it against a
+    /// changed board.
+    CompanionToHand {
+        player: PlayerId,
+        cost: ManaCost,
+    },
     ManaPayment {
+        /// The payer of the outer spell/ability cost. This is intentionally
+        /// independent from `PendingManaAbility::player`: Assist can activate
+        /// a helper-controlled mana source while returning to the caster's
+        /// `WaitingFor::ManaPayment` root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outer_player: Option<PlayerId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         convoke_mode: Option<ConvokeMode>,
     },
     UnlessPayment {
+        /// The player who owns the outer unless-payment poll. It can differ
+        /// from the controller of a helper mana source activated while paying.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outer_player: Option<PlayerId>,
         /// CR 118.12: Carried-through cost from `WaitingFor::UnlessPayment`.
         /// See the matching `WaitingFor::UnlessPayment.cost` doc-comment for
         /// the legacy-shape deserialization contract. Boxed so the
@@ -2688,6 +3018,33 @@ pub enum ManaAbilityResume {
         /// mana ability mid-payment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+    },
+    /// CR 118.12 + CR 605.3b + CR 616.1: A resolving `Effect::PayCost` whose
+    /// auto-tapped mana source paused on a replaceable cost move. The exact
+    /// payer-adjusted ability and concrete outer cost are retried by the cost
+    /// authority after that source finishes; this is not an effect-chain
+    /// continuation.
+    EffectPayCost {
+        payer: PlayerId,
+        return_to: PlayerId,
+        ability: Box<ResolvedAbility>,
+        cost: Box<AbilityCost>,
+    },
+    /// CR 107.4f + CR 601.2f-h + CR 605.3b + CR 616.1: Submitted
+    /// Phyrexian shard choices remain authoritative while a helper's or
+    /// caster's auto-tapped mana source pauses on a replaceable cost move.
+    /// The pending cast is restored by the finalizer; this root retries that
+    /// exact finalization rather than falling back to either player's priority.
+    PhyrexianCastPayment {
+        caster: PlayerId,
+        choices: Vec<ShardChoice>,
+    },
+    /// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: An automatic cast or
+    /// mana-leg activation paused while an auto-tapped source paid a cost.
+    /// The live `PendingCast` is the authoritative root; retry its shared
+    /// finalizer rather than returning to priority or opening a manual window.
+    FinalizePendingManaPayment {
+        player: PlayerId,
     },
 }
 
@@ -2765,6 +3122,13 @@ pub struct PendingManaAbility {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
+    /// CR 605.3b + CR 616.1: An auto-tapped mana source normally returns to
+    /// its immediate caller. If one of its own cost moves pauses, this is the
+    /// serialized outer payment root that must be promoted before resumption.
+    /// Keeping it separate prevents synchronous auto-taps from replaying an
+    /// already-live outer payment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_move_resume: Option<ManaAbilityResume>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_tappers: Vec<ObjectId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3061,6 +3425,14 @@ pub struct PlayerDeckPool {
     pub registered_sideboard: std::sync::Arc<Vec<DeckEntry>>,
     pub current_main: std::sync::Arc<Vec<DeckEntry>>,
     pub current_sideboard: std::sync::Arc<Vec<DeckEntry>>,
+    /// Commander-family companion registered outside the 100-card deck. This
+    /// is intentionally distinct from `current_sideboard`: Commander games do
+    /// not use sideboards (CR 903.5e), while a companion remains outside the
+    /// game until it is revealed (CR 702.139a).
+    #[serde(default)]
+    pub registered_companion: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_companion: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
@@ -3088,6 +3460,67 @@ pub struct PlayerDeckPool {
     /// compatibility with saved states and test fixtures that omit the field.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+}
+
+/// The authoritative source of a companion offered during pre-game setup.
+///
+/// Keeping the provenance in the offered value (rather than exposing an
+/// untyped index) makes a response self-validating across independent deck
+/// pools and prevents a stale client from selecting a different card after a
+/// pool changes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CompanionChoiceSource {
+    Sideboard { index: usize },
+    Dedicated,
+}
+
+/// One companion offer published by `WaitingFor::CompanionReveal`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct CompanionRevealChoice {
+    pub name: String,
+    pub source: CompanionChoiceSource,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CompanionRevealChoiceWire {
+    Current {
+        name: String,
+        source: CompanionChoiceSource,
+    },
+    /// Legacy saves encoded each normal-format offer as `(name, sideboard_index)`.
+    /// The old engine never offered a Commander companion, so that representation
+    /// unambiguously maps to the typed sideboard source.
+    LegacySideboard((String, usize)),
+}
+
+impl<'de> Deserialize<'de> for CompanionRevealChoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match CompanionRevealChoiceWire::deserialize(deserializer)? {
+            CompanionRevealChoiceWire::Current { name, source } => Ok(Self { name, source }),
+            CompanionRevealChoiceWire::LegacySideboard((name, index)) => Ok(Self {
+                name,
+                source: CompanionChoiceSource::Sideboard { index },
+            }),
+        }
+    }
+}
+
+/// A player's complete response to a pre-game companion offer.
+///
+/// This is deliberately an enum rather than `Option<CompanionRevealChoice>`:
+/// serde treats a missing `Option` field as `None`, which would turn an
+/// incompatible legacy `card_index` payload into a silent decline. The wire
+/// response must make both revealing and declining explicit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CompanionDeclaration {
+    Reveal(CompanionRevealChoice),
+    Decline,
 }
 
 /// CR 400.11/400.11a/400.11b: Tracks sideboard cards brought into this game
@@ -3554,11 +3987,17 @@ pub enum CastOfferKind {
         hit_card: ObjectId,
         exiled_misses: Vec<ObjectId>,
         source_mv: u32,
+        /// CR 702.85a: Preserve the cascading ability's source across the
+        /// cast-offer boundary for a declined or rejected cleanup batch.
+        source_id: ObjectId,
     },
     /// CR 701.57a: Discover — cast the discovered card or put it to hand.
     Discover {
         hit_card: ObjectId,
         exiled_misses: Vec<ObjectId>,
+        /// CR 701.57a: Preserve the resolving discover ability's source across
+        /// the cast-offer boundary for a declined or rejected cleanup batch.
+        source_id: ObjectId,
         /// CR 701.57a: "Discover N" — the resulting spell's mana value must be
         /// less than or equal to N for the cast to proceed. Carried on the
         /// offer so the cast-during-resolution path can build the `ManaValue`
@@ -3575,6 +4014,9 @@ pub enum CastOfferKind {
         hit_card: ObjectId,
         remaining_hits: Vec<ObjectId>,
         revealed_misses: Vec<ObjectId>,
+        /// CR 702.60a: Preserve the resolving Ripple source for its shared
+        /// bottom-placement cleanup.
+        source_id: ObjectId,
     },
     /// CR 608.2g + CR 601.2 + CR 118.9: Interactive free-cast window opened by
     /// `Effect::FreeCastFromZones` (Invoke Calamity). The controller repeatedly
@@ -4185,6 +4627,10 @@ pub enum WaitingFor {
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {
         player: PlayerId,
+        /// CR 701.23a: Owner of the library component actually included in
+        /// this search after prohibitions are applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_owner: Option<PlayerId>,
         /// Object IDs of legal choices (pre-filtered from library).
         cards: Vec<ObjectId>,
         /// How many cards to select.
@@ -5318,8 +5764,9 @@ pub enum WaitingFor {
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
-        /// Eligible companion cards from sideboard: (card_name, sideboard_index).
-        eligible_companions: Vec<(String, usize)>,
+        /// The exact companions the player may reveal, including their source.
+        /// Responses must exactly equal one of these offered values.
+        eligible_companions: Vec<CompanionRevealChoice>,
     },
     /// CR 704.5j: Player chooses which legendary permanent to keep.
     /// The rest are put into their owners' graveyards (not destroyed — indestructible does not apply).
@@ -7340,6 +7787,11 @@ pub struct GameState {
     /// state equality — it is empty outside the synchronous finalize window.
     #[serde(skip)]
     pub active_payment_pins: Vec<ManaPipId>,
+    /// CR 601.2a: transient copy of the object-attached casting permission
+    /// identity while finalization owns the `PendingCast` by value. Payment
+    /// consults it only inside that synchronous window; it is never serialized.
+    #[serde(skip)]
+    pub active_casting_permission_index: Option<CastingPermissionIndex>,
 
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
@@ -10337,6 +10789,7 @@ impl GameState {
             // `ManaPipId(0)` unstamped sentinel.
             next_pip_id: 1,
             active_payment_pins: Vec::new(),
+            active_casting_permission_index: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
             stack_paid_facts: HashMap::new(),
@@ -11336,6 +11789,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_object_id: _,
         next_pip_id: _,
         active_payment_pins: _,
+        active_casting_permission_index: _,
         battlefield: _,
         stack: _,
         stack_paid_facts: _,
@@ -12081,6 +12535,7 @@ mod tests {
     fn search_found_visibility_preserves_legacy_boolean_wire_shape() {
         let batch = PendingSearchFoundBatch {
             searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
             remaining: vec![ObjectId(7)],
             survivors: vec![ObjectId(8)],
             continuation: PendingSearchFoundContinuation::Standard { split: None },
@@ -12112,6 +12567,37 @@ mod tests {
                 .expect("deserialize pre-field SearchFound batch")
                 .visibility,
             SearchFoundVisibility::Private
+        );
+    }
+
+    #[test]
+    fn search_found_delivery_grant_round_trips_and_legacy_defaults() {
+        let completion = BatchCompletion::SearchFoundZoneDelivery {
+            object_id: ObjectId(7),
+            grant: Some(crate::types::proposed_event::BoundSearchFoundGrant {
+                source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(9), 3),
+                controller: PlayerId(0),
+                grantee: PlayerId(1),
+                mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+            }),
+        };
+        let json = serde_json::to_value(&completion).expect("serialize bound delivery grant");
+        assert_eq!(
+            serde_json::from_value::<BatchCompletion>(json)
+                .expect("deserialize bound delivery grant"),
+            completion
+        );
+
+        let legacy = serde_json::json!({
+            "SearchFoundZoneDelivery": { "object_id": 7 }
+        });
+        assert_eq!(
+            serde_json::from_value::<BatchCompletion>(legacy)
+                .expect("deserialize pre-grant delivery completion"),
+            BatchCompletion::SearchFoundZoneDelivery {
+                object_id: ObjectId(7),
+                grant: None,
+            }
         );
     }
 
@@ -13018,6 +13504,7 @@ mod tests {
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
                 casting_variant: CastingVariant::Normal,
+                casting_permission_index: None,
                 cast_timing_permission: None,
                 distribute: None,
                 origin_zone: Zone::Hand,
@@ -13039,6 +13526,7 @@ mod tests {
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
                 activation_residual: ActivationResidual::None,
+                activation_target_selection: ActivationTargetSelection::Pending,
                 alt_cost_grant_source: None,
             })
         }
@@ -13388,6 +13876,7 @@ mod tests {
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
@@ -13409,6 +13898,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            activation_target_selection: ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
         });
         let choose_x = WaitingFor::ChooseXValue {
@@ -13474,6 +13964,7 @@ mod tests {
                     ability_snapshot: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
+                    cost_move_resume: None,
                     chosen_tappers: Vec::new(),
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
@@ -13623,6 +14114,40 @@ mod tests {
                 contributions: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn companion_reveal_legacy_sideboard_offer_deserializes() {
+        let json = r#"{
+            "type":"CompanionReveal",
+            "data":{
+                "player":0,
+                "eligible_companions":[["Lurrus of the Dream-Den",2]]
+            }
+        }"#;
+        let waiting_for: WaitingFor = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            waiting_for,
+            WaitingFor::CompanionReveal {
+                player: PlayerId(0),
+                eligible_companions: vec![CompanionRevealChoice {
+                    name: "Lurrus of the Dream-Den".to_string(),
+                    source: CompanionChoiceSource::Sideboard { index: 2 },
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn deck_pool_without_dedicated_companion_defaults_to_empty() {
+        let mut json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("registered_companion");
+        fields.remove("current_companion");
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert!(pool.registered_companion.is_empty());
+        assert!(pool.current_companion.is_empty());
     }
 
     #[test]

@@ -42,24 +42,27 @@ fn parse_two_layer_with_keywords(
 /// to give it a private one. `OracleDocIr.diagnostics` is the single warning
 /// channel; `parse_warnings` is a copy of it.
 ///
-/// Fixture is pool-verified, not synthetic: Intermediate Chirography's Oracle text
-/// is verbatim MTGJSON, and it carries a live `Duration_ThisTurn` swallowed-clause
-/// warning in shipped `card-data.json` (M1 defect ledger → issue #5638) — the
-/// "this turn" in its level-3 trigger is not represented in the parse. A synthetic
-/// fixture could go vacuously green if the detector stopped firing; this one cannot
-/// without that separately-tracked defect being fixed.
+/// Fixture is pool-verified, not synthetic: Boing!'s Oracle text is verbatim
+/// MTGJSON, and it carries a live `DynamicQty` swallowed-clause warning — "scry
+/// a number of cards equal to the result" lowers to a fixed `Scry` count, so
+/// the die-result-dependent quantity is genuinely dropped from the parse. A
+/// synthetic fixture could go vacuously green if the detector stopped firing;
+/// this one cannot without that separately-tracked defect being fixed.
+///
+/// (Intermediate Chirography previously served as this fixture, but issue
+/// #5638's fix taught `parse_class_oracle_text` to compose a level-gated
+/// trigger's printed intervening-if with its `ClassLevelGE` condition instead
+/// of overwriting it — the card's `Duration_ThisTurn` warning was that
+/// overwrite silently dropping the "this turn" scoped condition, and is gone
+/// now that the condition survives.)
 #[test]
 fn swallow_diagnostics_are_homed_in_the_doc_ir_channel() {
     let (ir, lowered) = parse_two_layer(
-        "(Gain the next level as a sorcery to add its ability.)\n\
-         When this Class enters, create a 2/1 white and black Inkling creature token with flying.\n\
-         {1}{B}: Level 2\n\
-         Whenever you lose life for the first time each turn, put a +1/+1 counter on target creature you control.\n\
-         {2}{B}: Level 3\n\
-         At the beginning of each end step, if a modified creature died under your control this turn, create a 2/1 white and black Inkling creature token with flying. (Equipment, Auras you control, and counters are modifications.)",
-        "Intermediate Chirography",
-        &["Enchantment"],
-        &["Class"],
+        "Return target creature to its owner's hand, then roll a six-sided die. \
+         If the result is 3 or less, scry a number of cards equal to the result.",
+        "Boing!",
+        &["Instant"],
+        &[],
     );
 
     // (a) The re-homing itself. Before this change the audit wrote to a private vec

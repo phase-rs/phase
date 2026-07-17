@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -363,9 +363,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_version_tracks_meld_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 16);
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 15);
+    fn protocol_version_tracks_companion_wire_additions() {
+        assert_eq!(PROTOCOL_VERSION, 17);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 16);
     }
 
     #[test]

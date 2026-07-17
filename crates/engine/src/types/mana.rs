@@ -343,6 +343,11 @@ pub enum PaymentContext<'a> {
 /// `ManaSpendRestriction::is_coverage_supported`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecialAction {
+    /// CR 116.2g + CR 702.139a: Paying {3} to put a revealed companion from
+    /// outside the game into its owner's hand. This payment uses the mana pool,
+    /// so mana restricted to this exact special action is eligible while mana
+    /// restricted to casting, activating, or another special action is not.
+    CompanionToHand,
     /// CR 116.2m + CR 709.5e: Paying a locked Room half's unlock cost to give
     /// the permanent the appropriate unlocked designation.
     UnlockDoor,
