@@ -122,17 +122,13 @@ pub fn commander_lethal_headroom(
 /// the last SBA check. Their owner may put them into the command zone. Returns
 /// the first eligible `(ObjectId, PlayerId, Zone)` tuple, or `None`.
 ///
-/// CR 903.9b (hand/library) is also covered here as an SBA approximation. This
-/// differs from the CR's replacement effect when the intermediate zone change
-/// is observable; a replacement-model migration remains necessary for full
-/// conformance.
+/// CR 903.9b hand/library returns are a replacement effect at the would-move
+/// boundary; see `replacement::commander_hand_or_library_return_applies`.
 ///
-/// CR 903.9c (merged/melded commander): when a commander is a component of a
-/// merged or melded permanent that leaves to hand or library, `split_merged_permanent_on_leave`
-/// places the absorbed commander component into the destination zone with
-/// `is_commander` intact. This function then finds that component here and
-/// returns it — the owner's choice and the subsequent `Zone::Command` move
-/// proceed identically to the standalone case.
+/// CR 903.9c (merged/melded commander): when a commander component is put into
+/// a graveyard or exile as its merged permanent leaves, it retains
+/// `is_commander` and is eligible for this CR 903.9a check like a standalone
+/// commander. Hand/library components are not eligible for this SBA helper.
 pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId, PlayerId, Zone)> {
     state.objects.values().find_map(|obj| {
         // Oathbreaker RC: signature spells return to the command zone just like
@@ -140,11 +136,8 @@ pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId
         if !obj.uses_command_zone_rules() {
             return None;
         }
-        // CR 903.9a: graveyard or exile; CR 903.9b: hand or library.
-        if !matches!(
-            obj.zone,
-            Zone::Graveyard | Zone::Exile | Zone::Hand | Zone::Library
-        ) {
+        // CR 903.9a: only graveyard and exile are state-based returns.
+        if !matches!(obj.zone, Zone::Graveyard | Zone::Exile) {
             return None;
         }
         // Skip if the owner already declined this SBA cycle.
@@ -532,7 +525,7 @@ mod tests {
         assert_eq!(commander_casts_from_command_zone(&state, PlayerId(0)), 1);
     }
 
-    // --- Zone Return Eligibility Tests (CR 903.9a/b) ---
+    // --- Zone Return Eligibility Tests (CR 903.9a) ---
 
     #[test]
     fn eligible_when_commander_in_graveyard() {
@@ -565,16 +558,14 @@ mod tests {
     }
 
     #[test]
-    fn eligible_when_commander_in_hand() {
+    fn not_sba_eligible_when_commander_in_hand() {
         let mut state = setup_commander_game();
         let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kaalia", vec![]);
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
         crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Hand, &mut events);
 
-        let result = commander_eligible_for_zone_return(&state);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().2, Zone::Hand);
+        assert!(commander_eligible_for_zone_return(&state).is_none());
     }
 
     #[test]
@@ -1749,14 +1740,10 @@ mod tests {
         id
     }
 
-    /// CR 903.9c: when a merged permanent with a commander component leaves to
-    /// hand, the SBA offers the owner CommanderZoneChoice for the commander
-    /// component (survivor case: the survivor itself is the commander).
-    ///
-    /// Discriminating: if `commander_eligible_for_zone_return` stops covering
-    /// Zone::Hand, or if `is_commander` is cleared on zone exit, this test fails.
+    /// A hand arrival is not eligible for the CR 903.9a SBA path. CR 903.9b
+    /// owns hand/library moves at the replacement boundary instead.
     #[test]
-    fn cr903_9c_merged_commander_to_hand_sba_offers_zone_choice() {
+    fn merged_commander_hand_arrival_is_not_sba_eligible() {
         use crate::game::sba::check_state_based_actions;
         use crate::types::game_state::WaitingFor;
 
@@ -1793,11 +1780,11 @@ mod tests {
             "is_commander must survive the zone transition"
         );
 
-        // SBA should detect the commander in hand and offer zone-return choice.
+        // CR 903.9a does not offer a post-arrival hand-zone choice.
         check_state_based_actions(&mut state, &mut events);
 
         assert!(
-            matches!(
+            !matches!(
                 state.waiting_for,
                 WaitingFor::CommanderZoneChoice {
                     commander_id,
@@ -1805,20 +1792,16 @@ mod tests {
                     ..
                 } if commander_id == cmd_id
             ),
-            "CR 903.9c: SBA offers CommanderZoneChoice for commander in hand; got {:?}",
+            "CR 903.9a must not approximate the CR 903.9b hand replacement; got {:?}",
             state.waiting_for
         );
     }
 
-    /// CR 903.9c: accepting CommanderZoneChoice for a merged commander in hand
-    /// moves the commander component to Zone::Command.
-    ///
-    /// Discriminating: reverts if the accept branch no longer calls
-    /// `move_to_zone(Zone::Command)` or if the SBA path is broken.
+    /// CR 903.9a regression: the retired hand-zone approximation must not
+    /// produce an SBA `CommanderZoneChoice` for a merged survivor.
     #[test]
-    fn cr903_9c_merged_commander_to_hand_accept_moves_to_command() {
+    fn merged_commander_hand_arrival_does_not_offer_sba_accept() {
         use crate::game::sba::check_state_based_actions;
-        use crate::types::actions::GameAction;
         use crate::types::game_state::WaitingFor;
 
         let mut state = setup_commander_game();
@@ -1843,33 +1826,21 @@ mod tests {
 
         check_state_based_actions(&mut state, &mut events);
         assert!(
-            matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }),
-            "SBA must pause with CommanderZoneChoice"
+            !matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }),
+            "CR 903.9a must not offer a hand-zone commander choice"
         );
-
-        let result = crate::game::engine::apply(
-            &mut state,
-            PlayerId(0),
-            GameAction::DecideOptionalEffect { accept: true },
-        );
-        assert!(result.is_ok(), "accepting zone choice must not error");
-
         assert_eq!(
             state.objects[&cmd_id].zone,
-            Zone::Command,
-            "CR 903.9c: commander component must be in Zone::Command after accepting"
+            Zone::Hand,
+            "the raw fixture move is not retroactively changed by an SBA"
         );
     }
 
-    /// CR 903.9c: declining CommanderZoneChoice for a merged commander in hand
-    /// leaves the commander component in hand (not moved to command zone).
-    ///
-    /// Discriminating: reverts if the decline branch stops setting
-    /// `commander_declined_zone_return` or incorrectly moves to command zone.
+    /// CR 903.9a regression: the retired hand-zone approximation must not
+    /// produce an SBA decline prompt for a merged survivor.
     #[test]
-    fn cr903_9c_merged_commander_to_hand_decline_stays_in_hand() {
+    fn merged_commander_hand_arrival_does_not_offer_sba_decline() {
         use crate::game::sba::check_state_based_actions;
-        use crate::types::actions::GameAction;
         use crate::types::game_state::WaitingFor;
 
         let mut state = setup_commander_game();
@@ -1892,33 +1863,22 @@ mod tests {
 
         crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Hand, &mut events);
         check_state_based_actions(&mut state, &mut events);
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::CommanderZoneChoice { .. }
-        ));
-
-        let result = crate::game::engine::apply(
-            &mut state,
-            PlayerId(0),
-            GameAction::DecideOptionalEffect { accept: false },
-        );
-        assert!(result.is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(
             state.objects[&cmd_id].zone,
             Zone::Hand,
-            "CR 903.9c: declining zone choice must leave commander in hand"
+            "the raw fixture move remains in Hand without the retired SBA prompt"
         );
     }
 
-    /// CR 903.9c: absorbed (non-survivor) commander component is found by the SBA
-    /// after the merged pile leaves to hand.
+    /// CR 903.9a regression: an absorbed commander component in hand is not
+    /// picked up by the retired SBA approximation.
     ///
     /// Discriminating: the commander is the MERGING object, so it becomes an
     /// absorbed component routed exclusively through `merge::put_component_into_zone`
     /// (not `zones::move_to_zone`). If `put_component_into_zone` or
-    /// `apply_zone_exit_cleanup` dropped `is_commander`, the SBA would find nothing
-    /// and the assertion would fail. This is the novel path not covered by the
-    /// survivor-case tests above.
+    /// `apply_zone_exit_cleanup` dropped `is_commander`, the setup assertion
+    /// would fail.
     ///
     /// Setup:
     ///   host_id  = non-commander = TARGET  → survivor (keeps ObjectId, travels
@@ -1926,7 +1886,7 @@ mod tests {
     ///   cmd_id   = commander     = MERGING → absorbed component (travels through
     ///              `put_component_into_zone`, ends in hand with is_commander intact)
     #[test]
-    fn cr903_9c_absorbed_commander_component_in_hand_found_by_sba() {
+    fn absorbed_commander_component_hand_arrival_is_not_sba_eligible() {
         use crate::game::sba::check_state_based_actions;
         use crate::types::game_state::WaitingFor;
 
@@ -1965,11 +1925,11 @@ mod tests {
         );
         assert_eq!(state.objects[&cmd_id].zone, Zone::Hand);
 
-        // SBA must find the absorbed commander component in hand.
+        // CR 903.9a must not turn this hand arrival into an SBA choice.
         check_state_based_actions(&mut state, &mut events);
 
         assert!(
-            matches!(
+            !matches!(
                 state.waiting_for,
                 WaitingFor::CommanderZoneChoice {
                     commander_id,
@@ -1977,7 +1937,7 @@ mod tests {
                     ..
                 } if commander_id == cmd_id
             ),
-            "CR 903.9c: SBA must find the absorbed commander component in hand; got {:?}",
+            "CR 903.9a must not approximate a hand return; got {:?}",
             state.waiting_for
         );
     }

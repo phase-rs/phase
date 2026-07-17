@@ -47,13 +47,16 @@
 //! 702.140d downstream reflexive effects, and the CR 730.3a graveyard/library
 //! arrange-order UI (a deterministic order is used).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::game::printed_cards::intrinsic_copiable_values;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{ContinuousModification, CopiableValues, Duration, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::proposed_event::AppliedReplacementKey;
 use crate::types::zones::Zone;
 
 /// CR 702.140c + CR 730.2a: Which side of the target creature the mutating
@@ -353,16 +356,13 @@ pub(crate) fn install_merge_layer_effect(
 /// Called from the battlefield-exit seam in `zones::move_to_zone` BEFORE the
 /// surviving object is moved. Returns immediately for non-merged objects.
 ///
-/// CR 730.3d (replacement propagation): `dest` is the merged permanent's
-/// *resolved* destination — the merged-permanent leave is a single ZoneChange
-/// event consulted ONCE through `replace_event` (on the survivor) before
-/// `zones::move_to_zone` reaches this seam, so `dest` already reflects any
-/// applied `Moved` redirect (Rest in Peace / Leyline of the Void:
-/// graveyard → exile). Routing every component to that same resolved `dest`
-/// "applies one replacement effect to the object [and thereby] to all components
-/// of the object" — exactly CR 730.3d. Components are explicitly NOT re-consulted
-/// per component here (`put_component_into_zone` routes raw); re-consulting would
-/// double-apply ordering and is rules-wrong per 730.3d.
+/// CR 730.3d (replacement propagation): this raw primitive is retained only
+/// for callers that intentionally bypass the zone pipeline. Normal gameplay
+/// instead enters [`move_merged_permanent_on_leave`], which seeds each component
+/// with the merged event's applied set and lets the shared batch pipeline consult
+/// only still-applicable component replacements. That preserves the rule's
+/// direction that applying a replacement to the merged object applies it to all
+/// components, without suppressing the CR 903.9b-c commander exception.
 ///
 /// CR 730.3e (card-vs-token scope): a "card"-scoped redirect (one that applies to
 /// a card being put into a zone without also including tokens) follows the
@@ -386,17 +386,11 @@ pub(crate) fn install_merge_layer_effect(
 /// survivors and whenever no card-scoped redirect diverges from the survivor's
 /// destination.
 ///
-/// CR 903.9c (merged commander zone redirect): when a commander component is
-/// part of a merged permanent and the whole pile moves to hand or library (CR
-/// 903.9b destination), `put_component_into_zone` places the commander
-/// component in the destination zone with its `is_commander` flag intact. The
-/// next SBA pass calls `commander::commander_eligible_for_zone_return`, which
-/// covers `Zone::Hand | Zone::Library` (CR 903.9b), and presents
-/// `WaitingFor::CommanderZoneChoice` to the owner. On accept the commander
-/// component is moved to `Zone::Command` via `zones::move_to_zone` — the same
-/// path used for standalone commanders. Non-commander components remain in the
-/// destination zone. This function does not need special-case commander logic;
-/// the SBA path handles it identically to the standalone case.
+/// CR 903.9c (merged commander zone redirect): a Hand/Library component is
+/// never delivered through this raw fallback in ordinary play. The pipeline
+/// batch asks its owner the CR 903.9b replacement question before delivery;
+/// accepting places that commander component in Command while the other
+/// components receive their appropriate destinations.
 ///
 /// CR 730.3a deferred: the owner's arrange-order choice for graveyard/library
 /// destinations is not modeled — components are placed in their stored
@@ -466,6 +460,72 @@ pub fn split_merged_permanent_on_leave(
 
     // The surviving object's merge identity is cleared by its own
     // `reset_for_battlefield_exit` during the subsequent `move_to_zone`.
+}
+
+/// CR 730.3d: "If multiple replacement effects could be applied to the event
+/// of a merged permanent leaving the battlefield or being put into the new
+/// zone, applying one of those replacement effects to the object applies it to
+/// all components of the object. If the merged permanent is a commander, it
+/// may be exempt from this rule; see rules 903.9b-c."
+///
+/// This is the normal gameplay route for a merged permanent whose approved
+/// zone-change event is ready to deliver. Every component, including the
+/// survivor, is queued in `move_objects_simultaneously_then`: its inherited
+/// `applied` set prevents a replacement already applied to the merged event
+/// from applying again, while still letting a component-specific replacement
+/// (notably CR 903.9b) consult and pause. The batch owns every pause/restart,
+/// so replacement choices cannot clobber one another or expose partial event
+/// output. The survivor moves through the ordinary mover; absorbed components
+/// retain their `from: None` component-delivery event shape.
+///
+/// CR 903.9c: when an individual commander component accepts the CR 903.9b
+/// Hand/Library replacement, only that component's request changes to Command;
+/// noncommander components remain routed to their appropriate zones.
+pub(crate) fn move_merged_permanent_on_leave(
+    state: &mut GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    applied: &HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let Some(survivor) = state.objects.get(&merged_id) else {
+        return BatchMoveResult::Done;
+    };
+    if survivor.merged_components.is_empty() {
+        return BatchMoveResult::Done;
+    }
+    let components = survivor.merged_components.clone();
+
+    // CR 730.3 + CR 400.7: restore each physical card's own characteristics
+    // before proposing its destination. Clearing this list also prevents the
+    // survivor's ordinary delivery at the tail of this batch from recursively
+    // entering the raw split seam in `zones::move_to_zone`.
+    remove_merge_layer_effect(state, merged_id);
+    crate::game::layers::flush_layers(state);
+    if let Some(survivor) = state.objects.get_mut(&merged_id) {
+        survivor.merged_components.clear();
+        survivor.merge_kind = None;
+    }
+
+    let requests = components
+        .into_iter()
+        .map(|component_id| {
+            if component_id != merged_id {
+                // This live marker distinguishes the absorbed component's
+                // pipeline delivery from an ordinary Battlefield departure.
+                // `put_component_into_zone` restores it after CR 400.7 cleanup.
+                state
+                    .objects
+                    .get_mut(&component_id)
+                    .expect("merged component exists")
+                    .split_from_merge_survivor = Some(merged_id);
+            }
+            ZoneMoveRequest::merged_component(component_id, dest)
+                .with_replacement_applied(applied.clone())
+        })
+        .collect();
+
+    zone_pipeline::move_objects_simultaneously_then(state, requests, None, events)
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness
@@ -590,7 +650,7 @@ fn references_object_that_left(target_filter: &TargetFilter) -> bool {
 /// `zones::add_to_zone` rather than `zones::move_to_zone`, because the component
 /// is absorbed into the survivor (not present in any zone list) and its move must
 /// not be a battlefield exit.
-fn put_component_into_zone(
+pub(crate) fn put_component_into_zone(
     state: &mut GameState,
     component_id: ObjectId,
     dest: Zone,
@@ -608,8 +668,22 @@ fn put_component_into_zone(
     else {
         return;
     };
+    let split_from_merge_survivor = state
+        .objects
+        .get(&component_id)
+        .and_then(|obj| obj.split_from_merge_survivor);
 
     crate::game::zones::route_component(state, component_id, dest);
+
+    // CR 730.3c: `route_component` performs CR 400.7 cleanup and therefore
+    // clears the live marker used to select this special delivery. Restore the
+    // continuity link only after the component has actually reached its new
+    // zone, so a paused replacement cannot expose it as already split.
+    if let Some(survivor_id) = split_from_merge_survivor {
+        if let Some(obj) = state.objects.get_mut(&component_id) {
+            obj.split_from_merge_survivor = Some(survivor_id);
+        }
+    }
 
     let turn_zone_change_index =
         crate::game::restrictions::record_zone_change(state, record.clone());

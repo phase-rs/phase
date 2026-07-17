@@ -63,6 +63,11 @@ const TURN_SCOPED_COMBAT_SKIP_INDEX: usize = usize::MAX - 4;
 /// past cleanup, like shield counters), so a reserved candidate id lets the
 /// CR 616 ordering pipeline own its choice/application.
 const FINALITY_COUNTER_INDEX: usize = usize::MAX - 5;
+/// CR 903.9b: A commander moving to its owner's hand or library may move to
+/// the command zone instead. This is a rules-source replacement rather than a
+/// card-granted `ReplacementDefinition`, so it uses the existing virtual-ID
+/// protocol shared by intrinsic shield, finality, and compleated effects.
+const COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX: usize = usize::MAX - 6;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -161,6 +166,49 @@ fn finality_counter_replacement_id(object_id: ObjectId) -> ReplacementId {
 
 fn is_finality_counter_replacement(rid: ReplacementId) -> bool {
     rid.index == FINALITY_COUNTER_INDEX
+}
+
+fn commander_hand_or_library_return_replacement_id(object_id: ObjectId) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX,
+    }
+}
+
+fn is_commander_hand_or_library_return_replacement(rid: ReplacementId) -> bool {
+    rid.index == COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX
+}
+
+/// Prefer a prospective object's liminal projection when one exists, so a
+/// replacement redirected to Hand/Library still sees the entering card's
+/// command-zone identity.
+fn commander_hand_or_library_return_object(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<&GameObject> {
+    state
+        .liminal_entries
+        .get(&object_id)
+        .map(|entry| &entry.object)
+        .or_else(|| state.objects.get(&object_id))
+}
+
+/// CR 903.9b: The rules-source replacement is available only in a command-zone
+/// format, for a commander/signature spell, and only while its proposed move
+/// would put it into its owner's hand or library.
+fn commander_hand_or_library_return_applies(state: &GameState, event: &ProposedEvent) -> bool {
+    let ProposedEvent::ZoneChange { object_id, to, .. } = event else {
+        return false;
+    };
+    matches!(to, Zone::Hand | Zone::Library)
+        && state.format_config.command_zone
+        && commander_hand_or_library_return_object(state, *object_id).is_some_and(|object| {
+            // CR 903.9c: a merged/melded commander does not redirect the
+            // undivided permanent to Command. Its leave delivery is expanded
+            // into component requests, where each commander independently
+            // receives the CR 903.9b choice before reaching Hand/Library.
+            object.uses_command_zone_rules() && object.merged_components.is_empty()
+        })
 }
 
 /// CR 122.1h: A permanent has the finality death→exile redirect while it carries
@@ -836,6 +884,29 @@ pub(crate) fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
         mode,
         ReplacementMode::Optional { .. } | ReplacementMode::MayCost { .. }
     )
+}
+
+/// Whether a replacement needs the shared accept/decline prompt. Rules-source
+/// replacements use the same prompt seam as optional card definitions.
+fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> bool {
+    is_commander_hand_or_library_return_replacement(rid)
+        || replacement_definition_for_id(state, rid)
+            .is_some_and(|repl| replacement_mode_is_optional(&repl.mode))
+}
+
+/// CR 903.9b: The commander owner makes this optional-replacement choice. All
+/// other replacement choices retain the ordinary CR 616.1 affected-player rule.
+fn replacement_choice_player(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> PlayerId {
+    if is_commander_hand_or_library_return_replacement(rid) {
+        return commander_hand_or_library_return_object(state, rid.source)
+            .map(|obj| obj.owner)
+            .unwrap_or_else(|| proposed.affected_player(state));
+    }
+    proposed.affected_player(state)
 }
 
 fn replacement_mode_decline(mode: &ReplacementMode) -> Option<&AbilityDefinition> {
@@ -2052,6 +2123,40 @@ fn apply_finality_counter_replacement(
                 source_id: rid.source,
                 event_type: ReplacementEvent::Moved.to_string(),
             });
+        }
+    }
+    Ok(event)
+}
+
+/// CR 903.9b: Replace the proposed move before delivery, so the commander never
+/// enters its owner's hand or library and no arrival event can trigger from it.
+/// The caller has already recorded this virtual replacement in the applied set.
+#[allow(clippy::result_large_err)]
+fn apply_commander_hand_or_library_return_replacement(
+    state: &GameState,
+    mut event: ProposedEvent,
+    rid: ReplacementId,
+    branch: ReplacementBranch,
+    events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    if branch == ReplacementBranch::Execute
+        && commander_hand_or_library_return_applies(state, &event)
+    {
+        if let ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            applied,
+            ..
+        } = &mut event
+        {
+            if *object_id == rid.source {
+                *to = Zone::Command;
+                applied.insert(AppliedReplacementKey::object(rid.source, rid.index));
+                events.push(GameEvent::ReplacementApplied {
+                    source_id: rid.source,
+                    event_type: ReplacementEvent::Moved.to_string(),
+                });
+            }
         }
     }
     Ok(event)
@@ -5976,6 +6081,16 @@ pub fn find_applicable_replacements(
         _ => {}
     }
 
+    // CR 903.9b: This is an intrinsic rules-source replacement, not an
+    // ability granted by the commander. Expose it as a virtual candidate so
+    // the normal CR 616.1 ordering pipeline composes it with card effects.
+    if let ProposedEvent::ZoneChange { object_id, .. } = event {
+        let rid = commander_hand_or_library_return_replacement_id(*object_id);
+        if commander_hand_or_library_return_applies(state, event) && !event.already_applied(&rid) {
+            candidates.push(rid);
+        }
+    }
+
     // CR 702.150a: Compleated replaces the loyalty counters a permanent enters
     // with when life was paid for its Phyrexian mana symbols. In this engine,
     // ETB counters are delivered through the shared AddCounter replacement
@@ -6712,6 +6827,12 @@ fn apply_single_replacement(
         return apply_shield_counter_replacement(state, proposed, rid, kind, events);
     }
 
+    if is_commander_hand_or_library_return_replacement(rid) {
+        return apply_commander_hand_or_library_return_replacement(
+            state, proposed, rid, branch, events,
+        );
+    }
+
     if is_finality_counter_replacement(rid) {
         return apply_finality_counter_replacement(state, proposed, rid, events);
     }
@@ -7175,7 +7296,29 @@ fn apply_single_replacement_and_dirty(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
-    let result = apply_single_replacement(state, proposed, rid, branch, registry, events);
+    let before = proposed.clone();
+    let mut result = apply_single_replacement(state, proposed, rid, branch, registry, events);
+    // CR 614.5 normally records a replacement once per event. CR 903.9b is the
+    // express exception: after ANOTHER replacement actually modifies the event
+    // back into a commander hand/library move, re-arm its virtual key for the
+    // next pipeline pass. A declined commander choice leaves `before` unchanged,
+    // so it retains its key and cannot immediately re-prompt in the same event.
+    if !is_commander_hand_or_library_return_replacement(rid) {
+        if let Ok(after) = &mut result {
+            if *after != before && commander_hand_or_library_return_applies(state, after) {
+                let object_id = match after {
+                    ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+                    _ => unreachable!("commander replacement only applies to zone changes"),
+                };
+                after
+                    .applied_set_mut()
+                    .remove(&AppliedReplacementKey::object(
+                        object_id,
+                        COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX,
+                    ));
+            }
+        }
+    }
     dirty_replacement_index(state);
     result
 }
@@ -7374,6 +7517,12 @@ fn candidate_materiality(
             field: EventField::Count,
             commute: CommuteClass::Subtractive,
         };
+    }
+
+    // CR 903.9b + CR 616.1: Moving to the command zone instead changes the
+    // destination, so it is order-material with every competing replacement.
+    if is_commander_hand_or_library_return_replacement(rid) {
+        return CandidateMateriality::Unconditional;
     }
 
     // CR 614.10: the turn-scoped combat skip fully prevents the BeginPhase event,
@@ -7653,12 +7802,10 @@ fn pipeline_loop(
             let rid = candidates[0];
 
             // Check if this single candidate is Optional — if so, present as a choice
-            let is_optional = replacement_definition_for_id(state, rid)
-                .map(|repl| replacement_mode_is_optional(&repl.mode))
-                .unwrap_or(false);
+            let is_optional = replacement_is_optional(state, rid);
 
             if is_optional {
-                let affected = proposed.affected_player(state);
+                let affected = replacement_choice_player(state, &proposed, rid);
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
                 state.pending_replacement = Some(PendingReplacement {
@@ -7955,7 +8102,7 @@ fn continue_replacement_impl(
             }
             return continue_search_found_after_decline(state, pending, rid, events);
         }
-        let payer = pending.proposed.affected_player(state);
+        let payer = replacement_choice_player(state, &pending.proposed, rid);
         // CR 614.12a: a `true` flag means this is the post-choice resume of an
         // accept whose `MayCost` payment paused for an interactive sub-choice
         // (e.g. a `DiscardChoice`). Re-park fields are captured up front so a
@@ -8225,6 +8372,19 @@ fn continue_replacement_impl(
         let proposed = apply_bound_search_found_candidate(state, pending.proposed, &bound, events);
         return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
     }
+
+    // CR 616.1: Selecting an optional candidate from a material ordering prompt
+    // selects its turn to apply; it does not silently accept its "may" branch.
+    // Re-park it through the same optional seam used for a lone candidate, then
+    // re-scan the modified event so the other candidates remain available.
+    if replacement_is_optional(state, rid) {
+        let affected = replacement_choice_player(state, &pending.proposed, rid);
+        pending.candidates = vec![rid];
+        pending.is_optional = true;
+        state.pending_replacement = Some(pending);
+        return ReplacementResult::NeedsChoice(affected);
+    }
+
     let mut proposed = pending.proposed;
     proposed.mark_applied(rid);
     // CR 614.1a: per-player "first time each turn" window is consumed by

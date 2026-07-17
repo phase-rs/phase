@@ -5,7 +5,7 @@ use engine::game::mana_abilities::activate_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardSelectionMode,
+    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardPlayMode, CardSelectionMode,
     CastFromZoneDriver, CastingPermission, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, DigSource, DiscardSelfScope, Effect, EffectKind, FilterProp,
     ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction, ModalChoice,
@@ -17,7 +17,7 @@ use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     BatchCompletion, CastPaymentMode, CollectEvidenceResume, GameState,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, PayCostKind,
@@ -10500,5 +10500,497 @@ fn commander_zone_return_stays_synchronous_and_decline_is_unchanged() {
             .commander_declined_zone_return
             .contains(&declined_commander),
         "declining preserves the existing same-stay ledger behavior"
+    );
+}
+
+/// W-173 (red first): CR 903.9b replaces a commander bounce before the Hand
+/// arrival event. A Warped Devotion-shaped observer therefore cannot trigger
+/// when the owner chooses the command zone, but does trigger after a decline.
+#[test]
+fn commander_hand_return_replaces_bounce_before_warped_devotion_can_observe_it() {
+    let mut accept_scenario = GameScenario::new();
+    accept_scenario.at_phase(Phase::PreCombatMain);
+    let accepted_commander = accept_scenario
+        .add_creature(P0, "Commander Hand Replacement Accept", 2, 2)
+        .id();
+    accept_scenario.with_commander(accepted_commander);
+    let accepted_observer = accept_scenario
+        .add_creature(P0, "Warped Devotion Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::Typed(TypedFilter::permanent()))
+                .origin(Zone::Battlefield)
+                .destination(Zone::Hand)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    let mut accept_runner = accept_scenario.build();
+    accept_runner.state_mut().format_config.command_zone = true;
+    let mut accept_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        accept_runner.state_mut(),
+        accepted_commander,
+        Zone::Battlefield,
+        &mut accept_setup_events,
+    );
+    let accept_bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(accepted_commander)],
+        accepted_observer,
+        P0,
+    );
+    let mut accept_events = Vec::new();
+    resolve_ability_chain(
+        accept_runner.state_mut(),
+        &accept_bounce,
+        &mut accept_events,
+        0,
+    )
+    .expect("the bounce reaches the command-zone replacement choice");
+    assert!(matches!(
+        accept_runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(
+        accept_runner.state().objects[&accepted_commander].zone,
+        Zone::Battlefield,
+        "the original Hand move stays proposed until CR 903.9b is chosen"
+    );
+
+    let accepted = accept_runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the CR 903.9b replacement is valid");
+    assert_eq!(
+        accept_runner.state().objects[&accepted_commander].zone,
+        Zone::Command
+    );
+    assert!(
+        !accepted.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Hand,
+                ..
+            } if *object_id == accepted_commander
+        )),
+        "accepting CR 903.9b emits no battlefield-to-Hand event"
+    );
+    assert!(
+        !accept_runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == accepted_observer),
+        "Warped Devotion cannot trigger when the commander never reaches Hand"
+    );
+
+    let mut decline_scenario = GameScenario::new();
+    decline_scenario.at_phase(Phase::PreCombatMain);
+    let declined_commander = decline_scenario
+        .add_creature(P0, "Commander Hand Replacement Decline", 2, 2)
+        .id();
+    decline_scenario.with_commander(declined_commander);
+    let declined_observer = decline_scenario
+        .add_creature(P0, "Warped Devotion Decline Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::Typed(TypedFilter::permanent()))
+                .origin(Zone::Battlefield)
+                .destination(Zone::Hand)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    let mut decline_runner = decline_scenario.build();
+    decline_runner.state_mut().format_config.command_zone = true;
+    let mut decline_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        decline_runner.state_mut(),
+        declined_commander,
+        Zone::Battlefield,
+        &mut decline_setup_events,
+    );
+    let decline_bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(declined_commander)],
+        declined_observer,
+        P0,
+    );
+    let mut decline_events = Vec::new();
+    resolve_ability_chain(
+        decline_runner.state_mut(),
+        &decline_bounce,
+        &mut decline_events,
+        0,
+    )
+    .expect("the bounce reaches the command-zone replacement choice");
+    let declined = decline_runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the CR 903.9b replacement is valid");
+    assert_eq!(
+        decline_runner.state().objects[&declined_commander].zone,
+        Zone::Hand
+    );
+    assert!(declined.events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Hand,
+            ..
+        } if *object_id == declined_commander
+    )));
+    assert!(
+        decline_runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == declined_observer),
+        "Warped Devotion triggers after a declined Hand replacement"
+    );
+}
+
+/// W-173: CR 903.9b also replaces a library return before both the library
+/// arrival observer (Wan Shi Tong-shaped) and the normal library shuffle tail.
+#[test]
+fn commander_library_return_skips_library_arrival_and_shuffle_when_replaced() {
+    let mut accept_scenario = GameScenario::new();
+    accept_scenario.at_phase(Phase::PreCombatMain);
+    let accepted_commander = accept_scenario
+        .add_creature(P0, "Commander Library Replacement Accept", 2, 2)
+        .id();
+    accept_scenario.with_commander(accepted_commander);
+    let accepted_observer = accept_scenario
+        .add_creature(P0, "Wan Shi Tong Library Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZoneAll)
+                .destination(Zone::Library)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    let mut accept_runner = accept_scenario.build();
+    accept_runner.state_mut().format_config.command_zone = true;
+    let mut accept_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        accept_runner.state_mut(),
+        accepted_commander,
+        Zone::Battlefield,
+        &mut accept_setup_events,
+    );
+    let accept_library_return = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: Some(Zone::Library),
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(accepted_commander)],
+        accepted_observer,
+        P0,
+    );
+    let mut accept_events = Vec::new();
+    resolve_ability_chain(
+        accept_runner.state_mut(),
+        &accept_library_return,
+        &mut accept_events,
+        0,
+    )
+    .expect("the library return reaches the command-zone replacement choice");
+    let accepted = accept_runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the command-zone replacement is valid");
+    assert_eq!(
+        accept_runner.state().objects[&accepted_commander].zone,
+        Zone::Command
+    );
+    assert!(
+        !accepted.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Library,
+                ..
+            } if *object_id == accepted_commander
+        )),
+        "accepting CR 903.9b emits no library-arrival event"
+    );
+    assert!(
+        !accepted.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "a replaced library move must not run the delivery shuffle tail"
+    );
+    assert!(
+        !accept_runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == accepted_observer),
+        "a Wan Shi Tong-shaped observer cannot trigger without a library arrival"
+    );
+
+    let mut decline_scenario = GameScenario::new();
+    decline_scenario.at_phase(Phase::PreCombatMain);
+    let declined_commander = decline_scenario
+        .add_creature(P0, "Commander Library Replacement Decline", 2, 2)
+        .id();
+    decline_scenario.with_commander(declined_commander);
+    let declined_observer = decline_scenario
+        .add_creature(P0, "Wan Shi Tong Decline Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZoneAll)
+                .destination(Zone::Library)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    let mut decline_runner = decline_scenario.build();
+    decline_runner.state_mut().format_config.command_zone = true;
+    let mut decline_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        decline_runner.state_mut(),
+        declined_commander,
+        Zone::Battlefield,
+        &mut decline_setup_events,
+    );
+    let decline_library_return = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: Some(Zone::Library),
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(declined_commander)],
+        declined_observer,
+        P0,
+    );
+    let mut decline_events = Vec::new();
+    resolve_ability_chain(
+        decline_runner.state_mut(),
+        &decline_library_return,
+        &mut decline_events,
+        0,
+    )
+    .expect("the library return reaches the command-zone replacement choice");
+    let declined = decline_runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the command-zone replacement is valid");
+    assert_eq!(
+        decline_runner.state().objects[&declined_commander].zone,
+        Zone::Library
+    );
+    assert!(declined.events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Library,
+            ..
+        } if *object_id == declined_commander
+    )));
+    assert!(declined.events.iter().any(|event| matches!(
+        event,
+        GameEvent::PlayerPerformedAction {
+            action: PlayerActionKind::ShuffledLibrary,
+            ..
+        }
+    )));
+    assert!(
+        decline_runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == declined_observer),
+        "the observer triggers after a real library arrival"
+    );
+}
+
+/// W-173: CR 903.9b is the CR 614.5 exception. After it changes a Hand move
+/// to Command, a competing Command-to-Hand redirect modifies the same event
+/// and legally offers the commander replacement again.
+#[test]
+fn commander_hand_return_rearms_after_a_competing_redirect_recreates_hand() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature(P0, "Commander Repeat-Replacement Witness", 2, 2)
+        .id();
+    scenario.with_commander(commander);
+    let redirect_source = scenario
+        .add_creature(P0, "Command To Hand Redirect Witness", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Command, Zone::Hand))
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        commander,
+        Zone::Battlefield,
+        &mut setup_events,
+    );
+    let bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(commander)],
+        redirect_source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &bounce, &mut events, 0)
+        .expect("the initial commander replacement choice is available");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice {
+            candidate_count: 2,
+            ..
+        }
+    ));
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        unreachable!("the optional prompt was asserted above");
+    };
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.source_id)
+            .collect::<Vec<_>>(),
+        vec![commander, commander],
+        "the lone initial candidate is the commander's accept/decline choice: {candidates:?}"
+    );
+
+    let reapplied = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the initial commander replacement is valid");
+    assert!(
+        matches!(
+            reapplied.waiting_for,
+            WaitingFor::ReplacementChoice {
+                candidate_count: 2,
+                ..
+            }
+        ),
+        "the modified event must re-offer the commander replacement"
+    );
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Battlefield,
+        "the re-armed replacement parks before the modified event is delivered"
+    );
+
+    let settled = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the re-armed commander replacement is valid");
+    assert!(matches!(
+        settled.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Hand,
+        "the competing redirect's recreated Hand destination is delivered after the second decline"
+    );
+}
+
+/// W-173: In a material CR 616.1 ordering prompt, selecting the commander
+/// rule chooses its turn to apply; its CR 903.9b "may" choice remains separate.
+#[test]
+fn commander_hand_return_keeps_its_may_choice_inside_cr_616_ordering() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature(P0, "Commander Ordering Witness", 2, 2)
+        .id();
+    scenario.with_commander(commander);
+    let redirect_source = scenario
+        .add_creature(P0, "Hand To Command Redirect Witness", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Command))
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        commander,
+        Zone::Battlefield,
+        &mut setup_events,
+    );
+    let bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(commander)],
+        redirect_source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &bounce, &mut events, 0)
+        .expect("the material replacement ordering choice is available");
+    let WaitingFor::ReplacementChoice {
+        candidate_count,
+        candidates,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("CR 616.1 must present a replacement ordering prompt");
+    };
+    assert_eq!(*candidate_count, 2);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.source_id)
+            .collect::<Vec<_>>(),
+        vec![commander, redirect_source]
+    );
+
+    let selected = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("selecting the commander rule's place in the ordering is valid");
+    assert!(matches!(
+        selected.waiting_for,
+        WaitingFor::ReplacementChoice {
+            candidate_count: 2,
+            ..
+        }
+    ));
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Battlefield,
+        "ordering selection must not silently accept the optional commander replacement"
+    );
+
+    let declined = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the commander rule after ordering it is valid");
+    assert!(matches!(
+        declined.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Command,
+        "the still-applicable Hand-to-Command redirect resolves after the decline"
     );
 }

@@ -82,7 +82,11 @@ pub enum ZoneChangeCause {
     PregameProcedure,
     /// CR 800.4a: owner left the game; all objects they own leave the game.
     PlayerLeftGame,
-    /// CR 730.3: merged-component routing already inside a delivering move.
+    /// CR 730.3d + CR 903.9b-c: a merged permanent's physical components are
+    /// delivered by the same pausable replacement-aware batch as other
+    /// simultaneous moves. The special delivery shape preserves the component
+    /// event's `from: None` observability without exempting it from replacement
+    /// consultation.
     MergedComponentRouting,
     /// Debug/admin tooling (engine_debug.rs). Loud by construction.
     DebugCommand,
@@ -99,8 +103,6 @@ impl ZoneChangeCause {
     ///   bottom-of-library returns happen before any effect exists to replace.
     /// - `PlayerLeftGame` (CR 800.4a): "This is not a state-based action"; all
     ///   objects the player owns leave the game as a single rules action.
-    /// - `MergedComponentRouting` (CR 730.3): the merged-permanent move already
-    ///   consulted replacements; the component split is internal routing.
     /// - `DebugCommand`: operator intent is "force the state".
     ///
     /// The unconditional primitive guards (CR 111.8 token, CR 614.1d ETB block,
@@ -124,8 +126,11 @@ impl ZoneChangeCause {
             ZoneChangeCause::CastingToStack { .. }
             | ZoneChangeCause::PregameProcedure
             | ZoneChangeCause::PlayerLeftGame
-            | ZoneChangeCause::MergedComponentRouting
             | ZoneChangeCause::DebugCommand => true,
+            // CR 730.3d + CR 903.9c: component moves inherit the original
+            // event's applied replacements, then consult any component-specific
+            // replacement (including CR 903.9b) through the normal pipeline.
+            ZoneChangeCause::MergedComponentRouting => false,
         }
     }
 }
@@ -389,6 +394,22 @@ impl ZoneMoveRequest {
             object_id,
             to,
             cause: ZoneChangeCause::PlayerLeftGame,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+            replacement_applied: HashSet::new(),
+        }
+    }
+
+    /// CR 730.3d + CR 903.9b-c: Route one absorbed component through the
+    /// replacement pipeline. The delivery recognizes its split marker and
+    /// preserves `ZoneChanged { from: None }`, so this is not an independent
+    /// battlefield exit even though its would-move event is replaceable.
+    pub(crate) fn merged_component(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::MergedComponentRouting,
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
@@ -1834,13 +1855,53 @@ pub(crate) fn deliver_replaced_zone_change(
     } = event
     {
         if let Some(entry) = state.liminal_entries.get_mut(&object_id) {
-            entry.replacement_applied = applied;
+            entry.replacement_applied = applied.clone();
         }
         let exile_tracking = if track_exiled_by_source {
             ZoneDeliveryExileTracking::TrackBySource
         } else {
             ZoneDeliveryExileTracking::None
         };
+
+        let merged_permanent_leave = from == Zone::Battlefield
+            && state
+                .objects
+                .get(&object_id)
+                .is_some_and(|object| !object.merged_components.is_empty());
+        if merged_permanent_leave {
+            // CR 730.3d + CR 903.9c: the merged permanent's already-approved
+            // event is expanded into a single pausable batch. Each component
+            // inherits `applied`, so a replacement that affected the merged
+            // event is not consulted again; the batch nevertheless consults
+            // component-specific replacements, including CR 903.9b.
+            state.merged_card_component_route = None;
+            return match crate::game::merge::move_merged_permanent_on_leave(
+                state, object_id, to, &applied, events,
+            ) {
+                BatchMoveResult::Done => apply_zone_delivery_tail(
+                    state,
+                    object_id,
+                    from,
+                    to,
+                    cause,
+                    source_id,
+                    duration,
+                    exile_tracking,
+                    drain,
+                    library_placement.as_ref(),
+                    events,
+                ),
+                BatchMoveResult::NeedsChoice => replacement_pause_delivery_result(state),
+            };
+        }
+
+        let split_component_survivor = state.objects.get(&object_id).and_then(|object| {
+            (from == Zone::Battlefield
+                && object.zone == Zone::Battlefield
+                && !state.battlefield.contains(&object_id))
+            .then_some(object.split_from_merge_survivor)
+            .flatten()
+        });
 
         // CR 614.1c: Static replacement effects that modify how an object enters
         // must already be functioning before that object enters. Snapshot the
@@ -1974,7 +2035,17 @@ pub(crate) fn deliver_replaced_zone_change(
                 };
                 zones::move_to_library_at_index(state, object_id, index, events);
             }
-            _ => zones::move_to_zone(state, object_id, to, events),
+            _ => {
+                if split_component_survivor.is_some() {
+                    // CR 903.9b + CR 903.9c: this component has completed its
+                    // replacement consult. Deliver the resulting destination
+                    // with the CR 730.3 `from: None` event shape rather than
+                    // pretending it independently left the battlefield.
+                    crate::game::merge::put_component_into_zone(state, object_id, to, events);
+                } else {
+                    zones::move_to_zone(state, object_id, to, events);
+                }
+            }
         }
         // CR 730.3e: the survivor split (inside `move_to_zone` above) has consumed
         // any clause-2 routing override; clear it so it never leaks into a later
