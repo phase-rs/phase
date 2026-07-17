@@ -2421,6 +2421,11 @@ pub struct CloakExileMember {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
+    /// CR 303.4g + CR 614.1 + CR 616.1: A return-as-Aura host had no legal
+    /// object to enchant, and its proposed Battlefield→Graveyard move settled.
+    /// The completion event waits for any replacement choice without carrying
+    /// redundant move data.
+    ReturnAsAuraNoTargetComplete { source_id: ObjectId },
     /// CR 701.44a + CR 701.44b + CR 614.1 + CR 616.1: A revealed explore land's
     /// proposed Library→Hand delivery settled. The explore completion event is
     /// deferred so its trigger boundary cannot precede a replacement choice.

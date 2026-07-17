@@ -6,11 +6,12 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardSelectionMode,
-    CastFromZoneDriver, CastingPermission, CategoryChooserScope, ChoiceType, Chooser, DigSource,
-    DiscardSelfScope, Effect, EffectKind, FilterProp, ForEachCategoryAction, IterationCategory,
-    ManaContribution, ManaProduction, ModalChoice, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, SacrificeCost, SpellCastingOption,
-    TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
+    CastFromZoneDriver, CastingPermission, CategoryChooserScope, ChoiceType, Chooser,
+    ContinuousModification, DigSource, DiscardSelfScope, Effect, EffectKind, FilterProp,
+    ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction, ModalChoice,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+    SacrificeCost, SpellCastingOption, TargetFilter, TargetRef, TargetSelectionMode,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -10114,4 +10115,214 @@ fn explore_land_delivery_stays_synchronous_and_nonland_path_is_unchanged() {
         nonland_runner.state().waiting_for,
         WaitingFor::DigChoice { ref cards, .. } if cards == &vec![nonland]
     ));
+}
+
+/// W-170 (red first): the no-host ReturnAsAura graveyard instruction must park
+/// its resolution tail until CR 616.1 chooses and settles the replacement.
+#[test]
+fn return_as_aura_no_target_redirect_pauses_before_resolution_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario
+        .add_creature(P0, "Return-As-Aura Redirect Host", 2, 2)
+        .id();
+    for name in [
+        "Return-As-Aura Graveyard To Exile A",
+        "Return-As-Aura Graveyard To Exile B",
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().last_zone_changed_ids.push(host);
+    let ability = ResolvedAbility::new(
+        Effect::ReturnAsAura {
+            enchant_filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            grants: vec![ContinuousModification::RemoveAllAbilities],
+        },
+        vec![],
+        host,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    engine::game::effects::return_as_aura::resolve(
+        runner.state_mut(),
+        &ability,
+        &mut initial_events,
+    )
+    .expect("return-as-Aura reaches its replacement-safe no-host delivery");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ReturnAsAura,
+                source_id,
+                ..
+            } if *source_id == host
+        )),
+        "the ReturnAsAura tail must not precede the replacement choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected replacement settles the ReturnAsAura zone change");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&host].zone, Zone::Exile);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ReturnAsAura,
+                    source_id,
+                    ..
+                } if *source_id == host
+            ))
+            .count(),
+        1,
+        "the settled replacement delivery runs the ReturnAsAura tail exactly once"
+    );
+}
+
+/// W-170-REG: the unredirected no-host path stays synchronous, strips the
+/// returned host's live trigger snapshot, and the one-host attachment path is
+/// unchanged.
+#[test]
+fn return_as_aura_no_target_stays_synchronous_and_attach_path_is_unchanged() {
+    let mut no_target_scenario = GameScenario::new();
+    no_target_scenario.at_phase(Phase::PreCombatMain);
+    let no_target_host = no_target_scenario
+        .add_creature(P0, "Return-As-Aura No-Target Host", 2, 2)
+        .id();
+    let mut no_target_runner = no_target_scenario.build();
+    no_target_runner
+        .state_mut()
+        .objects
+        .get_mut(&no_target_host)
+        .expect("returned host exists")
+        .trigger_definitions
+        .push(TriggerDefinition::new(TriggerMode::ChangesZone));
+    no_target_runner
+        .state_mut()
+        .last_zone_changed_ids
+        .push(no_target_host);
+    let no_target_ability = ResolvedAbility::new(
+        Effect::ReturnAsAura {
+            enchant_filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            grants: vec![ContinuousModification::RemoveAllAbilities],
+        },
+        vec![],
+        no_target_host,
+        P0,
+    );
+    let mut no_target_events = Vec::new();
+    engine::game::effects::return_as_aura::resolve(
+        no_target_runner.state_mut(),
+        &no_target_ability,
+        &mut no_target_events,
+    )
+    .expect("unredirected no-host ReturnAsAura resolves synchronously");
+
+    assert!(matches!(
+        no_target_runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        no_target_runner.state().objects[&no_target_host].zone,
+        Zone::Graveyard
+    );
+    let GameEvent::ZoneChanged { record, .. } = no_target_events
+        .iter()
+        .find(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == no_target_host))
+        .expect("the no-host move emits its zone-change record")
+    else {
+        panic!("expected a no-host ZoneChanged event");
+    };
+    assert!(
+        record.trigger_definitions.is_empty(),
+        "the no-host move snapshots the aura-stripped live trigger definitions"
+    );
+    assert_eq!(
+        no_target_events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ReturnAsAura,
+                    source_id,
+                    ..
+                } if *source_id == no_target_host
+            ))
+            .count(),
+        1,
+        "the synchronous no-host path resolves exactly once"
+    );
+
+    let mut attach_scenario = GameScenario::new();
+    attach_scenario.at_phase(Phase::PreCombatMain);
+    let attach_host = attach_scenario
+        .add_creature(P0, "Return-As-Aura Attach Host", 2, 2)
+        .id();
+    let target = attach_scenario
+        .add_creature(P0, "Return-As-Aura Attach Target", 1, 1)
+        .id();
+    let mut attach_runner = attach_scenario.build();
+    attach_runner
+        .state_mut()
+        .last_zone_changed_ids
+        .push(attach_host);
+    let attach_ability = ResolvedAbility::new(
+        Effect::ReturnAsAura {
+            enchant_filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            grants: vec![],
+        },
+        vec![],
+        attach_host,
+        P0,
+    );
+    let mut attach_events = Vec::new();
+    engine::game::effects::return_as_aura::resolve(
+        attach_runner.state_mut(),
+        &attach_ability,
+        &mut attach_events,
+    )
+    .expect("one-host ReturnAsAura attaches synchronously");
+
+    assert_eq!(
+        attach_runner.state().objects[&attach_host].attached_to,
+        Some(AttachTarget::Object(target))
+    );
+    assert_eq!(
+        attach_runner.state().objects[&attach_host].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(
+        attach_events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ReturnAsAura,
+                    source_id,
+                    ..
+                } if *source_id == attach_host
+            ))
+            .count(),
+        1,
+        "the unchanged attach path resolves exactly once"
+    );
 }

@@ -6131,6 +6131,9 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::ReturnAsAuraNoTargetComplete { source_id } => {
+            effects::return_as_aura::complete_no_target_delivery(source_id, events)
+        }
         BatchCompletion::ExploreLandDeliveryComplete { explorer_id } => {
             effects::explore::complete_land_delivery(explorer_id, events)
         }
