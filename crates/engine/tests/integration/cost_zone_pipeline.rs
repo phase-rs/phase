@@ -5,12 +5,12 @@ use engine::game::mana_abilities::activate_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, CastingPermission,
-    CategoryChooserScope, ChoiceType, Chooser, DigSource, DiscardSelfScope, Effect, EffectKind,
-    FilterProp, ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction,
-    ModalChoice, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, SacrificeCost, SpellCastingOption, TargetFilter, TargetRef,
-    TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardSelectionMode,
+    CastFromZoneDriver, CastingPermission, CategoryChooserScope, ChoiceType, Chooser, DigSource,
+    DiscardSelfScope, Effect, EffectKind, FilterProp, ForEachCategoryAction, IterationCategory,
+    ManaContribution, ManaProduction, ModalChoice, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementMode, ResolvedAbility, SacrificeCost, SpellCastingOption,
+    TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -7384,6 +7384,164 @@ fn cascade_exile_loop_stays_synchronous_without_replacements() {
             .count(),
         1,
         "the synchronous cascade tail resolves exactly once"
+    );
+}
+
+/// W-167 (red first): a cast-from-zone exile delivery must park before it grants
+/// the lingering permission or emits its resolution event when CR 616.1 requires
+/// the affected card's controller to choose a replacement.
+#[test]
+fn cast_from_zone_exile_redirect_pauses_before_lingering_permission_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Cast-From-Zone Redirect Source", 1, 1)
+        .id();
+    let card = scenario
+        .add_spell_to_library_top(P0, "Cast-From-Zone Redirect Card", true)
+        .id();
+    scenario
+        .add_creature(P0, "Cast-From-Zone Exile To Hand", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    scenario
+        .add_creature(P0, "Cast-From-Zone Exile To Graveyard", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Graveyard));
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![card];
+    let ability = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        },
+        vec![TargetRef::Object(card)],
+        source,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("CastFromZone reaches its replacement-safe exile delivery");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&card].zone, Zone::Library);
+    assert!(runner.state().objects[&card].casting_permissions.is_empty());
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::CastFromZone,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the lingering-permission tail must not precede the replacement choice"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected exile redirect settles the CastFromZone delivery");
+    assert!(matches!(
+        resumed.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
+    assert!(
+        runner.state().objects[&card].casting_permissions.is_empty(),
+        "an exile permission must not attach when the card did not reach exile"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(resumed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CastFromZone,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the settled CastFromZone tail resolves exactly once"
+    );
+}
+
+/// W-167-REG: an unredirected CastFromZone exile delivery remains synchronous
+/// and grants exactly the same permission as the prior raw mover.
+#[test]
+fn cast_from_zone_exile_delivery_stays_synchronous_and_grants_permission() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Synchronous Cast-From-Zone Source", 1, 1)
+        .id();
+    let card = scenario
+        .add_spell_to_library_top(P0, "Synchronous Cast-From-Zone Card", true)
+        .id();
+    let second_card = scenario
+        .add_spell_to_library_top(P0, "Second Synchronous Cast-From-Zone Card", true)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![card, second_card];
+    let ability = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        },
+        vec![TargetRef::Object(card), TargetRef::Object(second_card)],
+        source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("unredirected CastFromZone resolves synchronously");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    for card in [card, second_card] {
+        assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+        assert!(runner.state().objects[&card]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(permission, CastingPermission::ExileWithAltCost { .. })));
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CastFromZone,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the synchronous CastFromZone path resolves exactly once"
     );
 }
 

@@ -4268,13 +4268,22 @@ pub(super) fn handle_resolution_choice(
                             ));
                         }
                     } else {
-                        effects::cast_from_zone::grant_lingering_permissions(
-                            &mut *state,
-                            &ability,
-                            &chosen,
-                            events,
-                        )
-                        .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                        let permission_grant =
+                            effects::cast_from_zone::grant_lingering_permissions(
+                                &mut *state,
+                                &ability,
+                                &chosen,
+                                events,
+                            )
+                            .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                        if matches!(
+                            permission_grant,
+                            effects::cast_from_zone::LingeringPermissionGrantResult::NeedsChoice
+                        ) {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     }
                 }
                 // CR 701.68a: Place `count_param` -1/-1 counters on the creature
@@ -5944,6 +5953,17 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::CastFromZoneExileDeliveryComplete {
+            ability,
+            in_place_ids,
+            exile_delivery_ids,
+        } => effects::cast_from_zone::complete_lingering_permissions_after_exile_delivery(
+            state,
+            &ability,
+            &in_place_ids,
+            &exile_delivery_ids,
+            events,
+        ),
         BatchCompletion::CascadeExileLoopComplete {
             controller,
             source_id,
