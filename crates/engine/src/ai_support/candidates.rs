@@ -3267,7 +3267,10 @@ pub(crate) fn priority_actions_with_probe(
                         bf.layout_kind == Some(LayoutKind::Modal)
                             && bf.card_types.core_types.contains(&CoreType::Land)
                     });
-                if is_playable_land {
+                // CR 305.1: Don't offer a land whose specific card is denied by
+                // a `PlayLands` restriction (Conjurer's Ban) — mirrors the
+                // blanket `CantPlayLand` gate above, but per-object.
+                if is_playable_land && !casting::is_blocked_by_cant_play_lands(state, player, obj) {
                     actions.push(candidate(
                         GameAction::PlayLand {
                             object_id: obj_id,
@@ -3282,14 +3285,16 @@ pub(crate) fn priority_actions_with_probe(
         // CR 604.2 + CR 305.1: Lands playable from graveyard via static permission
         for (obj_id, _source) in casting::graveyard_lands_playable_by_permission(state, player) {
             if let Some(obj) = state.objects.get(&obj_id) {
-                actions.push(candidate(
-                    GameAction::PlayLand {
-                        object_id: obj_id,
-                        card_id: obj.card_id,
-                    },
-                    TacticalClass::Land,
-                    Some(player),
-                ));
+                if !casting::is_blocked_by_cant_play_lands(state, player, obj) {
+                    actions.push(candidate(
+                        GameAction::PlayLand {
+                            object_id: obj_id,
+                            card_id: obj.card_id,
+                        },
+                        TacticalClass::Land,
+                        Some(player),
+                    ));
+                }
             }
         }
         // CR 401.5 + CR 305.1: Land on top of library playable via
@@ -3299,26 +3304,30 @@ pub(crate) fn priority_actions_with_probe(
             casting::top_of_library_land_playable_by_permission(state, player)
         {
             if let Some(obj) = state.objects.get(&top_id) {
-                actions.push(candidate(
-                    GameAction::PlayLand {
-                        object_id: top_id,
-                        card_id: obj.card_id,
-                    },
-                    TacticalClass::Land,
-                    Some(player),
-                ));
+                if !casting::is_blocked_by_cant_play_lands(state, player, obj) {
+                    actions.push(candidate(
+                        GameAction::PlayLand {
+                            object_id: top_id,
+                            card_id: obj.card_id,
+                        },
+                        TacticalClass::Land,
+                        Some(player),
+                    ));
+                }
             }
         }
         for (obj_id, _source) in casting::exile_lands_playable_by_permission(state, player) {
             if let Some(obj) = state.objects.get(&obj_id) {
-                actions.push(candidate(
-                    GameAction::PlayLand {
-                        object_id: obj_id,
-                        card_id: obj.card_id,
-                    },
-                    TacticalClass::Land,
-                    Some(player),
-                ));
+                if !casting::is_blocked_by_cant_play_lands(state, player, obj) {
+                    actions.push(candidate(
+                        GameAction::PlayLand {
+                            object_id: obj_id,
+                            card_id: obj.card_id,
+                        },
+                        TacticalClass::Land,
+                        Some(player),
+                    ));
+                }
             }
         }
     }

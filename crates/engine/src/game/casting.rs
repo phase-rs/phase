@@ -756,6 +756,56 @@ fn is_blocked_by_cant_cast_spells_for(
     })
 }
 
+/// CR 305.1 + CR 116.2a: Check if any `PlayLands` restriction prevents `player`
+/// from playing `land_obj` as a land. Filter-scoped sibling of
+/// `is_blocked_by_cant_cast_spells_for` — a land play is not a cast, so this
+/// reads the land's own `GameObject` directly through the generic per-object
+/// filter evaluator (`filter::matches_target_filter`) rather than a spell-record
+/// projection.
+pub(crate) fn is_blocked_by_cant_play_lands(
+    state: &GameState,
+    player: PlayerId,
+    land_obj: &GameObject,
+) -> bool {
+    state.restrictions.iter().any(|restriction| {
+        let GameRestriction::ProhibitActivity {
+            source,
+            affected_players,
+            expiry,
+            activity: ProhibitedActivity::PlayLands { land_filter },
+        } = restriction
+        else {
+            return false;
+        };
+        // CR 514.2 + CR 500.7: mirror the pre-armed-turn gate shared by
+        // CastSpells/ActivateAbilities — a still-pre-armed `UntilEndOfNextTurnOf`
+        // ban is not yet in force.
+        if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
+            return false;
+        }
+        let source_controller = state.objects.get(source).map(|obj| obj.controller);
+        let player_affected =
+            restriction_scope_matches_player(source_controller, affected_players, player);
+
+        player_affected
+            && match land_filter {
+                Some(filter) => super::filter::matches_target_filter(
+                    state,
+                    land_obj.id,
+                    filter,
+                    &super::filter::FilterContext {
+                        source_id: *source,
+                        source_controller,
+                        ability: None,
+                        recipient_id: None,
+                        scoped_iteration_player: None,
+                    },
+                ),
+                None => true,
+            }
+    })
+}
+
 /// CR 602.5 + CR 605.1a: Temporary game restrictions can prohibit activating
 /// abilities, optionally exempting mana abilities via the single classifier.
 fn is_blocked_by_cant_activate_abilities(

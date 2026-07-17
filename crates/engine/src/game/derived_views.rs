@@ -723,6 +723,10 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
             // CR 116.2a: "can't play cards from <zone>" is enforced at the cast
             // and play-land gates; no dedicated HUD badge yet, so no status row.
             ProhibitedActivity::ProhibitPlayFromZone { .. } => continue,
+            // CR 305.1: "can't play [matching] lands" is enforced at the
+            // play-land gate; no dedicated HUD badge yet, so no status row —
+            // mirrors `ProhibitPlayFromZone` above.
+            ProhibitedActivity::PlayLands { .. } => continue,
         };
         for pid in restriction_affected_players(state, affected_players, *source) {
             views.push(PlayerStatusView {

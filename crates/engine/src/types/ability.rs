@@ -2368,6 +2368,20 @@ pub enum ProhibitedActivity {
     /// both the cast gate and the play-land gate, so it is categorically a
     /// separate variant, not a parameterization of `CastOnlyFromZones`.
     ProhibitPlayFromZone { zone: Zone },
+    /// CR 305.1 + CR 116.2a: Prevent playing lands matching `land_filter`.
+    ///
+    /// The land-play sibling of `CastSpells { spell_filter }` on the filter-
+    /// scoped deny axis. Kept as a separate variant rather than a parameter on
+    /// `CastSpells` because CR 601.2a (casting) and CR 305.1 (land-playing, a
+    /// special action per CR 116.2a — explicitly NOT a cast) are different rule
+    /// sections; the same reasoning `ProhibitPlayFromZone` above already gives
+    /// for staying separate from `CastOnlyFromZones` applies here. `None` denies
+    /// every land (a blanket temporary land-play ban); `Some(filter)` scopes the
+    /// deny to matching lands only (Conjurer's Ban: `HasChosenName`).
+    PlayLands {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        land_filter: Option<TargetFilter>,
+    },
 }
 
 /// When a game restriction expires.

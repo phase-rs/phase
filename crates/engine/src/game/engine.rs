@@ -7678,6 +7678,15 @@ fn handle_play_land(
                 "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
             ));
         }
+        // CR 305.1 + CR 116.2a: A `PlayLands` restriction denies playing THIS
+        // specific land (e.g. Conjurer's Ban: "lands with the chosen name can't
+        // be played") — the filter-scoped counterpart to the blanket
+        // `CantPlayLand` check above.
+        if super::casting::is_blocked_by_cant_play_lands(state, player, obj) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents playing this land (CR 305.1)".to_string(),
+            ));
+        }
     }
     let additional = super::static_abilities::additional_land_drops(state, player);
     let effective_limit = state.max_lands_per_turn.saturating_add(additional);

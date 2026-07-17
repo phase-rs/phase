@@ -3329,6 +3329,90 @@ fn apply_play_land_rejects_under_cant_play_land_transient_effect() {
 }
 
 #[test]
+fn apply_play_land_rejects_under_cant_play_lands_chosen_name_filter() {
+    // CR 305.1 + CR 116.2a + CR 201.2: Conjurer's Ban's land-play half —
+    // "lands with the chosen name can't be played". Filter-scoped sibling of
+    // `apply_play_land_rejects_under_cant_play_land` (the blanket static
+    // form): the restriction denies only the SPECIFICALLY NAMED land, not
+    // every land. The prohibiting object sits in the graveyard (as Conjurer's
+    // Ban, a sorcery, would after resolving) to prove the chosen-name
+    // `chosen_attributes` binding survives its own source's zone change —
+    // `HasChosenName` is a LIVE lookup against `source_id` at each
+    // evaluation, not a value snapshotted into the restriction.
+    use crate::types::ability::{
+        ChosenAttribute, GameRestriction, ProhibitedActivity, RestrictionExpiry,
+        RestrictionPlayerScope,
+    };
+
+    let mut state = setup_game_at_main_phase();
+
+    let forest_id = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Forest".to_string(),
+        Zone::Hand,
+    );
+    let island_id = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Island".to_string(),
+        Zone::Hand,
+    );
+
+    // The (already-resolved) Conjurer's Ban, sitting in the graveyard with its
+    // chosen name still attached.
+    let source_id = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Conjurer's Ban".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&source_id)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::CardName("Forest".to_string()));
+
+    state.restrictions.push(GameRestriction::ProhibitActivity {
+        source: source_id,
+        affected_players: RestrictionPlayerScope::AllPlayers,
+        expiry: RestrictionExpiry::EndOfTurn,
+        activity: ProhibitedActivity::PlayLands {
+            land_filter: Some(TargetFilter::HasChosenName),
+        },
+    });
+
+    let forest_result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: forest_id,
+            card_id: CardId(1),
+        },
+    );
+    assert!(
+        forest_result.is_err(),
+        "the specifically-named land (Forest) must be rejected"
+    );
+
+    let island_result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: island_id,
+            card_id: CardId(2),
+        },
+    );
+    assert!(
+        island_result.is_ok(),
+        "a differently-named land (Island) must NOT be blocked by a filter-scoped \
+         restriction — got {island_result:?}"
+    );
+}
+
+#[test]
 fn new_game_creates_two_player_state() {
     let state = new_game(42);
     assert_eq!(state.players.len(), 2);
