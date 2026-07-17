@@ -11,7 +11,14 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { DeckCardCount, GameFormat, MatchConfig, ObjectId, SerializedAbilityCost } from "../adapter/types";
+import type {
+  CompanionRevealChoice,
+  DeckCardCount,
+  GameFormat,
+  MatchConfig,
+  ObjectId,
+  SerializedAbilityCost,
+} from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -1085,8 +1092,15 @@ function GamePageContent({
   }, [viewingZone]);
 
   const handleDeclareCompanion = useCallback(
-    (cardIndex: number | null) => {
-      dispatch({ type: "DeclareCompanion", data: { card_index: cardIndex } });
+    (choice: CompanionRevealChoice | null) => {
+      dispatch({
+        type: "DeclareCompanion",
+        data: {
+          choice: choice
+            ? { type: "Reveal", data: choice }
+            : { type: "Decline" },
+        },
+      });
     },
     [dispatch],
   );
@@ -2291,8 +2305,8 @@ function MulliganDecisionPrompt({
 }
 
 interface CompanionRevealPromptProps {
-  eligibleCompanions: [string, number][];
-  onChoose: (cardIndex: number | null) => void;
+  eligibleCompanions: CompanionRevealChoice[];
+  onChoose: (choice: CompanionRevealChoice | null) => void;
 }
 
 function CompanionRevealPrompt({
@@ -2320,17 +2334,17 @@ function CompanionRevealPrompt({
             >
               <button
                 onClick={() => onChoose(null)}
-                className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
+                className="min-h-11 rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 active:bg-white/12 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
               >
                 {t("gamePage.companion.decline")}
               </button>
-              {eligibleCompanions.map(([name], i) => (
+              {eligibleCompanions.map((choice) => (
                 <button
-                  key={name}
-                  onClick={() => onChoose(i)}
-                  className="min-h-11 rounded-[16px] bg-amber-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_14px_34px_rgba(245,158,11,0.28)] transition hover:bg-amber-400 sm:text-base"
+                  key={`${choice.name}-${choice.source.type}`}
+                  onClick={() => onChoose(choice)}
+                  className="min-h-11 rounded-[16px] bg-amber-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_14px_34px_rgba(245,158,11,0.28)] transition hover:bg-amber-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200 active:bg-amber-300 sm:text-base"
                 >
-                  {t("gamePage.companion.reveal", { name })}
+                  {t("gamePage.companion.reveal", { name: choice.name })}
                 </button>
               ))}
             </motion.div>
@@ -2349,9 +2363,9 @@ function CompanionRevealPrompt({
       >
         <div className="w-full overflow-x-auto">
           <div className="mx-auto flex w-max min-w-full items-center justify-center px-2 sm:px-4">
-            {eligibleCompanions.map(([name], index) => (
+            {eligibleCompanions.map((choice, index) => (
               <motion.div
-                key={name}
+                key={`${choice.name}-${choice.source.type}`}
                 className="flex-shrink-0 rounded-[18px] transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_24px_rgba(245,158,11,0.22)]"
                 style={{
                   marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)",
@@ -2370,7 +2384,7 @@ function CompanionRevealPrompt({
                 }}
               >
                 <CardImage
-                  cardName={name}
+                  cardName={choice.name}
                   size="normal"
                   className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />

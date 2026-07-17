@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-07-16T00:00:00Z",
+  "updated": "2026-07-17T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -1280,8 +1280,8 @@
       "name": "Jeskai Energy",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
         "U",
+        "W",
         "R"
       ],
       "tags": [
@@ -1290,83 +1290,7 @@
       "main": [
         {
           "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 4,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 4,
-          "name": "Ocelot Pride"
-        },
-        {
-          "count": 4,
-          "name": "Guide of Souls"
-        },
-        {
-          "count": 2,
-          "name": "Galvanic Discharge"
-        },
-        {
-          "count": 4,
-          "name": "Ajani, Nacatl Pariah"
-        },
-        {
-          "count": 4,
-          "name": "Witch Enchanter"
-        },
-        {
-          "count": 1,
-          "name": "Mockingbird"
-        },
-        {
-          "count": 1,
-          "name": "Cori Mountain Monastery"
-        },
-        {
-          "count": 2,
-          "name": "Starfield Shepherd"
-        },
-        {
-          "count": 4,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 2,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 4,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 4,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 3,
-          "name": "Goblin Bombardment"
-        },
-        {
-          "count": 1,
           "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Ephemerate"
         },
         {
           "count": 2,
@@ -1374,49 +1298,121 @@
         },
         {
           "count": 1,
-          "name": "Mountain"
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 4,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Flooded Strand"
+        },
+        {
+          "count": 4,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 1,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 3,
+          "name": "Teferi, Time Raveler"
+        },
+        {
+          "count": 3,
+          "name": "Ephemerate"
         },
         {
           "count": 2,
-          "name": "Ragavan, Nimble Pilferer"
+          "name": "Prismatic Ending"
         },
         {
           "count": 4,
           "name": "Solitude"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Damping Sphere"
         },
         {
-          "count": 2,
-          "name": "Wrath of the Skies"
+          "count": 4,
+          "name": "Ragavan, Nimble Pilferer"
         },
         {
-          "count": 2,
-          "name": "Strix Serenade"
+          "count": 1,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 1,
+          "name": "Elegant Parlor"
         },
         {
           "count": 4,
           "name": "Consign to Memory"
         },
         {
-          "count": 1,
-          "name": "Surgical Extraction"
+          "count": 4,
+          "name": "Galvanic Discharge"
         },
         {
           "count": 2,
-          "name": "Wear // Tear"
+          "name": "Arena of Glory"
+        },
+        {
+          "count": 2,
+          "name": "Wrath of the Skies"
+        },
+        {
+          "count": 4,
+          "name": "Phelia, Exuberant Shepherd"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 3,
+          "name": "Casey Jones, Vigilante"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Spell Snare"
         },
         {
           "count": 1,
-          "name": "Containment Priest"
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 4,
+          "name": "Obsidian Charmaw"
+        },
+        {
+          "count": 3,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Strix Serenade"
+        },
+        {
+          "count": 2,
+          "name": "Wrath of the Skies"
         },
         {
           "count": 1,
-          "name": "Drannith Magistrate"
+          "name": "Ghost Vacuum"
         }
       ]
     }

@@ -511,6 +511,10 @@ pub fn resolve(
     // and AI candidate enumerator both see it.
     state.waiting_for = WaitingFor::SearchChoice {
         player: searcher_id,
+        // CR 701.23a: bind search-session provenance after the library muzzle
+        // has produced the effective zone set. A hand/graveyard card selected
+        // from this mixed search still belongs to a search of this library.
+        library_owner: searched_library.then_some(library_owner_id),
         cards: matching,
         count: pick_count,
         reveal,
@@ -719,7 +723,12 @@ mod tests {
             .contains(&PlayerId(0)));
 
         match &state.waiting_for {
-            WaitingFor::SearchChoice { cards, .. } => {
+            WaitingFor::SearchChoice {
+                cards,
+                library_owner,
+                ..
+            } => {
+                assert_eq!(*library_owner, Some(PlayerId(0)));
                 assert!(cards.contains(&gy), "graveyard match should be offered");
                 assert!(cards.contains(&hand), "hand match should be offered");
                 assert!(cards.contains(&lib), "library match should be offered");
@@ -757,8 +766,46 @@ mod tests {
             .players_who_searched_library_this_turn
             .contains(&PlayerId(0)));
         match &state.waiting_for {
-            WaitingFor::SearchChoice { cards, .. } => assert!(cards.contains(&gy)),
+            WaitingFor::SearchChoice {
+                cards,
+                library_owner,
+                ..
+            } => {
+                assert_eq!(*library_owner, None);
+                assert!(cards.contains(&gy));
+            }
             other => panic!("Expected SearchChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn muzzled_mixed_zone_search_drops_library_provenance() {
+        let mut state = GameState::new_two_player(42);
+        add_cant_search_library_permanent(&mut state, PlayerId(1), ProhibitionScope::Opponents);
+        let gy = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Graveyard,
+        );
+        let ability = make_multi_zone_named_search(
+            "Target",
+            vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                cards,
+                library_owner,
+                ..
+            } => {
+                assert_eq!(*library_owner, None);
+                assert_eq!(cards, &vec![gy]);
+            }
+            other => panic!("Expected SearchChoice, got {other:?}"),
         }
     }
 

@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
-    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterCostChoice,
-    CounterMoveChoice, CounterRemoveChoice, MayTriggerAutoChoiceKey, ShardChoice, YieldScope,
-    YieldTarget,
+    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
+    CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
+    MayTriggerAutoChoiceKey, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -600,8 +600,9 @@ pub enum GameAction {
     },
     /// CR 702.139a: Declare a companion during pre-game reveal (or decline).
     DeclareCompanion {
-        /// Index into the eligible_companions list, or None to decline.
-        card_index: Option<usize>,
+        /// An explicit reveal choice or an explicit decline. This cannot be
+        /// optional: missing fields must reject rather than silently decline.
+        choice: CompanionDeclaration,
     },
     /// CR 702.139a: Pay {3} to put companion into hand (special action, see rule 116.2g).
     CompanionToHand,
@@ -1606,6 +1607,21 @@ mod tests {
         let json = serde_json::to_value(&action).unwrap();
         assert_eq!(json["type"], "PassPriority");
         assert!(json.get("data").is_none());
+    }
+
+    #[test]
+    fn companion_declaration_requires_an_explicit_response() {
+        let action = GameAction::DeclareCompanion {
+            choice: crate::types::game_state::CompanionDeclaration::Decline,
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(json["data"]["choice"]["type"], "Decline");
+
+        let legacy = r#"{
+            "type":"DeclareCompanion",
+            "data":{"card_index":0}
+        }"#;
+        assert!(serde_json::from_str::<GameAction>(legacy).is_err());
     }
 
     #[test]

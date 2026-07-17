@@ -13,6 +13,7 @@ mod condition_gated_activation;
 pub(crate) mod context;
 mod control_change_awareness;
 pub(crate) mod copy_value;
+mod cycling_discipline;
 mod downside_awareness;
 pub(crate) mod effect_classify;
 mod effect_timing;

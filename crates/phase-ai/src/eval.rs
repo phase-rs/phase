@@ -4,6 +4,7 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 use serde::{Deserialize, Serialize};
 
 use crate::planner::ValueEstimate;
@@ -202,6 +203,31 @@ pub fn strategic_intent(state: &GameState, player: PlayerId) -> StrategicIntent 
 /// commander damage dealt to evaluator.
 pub fn threat_level(state: &GameState, evaluator: PlayerId, target: PlayerId) -> f64 {
     threat_level_projected(state, evaluator, target, None)
+}
+
+/// Card-equivalent value of a living opponent's battlefield creature, weighted
+/// by how threatening that creature's controller is to `evaluator`.
+///
+/// Keeping the relationship and zone checks here gives removal timing, target
+/// selection, and play-order hints one authoritative multiplayer valuation.
+pub(crate) fn opponent_battlefield_creature_threat_value(
+    state: &GameState,
+    evaluator: PlayerId,
+    object_id: ObjectId,
+) -> Option<f64> {
+    let object = state.objects.get(&object_id)?;
+    if object.zone != Zone::Battlefield
+        || !object.card_types.core_types.contains(&CoreType::Creature)
+        || !players::is_alive(state, object.controller)
+        || !players::is_opponent(state, evaluator, object.controller)
+    {
+        return None;
+    }
+
+    Some(
+        evaluate_creature(state, object_id)
+            * (threat_level(state, evaluator, object.controller) + 0.5),
+    )
 }
 
 /// Projection-aware variant of `threat_level`. When `projection` is provided,
@@ -752,5 +778,70 @@ mod tests {
             strategic_intent(&state, PlayerId(0)),
             StrategicIntent::PreserveAdvantage
         );
+    }
+
+    #[test]
+    fn opponent_creature_threat_value_weights_equal_bodies_by_controller_threat() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        let frog = add_creature(&mut state, PlayerId(1), 3, 3, vec![]);
+        let krenko = add_creature(&mut state, PlayerId(2), 3, 3, vec![]);
+        for _ in 0..10 {
+            add_creature(&mut state, PlayerId(2), 1, 1, vec![]);
+        }
+
+        let frog_value =
+            opponent_battlefield_creature_threat_value(&state, PlayerId(0), frog).unwrap();
+        let krenko_value =
+            opponent_battlefield_creature_threat_value(&state, PlayerId(0), krenko).unwrap();
+
+        assert!(
+            krenko_value > frog_value,
+            "equal bodies should inherit controller threat: Krenko={krenko_value}, Frog={frog_value}"
+        );
+    }
+
+    #[test]
+    fn opponent_creature_threat_value_rejects_wrong_relation_zone_and_type() {
+        let mut state = GameState::new(
+            engine::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let own = add_creature(&mut state, PlayerId(0), 3, 3, vec![]);
+        let teammate = add_creature(&mut state, PlayerId(1), 3, 3, vec![]);
+        let eliminated = add_creature(&mut state, PlayerId(2), 3, 3, vec![]);
+        state.players[2].is_eliminated = true;
+
+        let noncreature_card_id = CardId(state.next_object_id);
+        let noncreature = create_object(
+            &mut state,
+            noncreature_card_id,
+            PlayerId(3),
+            "Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let hand_creature_card_id = CardId(state.next_object_id);
+        let hand_creature = create_object(
+            &mut state,
+            hand_creature_card_id,
+            PlayerId(3),
+            "Hidden Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&hand_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        for id in [own, teammate, eliminated, noncreature, hand_creature] {
+            assert_eq!(
+                opponent_battlefield_creature_threat_value(&state, PlayerId(0), id),
+                None,
+                "{id:?} must be outside the living-opponent battlefield-creature contract"
+            );
+        }
     }
 }

@@ -13,6 +13,10 @@ import { ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "../ChoiceOver
 import { CHOICE_CARD_IMAGE_CLASS } from "./shared";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
+type ArrangePlanarDeckTopChoice = Extract<
+  WaitingFor,
+  { type: "ArrangePlanarDeckTopChoice" }
+>;
 type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
@@ -26,6 +30,7 @@ export function ReorderableTopChoice({
   restLabel,
   reorderHint,
   keepTone,
+  exactKeepCount,
 }: {
   cards: ObjectId[];
   title: string;
@@ -34,6 +39,7 @@ export function ReorderableTopChoice({
   restLabel: string;
   reorderHint: string;
   keepTone: "emerald" | "blue";
+  exactKeepCount?: number;
 }) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -53,8 +59,11 @@ export function ReorderableTopChoice({
 
   const handleConfirm = useCallback(() => {
     const keep = order.filter((id) => !restSet.has(id));
+    if (exactKeepCount !== undefined && keep.length !== exactKeepCount) {
+      return;
+    }
     dispatch({ type: "SelectCards", data: { cards: keep } });
-  }, [dispatch, order, restSet]);
+  }, [dispatch, exactKeepCount, order, restSet]);
 
   if (!objects) return null;
 
@@ -151,6 +160,27 @@ export function ScryModal({ data }: { data: ScryChoice["data"] }) {
       restLabel={t("cardChoice.badges.bottom")}
       reorderHint={t("cardChoice.reorderHint")}
       keepTone="emerald"
+    />
+  );
+}
+
+export function ArrangePlanarDeckTopModal({
+  data,
+}: {
+  data: ArrangePlanarDeckTopChoice["data"];
+}) {
+  const { t } = useTranslation("game");
+  return (
+    <ReorderableTopChoice
+      key={data.cards.join("-")}
+      cards={data.cards}
+      title={t("cardChoice.scry.title")}
+      subtitle={t("cardChoice.scry.subtitle", { count: data.cards.length })}
+      keepLabel={t("cardChoice.badges.top")}
+      restLabel={t("cardChoice.badges.bottom")}
+      reorderHint={t("cardChoice.reorderHint")}
+      keepTone="emerald"
+      exactKeepCount={data.keep_on_top}
     />
   );
 }
