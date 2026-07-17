@@ -3912,7 +3912,7 @@ mod tests {
     /// CR 702.168d + CR 118.7a: Fugitive Codebreaker's red pip and dynamic
     /// turn-face-up discount both survive keyword extraction.
     #[test]
-    fn extract_keyword_line_disguise_with_graveyard_reduction() {
+    fn extract_router_keyword_line_disguise_with_graveyard_reduction() {
         use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
 
         let keyword = parse_router_keyword_line(

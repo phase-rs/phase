@@ -21865,25 +21865,28 @@ fn static_reduce_ability_cost_global_with_mana_exemption() {
 /// but its explicit mana-ability exception still applies to the named source.
 #[test]
 fn static_reduce_ability_cost_chosen_name_with_mana_exemption() {
-    let def = parse_static_line(
+    for text in [
         "Activated abilities of sources with the chosen name cost {2} more to activate unless they're mana abilities.",
-    )
-    .expect("Anointed Peacekeeper chosen-name activated-ability tax must parse");
-    assert!(matches!(def.affected, Some(TargetFilter::HasChosenName)));
-    assert!(
-        matches!(
-            &def.mode,
-            StaticMode::ReduceAbilityCost {
-                mode: CostModifyMode::Raise,
-                keyword,
-                amount: 2,
-                exemption: ActivationExemption::ManaAbilities,
-                ..
-            } if keyword == "activated"
-        ),
-        "expected Raise/activated/2 with ManaAbilities exemption, got {:?}",
-        def.mode
-    );
+        "Activated abilities of sources with the chosen name cost {2} more to activate unless they\u{2019}re mana abilities.",
+    ] {
+        let def = parse_static_line(text)
+            .expect("Anointed Peacekeeper chosen-name activated-ability tax must parse");
+        assert!(matches!(def.affected, Some(TargetFilter::HasChosenName)));
+        assert!(
+            matches!(
+                &def.mode,
+                StaticMode::ReduceAbilityCost {
+                    mode: CostModifyMode::Raise,
+                    keyword,
+                    amount: 2,
+                    exemption: ActivationExemption::ManaAbilities,
+                    ..
+                } if keyword == "activated"
+            ),
+            "expected Raise/activated/2 with ManaAbilities exemption for {text:?}, got {:?}",
+            def.mode
+        );
+    }
 }
 
 /// CR 601.2f + CR 602.2 + CR 605.1a: The activator-scoped "Abilities you activate
