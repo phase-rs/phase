@@ -20309,66 +20309,81 @@ fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
 
 /// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: the mass-exile arm of the
 /// two-trigger exile-return class. Worldgorger Dragon ("exile all other
-/// permanents you control") and Realm Razer ("exile all lands") parse their ETB
-/// to `Effect::ChangeZoneAll`→Exile, not the single-target `ChangeZone`. The
-/// widened `trigger_is_etb_exile_pending_duration` predicate must stamp
+/// permanents you control") parses its ETB to `Effect::ChangeZoneAll`→Exile,
+/// not the single-target `ChangeZone`. The widened
+/// `trigger_is_etb_exile_pending_duration` predicate must stamp
 /// `Duration::UntilHostLeavesPlay` on the mass-exile ETB exactly as it does for
 /// the single-target Journey to Nowhere / Oblivion Ring class, so the engine's
 /// `ExileLink::UntilSourceLeaves` mechanism returns the exiled cards when the
 /// source leaves. Oracle text verbatim from `data/card-data.json` (2026-07).
 #[test]
 fn mass_exile_ltb_return_etb_gets_until_host_leaves_duration() {
-    // (card name, oracle text, core types) — keywords parse from the oracle text
-    // line, so the separate keyword list is left empty for both.
-    let cases: &[(&str, &str, &[&str])] = &[
-        (
-            "Worldgorger Dragon",
-            "Flying, trample\n\
+    let oracle = "Flying, trample\n\
              When this creature enters, exile all other permanents you control.\n\
              When this creature leaves the battlefield, return the exiled cards to the \
-             battlefield under their owners' control.",
-            &["Creature"],
+             battlefield under their owners' control.";
+    let name = "Worldgorger Dragon";
+    let result = parse(oracle, name, &[], &["Creature"], &[]);
+
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
+
+    let execute = etb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{name} ETB must have execute"));
+    assert_eq!(
+        execute.duration,
+        Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+        "{name}: mass-exile ETB must carry UntilHostLeavesPlay so the engine returns the cards"
+    );
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                ..
+            }
         ),
-        (
-            "Realm Razer",
-            "When this creature enters, exile all lands.\n\
+        "{name}: ETB execute must be ChangeZoneAll→Exile"
+    );
+}
+
+/// CR 610.3: Realm Razer's LTB return carries an entry modifier ("return the
+/// exiled cards to the battlefield TAPPED") that the automatic
+/// `ExileLink::UntilSourceLeaves` return path can't apply — it performs a
+/// plain, unmodified zone move. `trigger_is_ltb_return` must reject a return
+/// trigger with any entry modifier, so `detect_etb_exile_ltb_return` never
+/// pairs Realm Razer's ETB and its mass-exile ETB is left without
+/// `Duration::UntilHostLeavesPlay` — correctly excluded rather than silently
+/// dropping the tapped rider. Oracle text verbatim from `data/card-data.json`
+/// (2026-07). Caught in review of #6055.
+#[test]
+fn mass_exile_ltb_return_with_entry_modifier_is_not_paired() {
+    let oracle = "When this creature enters, exile all lands.\n\
              When this creature leaves the battlefield, return the exiled cards to the \
-             battlefield tapped under their owners' control.",
-            &["Creature"],
-        ),
-    ];
+             battlefield tapped under their owners' control.";
+    let name = "Realm Razer";
+    let result = parse(oracle, name, &[], &["Creature"], &[]);
 
-    for (name, oracle, core_types) in cases {
-        let result = parse(oracle, name, &[], core_types, &[]);
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
 
-        let etb = result
-            .triggers
-            .iter()
-            .find(|t| {
-                t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield)
-            })
-            .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
-
-        let execute = etb
-            .execute
-            .as_deref()
-            .unwrap_or_else(|| panic!("{name} ETB must have execute"));
-        assert_eq!(
-            execute.duration,
-            Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-            "{name}: mass-exile ETB must carry UntilHostLeavesPlay so the engine returns the cards"
-        );
-        assert!(
-            matches!(
-                execute.effect.as_ref(),
-                Effect::ChangeZoneAll {
-                    destination: Zone::Exile,
-                    ..
-                }
-            ),
-            "{name}: ETB execute must be ChangeZoneAll→Exile"
-        );
-    }
+    let execute = etb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{name} ETB must have execute"));
+    assert_eq!(
+        execute.duration, None,
+        "{name}: mass-exile ETB must NOT be stamped UntilHostLeavesPlay — its LTB return has a \
+         tapped modifier the automatic return path can't carry"
+    );
 }
 
 #[test]

@@ -37608,13 +37608,17 @@ const PIRANHA_MARSH_ORACLE_FULL: &str =
 ///
 /// The bug: `trigger_is_etb_exile_pending_duration` only matched the single-target
 /// `Effect::ChangeZone`→Exile, not the mass `Effect::ChangeZoneAll`→Exile that
-/// WGD's "exile all other permanents you control" (and Realm Razer's "exile all
-/// lands") parses to. So WGD's ETB never got the duration stamp and the entire
-/// downstream machinery stayed dormant. WGD's own printed LTB `ChangeZone
-/// {TrackedSet}` return is vestigial for this class (`TrackedSet(0)` resolves to
-/// an empty set — a no-op), exactly like the Fiend Hunter → Wall of Omens
-/// precedent (issue #3673) where the automatic `check_exile_returns` path, not the
-/// printed trigger, is what returns the cards.
+/// WGD's "exile all other permanents you control" parses to. So WGD's ETB never
+/// got the duration stamp and the entire downstream machinery stayed dormant.
+/// WGD's own printed LTB `ChangeZone{TrackedSet}` return is vestigial for this
+/// class (`TrackedSet(0)` resolves to an empty set — a no-op), exactly like the
+/// Fiend Hunter → Wall of Omens precedent (issue #3673) where the automatic
+/// `check_exile_returns` path, not the printed trigger, is what returns the
+/// cards. (Realm Razer shares WGD's mass-exile ETB shape but its LTB return
+/// carries a "tapped" entry modifier the automatic return path can't apply —
+/// `trigger_is_ltb_return` correctly excludes it from this synthesis rather
+/// than silently dropping that modifier; see `parser/oracle_tests.rs`'s
+/// `mass_exile_ltb_return_with_entry_modifier_is_not_paired`.)
 ///
 /// This test drives the real return path: it fires WGD's (now-vestigial) LTB
 /// trigger, then calls `check_exile_returns` over the SAME events vec that carries

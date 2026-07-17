@@ -36,7 +36,10 @@ pub(crate) enum DocumentRelationIr {
     /// existing `ExileLink::UntilSourceLeaves` mechanism returns them. Covers both
     /// the single-target class (Journey to Nowhere, Oblivion Ring) and the
     /// mass-exile class (Worldgorger Dragon's "exile all other permanents you
-    /// control"; Realm Razer's "exile all lands").
+    /// control"). Only paired against an unmodified LTB return — a card whose
+    /// return carries an entry rider (Realm Razer's "return the exiled cards to
+    /// the battlefield TAPPED") is excluded, since the automatic return path
+    /// can't carry that rider; see `trigger_is_ltb_return` in `parser/oracle.rs`.
     EtbExileLtbReturn {
         etb_exile: OracleItemId,
         ltb_return: OracleItemId,

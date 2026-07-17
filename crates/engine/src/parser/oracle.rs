@@ -3035,6 +3035,32 @@ fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
 
 // --- CR 607.1 + CR 610.3: ETB exile → LTB return two-trigger pair --------------
 
+/// CR 610.3: The automatic `check_exile_returns` path this synthesis activates
+/// performs a plain zone move with no entry modifiers — it can't carry a
+/// printed rider like "return the exiled cards to the battlefield TAPPED"
+/// (Realm Razer). Only pair the linked-ability synthesis with an unmodified
+/// return; a modified return needs its own modifier-carrying mechanism and
+/// stays unsupported by this synthesis until one exists (caught in review
+/// of #6055 — Realm Razer would otherwise return its lands untapped,
+/// contradicting its printed text).
+fn change_zone_return_has_no_entry_modifiers(effect: &Effect) -> bool {
+    match effect {
+        Effect::ChangeZone {
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile: None,
+            enters_modified_if: None,
+            ..
+        } => enter_with_counters.is_empty() && conditional_enter_with_counters.is_empty(),
+        _ => false,
+    }
+}
+
 /// Whether a trigger is the LTB "return the exiled card to the battlefield" side.
 fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::LeavesBattlefield
@@ -3046,17 +3072,20 @@ fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
                     target: TargetFilter::TrackedSet { .. },
                     ..
                 }
-            )
+            ) && change_zone_return_has_no_entry_modifiers(&ex.effect)
         })
 }
 
-/// Whether a trigger is the ETB "exile ..." side with no printed duration (the
-/// side that must gain `Duration::UntilHostLeavesPlay`). Covers both the
-/// single-target exile (`Effect::ChangeZone`, Journey to Nowhere / Oblivion
-/// Ring) and the mass exile (`Effect::ChangeZoneAll`, "exile all other
-/// permanents you control" — Worldgorger Dragon; "exile all lands" — Realm
-/// Razer). The two effect variants share the CR 610.3 "until"-duration vehicle,
-/// so the duration stamp applies identically to either.
+/// CR 610.3: Whether a trigger is the ETB "exile ..." side with no printed
+/// duration (the side that must gain `Duration::UntilHostLeavesPlay`). Covers
+/// both the single-target exile (`Effect::ChangeZone`, Journey to Nowhere /
+/// Oblivion Ring) and the mass exile (`Effect::ChangeZoneAll`, "exile all
+/// other permanents you control" — Worldgorger Dragon). The two effect
+/// variants share the CR 610.3 "until"-duration vehicle, so the duration
+/// stamp applies identically to either — gated, in `trigger_is_ltb_return`,
+/// on the paired LTB return having no entry modifiers (a card like Realm
+/// Razer, "return the exiled cards to the battlefield TAPPED," is excluded
+/// from this synthesis rather than silently dropping its tapped rider).
 fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::ChangesZone
         && def.destination == Some(Zone::Battlefield)
@@ -3078,8 +3107,9 @@ fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
 /// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: Pair each ETB "exile ..."
 /// trigger with the LTB "return the exiled card(s)" trigger. Covers both the
 /// single-target class (Journey to Nowhere, Oblivion Ring) and the mass-exile
-/// class ("exile all other permanents you control" — Worldgorger Dragon; "exile
-/// all lands" — Realm Razer). Emitted only when the LTB-return side exists.
+/// class ("exile all other permanents you control" — Worldgorger Dragon).
+/// Emitted only when an unmodified LTB-return side exists (see
+/// `trigger_is_ltb_return`'s entry-modifier gate).
 fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
     let Some(ltb) = items
         .iter()
