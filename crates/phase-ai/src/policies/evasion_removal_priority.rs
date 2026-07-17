@@ -526,6 +526,7 @@ mod tests {
         let slot = TargetSelectionSlot {
             legal_targets: vec![TargetRef::Object(low), TargetRef::Object(high)],
             optional: false,
+            chooser: None,
         };
         let trigger = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
@@ -598,6 +599,7 @@ mod tests {
                         TargetRef::Object(eliminated),
                     ],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
