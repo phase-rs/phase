@@ -511,9 +511,18 @@ pub(crate) fn parse_additive_type_clause_modifications(
     let granted_original = granted_lower
         .map(|granted| &clause_original[clause_original.len() - granted.len()..])
         .map(str::trim);
-    let granted_modifications = granted_original
-        .map(parse_quoted_ability_modifications)
-        .unwrap_or_default();
+    // CR 613.1f: route the trailing "and has <X>" conjunct through the shared
+    // `parse_continuous_modifications` authority — the same one the sibling
+    // `parse_enchanted_is_type` uses for its own trailing clause — rather than the
+    // quoted-ability-only `parse_quoted_ability_modifications`. It subsumes the
+    // quoted-ability parse and adds bare keyword handling, so a bare "and has
+    // <keyword>" (Aurification's "…other creature types and has defender") composes
+    // an `AddKeyword` instead of being silently dropped. Safe from the mutual
+    // recursion with this function: the trailing clause carries no
+    // "in addition to … types" phrase, so the additive fallback inside it declines.
+    let after_suffix_original =
+        &clause_original[clause_original.len() - after_suffix_lower.len()..];
+    let granted_modifications = parse_continuous_modifications(after_suffix_original);
 
     let mut modifications = Vec::new();
     for raw_word in type_words.split_whitespace() {
