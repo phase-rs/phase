@@ -9889,10 +9889,7 @@ fn build_oracle_face_inner(
         for definition in &mut parsed.statics {
             if definition.condition.is_some()
                 && definition.modifications.iter().any(|modification| {
-                    matches!(
-                        modification,
-                        ContinuousModification::AddSubtype { .. }
-                    )
+                    matches!(modification, ContinuousModification::AddSubtype { .. })
                 })
                 && !definition.modifications.iter().any(|modification| {
                     matches!(
