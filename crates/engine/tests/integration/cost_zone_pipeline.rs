@@ -7796,3 +7796,294 @@ fn library_effect_placements_stay_synchronous_without_redirects() {
         1
     );
 }
+
+/// W-R2-TOP (red first): PutOnTopOrBottom's selected permanent must take the
+/// replacement-aware Library delivery before its chained resolution tail runs.
+#[test]
+fn put_on_top_or_bottom_redirect_pauses_before_continuation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Top Or Bottom Redirect Source", 1, 1)
+        .id();
+    let target = scenario
+        .add_creature(P0, "Top Or Bottom Redirect Target", 1, 1)
+        .id();
+    for (name, destination) in [
+        ("Top Or Bottom Library To Graveyard", Zone::Graveyard),
+        ("Top Or Bottom Library To Exile", Zone::Exile),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, destination));
+    }
+
+    let mut runner = scenario.build();
+    let mut ability = ResolvedAbility::new(
+        Effect::PutOnTopOrBottom {
+            target: TargetFilter::Any,
+        },
+        vec![TargetRef::Object(target)],
+        source,
+        P0,
+    );
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("top-or-bottom reaches the owner choice");
+
+    let paused = runner
+        .act(GameAction::ChooseTopOrBottom { top: true })
+        .expect("the Library delivery reaches its replacement choice");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the redirected Library delivery resumes its continuation");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&target].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(paused.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::GainLife,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the chained continuation runs exactly once after the redirected delivery"
+    );
+}
+
+/// W-R2-DIG (red first): a Dig kept card moving out of the library must settle
+/// its replacement-aware destination before the tracked-set publication and
+/// continuation tail run.
+#[test]
+fn dig_kept_nonbattlefield_redirect_pauses_before_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Dig Kept Redirect Source", 1, 1)
+        .id();
+    let kept = scenario
+        .add_spell_to_library_top(P0, "Dig Kept Redirect Card", true)
+        .id();
+    let rest = scenario
+        .add_spell_to_library_top(P0, "Dig Kept Redirect Rest", true)
+        .id();
+    for (name, destination) in [
+        ("Dig Kept Hand To Graveyard", Zone::Graveyard),
+        ("Dig Kept Hand To Exile", Zone::Exile),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, destination));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![kept, rest];
+    let mut ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+            destination: Some(Zone::Hand),
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Graveyard),
+            reveal: true,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("Dig reaches its selection");
+
+    let paused = runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("the kept Hand delivery reaches its replacement choice");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&kept].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&rest].zone, Zone::Library);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+    assert!(runner.state().chain_tracked_set_id.is_none());
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the redirected kept delivery completes the Dig tail");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&kept].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&rest].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    let tracked = runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &runner
+                .state()
+                .chain_tracked_set_id
+                .expect("Dig publishes its kept set after the delivery settles"),
+        )
+        .expect("Dig tracked set exists");
+    assert_eq!(tracked, &vec![kept]);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(paused.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::GainLife,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the Dig continuation runs exactly once after the redirected kept delivery"
+    );
+}
+
+/// W-R2-REG: The two R2 effect paths preserve their synchronous no-replacement
+/// behavior, including continuation delivery and the requested library position.
+#[test]
+fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
+    let mut top_scenario = GameScenario::new();
+    top_scenario.at_phase(Phase::PreCombatMain);
+    let top_source = top_scenario
+        .add_creature(P0, "Synchronous Top Or Bottom Source", 1, 1)
+        .id();
+    let top_target = top_scenario
+        .add_creature(P0, "Synchronous Top Or Bottom Target", 1, 1)
+        .id();
+    let mut top_runner = top_scenario.build();
+    let mut top_ability = ResolvedAbility::new(
+        Effect::PutOnTopOrBottom {
+            target: TargetFilter::Any,
+        },
+        vec![TargetRef::Object(top_target)],
+        top_source,
+        P0,
+    );
+    top_ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        top_source,
+        P0,
+    )));
+    let mut top_events = Vec::new();
+    resolve_ability_chain(top_runner.state_mut(), &top_ability, &mut top_events, 0)
+        .expect("top-or-bottom reaches its choice");
+    let top_completed = top_runner
+        .act(GameAction::ChooseTopOrBottom { top: true })
+        .expect("unredirected top-or-bottom settles inline");
+    assert!(matches!(
+        top_completed.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(top_runner.state().objects[&top_target].zone, Zone::Library);
+    assert_eq!(top_runner.state().players[P0.0 as usize].life, 21);
+
+    let mut dig_scenario = GameScenario::new();
+    dig_scenario.at_phase(Phase::PreCombatMain);
+    let dig_source = dig_scenario
+        .add_creature(P0, "Synchronous Dig Kept Source", 1, 1)
+        .id();
+    let kept = dig_scenario
+        .add_spell_to_library_top(P0, "Synchronous Dig Kept Card", true)
+        .id();
+    let rest = dig_scenario
+        .add_spell_to_library_top(P0, "Synchronous Dig Kept Rest", true)
+        .id();
+    let mut dig_runner = dig_scenario.build();
+    dig_runner.state_mut().players[P0.0 as usize].library = im::vector![kept, rest];
+    let mut dig_ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+            destination: Some(Zone::Hand),
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Graveyard),
+            reveal: true,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        dig_source,
+        P0,
+    );
+    dig_ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        dig_source,
+        P0,
+    )));
+    let mut dig_events = Vec::new();
+    resolve_ability_chain(dig_runner.state_mut(), &dig_ability, &mut dig_events, 0)
+        .expect("Dig reaches its selection");
+    let dig_completed = dig_runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("unredirected Dig kept delivery settles inline");
+    assert!(matches!(
+        dig_completed.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(dig_runner.state().objects[&kept].zone, Zone::Hand);
+    assert_eq!(dig_runner.state().objects[&rest].zone, Zone::Graveyard);
+    assert_eq!(dig_runner.state().players[P0.0 as usize].life, 21);
+}

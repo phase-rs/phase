@@ -1795,8 +1795,28 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::TopOrBottomChoice { player, object_id },
             GameAction::ChooseTopOrBottom { top },
         ) => {
-            zones::move_to_library_position(state, object_id, top, events);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            // CR 614.1 + CR 616.1: The chosen object's Library delivery is
+            // an effect-owned zone event, so a `Moved` replacement must settle
+            // before its chained resolution tail drains. This legacy waiter does
+            // not retain the original ability source; preserve its prior
+            // self-anchored attribution for the pipeline request.
+            let position = if top {
+                LibraryPosition::Top
+            } else {
+                LibraryPosition::Bottom
+            };
+            crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                vec![crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    object_id,
+                    Zone::Library,
+                    object_id,
+                )
+                .at_library_position(position)],
+                Some(crate::types::game_state::BatchCompletion::TopOrBottomComplete { player }),
+                events,
+            );
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         // CR 107.1c + CR 107.14: Commit the chosen amount for a "pay any amount
         // of X" prompt. Deducts the resource, emits the matching resource event,
@@ -2439,76 +2459,123 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             if let Some(kept_zone) = kept_destination {
-                for &obj_id in &kept {
-                    if kept_zone == Zone::Battlefield {
-                        // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield
-                        // entries through the zone-change pipeline so the delivery
-                        // tail seeds intrinsic enters-with counters and applies the
-                        // CR 614.1 tap-state. The previous manual `obj.tapped` is
-                        // dropped (the tail does it from the seeded EntryMods).
-                        // CR 400.7: attribute the entry to the dig's source when
-                        // known; otherwise the moved object anchors itself (the
-                        // pre-pipeline raw move recorded no source).
-                        let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
-                            obj_id,
-                            Zone::Battlefield,
-                            dig_source_id.unwrap_or(obj_id),
-                        );
-                        req.mods.enter_tapped =
-                            crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
-                        match crate::game::zone_pipeline::move_object(state, req, events) {
-                            crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                            // CR 303.4f / CR 616.1: the kept card's battlefield
-                            // entry paused on an as-enters choice (aura host pick /
-                            // replacement ordering). The pause is already parked;
-                            // defer the rest-pile move + tracked-set publish +
-                            // continuation wiring onto the batch tail so the drain
-                            // runs it once the entry resolves — otherwise the
-                            // unkept cards strand in the library (they were not yet
-                            // moved). The drain fires on both the replacement-choice
-                            // resume and the aura-attachment resume.
-                            //
-                            // SCOPING (multi-kept limitation, pre-existing,
-                            // strictly no-worse-than-before): this `return` exits
-                            // the `for &obj_id in &kept` loop, so if kept card #1
-                            // pauses, kept #2+ are NOT moved to the battlefield —
-                            // they remain in the library. The deferred completion
-                            // only finishes the rest-pile (unkept) move and the
-                            // tracked-set publish; it does not resume the kept
-                            // loop. The old raw-`move_to_zone` path had the same
-                            // ceiling (it could not pause and resume a kept tail
-                            // either), so this is no regression. WRINKLE:
-                            // `publish_tracked_set: Some(kept.clone())` publishes
-                            // ALL kept cards, including the unmoved #2+, so a
-                            // downstream sub-ability keyed off the tracked set can
-                            // be wired to cards still in the library on this paused
-                            // path. Acceptable today because no supported dig card
-                            // both keeps 2+ cards to the battlefield AND surfaces an
-                            // as-enters pause on the first; revisit if such a card
-                            // is added (the fix is a kept-loop continuation, not a
-                            // single completion).
-                            crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
-                            | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                                crate::game::zone_pipeline::defer_completion_on_pause(
-                                    state,
-                                    crate::types::game_state::BatchCompletion::RevealRestPile {
-                                        player,
-                                        source_id: dig_source_id,
-                                        rest_cards: unkept.clone(),
-                                        rest_destination: rest_destination
-                                            .unwrap_or(Zone::Graveyard),
-                                        clear_markers: Vec::new(),
-                                        publish_tracked_set: Some(kept.clone()),
-                                        emit_reveal_until_resolved: None,
-                                    },
-                                );
-                                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                                    state.waiting_for.clone(),
-                                ));
-                            }
-                        }
+                if kept_zone != Zone::Battlefield {
+                    // CR 614.1 + CR 616.1 + CR 608.2c: Kept cards leaving the
+                    // library are effect-owned zone events. Their destination
+                    // delivery, rest-pile routing, tracked-set publication, and
+                    // continuation drain are one typed batch tail so none can
+                    // run before every kept card has settled.
+                    let publish_set = if kept.is_empty() {
+                        Vec::new()
+                    } else if state.pending_continuation.as_ref().is_some_and(|cont| {
+                        dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                    }) {
+                        unkept.clone()
                     } else {
-                        zones::move_to_zone(state, obj_id, kept_zone, events);
+                        kept.clone()
+                    };
+                    let defer_rest_routing =
+                        state.pending_continuation.as_ref().is_some_and(|cont| {
+                            dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                        });
+                    let reqs = kept
+                        .iter()
+                        .map(|&obj_id| {
+                            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                                obj_id,
+                                kept_zone,
+                                dig_source_id.unwrap_or(obj_id),
+                            )
+                        })
+                        .collect();
+                    crate::game::zone_pipeline::move_objects_simultaneously_then(
+                        state,
+                        reqs,
+                        Some(
+                            crate::types::game_state::BatchCompletion::DigKeptDeliveryComplete {
+                                player,
+                                source_id: dig_source_id,
+                                rest_cards: if defer_rest_routing {
+                                    Vec::new()
+                                } else {
+                                    unkept
+                                },
+                                rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                publish_tracked_set: publish_set,
+                                continuation_targets: kept.clone(),
+                            },
+                        ),
+                        events,
+                    );
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+                for &obj_id in &kept {
+                    // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield
+                    // entries through the zone-change pipeline so the delivery
+                    // tail seeds intrinsic enters-with counters and applies the
+                    // CR 614.1 tap-state. The previous manual `obj.tapped` is
+                    // dropped (the tail does it from the seeded EntryMods).
+                    // CR 400.7: attribute the entry to the dig's source when
+                    // known; otherwise the moved object anchors itself (the
+                    // pre-pipeline raw move recorded no source).
+                    let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                        obj_id,
+                        Zone::Battlefield,
+                        dig_source_id.unwrap_or(obj_id),
+                    );
+                    req.mods.enter_tapped =
+                        crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+                    match crate::game::zone_pipeline::move_object(state, req, events) {
+                        crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                        // CR 303.4f / CR 616.1: the kept card's battlefield
+                        // entry paused on an as-enters choice (aura host pick /
+                        // replacement ordering). The pause is already parked;
+                        // defer the rest-pile move + tracked-set publish +
+                        // continuation wiring onto the batch tail so the drain
+                        // runs it once the entry resolves — otherwise the
+                        // unkept cards strand in the library (they were not yet
+                        // moved). The drain fires on both the replacement-choice
+                        // resume and the aura-attachment resume.
+                        //
+                        // SCOPING (multi-kept limitation, pre-existing,
+                        // strictly no-worse-than-before): this `return` exits
+                        // the `for &obj_id in &kept` loop, so if kept card #1
+                        // pauses, kept #2+ are NOT moved to the battlefield —
+                        // they remain in the library. The deferred completion
+                        // only finishes the rest-pile (unkept) move and the
+                        // tracked-set publish; it does not resume the kept
+                        // loop. The old raw-`move_to_zone` path had the same
+                        // ceiling (it could not pause and resume a kept tail
+                        // either), so this is no regression. WRINKLE:
+                        // `publish_tracked_set: Some(kept.clone())` publishes
+                        // ALL kept cards, including the unmoved #2+, so a
+                        // downstream sub-ability keyed off the tracked set can
+                        // be wired to cards still in the library on this paused
+                        // path. Acceptable today because no supported dig card
+                        // both keeps 2+ cards to the battlefield AND surfaces an
+                        // as-enters pause on the first; revisit if such a card
+                        // is added (the fix is a kept-loop continuation, not a
+                        // single completion).
+                        crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                        | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            crate::game::zone_pipeline::defer_completion_on_pause(
+                                state,
+                                crate::types::game_state::BatchCompletion::RevealRestPile {
+                                    player,
+                                    source_id: dig_source_id,
+                                    rest_cards: unkept.clone(),
+                                    rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                    clear_markers: Vec::new(),
+                                    publish_tracked_set: Some(kept.clone()),
+                                    emit_reveal_until_resolved: None,
+                                },
+                            );
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     }
                 }
             }
@@ -5613,6 +5680,49 @@ pub(crate) fn run_batch_completion(
                 source_id,
                 subject: None,
             });
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::TopOrBottomComplete { player } => {
+            finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::DigKeptDeliveryComplete {
+            player,
+            source_id,
+            rest_cards,
+            rest_destination,
+            publish_tracked_set,
+            continuation_targets,
+        } => {
+            if !rest_cards.is_empty() {
+                match route_rest_partition(state, &rest_cards, rest_destination, source_id, events)
+                {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        crate::game::zone_pipeline::defer_completion_on_pause(
+                            state,
+                            BatchCompletion::DigKeptDeliveryComplete {
+                                player,
+                                source_id,
+                                rest_cards: Vec::new(),
+                                rest_destination,
+                                publish_tracked_set,
+                                continuation_targets,
+                            },
+                        );
+                        return crate::game::zone_pipeline::BatchMoveResult::NeedsChoice;
+                    }
+                }
+            }
+            effects::publish_fresh_tracked_set(state, publish_tracked_set);
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.targets = continuation_targets
+                    .iter()
+                    .map(|&id| TargetRef::Object(id))
+                    .collect();
+                cont.chain.context.optional_effect_performed = !continuation_targets.is_empty();
+            }
+            finish_with_continuation(state, player, events);
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::SurveilKeepOnTop { player, top_cards } => {

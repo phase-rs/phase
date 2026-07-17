@@ -1867,6 +1867,21 @@ pub enum BatchCompletion {
         source_id: ObjectId,
         removed_exile_links: Vec<ObjectId>,
     },
+    /// CR 614.1 + CR 616.1: A PutOnTopOrBottom object's Library delivery has settled, so
+    /// its chained resolution tail may run exactly once.
+    TopOrBottomComplete { player: PlayerId },
+    /// CR 614.1 + CR 616.1 + CR 608.2c: A Dig kept-card batch settled outside
+    /// the battlefield. Its rest routing, tracked-set publication, and
+    /// continuation drain must follow the delivery, while the published set and
+    /// parent-target continuation set remain independently typed.
+    DigKeptDeliveryComplete {
+        player: PlayerId,
+        source_id: Option<ObjectId>,
+        rest_cards: Vec<ObjectId>,
+        rest_destination: Zone,
+        publish_tracked_set: Vec<ObjectId>,
+        continuation_targets: Vec<ObjectId>,
+    },
     /// CR 701.25a: After the surveil rest pile reaches the graveyard, the kept
     /// cards rest on top of the player's library in the chosen order
     /// (`top_cards[0]` becomes the topmost card).
@@ -1880,12 +1895,11 @@ pub enum BatchCompletion {
         player: PlayerId,
         revealed: Vec<ObjectId>,
     },
-    /// CR 303.4f / CR 616.1 + CR 701.20b: A reveal-until / dig kept card routed
-    /// onto the battlefield paused on an as-enters choice (aura host pick or a
-    /// replacement-ordering prompt) before the unkept "rest pile" was moved.
-    /// Defer the rest-pile move + reveal-marker cleanup onto the parked batch
-    /// tail so it runs exactly once after the kept card's entry resolves —
-    /// otherwise the rest cards strand in the library (the early-`return` bug).
+    /// CR 614.1 + CR 616.1 + CR 701.20b: A reveal-until / dig kept-card
+    /// delivery paused before its unkept "rest pile" was moved. Defer the
+    /// rest-pile move + reveal-marker cleanup onto the parked batch tail so it
+    /// runs exactly once after the kept delivery settles — otherwise the rest
+    /// cards strand in the library (the early-`return` bug).
     RevealRestPile {
         /// The player whose continuation drains after the pile lands.
         player: PlayerId,
