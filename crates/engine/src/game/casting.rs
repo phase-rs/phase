@@ -13219,9 +13219,9 @@ pub fn can_pay_cost_after_auto_tap(
     can_pay_cost_after_auto_tap_with_probe(state, player, source_id, cost, None)
 }
 
-/// Return the unpaid portion of an in-flight spell's mana cost after applying
-/// the caster's current mana pool, including spell-specific spending
-/// restrictions and any-color permissions.
+/// CR 601.2g + CR 601.2h: Return the unpaid portion of an in-flight spell's
+/// mana cost after applying the caster's current mana pool, including
+/// spell-specific spending restrictions and any-color permissions.
 pub fn pending_cast_remaining_mana_cost(state: &GameState, player: PlayerId) -> Option<ManaCost> {
     let pending = state.pending_cast.as_deref()?;
     let player_data = state

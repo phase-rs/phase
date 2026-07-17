@@ -7292,6 +7292,8 @@ fn condition_matches_with_additional_cost_paid(
     }
 }
 
+/// CR 601.2f: Determine the greatest generic cost reduction available from
+/// eligible cards that may be exiled while paying an optional additional cost.
 fn exile_any_number_cost_reduction_capacity(
     state: &GameState,
     player: PlayerId,
