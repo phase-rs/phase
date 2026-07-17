@@ -963,6 +963,7 @@ mod incredible_hulk_enrage_attacking;
 mod indestructible_survives_destroy;
 mod issue_4365_msh_legality;
 mod issue_4376_elspeth_resplendent_nonmodal_labels;
+mod issue_4731_reins_of_power;
 mod issue_4937_iona_chosen_color;
 mod issue_4945_zada_hedron_grinder;
 mod issue_4948_samwise_gamgee_sacrifice_target_order;

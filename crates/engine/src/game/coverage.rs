@@ -3500,6 +3500,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::GiveControl {
             target, recipient, ..
+        }
+        | Effect::GiveControlAll {
+            target, recipient, ..
         } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("to".into(), fmt_target(recipient)));

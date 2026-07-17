@@ -113,7 +113,7 @@ fn score_activation(
                     gives_away_permanent = true;
                 }
             }
-            Effect::GiveControl { target, .. } => {
+            Effect::GiveControl { target, .. } | Effect::GiveControlAll { target, .. } => {
                 control_change_effect = true;
                 if would_target_own_permanent(ctx, source_id, target) {
                     gives_away_permanent = true;

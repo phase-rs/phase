@@ -48716,3 +48716,94 @@ fn unless_extraction_offsets_survive_unicode_case_fold() {
          the boundary, and the mask must not eat the quote)"
     );
 }
+
+/// Issue #4731 (Reins of Power): "You and that opponent each gain control of
+/// all creatures the other controls until end of turn" must lower to a
+/// genuine TWO-WAY mass swap, not the mass one-way `GainControlAll` grab the
+/// bug report describes (the caster taking every creature on the board,
+/// filter `controller: null`). Pins the AST shape: `GainControlAll` (the
+/// caster takes the target opponent's creatures) chained via `sub_ability` to
+/// the new `GiveControlAll` (the target opponent takes the caster's
+/// creatures), both carrying the printed `UntilEndOfTurn` duration.
+#[test]
+fn issue_4731_reins_of_power_control_swap_ast() {
+    let parsed = parse_oracle_text(
+        "Untap all creatures you control and all creatures target opponent controls. \
+         You and that opponent each gain control of all creatures the other controls \
+         until end of turn. Those creatures gain haste until end of turn.",
+        "Reins of Power",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let head = parsed
+        .abilities
+        .iter()
+        .find_map(|def| {
+            let mut node = Some(def);
+            while let Some(d) = node {
+                if matches!(*d.effect, Effect::GainControlAll { .. }) {
+                    return Some(d);
+                }
+                node = d.sub_ability.as_deref();
+            }
+            None
+        })
+        .expect("expected a GainControlAll in the parsed chain");
+
+    let Effect::GainControlAll { target } = &*head.effect else {
+        unreachable!()
+    };
+    match target {
+        TargetFilter::Typed(tf) => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::TargetOpponent),
+                "the caster's half must take creatures the TARGET OPPONENT controls, got {tf:?}"
+            );
+        }
+        other => panic!("expected a Typed creature filter, got {other:?}"),
+    }
+    assert_eq!(
+        head.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the printed \"until end of turn\" must reach the GainControlAll half"
+    );
+
+    let sub = head
+        .sub_ability
+        .as_deref()
+        .expect("GainControlAll must chain to a GiveControlAll sub_ability");
+    let Effect::GiveControlAll { target, recipient } = &*sub.effect else {
+        panic!(
+            "expected GiveControlAll as the GainControlAll's sub_ability, got {:?}",
+            sub.effect
+        );
+    };
+    match target {
+        TargetFilter::Typed(tf) => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "the opponent's half must take creatures the CASTER controls, got {tf:?}"
+            );
+        }
+        other => panic!("expected a Typed creature filter, got {other:?}"),
+    }
+    match recipient {
+        TargetFilter::Typed(tf) => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::Opponent),
+                "GiveControlAll must hand control to the opponent, not the caster, got {tf:?}"
+            );
+        }
+        other => panic!("expected a Typed player filter, got {other:?}"),
+    }
+    assert_eq!(
+        sub.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the printed \"until end of turn\" must ALSO reach the GiveControlAll sub_ability — \
+         it does not inherit ability.duration from its parent at resolution time"
+    );
+}

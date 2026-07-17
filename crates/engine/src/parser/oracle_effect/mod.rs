@@ -7852,6 +7852,22 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 613.1b + CR 110.2 + CR 109.5: "you and that opponent each gain
+    // control of all creatures the other controls [until end of turn]" (Reins
+    // of Power). MUST run before the imperative dispatch for the same reason
+    // as `try_parse_compound_subject_each` above (the bare "you" subject would
+    // otherwise be swallowed). Deliberately NOT routed through
+    // `try_parse_compound_subject_each`'s generic distributor: that combinator
+    // clones ONE parsed body and rewrites a single recipient-shaped field per
+    // half, but here both the population filter's controller anaphor ("the
+    // other controls") and who receives control must co-vary together per
+    // half — `GainControlAll`'s `target` is a resolution-time population scan,
+    // not a recipient slot, so the generic single-field rewrite cannot express
+    // it (see `try_parse_symmetric_gain_control_all`'s own doc comment).
+    if let Some(clause) = try_parse_symmetric_gain_control_all(text) {
+        return clause;
+    }
+
     // CR 122.1 + CR 608.2d: Bribe Taker — "[you may] put your choice of a
     // <fixed> counter or a counter of that kind on ~". Runs before the generic
     // for-each path; the `DistinctCounterKindsAmong` iteration source has already
@@ -17270,6 +17286,91 @@ fn try_parse_compound_subject_each(
         distribute: None,
         multi_target: None,
         condition: half_a.condition,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 613.1b + CR 110.2 + CR 109.5: "You and that opponent each gain control
+/// of all creatures the other controls [until end of turn]" (Reins of Power)
+/// — a symmetric two-way MASS control swap. Called with the body already
+/// stripped of its leading/trailing slots by `clause_shell::peel_clause`
+/// (this function's caller applies `with_clause_duration`, which — extended
+/// alongside this fix — also re-stamps the peeled duration onto the
+/// `GiveControlAll` sub_ability this function builds).
+///
+/// Not routed through the generic `try_parse_compound_subject_each`
+/// distributor: that combinator clones ONE parsed body and rewrites a single
+/// recipient-shaped field per half (Draw's `target`, Token's `owner`, …).
+/// Here, BOTH the population filter's controller anaphor ("the other
+/// controls") AND who receives control must co-vary together per half —
+/// `GainControlAll`'s `target` is a resolution-time population scan (CR
+/// 613.1b), not a recipient slot, so a single-field rewrite cannot express a
+/// filter AND a recipient flipping in lockstep. Composes two independently
+/// correct, already-proven mechanisms instead:
+///   - Head: `GainControlAll { target: creatures the opponent controls }` —
+///     the ability's controller takes (byte-identical mechanism to the
+///     already-correct Hellkite Tyrant "gain control of all artifacts that
+///     player controls").
+///   - Sub: `GiveControlAll { target: creatures you control, recipient: the
+///     opponent }` — the mass counterpart of `GiveControl`.
+///
+/// `resolve_ability_chain` does not re-evaluate layers between chain links,
+/// so both mass filters read the pre-effect battlefield: the printed "each"
+/// is genuinely simultaneous (CR 613.9-style), with no extra staging.
+fn try_parse_symmetric_gain_control_all(text: &str) -> Option<ParsedEffectClause> {
+    const SUBJECT_PREFIXES: [&str; 2] = [
+        "you and that opponent each gain control of all creatures the other controls",
+        "you and target opponent each gain control of all creatures the other controls",
+    ];
+    let trimmed = text.trim().trim_end_matches('.').trim();
+    let lower = trimmed.to_lowercase();
+    if !SUBJECT_PREFIXES.contains(&lower.as_str()) {
+        return None;
+    }
+
+    // "all creatures target opponent controls" — same controller anaphor
+    // already proven correct by the Hellkite Tyrant `GainControlAll` mechanism.
+    let opponent_creatures =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
+    // "all creatures you [the ability's controller] control" — `ControllerRef::You`
+    // resolves from `ability.controller`, which stays the caster for every link
+    // in this chain (no per-link reassignment happens here), so this correctly
+    // reads as "the creatures the CASTER controls" even from the GiveControlAll
+    // sub_ability link.
+    let your_creatures =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+    // The recipient of `GiveControlAll` — the same already-targeted opponent.
+    // `resolve_recipient_player` prefers an already-declared `TargetRef::Player`
+    // in `ability.targets` (surfaced by this SAME clause's `TargetOpponent`
+    // population filter above, via the companion-target-slot machinery), so
+    // this filter's generic ambiguity-checked fallback is not actually hit in
+    // the common 2+ player case here.
+    let opponent_recipient =
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+    let mut head = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainControlAll {
+            target: opponent_creatures,
+        },
+    );
+    let sub = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GiveControlAll {
+            target: your_creatures,
+            recipient: opponent_recipient,
+        },
+    );
+    head.sub_ability = Some(Box::new(sub));
+
+    Some(ParsedEffectClause {
+        effect: *head.effect,
+        duration: head.duration,
+        sub_ability: head.sub_ability,
+        distribute: None,
+        multi_target: None,
+        condition: None,
         optional: false,
         unless_pay: None,
     })

@@ -132,6 +132,13 @@ pub fn resolve_all(
         .copied()
         .collect();
 
+    // CR 613.9 (issue #4731): Stamp the objects this effect just took, so a
+    // chained sibling `GiveControlAll` (the "you and target opponent each
+    // gain control of all creatures the other controls" idiom) can exclude
+    // them from its own "creatures you control" population filter — see the
+    // field doc on `GameState::last_gained_control_object_ids`.
+    state.last_gained_control_object_ids = matching.clone();
+
     for obj_id in matching {
         let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
         // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
@@ -234,24 +241,7 @@ pub fn resolve_give(
         return Err(EffectError::MissingParam("GiveControl".to_string()));
     };
 
-    // CR 110.2 + CR 613.3: The recipient is the player target when one is
-    // explicitly in ability.targets (normal targeting path). When no player
-    // target is present — e.g. a post-replacement continuation whose target
-    // list only carries the damaged object — resolve the effect's `recipient`
-    // filter only if it identifies exactly one legal player. CR 608.2d choices
-    // are made while applying the effect; arbitrary first-match selection would
-    // be wrong in multiplayer when several opponents are legal.
-    let recipient_id = if let Some(pid) = ability.targets.iter().find_map(|t| {
-        if let TargetRef::Player(pid) = t {
-            Some(*pid)
-        } else {
-            None
-        }
-    }) {
-        pid
-    } else {
-        unique_recipient_from_filter(state, recipient, ability)?
-    };
+    let recipient_id = resolve_recipient_player(state, ability, recipient)?;
 
     let object_ids = give_control_object_targets(state, ability, target);
 
@@ -292,6 +282,123 @@ pub fn resolve_give(
     });
 
     Ok(())
+}
+
+/// CR 613.1b + CR 110.2: Mass control-change to an explicit RECIPIENT — the
+/// untargeted "all" counterpart of [`resolve_give`], mirroring how
+/// [`resolve_all`] is to [`resolve`]. Unlike `resolve_all` (which always hands
+/// control to `ability.controller`), the recipient is read from `recipient`
+/// via [`resolve_recipient_player`] — the same declared-target-first
+/// resolution `resolve_give` uses, so a recipient already established
+/// elsewhere in the same resolving chain (e.g. the "target opponent" from a
+/// preceding clause) is honored here too.
+///
+/// Reins of Power composes `GainControlAll` (this ability's controller takes
+/// all creatures the target opponent controls) chained via `sub_ability` to
+/// this effect (the target opponent takes all creatures the controller
+/// controls). CR 613.9-style simultaneity does NOT fall out for free here:
+/// `resolve_chain_body` deliberately flushes layers before a sub-ability
+/// resolves (issue #2384, so a P/T-dependent sub sees current
+/// characteristics), which applies the first half's control-change TCEs
+/// before this filter runs — a live "creatures you control" filter at this
+/// point would incorrectly also match the creatures the first half JUST
+/// took. `resolve_all` stamps those ids into
+/// `state.last_gained_control_object_ids`, and this filter excludes them, to
+/// recover the intended simultaneity.
+pub fn resolve_give_all(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
+
+    let Effect::GiveControlAll { target, recipient } = &ability.effect else {
+        return Err(EffectError::InvalidParam(
+            "expected GiveControlAll effect".to_string(),
+        ));
+    };
+
+    let new_controller = resolve_recipient_player(state, ability, recipient)?;
+
+    // Ability-context filter evaluation, identical to `resolve_all` /
+    // `destroy::resolve_all`: `resolved_object_filter` binds anaphoric scopes
+    // (e.g. `controller: OriginalController`) from the ability before matching.
+    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let matching: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+                // CR 613.9 (issue #4731): exclude objects a chained sibling
+                // `GainControlAll` just took THIS resolution — see the field
+                // doc on `GameState::last_gained_control_object_ids`. Without
+                // this, the `flush_layers` call `resolve_chain_body` makes
+                // before a sub-ability resolves applies the sibling's control
+                // change first, so a live "creatures you control" filter here
+                // would incorrectly also match what the sibling just took,
+                // collapsing a two-way swap into a one-sided grab.
+                && !state.last_gained_control_object_ids.contains(id)
+        })
+        .copied()
+        .collect();
+
+    for obj_id in matching {
+        let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
+        // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
+        state.add_transient_continuous_effect(
+            ability.source_id,
+            new_controller,
+            duration.clone(),
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        mark_echo_due_for_new_controller(state, obj_id);
+        if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
+            events.push(GameEvent::ControllerChanged {
+                object_id: obj_id,
+                old_controller,
+                new_controller,
+            });
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::GiveControlAll,
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
+}
+
+/// CR 110.2 + CR 613.3: Shared recipient resolution for [`resolve_give`] and
+/// [`resolve_give_all`]. The recipient is the player target when one is
+/// explicitly in `ability.targets` (normal targeting path — also covers a
+/// recipient anaphor like "target opponent" already declared by an earlier
+/// clause in the same resolving chain, e.g. Reins of Power). When no player
+/// target is present — e.g. a post-replacement continuation whose target list
+/// only carries the damaged object — resolve the effect's `recipient` filter
+/// only if it identifies exactly one legal player. CR 608.2d choices are made
+/// while applying the effect; arbitrary first-match selection would be wrong
+/// in multiplayer when several opponents are legal.
+fn resolve_recipient_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    recipient: &TargetFilter,
+) -> Result<PlayerId, EffectError> {
+    if let Some(pid) = ability.targets.iter().find_map(|t| {
+        if let TargetRef::Player(pid) = t {
+            Some(*pid)
+        } else {
+            None
+        }
+    }) {
+        Ok(pid)
+    } else {
+        unique_recipient_from_filter(state, recipient, ability)
+    }
 }
 
 fn give_control_object_targets(

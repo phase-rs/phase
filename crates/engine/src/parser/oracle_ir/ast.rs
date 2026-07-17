@@ -1698,6 +1698,23 @@ pub(crate) fn with_clause_duration(
     // Leading duration from Oracle text (e.g., "Until end of turn, ...") is authoritative —
     // it overrides any default injected by sub-parsers (e.g., build_become_clause's Permanent).
     clause.duration = Some(duration.clone());
+    // CR 613.1b + CR 109.5: "you and that opponent each gain control of all
+    // creatures the other controls until end of turn" (Reins of Power,
+    // `try_parse_symmetric_gain_control_all`) composes as a `GainControlAll`
+    // head chained via `sub_ability` to a `GiveControlAll` tail — ONE printed
+    // duration governs BOTH mass control-changes, but each becomes its own
+    // `AbilityDefinition` node reading its OWN `.duration` at resolution
+    // (`ability.duration` in `gain_control::resolve_all` /
+    // `resolve_give_all`). The generic per-field patch below only reaches
+    // `clause.effect` (the head); re-stamp the sub_ability explicitly here so
+    // the tail doesn't silently fall back to `Duration::Permanent`.
+    if matches!(clause.effect, Effect::GainControlAll { .. }) {
+        if let Some(sub) = clause.sub_ability.as_mut() {
+            if matches!(*sub.effect, Effect::GiveControlAll { .. }) && sub.duration.is_none() {
+                sub.duration = Some(duration.clone());
+            }
+        }
+    }
     match &mut clause.effect {
         Effect::GenericEffect {
             duration: ref mut effect_duration,

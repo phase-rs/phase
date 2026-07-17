@@ -295,6 +295,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::GainControlAll { .. }
         | Effect::GainEnergy { .. }
         | Effect::GiveControl { .. }
+        | Effect::GiveControlAll { .. }
         | Effect::GoadAll { .. }
         | Effect::GrantCastingPermission { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }

@@ -6092,6 +6092,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExchangeLifeTotals { .. }
         | Effect::SetDayNight { .. }
         | Effect::GiveControl { .. }
+        | Effect::GiveControlAll { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
         | Effect::CombineHost { .. }

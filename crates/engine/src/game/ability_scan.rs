@@ -724,6 +724,12 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
+        Effect::GiveControlAll { target, recipient } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target));
+            acc = acc.or(scan_target_filter(recipient));
+            acc
+        }
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after: _,
@@ -5880,6 +5886,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
         | Effect::GainControlAll { .. }
+        | Effect::GiveControlAll { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
         | Effect::UnattachAll { .. }
@@ -6151,6 +6158,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
         | Effect::GainControlAll { .. }
+        | Effect::GiveControlAll { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
         | Effect::UnattachAll { .. }

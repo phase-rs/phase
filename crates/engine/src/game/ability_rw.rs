@@ -2796,6 +2796,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::PumpAll { target, .. }
         | Effect::GainControl { target }
         | Effect::GainControlAll { target }
+        | Effect::GiveControlAll { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::DestroyAll { target, .. }
@@ -4993,6 +4994,10 @@ fn rw_effect(
         Effect::GainControl { target: _ }
         | Effect::GainControlAll { target: _ }
         | Effect::GiveControl {
+            target: _,
+            recipient: _,
+        }
+        | Effect::GiveControlAll {
             target: _,
             recipient: _,
         }

@@ -910,6 +910,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SetLifeTotal
         | EffectKind::SetDayNight
         | EffectKind::GiveControl
+        | EffectKind::GiveControlAll
         | EffectKind::RemoveFromCombat
         // CR 509.3c: the "becomes blocked" trigger from an effect-block is keyed
         // off the `AttackerBecameBlockedByEffect` GameEvent (see the event→key

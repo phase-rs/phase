@@ -10340,6 +10340,27 @@ pub enum Effect {
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
     },
+    /// CR 613.1b + CR 110.2: Mass control-change to an explicit RECIPIENT
+    /// (Layer 2) — the untargeted "all" counterpart of `GiveControl`, mirroring
+    /// how `GainControlAll` is to `GainControl`. Distinct from `GainControlAll`
+    /// (which always hands control to `ability.controller`): `recipient` names
+    /// who takes control, independent of who cast/activated the source.
+    /// Reins of Power ("You and that opponent each gain control of all
+    /// creatures the other controls until end of turn") composes as
+    /// `GainControlAll { target: creatures target opponent controls }`
+    /// (`ability.controller` takes) chained via `sub_ability` to
+    /// `GiveControlAll { target: creatures you control, recipient: target
+    /// opponent }` (the opponent takes) — CR 613.1b: both mass filters are
+    /// evaluated against the pre-effect battlefield since layers are not
+    /// re-evaluated between chain links, giving the printed "each" a genuinely
+    /// simultaneous two-way swap.
+    GiveControlAll {
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
+        /// The player who receives control of every matching permanent.
+        #[serde(default = "default_target_filter_any")]
+        recipient: TargetFilter,
+    },
     ControlNextTurn {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -14342,6 +14363,11 @@ impl Effect {
             // (enumerated at resolution), not a chosen target slot — like
             // DestroyAll, its `target_filter()` is None.
             | Effect::GainControlAll { .. }
+            // CR 613.1b + CR 110.2: GiveControlAll mirrors GainControlAll — its
+            // `target` is the mass population filter; `recipient` is likewise
+            // not a player-selectable target (it's resolved from an already-
+            // declared target/filter, same as `GiveControl`'s `recipient`).
+            | Effect::GiveControlAll { .. }
             | Effect::GoadAll { .. }
             | Effect::BounceAll { .. }
             | Effect::CounterAll { .. }
@@ -14655,6 +14681,7 @@ impl Effect {
             | Effect::ChangeZoneAll { .. }
             | Effect::GainControl { .. }
             | Effect::GainControlAll { .. }
+            | Effect::GiveControlAll { .. }
             | Effect::ControlNextTurn { .. }
             | Effect::Attach { .. }
             | Effect::UnattachAll { .. }
@@ -14908,6 +14935,7 @@ impl Effect {
             | Effect::ChangeZoneAll { .. }
             | Effect::GainControl { .. }
             | Effect::GainControlAll { .. }
+            | Effect::GiveControlAll { .. }
             | Effect::ControlNextTurn { .. }
             | Effect::Attach { .. }
             | Effect::UnattachAll { .. }
@@ -15114,6 +15142,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Dig { .. } => "Dig",
         Effect::GainControl { .. } => "GainControl",
         Effect::GainControlAll { .. } => "GainControlAll",
+        Effect::GiveControlAll { .. } => "GiveControlAll",
         Effect::ControlNextTurn { .. } => "ControlNextTurn",
         Effect::Attach { .. } => "Attach",
         Effect::UnattachAll { .. } => "UnattachAll",
@@ -15357,6 +15386,7 @@ pub enum EffectKind {
     Dig,
     GainControl,
     GainControlAll,
+    GiveControlAll,
     ControlNextTurn,
     Attach,
     AttachAll,
@@ -15611,6 +15641,7 @@ impl From<&Effect> for EffectKind {
             Effect::Dig { .. } => EffectKind::Dig,
             Effect::GainControl { .. } => EffectKind::GainControl,
             Effect::GainControlAll { .. } => EffectKind::GainControlAll,
+            Effect::GiveControlAll { .. } => EffectKind::GiveControlAll,
             Effect::ControlNextTurn { .. } => EffectKind::ControlNextTurn,
             Effect::Attach { .. } => EffectKind::Attach,
             Effect::UnattachAll { .. } => EffectKind::UnattachAll,

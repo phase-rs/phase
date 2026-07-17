@@ -3762,6 +3762,7 @@ pub fn resolve_effect(
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
         Effect::GainControlAll { .. } => gain_control::resolve_all(state, ability, events),
+        Effect::GiveControlAll { .. } => gain_control::resolve_give_all(state, ability, events),
         Effect::Goad { .. } | Effect::GoadAll { .. } => goad::resolve(state, ability, events),
         Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::SetRoomDoorLock { .. } => set_room_door_lock::resolve(state, ability, events),
@@ -4635,7 +4636,7 @@ fn affected_objects_from_events(
                 TargetRef::Player(_) => None,
             })
             .collect(),
-        Effect::GainControlAll { .. } => events
+        Effect::GainControlAll { .. } | Effect::GiveControlAll { .. } => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::ControllerChanged { object_id, .. } => Some(*object_id),
@@ -4954,6 +4955,19 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
                 event,
                 GameEvent::EffectResolved {
                     kind: crate::types::ability::EffectKind::GiveControl,
+                    ..
+                } | GameEvent::ControllerChanged { .. }
+            )
+        }),
+        // CR 613.1b + CR 110.2: mass counterpart of the `GiveControl` gate
+        // above — "did anything" iff at least one matching permanent actually
+        // changed controller (`resolve_give_all` emits `ControllerChanged` per
+        // handoff, skipping no-op self-handoffs, mirroring `resolve_give`).
+        Effect::GiveControlAll { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::GiveControlAll,
                     ..
                 } | GameEvent::ControllerChanged { .. }
             )
@@ -7156,6 +7170,11 @@ pub fn resolve_ability_chain(
         state.private_look_ids.clear();
         state.private_look_player = None;
         state.last_zone_changed_ids.clear();
+        // CR 613.9 (issue #4731): Mirrors `last_zone_changed_ids`'s lifecycle —
+        // resolution-scoped, cleared only at depth 0 so a chained sibling
+        // `GiveControlAll` (entering at depth > 0) still sees the ids its
+        // sibling `GainControlAll` just stamped.
+        state.last_gained_control_object_ids.clear();
         // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
         // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
         // alongside `last_zone_changed_ids` so cross-resolution leakage is

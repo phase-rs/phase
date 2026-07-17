@@ -369,6 +369,22 @@ struct SlotAccumulator {
     /// announcer (the CR-601.2c default). Set/restored by `collect_target_slots`
     /// per link so each chained sub-ability stamps only its own slots.
     current_chooser: Option<PlayerId>,
+    /// CR 601.2c + CR 109.4 + CR 115.1 (issue #4731): True once a companion
+    /// `TargetPlayer`/`TargetOpponent` slot has been pushed anywhere in this
+    /// resolving ability chain. A single "target opponent"/"target player"
+    /// declaration is chosen ONCE (CR 601.2c) and may be referenced by that
+    /// SAME identifier ("that opponent"/"that player") in a LATER, textually
+    /// separate clause of the same printed ability (Reins of Power: "Untap
+    /// all creatures ... and all creatures target opponent controls. You and
+    /// THAT OPPONENT each gain control ..." — two independent clauses, one
+    /// shared target). `ability_needs_companion_target_player_slot` is a pure
+    /// per-node predicate with no chain-wide memory of its own, so without this
+    /// flag a second clause reusing the identical anaphor would surface a
+    /// SECOND, spurious target-opponent prompt. Guarded so only the FIRST such
+    /// node in printed order actually requests the choice; every later node's
+    /// identical anaphor is a read of the SAME already-declared target, not an
+    /// independent one.
+    target_player_companion_slot_pushed: bool,
 }
 
 impl SlotAccumulator {
@@ -1567,7 +1583,14 @@ pub fn assign_targets_in_chain(
         return Ok(());
     }
     let mut next_target = 0usize;
-    assign_targets_recursive(state, ability, targets, &mut next_target)?;
+    let mut player_slot_consumed = false;
+    assign_targets_recursive(
+        state,
+        ability,
+        targets,
+        &mut next_target,
+        &mut player_slot_consumed,
+    )?;
     if next_target != targets.len() {
         return Err(EngineError::InvalidAction(
             "Unused selected targets".to_string(),
@@ -2426,6 +2449,9 @@ fn collect_target_slots_inner(
         // Oracle text order).
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && ability_needs_companion_target_player_slot(ability)
+            // CR 601.2c (issue #4731): a chain-wide "already requested" guard —
+            // see `SlotAccumulator::target_player_companion_slot_pushed` doc.
+            && !acc.target_player_companion_slot_pushed
         {
             // CR 120.3a + CR 603.7c: For a damage-to-player trigger ("…deals
             // combat damage to a player, [destroy/goad] target creature that
@@ -2450,6 +2476,7 @@ fn collect_target_slots_inner(
                 optional: ability.optional_targeting,
                 chooser: None,
             });
+            acc.target_player_companion_slot_pushed = true;
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && effect_needs_target_creature_quantity_slot(&ability.effect)
@@ -2961,6 +2988,7 @@ fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         Effect::PutCounterAll { target, .. }
         | Effect::DestroyAll { target, .. }
         | Effect::GainControlAll { target, .. }
+        | Effect::GiveControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::DamageAll { target, .. }
         | Effect::SetTapState {
@@ -5829,6 +5857,10 @@ fn assign_targets_recursive(
     ability: &mut ResolvedAbility,
     targets: &[TargetRef],
     next_target: &mut usize,
+    // CR 601.2c + issue #4731: mirrors `SlotAccumulator::target_player_companion_slot_pushed`
+    // — the companion "target opponent"/"target player" slot is consumed from
+    // `targets` at most once per resolving chain, matching how it was built.
+    player_slot_consumed: &mut bool,
 ) -> Result<(), EngineError> {
     if let Some(sub_ability) = ability.sub_ability.as_mut().filter(|sub| {
         matches!(
@@ -5837,7 +5869,13 @@ fn assign_targets_recursive(
         )
     }) {
         if ability.context.additional_cost_paid {
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            assign_targets_recursive(
+                state,
+                sub_ability,
+                targets,
+                next_target,
+                player_slot_consumed,
+            )?;
             ability.targets = sub_ability.targets.clone();
             return Ok(());
         }
@@ -5868,6 +5906,7 @@ fn assign_targets_recursive(
                 ability.sub_ability.as_deref_mut(),
                 targets,
                 next_target,
+                player_slot_consumed,
             )?;
             return Ok(());
         }
@@ -5875,7 +5914,13 @@ fn assign_targets_recursive(
             if defers_conditional_target_selection(sub_ability) {
                 return Ok(());
             }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            assign_targets_recursive(
+                state,
+                sub_ability,
+                targets,
+                next_target,
+                player_slot_consumed,
+            )?;
         }
         return Ok(());
     }
@@ -5907,6 +5952,7 @@ fn assign_targets_recursive(
                 ability.sub_ability.as_deref_mut(),
                 targets,
                 next_target,
+                player_slot_consumed,
             )?;
             return Ok(());
         }
@@ -5914,7 +5960,13 @@ fn assign_targets_recursive(
             if defers_conditional_target_selection(sub_ability) {
                 return Ok(());
             }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            assign_targets_recursive(
+                state,
+                sub_ability,
+                targets,
+                next_target,
+                player_slot_consumed,
+            )?;
         }
         return Ok(());
     }
@@ -5947,7 +5999,13 @@ fn assign_targets_recursive(
             if defers_conditional_target_selection(sub_ability) {
                 return Ok(());
             }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            assign_targets_recursive(
+                state,
+                sub_ability,
+                targets,
+                next_target,
+                player_slot_consumed,
+            )?;
         }
         return Ok(());
     }
@@ -5978,6 +6036,9 @@ fn assign_targets_recursive(
     // Slot order matches `collect_target_slots`: player slot before primary.
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && ability_needs_companion_target_player_slot(ability)
+        // CR 601.2c (issue #4731): mirrors the `collect_target_slots_inner` guard —
+        // consume the companion target at most once per resolving chain.
+        && !*player_slot_consumed
     {
         if let Some(target) = targets.get(*next_target) {
             ability.targets.push(target.clone());
@@ -5987,6 +6048,7 @@ fn assign_targets_recursive(
                 "Missing required target".to_string(),
             ));
         }
+        *player_slot_consumed = true;
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && effect_needs_target_creature_quantity_slot(&ability.effect)
@@ -6063,6 +6125,7 @@ fn assign_targets_recursive(
             ability.sub_ability.as_deref_mut(),
             targets,
             next_target,
+            player_slot_consumed,
         )?;
         return Ok(());
     }
@@ -6083,7 +6146,13 @@ fn assign_targets_recursive(
                 sub_ability.targets.push(creature);
             }
         } else {
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            assign_targets_recursive(
+                state,
+                sub_ability,
+                targets,
+                next_target,
+                player_slot_consumed,
+            )?;
         }
     }
     Ok(())
@@ -6419,6 +6488,7 @@ fn assign_targets_after_deferred_effect(
     sub_ability: Option<&mut ResolvedAbility>,
     targets: &[TargetRef],
     next_target: &mut usize,
+    player_slot_consumed: &mut bool,
 ) -> Result<(), EngineError> {
     let Some(sub_ability) = sub_ability else {
         return Ok(());
@@ -6432,9 +6502,16 @@ fn assign_targets_after_deferred_effect(
             sub_ability.sub_ability.as_deref_mut(),
             targets,
             next_target,
+            player_slot_consumed,
         );
     }
-    assign_targets_recursive(state, sub_ability, targets, next_target)
+    assign_targets_recursive(
+        state,
+        sub_ability,
+        targets,
+        next_target,
+        player_slot_consumed,
+    )
 }
 
 fn assign_selected_slots_after_deferred_effect(
