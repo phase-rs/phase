@@ -515,10 +515,8 @@ pub fn create_attraction_deck_card(
 }
 
 fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_attraction_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_attraction_deck_card(state, face, owner);
     }
 }
 
@@ -542,10 +540,8 @@ pub fn create_planar_deck_card(
 
 fn load_shared_planar_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
     state.planar_deck.clear();
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_planar_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_planar_deck_card(state, face, owner);
     }
     state.planar_controller = Some(owner);
     crate::game::planechase::restamp_planar_objects_to_controller(state);
@@ -571,10 +567,8 @@ pub fn create_scheme_deck_card(
 
 fn load_shared_scheme_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
     state.scheme_deck.clear();
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_scheme_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_scheme_deck_card(state, face, owner);
     }
     state.archenemy = Some(owner);
 }
@@ -603,10 +597,8 @@ pub fn create_contraption_deck_card(
 }
 
 fn load_player_contraption_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_contraption_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_contraption_deck_card(state, face, owner);
     }
 }
 
@@ -940,14 +932,21 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 /// intentionally separate: revealed ID/name pairs carry no information about
 /// the current order of unrevealed cards.
 fn load_player_library(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    let mut faces = entries
-        .iter()
-        .flat_map(|entry| std::iter::repeat(&entry.card).take(entry.count as usize))
-        .collect::<Vec<_>>();
-    faces.shuffle(&mut state.rng);
-    for face in faces {
+    for face in shuffled_entry_faces(state, entries) {
         create_object_from_card_face(state, face, owner);
     }
+}
+
+/// Produces a fresh ID-allocation order for every hidden-order deck before its
+/// usual game-start shuffle. This prevents a public object ID from encoding the
+/// submitted deck-list position once the card is later revealed.
+fn shuffled_entry_faces(state: &mut GameState, entries: &[DeckEntry]) -> Vec<&CardFace> {
+    let mut faces = entries
+        .iter()
+        .flat_map(|entry| std::iter::repeat_n(&entry.card, entry.count as usize))
+        .collect::<Vec<_>>();
+    faces.shuffle(&mut state.rng);
+    faces
 }
 
 /// Canonical init sequence for every transport layer: load the decks into

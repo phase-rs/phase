@@ -44,7 +44,7 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         } if state
             .objects
             .get(object_id)
-            .is_some_and(|obj| obj.foretold && obj.face_down) =>
+            .is_some_and(|obj| obj.face_down) =>
         {
             true
         }
@@ -1278,9 +1278,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         }
         // CR 702.143d: an effect made an exiled card foretold (no foretelling
         // player — the card itself became foretold).
-        GameEvent::BecameForetold { object_id } => {
-            vec![card_seg(state, *object_id), text(" becomes foretold")]
-        }
+        GameEvent::BecameForetold { .. } => vec![text("An exiled card becomes foretold")],
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is

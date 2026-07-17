@@ -1170,7 +1170,12 @@ pub fn filter_events_for_viewer(
                 controller,
                 object_id,
                 ..
-            } if !viewer_has_private_access_to_player(state, viewer, *controller) => {
+            } if !viewer_has_private_access_to_player(state, viewer, *controller)
+                && state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|obj| obj.face_down) =>
+            {
                 GameEvent::SpellCast {
                     card_id: CardId(0),
                     controller: *controller,
@@ -1974,6 +1979,13 @@ mod tests {
             "Known Spell".to_string(),
             Zone::Stack,
         );
+        let opponent_face_up_spell = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(1),
+            "Known Opponent Spell".to_string(),
+            Zone::Stack,
+        );
         let events = vec![
             GameEvent::SpellCast {
                 card_id: CardId(701),
@@ -1984,6 +1996,11 @@ mod tests {
                 card_id: CardId(702),
                 controller: PlayerId(0),
                 object_id: own_spell,
+            },
+            GameEvent::SpellCast {
+                card_id: CardId(703),
+                controller: PlayerId(1),
+                object_id: opponent_face_up_spell,
             },
         ];
 
@@ -2001,7 +2018,12 @@ mod tests {
                     controller: PlayerId(0),
                     ..
                 },
-            ] if *object_id == face_down_spell
+                GameEvent::SpellCast {
+                    card_id: CardId(703),
+                    controller: PlayerId(1),
+                    object_id: face_up_object_id,
+                },
+            ] if *object_id == face_down_spell && *face_up_object_id == opponent_face_up_spell
         ));
 
         let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
