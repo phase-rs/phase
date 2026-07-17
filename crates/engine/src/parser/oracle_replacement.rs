@@ -891,23 +891,162 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     None
 }
 
-fn parse_search_found_replacement_clause(input: &str) -> OracleResult<'_, ()> {
-    let (input, _) = tag::<_, _, OracleError<'_>>("while ").parse(input)?;
-    let (input, _) = alt((
-        pair(tag("an opponent"), tag(" is searching")),
-        pair(tag("one or more opponents"), tag(" are searching")),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchFoundSearcherAgreement {
+    Singular,
+    Plural,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFoundSearcher {
+    player_scope: ReplacementPlayerScope,
+    agreement: SearchFoundSearcherAgreement,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchFoundExileActor {
+    SingularPlayer,
+    PluralPlayers,
+    GenderNeutral,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFoundExileAction {
+    actor: SearchFoundExileActor,
+    destination: Zone,
+    target: TargetFilter,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFoundPlayPermission {
+    duration: Duration,
+    target: TargetFilter,
+    grantee: PermissionGrantee,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFoundReplacementClause {
+    searcher: SearchFoundSearcher,
+    exile: SearchFoundExileAction,
+    play_permission: SearchFoundPlayPermission,
+    mana_spend_permission: ManaSpendPermission,
+}
+
+fn parse_search_found_searcher(input: &str) -> OracleResult<'_, SearchFoundSearcher> {
+    preceded(
+        tag("while "),
+        alt((
+            value(
+                SearchFoundSearcher {
+                    player_scope: ReplacementPlayerScope::Opponent,
+                    agreement: SearchFoundSearcherAgreement::Singular,
+                },
+                (tag("an opponent is searching their library"), tag(", ")),
+            ),
+            value(
+                SearchFoundSearcher {
+                    player_scope: ReplacementPlayerScope::Opponent,
+                    agreement: SearchFoundSearcherAgreement::Plural,
+                },
+                (
+                    tag("one or more opponents are searching their "),
+                    alt((tag("libraries"), tag("library"))),
+                    tag(", "),
+                ),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_search_found_exile_action(input: &str) -> OracleResult<'_, SearchFoundExileAction> {
+    let (input, actor) = alt((
+        value(SearchFoundExileActor::GenderNeutral, tag("they exile ")),
+        value(
+            SearchFoundExileActor::SingularPlayer,
+            tag("that player exiles "),
+        ),
+        value(
+            SearchFoundExileActor::PluralPlayers,
+            tag("those players exile "),
+        ),
     ))
     .parse(input)?;
-    let (input, _) = tag(" their library, ").parse(input)?;
-    let (input, _) = alt((tag("they exile "), tag("that player exiles "))).parse(input)?;
     let (input, _) = tag("each card they find. ").parse(input)?;
+    Ok((
+        input,
+        SearchFoundExileAction {
+            actor,
+            destination: Zone::Exile,
+            target: TargetFilter::ParentTarget,
+        },
+    ))
+}
+
+fn parse_search_found_play_permission(input: &str) -> OracleResult<'_, SearchFoundPlayPermission> {
     let (input, _) = tag("you may play ").parse(input)?;
-    let (input, _) = tag("those cards for as long as they remain exiled, and ").parse(input)?;
-    let (input, _) = tag("you may spend mana as though it were mana of any color ").parse(input)?;
-    let (input, _) = tag("to cast them").parse(input)?;
+    let (input, _) = alt((tag("those cards"), tag("them"))).parse(input)?;
+    let (input, _) = tag(" for as long as ").parse(input)?;
+    let (input, _) =
+        alt((tag("they remain exiled"), tag("those cards remain exiled"))).parse(input)?;
+    let (input, _) = tag(", and ").parse(input)?;
+    Ok((
+        input,
+        SearchFoundPlayPermission {
+            // The permission is stored on each exiled object and removed when
+            // that object changes zones, so the existing permanent duration is
+            // the engine representation of this linked-exile lifetime.
+            duration: Duration::Permanent,
+            target: TargetFilter::ParentTarget,
+            grantee: PermissionGrantee::AbilityController,
+        },
+    ))
+}
+
+fn parse_search_found_mana_concession(input: &str) -> OracleResult<'_, ManaSpendPermission> {
+    let (input, _) = tag("you may spend mana as though it were mana of any ").parse(input)?;
+    let (input, permission) = alt((
+        value(ManaSpendPermission::AnyColor, tag("color")),
+        value(ManaSpendPermission::AnyTypeOrColor, tag("type")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" to cast ").parse(input)?;
+    let (input, _) = alt((tag("them"), tag("those cards"), tag("those spells"))).parse(input)?;
+    Ok((input, permission))
+}
+
+fn parse_search_found_replacement_clause(
+    input: &str,
+) -> OracleResult<'_, SearchFoundReplacementClause> {
+    let (input, searcher) = parse_search_found_searcher(input)?;
+    let (input, exile) = parse_search_found_exile_action(input)?;
+    let actor_agrees = matches!(exile.actor, SearchFoundExileActor::GenderNeutral)
+        || matches!(
+            (searcher.agreement, exile.actor),
+            (
+                SearchFoundSearcherAgreement::Singular,
+                SearchFoundExileActor::SingularPlayer
+            ) | (
+                SearchFoundSearcherAgreement::Plural,
+                SearchFoundExileActor::PluralPlayers
+            )
+        );
+    if !actor_agrees {
+        return Err(oracle_err(input));
+    }
+    let (input, play_permission) = parse_search_found_play_permission(input)?;
+    let (input, mana_spend_permission) = parse_search_found_mana_concession(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     let (input, _) = eof(input)?;
-    Ok((input, ()))
+    Ok((
+        input,
+        SearchFoundReplacementClause {
+            searcher,
+            exile,
+            play_permission,
+            mana_spend_permission,
+        },
+    ))
 }
 
 /// Parser-authoritative classifier for the complete SearchFound replacement
@@ -920,20 +1059,21 @@ pub(crate) fn is_search_found_replacement_pattern(lower: &str) -> bool {
 /// CR 701.23a + CR 614.1 + CR 611.2b: During the scoped own-library search,
 /// replace each found-card event with exile and bind a permission that lasts
 /// for as long as that object remains exiled. CR 609.4b: the permission also
-/// carries the exact any-color mana-spending concession for casting that card.
+/// carries the parsed any-color or any-type mana-spending concession for casting
+/// that card.
 fn parse_search_found_replacement(original: &str, lower: &str) -> Option<ReplacementDefinition> {
-    nom_parse_lower(lower, parse_search_found_replacement_clause)?;
+    let parsed = nom_parse_lower(lower, parse_search_found_replacement_clause)?;
 
     let grant = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
-                duration: Duration::Permanent,
+                duration: parsed.play_permission.duration,
                 granted_to: crate::types::player::PlayerId(0),
                 frequency: CastFrequency::Unlimited,
                 source_id: None,
                 exiled_by_ability_controller: None,
-                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                mana_spend_permission: Some(parsed.mana_spend_permission),
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
@@ -941,16 +1081,16 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             },
-            target: TargetFilter::ParentTarget,
-            grantee: PermissionGrantee::AbilityController,
+            target: parsed.play_permission.target,
+            grantee: parsed.play_permission.grantee,
         },
     );
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
             origin: None,
-            destination: Zone::Exile,
-            target: TargetFilter::ParentTarget,
+            destination: parsed.exile.destination,
+            target: parsed.exile.target,
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
@@ -968,7 +1108,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
     let mut definition = ReplacementDefinition::new(ReplacementEvent::SearchFound)
         .execute(execute)
         .description(original.to_string());
-    definition.valid_player = Some(ReplacementPlayerScope::Opponent);
+    definition.valid_player = Some(parsed.searcher.player_scope);
     Some(definition)
 }
 
@@ -20827,6 +20967,51 @@ mod opposition_agent_parser_tests {
     }
 
     #[test]
+    fn search_found_parser_composes_supported_surface_axes_independently() {
+        let cases = [
+            (
+                "While an opponent is searching their library, that player exiles each card they find. You may play them for as long as those cards remain exiled, and you may spend mana as though it were mana of any type to cast those cards.",
+                ManaSpendPermission::AnyTypeOrColor,
+            ),
+            (
+                "While one or more opponents are searching their libraries, those players exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast those spells.",
+                ManaSpendPermission::AnyColor,
+            ),
+            (
+                "While one or more opponents are searching their library, they exile each card they find. You may play them for as long as they remain exiled, and you may spend mana as though it were mana of any type to cast them.",
+                ManaSpendPermission::AnyTypeOrColor,
+            ),
+        ];
+
+        for (text, expected_mana) in cases {
+            assert!(is_search_found_replacement_pattern(&text.to_lowercase()));
+            let definition = parse_replacement_line(text, "Search Interceptor")
+                .expect("composed SearchFound paragraph should reach replacement lowering");
+            assert_eq!(
+                definition.valid_player,
+                Some(ReplacementPlayerScope::Opponent)
+            );
+            let grant = definition
+                .execute
+                .as_deref()
+                .and_then(|execute| execute.sub_ability.as_deref())
+                .expect("found-card exile must carry its linked play permission");
+            assert!(matches!(
+                grant.effect.as_ref(),
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::Permanent,
+                        mana_spend_permission: Some(actual_mana),
+                        ..
+                    },
+                    target: TargetFilter::ParentTarget,
+                    grantee: PermissionGrantee::AbilityController,
+                } if *actual_mana == expected_mana
+            ));
+        }
+    }
+
+    #[test]
     fn search_found_parser_requires_the_complete_atomic_paragraph() {
         assert!(parse_replacement_line(
             "While an opponent is searching their library, they exile each card they find.",
@@ -20836,6 +21021,27 @@ mod opposition_agent_parser_tests {
         assert!(!is_search_found_replacement_pattern(
             "while an opponent are searching their library, they exile each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them."
         ));
+        assert!(!is_search_found_replacement_pattern(
+            "while an opponent is searching their library, those players exile each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them."
+        ));
+        assert!(!is_search_found_replacement_pattern(
+            "while one or more opponents are searching their libraries, that player exiles each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them."
+        ));
+        assert!(!is_search_found_replacement_pattern(
+            "while an opponent is searching their library, they exile each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them. draw a card."
+        ));
+
+        // Reach guard: the rejection assertions above are meaningful only if
+        // the neighboring well-formed production still reaches this parser.
+        assert!(is_search_found_replacement_pattern(
+            &REPLACEMENT_TEXT.to_lowercase()
+        ));
+        assert_eq!(
+            parse_replacement_line(REPLACEMENT_TEXT, "Search Interceptor")
+                .expect("well-formed reach guard")
+                .event,
+            ReplacementEvent::SearchFound
+        );
     }
 
     #[test]
