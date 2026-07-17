@@ -2480,6 +2480,68 @@ fn compound_mass_counter_first_conjunct_stays_put_counter_all() {
     assert!(!matches!(*sub.effect, Effect::Unimplemented { .. }));
 }
 
+/// CR 603.7 + issue #6065: Inspiring Call — "Draw a card for each creature you
+/// control with a +1/+1 counter on it. Those creatures gain indestructible until
+/// end of turn." Unlike Nalia (whose `PutCounterAll` publishes a tracked set),
+/// the `Draw` clause publishes NO tracked set — its target is the drawing player
+/// — so "those creatures" must bind to the Draw's COUNT filter (the counted
+/// creatures), not the `ParentTarget` anaphor (which resolved to the controller
+/// and left the grant inert), and not `TrackedSet(0)` (no publisher).
+#[test]
+fn inspiring_call_those_creatures_bind_to_draw_count_filter() {
+    let def = parse_effect_chain(
+        "draw a card for each creature you control with a +1/+1 counter on it. those creatures gain indestructible until end of turn",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "primary clause must be Draw, got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("'those creatures gain indestructible ...' must attach as sub_ability");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => {
+            // The "those creatures" anaphor may live in the GenericEffect `target`
+            // or the static's `affected` — the binding must land in one of them.
+            let affected = static_abilities.first().and_then(|s| s.affected.as_ref());
+            let bound = target.as_ref().or(affected);
+            assert!(
+                !matches!(target, Some(TargetFilter::ParentTarget))
+                    && !matches!(affected, Some(TargetFilter::ParentTarget)),
+                "no ParentTarget may remain (would resolve to the controller); \
+                 target={target:?} affected={affected:?}"
+            );
+            assert!(
+                matches!(
+                    bound,
+                    Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Creature)
+                ),
+                "grant must bind to the counted Typed creature filter; \
+                 target={target:?} affected={affected:?}"
+            );
+            assert!(
+                static_abilities
+                    .iter()
+                    .any(|s| s.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Indestructible
+                        }
+                    ))),
+                "grant must add Indestructible, got {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect grant sub-ability, got {other:?}"),
+    }
+}
+
 /// CR 608.2c + CR 611.2a + CR 613.1f: Nalia de'Arnise's full-party trigger
 /// body. The "and those creatures gain deathtouch until end of turn"
 /// conjunct must split at the chain level so the anaphoric back-reference
@@ -25290,6 +25352,28 @@ fn strip_each_scope_who_cant_subject_rejects_non_matches() {
     );
 }
 
+#[test]
+fn strip_each_scope_who_didnt_discard_filter_this_way_is_exact() {
+    let (scope, filter, body) = strip_each_scope_who_didnt_verb_filter_this_way_subject(
+        "each opponent who didn't discard a nonland card this way loses 3 life",
+    )
+    .expect("Kroxa-class decline tail");
+    assert_eq!(scope, PlayerFilter::Opponent);
+    assert!(matches!(filter, TargetFilter::Typed(_)));
+    assert_eq!(body, "loses 3 life");
+
+    for unrelated in [
+        "each player who didn't sacrifice a creature loses 3 life",
+        "each player who didn't choose the lowest number discards their hand",
+        "each opponent who didn't draws a card",
+    ] {
+        assert!(
+            strip_each_scope_who_didnt_verb_filter_this_way_subject(unrelated).is_none(),
+            "only the supported discard-a/an-filter-this-way grammar may reserve: {unrelated}",
+        );
+    }
+}
+
 /// CR 118.12 + CR 608.2d + CR 109.5: `strip_each_scope_who_does_subject`
 /// covers the full subject-only × scope × positive-"does" matrix (The Second
 /// Doctor: "each opponent who does can't attack you …"; Step Between Worlds:
@@ -29214,6 +29298,223 @@ fn render_silent_its_controller_cant_cast_spells() {
         }
     }
     assert_no_unimplemented(&def);
+}
+
+/// CR 305.1 + CR 101.2 + CR 201.2: Conjurer's Ban's compound restriction —
+/// "Until your next turn, spells with the chosen name can't be cast and lands
+/// with the chosen name can't be played." The PASSIVE-voice, card-scoped
+/// sibling of `cant_cast_spells_this_turn_opponents` (Silence's active-voice,
+/// player-scoped form). Both halves must produce their own `AddRestriction`,
+/// chained via `sub_ability`, sharing the same `UntilNextTurnOf` duration —
+/// the filter-scoped CR 305.1 land-play axis (`ProhibitedActivity::PlayLands`)
+/// has no other coverage anywhere in the parser today.
+#[test]
+fn conjurers_ban_compound_cant_be_cast_and_cant_be_played() {
+    let def = parse_effect_chain(
+        "Until your next turn, spells with the chosen name can't be cast and lands with the chosen name can't be played.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::AllPlayers,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        ),
+        "spell half got {:?}",
+        def.effect
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        }),
+        "spell half must carry the shared 'until your next turn' duration"
+    );
+
+    let land_sub = def
+        .sub_ability
+        .as_deref()
+        .expect("the compound must chain a land-play restriction sub-ability");
+    assert!(
+        matches!(
+            &*land_sub.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::AllPlayers,
+                    activity: ProhibitedActivity::PlayLands {
+                        land_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        ),
+        "land half got {:?}",
+        land_sub.effect
+    );
+    assert_eq!(
+        land_sub.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        }),
+        "the land sub-ability must inherit the SAME duration as the spell half — \
+         AddRestriction resolution reads `ability.duration` per sub-ability \
+         independently, so an unset child duration would silently fall back to \
+         end-of-turn instead of 'until your next turn'"
+    );
+    assert!(
+        land_sub.sub_ability.is_none(),
+        "the land clause is the end of the modeled sentence; no further chaining here"
+    );
+}
+
+/// No-regression companion to [`conjurers_ban_compound_cant_be_cast_and_cant_be_played`]:
+/// a bare single-clause passive cast prohibition (no "and lands ...") must NOT
+/// grow a dangling land sub-ability, and must still parse via the same
+/// passive-voice recognizer (unlocking any future card printed as just
+/// "Spells with the chosen name can't be cast.").
+#[test]
+fn passive_cant_be_cast_single_clause_has_no_land_sub_ability() {
+    let def = parse_effect_chain(
+        "Spells with the chosen name can't be cast.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::AllPlayers,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "a single-clause passive prohibition must not fabricate a land sub-ability"
+    );
+}
+
+/// Pattern-coverage companion: the land-play axis is not limited to "chosen
+/// name" — `parse_type_phrase` resolves any type-phrase subject, so a
+/// hypothetical type-scoped land-play ban parses the same way (building for
+/// the class, not the single card).
+#[test]
+fn passive_cant_be_played_land_type_filter() {
+    let def = parse_effect_chain(
+        "Until end of turn, Merfolk lands can't be played.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::AddRestriction {
+            restriction:
+                GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::AllPlayers,
+                    activity:
+                        ProhibitedActivity::PlayLands {
+                            land_filter: Some(TargetFilter::Typed(tf)),
+                        },
+                    ..
+                },
+        } => {
+            assert!(
+                !tf.type_filters.is_empty(),
+                "expected a concrete type filter (Merfolk), got {tf:?}"
+            );
+        }
+        other => panic!("expected a typed PlayLands restriction, got {other:?}"),
+    }
+    assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+}
+
+/// Full-oracle regression: Conjurer's Ban must lower with NO residual
+/// `Effect::Unimplemented` anywhere in its ability chain (Choose the name →
+/// cast prohibition → land-play prohibition → Draw a card) — previously the
+/// whole restriction sentence collapsed into one `Unimplemented` node and the
+/// card did nothing but choose a name and draw a card.
+#[test]
+fn conjurers_ban_full_oracle_has_no_unimplemented() {
+    let parsed = parse_oracle_text(
+        "Choose a card name. Until your next turn, spells with the chosen name can't be cast and lands with the chosen name can't be played.\nDraw a card.",
+        "Conjurer's Ban",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "expected one top-level ability");
+
+    fn collect_effects<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        out: &mut Vec<&'a Effect>,
+    ) {
+        out.push(&def.effect);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect_effects(sub, out);
+        }
+    }
+    let mut effects = Vec::new();
+    collect_effects(&parsed.abilities[0], &mut effects);
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Conjurer's Ban must have no Unimplemented residual: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::CardName,
+                ..
+            }
+        )),
+        "expected a CardName Choose effect: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        )),
+        "expected a chosen-name CastSpells restriction: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::PlayLands {
+                        land_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        )),
+        "expected a chosen-name PlayLands restriction: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+        "expected the trailing Draw a card: {effects:?}"
+    );
 }
 
 #[test]

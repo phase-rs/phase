@@ -746,8 +746,9 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_number_of_cards_discarded_this_turn,
             parse_cards_in_zone_ref,
         )),
-        parse_self_power_ref,
-        parse_self_toughness_ref,
+        // CR 208.3 / CR 306.5c: source-scoped power / toughness / loyalty
+        // self-possessives ("~'s power", "~'s loyalty").
+        parse_self_characteristic_ref,
         parse_damage_dealt_this_turn_ref,
         parse_life_lost_ref,
         parse_life_gained_ref,
@@ -1417,11 +1418,15 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // within nom's top-level `alt` arity (nom 8.0 max: 21 items).
         // All three arms must precede `parse_number_of_controlled_type` so the
         // leading type-word token does not commit to the generic controlled-type arm.
+        // CR 700.2d: the "times you chose a mode for that spell" event-context
+        // mode-count (Riku) shares this "times you <verb>" nest with the descended
+        // count; both lead with "times you" and must precede the generic arms.
         alt((
             parse_entered_this_turn_ref,
             parse_number_of_creatures_died_this_turn,
             parse_number_of_sacrificed_this_turn,
             parse_number_of_descended_this_turn,
+            parse_number_of_times_you_chose_a_mode,
         )),
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
@@ -1955,13 +1960,38 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
         }
     }
     let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+    // CR 715.2: Hearth Elemental counts cards that are instants, sorceries,
+    // and/or have an Adventure. Adventure cards have their permanent face's
+    // types in the graveyard, so type filters alone undercount this set.
+    let (rest, includes_adventure) = opt(nom::bytes::complete::tag_no_case(
+        " that are instant cards, sorcery cards, and/or have an adventure",
+    ))
+    .parse(rest)?;
+    let (card_types, filter) = if includes_adventure.is_some() {
+        (
+            Vec::new(),
+            Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+                        TypeFilter::Instant,
+                        TypeFilter::Sorcery,
+                    ]))),
+                    TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                    ),
+                ],
+            }),
+        )
+    } else {
+        (card_types, None)
+    };
     Ok((
         rest,
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
             scope,
-            filter: None,
+            filter,
         },
     ))
 }
@@ -2432,38 +2462,39 @@ pub(crate) fn parse_self_possessive(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// Parse "its power" / "~'s power" / "this creature's power" / "this card's
-/// power" / "his power" / "her power" / "their power".
+/// Parse a self-possessive characteristic: power, toughness, or loyalty.
 ///
 /// CR 400.7 + CR 208.3: Scavenge and other graveyard-activated effects reference
 /// the source via "this card's power" because the source is a card (not a
 /// creature) when the ability is activated. `SelfPower` is LKI-aware at
-/// resolution time (see `game/quantity.rs`), so all phrasings resolve
-/// identically. See `parse_self_possessive` for the gendered-pronoun rationale.
-fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+/// resolution time (see `game/quantity.rs`). CR 306.5c makes a planeswalker's
+/// loyalty its number of loyalty counters, represented by `CountersOn` rather
+/// than a new characteristic reference. See `parse_self_possessive` for the
+/// gendered-pronoun rationale.
+fn parse_self_characteristic_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = parse_self_possessive(input)?;
-    let (rest, _) = tag(" power").parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::Power {
-            scope: crate::types::ability::ObjectScope::Source,
-        },
+    alt((
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+            tag(" power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+            tag(" toughness"),
+        ),
+        value(
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Loyalty),
+            },
+            tag(" loyalty"),
+        ),
     ))
-}
-
-/// Parse "its toughness" / "~'s toughness" / "this creature's toughness" /
-/// "this card's toughness" / "his toughness" / "her toughness" /
-/// "their toughness". See `parse_self_power_ref` for the card-vs-creature
-/// rationale and `parse_self_possessive` for the gendered-pronoun rationale.
-fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = parse_self_possessive(input)?;
-    let (rest, _) = tag(" toughness").parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::Toughness {
-            scope: crate::types::ability::ObjectScope::Source,
-        },
-    ))
+    .parse(rest)
 }
 
 /// Parse damage-history references such as Chandra's Incinerator's
@@ -4451,6 +4482,20 @@ fn parse_number_of_descended_this_turn(input: &str) -> OracleResult<'_, Quantity
             ])),
         },
     ))
+}
+
+/// CR 700.2 + CR 700.2a + CR 700.2d + CR 601.2b: "[the number of] times you chose
+/// a mode for that spell" — the count of modes chosen for the triggering modal
+/// spell (Riku of Many Paths). Resolves to `EventContextSourceModesChosen`, which
+/// reads `GameObject::chosen_modes.len()` off the `current_trigger_event` spell
+/// object (CR 700.2d counts a repeated mode "that many times in sequence"). The
+/// axes are factored: the fixed "times you chose a mode" phrase plus an optional
+/// " for that spell" tail that tolerates the bare form without changing the
+/// (triggering-spell) referent.
+fn parse_number_of_times_you_chose_a_mode(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("times you chose a mode").parse(input)?;
+    let (rest, _) = opt(tag(" for that spell")).parse(rest)?;
+    Ok((rest, QuantityRef::EventContextSourceModesChosen))
 }
 
 /// CR 701.21a: "[type] you['ve] sacrificed this turn" in a "for each" context →
@@ -7462,6 +7507,36 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 715.2: Hearth Elemental includes Adventure cards whose front face is
+    /// a permanent, in addition to instant and sorcery cards.
+    #[test]
+    fn test_parse_quantity_ref_instant_sorcery_or_adventure_in_graveyard() {
+        let (rest, q) = parse_quantity_ref(
+            "cards in your graveyard that are instant cards, sorcery cards, and/or have an adventure",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![],
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+                            TypeFilter::Instant,
+                            TypeFilter::Sorcery,
+                        ]))),
+                        TargetFilter::Typed(
+                            TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                        ),
+                    ],
+                }),
+            }
+        );
+    }
+
     /// CR 604.3: Plain `" or "` joining is also valid in Oracle text — both
     /// forms appear historically depending on era ("instant or sorcery
     /// cards"). Resolves identically to the `and/or` form.
@@ -8568,6 +8643,23 @@ mod tests {
         assert!(tf.properties.contains(&FilterProp::Owned {
             controller: ControllerRef::You,
         }));
+    }
+
+    // CR 700.2d + CR 601.2b: Riku of Many Paths' "the number of times you chose a
+    // mode for that spell" → the new event-context mode-count ref. Revert probe:
+    // delete `parse_number_of_times_you_chose_a_mode` (or drop it from the
+    // parse_number_of_inner nest) → the phrase falls through, `rest` is non-empty
+    // / the ref is wrong, failing these assertions.
+    #[test]
+    fn parse_number_of_times_you_chose_a_mode_for_that_spell() {
+        let (rest, q) =
+            parse_quantity_ref("the number of times you chose a mode for that spell").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::EventContextSourceModesChosen);
+        // Bare form (optional " for that spell" tail) also resolves.
+        let (rest, q) = parse_quantity_ref("the number of times you chose a mode").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(q, QuantityRef::EventContextSourceModesChosen);
     }
 
     #[test]

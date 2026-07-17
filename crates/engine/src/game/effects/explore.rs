@@ -2,14 +2,14 @@ use std::collections::HashSet;
 
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
@@ -314,14 +314,24 @@ pub(crate) fn resolve_explore_effect(
         .unwrap_or(false);
 
     if is_land {
-        // CR 701.44a: Land revealed — put the card into the player's hand. No counter.
-        zones::move_to_zone(state, top_card_id, crate::types::zones::Zone::Hand, events);
-
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: explorer_id,
-            subject: None,
-        });
+        // CR 701.44a + CR 614.1 + CR 616.1: The revealed land's Library→Hand
+        // instruction is a replaceable zone-change event. Keep Explore's
+        // completion event on the typed batch tail so a replacement-ordering
+        // choice settles the move before "whenever [a creature] explores"
+        // triggers or a chained continuation can run.
+        let result = zone_pipeline::move_objects_simultaneously_then(
+            state,
+            vec![ZoneMoveRequest::effect(
+                top_card_id,
+                crate::types::zones::Zone::Hand,
+                ability.source_id,
+            )],
+            Some(BatchCompletion::ExploreLandDeliveryComplete { explorer_id }),
+            events,
+        );
+        if matches!(result, BatchMoveResult::NeedsChoice) {
+            return Ok(());
+        }
     } else {
         // CR 701.44a: Nonland revealed — put a +1/+1 counter on the creature,
         // then player chooses to put the card back on top or into graveyard.
@@ -354,6 +364,22 @@ pub(crate) fn resolve_explore_effect(
     }
 
     Ok(())
+}
+
+/// CR 701.44a + CR 701.44b + CR 614.1 + CR 616.1: A revealed land's proposed
+/// hand delivery has settled. The permanent explored even when a replacement
+/// redirected the land elsewhere, so emit its completion event exactly once;
+/// the replacement-resume boundary then drains any already-parked continuation.
+pub(crate) fn complete_land_delivery(
+    explorer_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Explore,
+        source_id: explorer_id,
+        subject: None,
+    });
+    BatchMoveResult::Done
 }
 
 /// CR 701.44d: If multiple permanents explore simultaneously, controllers choose

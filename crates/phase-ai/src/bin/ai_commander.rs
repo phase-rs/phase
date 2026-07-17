@@ -171,6 +171,10 @@ fn main() {
     }
 
     let start = Instant::now();
+    let dump_log_path = read_dump_env("PHASE_DUMP_LOG");
+    let mut game_log: Vec<engine::types::log::GameLogEntry> = Vec::new();
+    let dump_actions_path = read_dump_env("PHASE_DUMP_ACTIONS");
+    let mut actions_log: Vec<String> = Vec::new();
     let mut total_actions: usize = 0;
     let mut last_turn_reported: u32 = 0;
     let mut aborted = false;
@@ -178,7 +182,7 @@ fn main() {
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
 
     loop {
-        let results = run_ai_actions(
+        let mut results = run_ai_actions(
             &mut state,
             &ai_players,
             &ai_configs,
@@ -187,6 +191,16 @@ fn main() {
         );
         if results.is_empty() {
             break;
+        }
+        if dump_log_path.is_some() {
+            for r in &mut results {
+                game_log.extend(std::mem::take(&mut r.log_entries));
+            }
+        }
+        if dump_actions_path.is_some() {
+            for r in &results {
+                actions_log.push(format!("{:?}", r.action));
+            }
         }
         total_actions += results.len();
 
@@ -259,9 +273,32 @@ fn main() {
         );
     }
 
+    if let Some(path) = &dump_actions_path {
+        std::fs::write(path, actions_log.join("\n")).expect("write actions dump");
+        println!("Dumped {} actions to {path}", actions_log.len());
+    }
+    if let Some(path) = &dump_log_path {
+        let json = serde_json::to_string(&game_log).expect("serialize game log");
+        std::fs::write(path, json).expect("write game log dump");
+        println!("Dumped {} game-log entries to {path}", game_log.len());
+    }
+
     if aborted {
         std::process::exit(2);
     }
+}
+
+/// Reads an opt-in dump-destination env var once at startup. Absence is a
+/// valid "not capturing" state; any other error (e.g. invalid Unicode) is a
+/// misconfiguration and must not silently disable capture.
+fn read_dump_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .map(Some)
+        .or_else(|e| match e {
+            std::env::VarError::NotPresent => Ok(None),
+            e => Err(e),
+        })
+        .expect("invalid Unicode in dump-destination env var")
 }
 
 fn parse_difficulty(s: &str) -> AiDifficulty {

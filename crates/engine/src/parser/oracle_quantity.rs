@@ -3693,6 +3693,26 @@ mod tests {
     }
 
     #[test]
+    fn quantity_ref_self_loyalty_is_loyalty_counters_on_source() {
+        // CR 306.5c: a planeswalker's loyalty on the battlefield is its
+        // loyalty-counter count, so every self-possessive "loyalty" phrasing
+        // (Nissa, Ascended Animist's "where X is ~'s loyalty") resolves to
+        // `CountersOn { Source, Loyalty }`.
+        for phrase in ["~'s loyalty", "its loyalty", "this card's loyalty"] {
+            let qty = parse_quantity_ref(phrase).unwrap_or_else(|| panic!("failed: {phrase}"));
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Loyalty),
+                } => {}
+                other => {
+                    panic!("Expected CountersOn{{Source, Loyalty}} for {phrase}, got {other:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
     fn quantity_ref_all_counters_on_normalized_self() {
         for phrase in [
             "the number of counters on ~",

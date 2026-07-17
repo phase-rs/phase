@@ -2149,6 +2149,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         starting_with,
         chosen_x,
         cost_paid_object,
+        cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
         ability_index,
@@ -2207,6 +2208,13 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        // CR 117.1 (issue #4948): a batched triggered ability must not carry
+        // per-instance cost-paid-object state either — mirrors the
+        // `cost_paid_object` gate above. Always empty for triggered
+        // abilities today (only cost-payment handlers populate it), kept
+        // here so this exhaustive-field check stays correct if that ever
+        // changes.
+        && cost_paid_object_ids.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && ability_index.is_none()

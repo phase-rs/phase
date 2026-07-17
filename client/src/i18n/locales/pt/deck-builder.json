@@ -229,6 +229,11 @@
       "remove": "Remover feitiço de assinatura",
       "mustBeInstantOrSorcery": "O feitiço de assinatura deve ser uma mágica instantânea ou feitiçaria",
       "outsideColorIdentity": "{{name}}: fora da identidade de cor do Oathbreaker"
+    },
+    "companion": {
+      "heading": "Companheiro",
+      "noCompanion": "Nenhum companheiro selecionado",
+      "remove": "Remover companheiro"
     }
   },
   "manaCurve": {

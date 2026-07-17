@@ -47,20 +47,21 @@ use lower::{
     rebind_decline_body_recipient, rebind_subject_only_body_recipient,
     scan_until_next_same_source_exile_invalidation, split_difference_repeat_suffix,
     strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
-    strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
-    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
-    strip_leading_duration, strip_leading_quantifier, strip_leading_return_destination_ext,
-    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
-    strip_repeat_count_suffix, strip_return_destination_ext,
-    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
-    try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_each_scope_who_didnt_verb_filter_this_way_subject, strip_each_scope_who_does_subject,
+    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
+    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_quantifier,
+    strip_leading_return_destination_ext, strip_leading_sequence_connector,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
+    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
+    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
+    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
 pub(crate) use self::token::try_parse_token;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError};
+use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
@@ -3353,36 +3354,52 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
     })
 }
 
+/// CR 611.2a + CR 514.2: shared optional leading duration-prefix combinator for
+/// temporary-restriction effect clauses — "until your next turn, " / "until end
+/// of turn, " / "this turn, ". Returns the text with a recognized prefix
+/// consumed (unconsumed if none matched), a placeholder `RestrictionExpiry`
+/// (overridden from `ability.duration` at `AddRestriction` resolution — see
+/// `game/effects/add_restriction.rs::fill_runtime_fields`), and the `Duration`
+/// to publish on the ability. Shared by `try_parse_cant_cast_spells_effect`,
+/// `try_parse_passive_cant_be_cast_effect`, and
+/// `try_parse_passive_cant_be_played_land_effect` — the same three-way prefix
+/// grammar governs every temporary-restriction effect clause regardless of
+/// which activity axis (cast / activate / play-land) follows it.
+fn strip_temporary_restriction_duration_prefix(
+    tp: TextPair<'_>,
+) -> (TextPair<'_>, RestrictionExpiry, Option<Duration>) {
+    if let Some(((expiry, duration), rest_orig)) = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value(
+                (
+                    RestrictionExpiry::EndOfTurn,
+                    Some(Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    }),
+                ),
+                tag("until your next turn, "),
+            ),
+            value(
+                (RestrictionExpiry::EndOfTurn, Some(Duration::UntilEndOfTurn)),
+                tag("until end of turn, "),
+            ),
+            value((RestrictionExpiry::EndOfTurn, None), tag("this turn, ")),
+        ))
+        .parse(input)
+    }) {
+        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+        (TextPair::new(rest_orig, rest_lower), expiry, duration)
+    } else {
+        (tp, RestrictionExpiry::EndOfTurn, None)
+    }
+}
+
 /// CR 101.2: "Your opponents can't cast spells this turn" / "Players can't cast spells this turn."
 /// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
 /// specific "can't cast spells from anywhere other than" variant).
 fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    let (scope_tp, expiry, duration) = if let Some(((expiry, duration), rest_orig)) =
-        nom_on_lower(tp.original, tp.lower, |input| {
-            alt((
-                value(
-                    (
-                        RestrictionExpiry::EndOfTurn,
-                        Some(Duration::UntilNextTurnOf {
-                            player: PlayerScope::Controller,
-                        }),
-                    ),
-                    tag("until your next turn, "),
-                ),
-                value(
-                    (RestrictionExpiry::EndOfTurn, Some(Duration::UntilEndOfTurn)),
-                    tag("until end of turn, "),
-                ),
-                value((RestrictionExpiry::EndOfTurn, None), tag("this turn, ")),
-            ))
-            .parse(input)
-        }) {
-        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        (TextPair::new(rest_orig, rest_lower), expiry, duration)
-    } else {
-        (tp, RestrictionExpiry::EndOfTurn, None)
-    };
+    let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
 
     let (affected_players, rest_orig) = nom_on_lower(scope_tp.original, scope_tp.lower, |input| {
         alt((
@@ -3512,6 +3529,180 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
                 affected_players,
                 expiry,
                 activity: ProhibitedActivity::CastSpells { spell_filter },
+            },
+        },
+        duration,
+        sub_ability,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// Nom-idiomatic combinator replacement for `str::strip_suffix` (forbidden
+/// for parsing dispatch by the parser-combinator gate — see
+/// `oracle_nom/PATTERNS.md` §2a): requires `input` to end EXACTLY with
+/// `suffix`, returning the text before it. Fails if the suffix is absent or
+/// if anything follows it (`take_until` + `tag` alone would accept trailing
+/// content after the first match; the explicit `is_empty` check anchors to
+/// the true end, matching `strip_suffix`'s semantics). Shared by every
+/// "`<subject>` can't be cast/played" suffix-strip in this module.
+fn strip_required_suffix<'a>(input: &'a str, suffix: &str) -> Option<&'a str> {
+    let (rest, before) = terminated(take_until::<_, _, OracleError<'_>>(suffix), tag(suffix))
+        .parse(input)
+        .ok()?;
+    rest.is_empty().then_some(before)
+}
+
+/// CR 101.2 + CR 201.2: Shared passive-voice "`<subject>` can't be played"
+/// SUBJECT filter parser for the land-play axis (CR 305.1) — `<subject>` may
+/// be "[type] lands" or "lands with the chosen name". `before_played` is the
+/// text with the trailing " can't be played" suffix already stripped. Land-
+/// play sibling of `oracle_static::restriction::parse_passive_cant_be_cast_spell_filter`
+/// (the CR 601.2a casting axis) — no mana-value/X-in-cost sub-patterns here,
+/// since those are card-casting concepts (CR 107, CR 202) with no CR 305
+/// land-play analog.
+fn parse_passive_cant_be_played_land_filter(before_played: &str) -> Option<TargetFilter> {
+    // --- "Lands with the chosen name can't be played" (passive voice) ---
+    // CR 101.2 + CR 201.2: mirrors the cast-axis "spells with the chosen name"
+    // arm (Meddling Mage class) — Conjurer's Ban is the land-play twin.
+    if let Ok((rest, ())) = value(
+        (),
+        tag::<_, _, OracleError<'_>>("lands with the chosen name"),
+    )
+    .parse(before_played)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::HasChosenName);
+        }
+    }
+
+    // Require " lands" (or the singular "land") at the end of the subject.
+    let type_text = strip_required_suffix(before_played, " lands")
+        .or_else(|| strip_required_suffix(before_played, " land"))?;
+
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    match &filter {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => {}
+        _ => return None,
+    }
+    Some(filter)
+}
+
+/// CR 305.1 + CR 116.2a: "`<subject>` can't be played" — the land-play
+/// PASSIVE-voice sibling of [`try_parse_cant_cast_spells_effect`]'s active
+/// voice, and the effect-layer (temporary, spell-sourced) sibling of
+/// `oracle_static::restriction`'s land-play statics. Wraps
+/// [`parse_passive_cant_be_played_land_filter`] in the shared duration prefix
+/// and `Effect::AddRestriction` shell. Standalone-usable (any future card
+/// printed as just "Lands with `<X>` can't be played."), and also the target
+/// [`try_parse_passive_cant_be_cast_effect`] composes into via its own
+/// "and lands …" tail.
+fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
+    let trimmed_lower = scope_tp.lower.trim_end_matches('.');
+    let before_played = strip_required_suffix(trimmed_lower, " can't be played")?;
+    let land_filter = parse_passive_cant_be_played_land_filter(before_played)?;
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::AllPlayers,
+                expiry,
+                activity: ProhibitedActivity::PlayLands {
+                    land_filter: Some(land_filter),
+                },
+            },
+        },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 101.2: "`<subject>` can't be cast" — the PASSIVE-voice, card-scoped
+/// sibling of [`try_parse_cant_cast_spells_effect`]'s active, player-scoped
+/// form ("Your opponents can't cast spells..."). Mirrors why the static layer
+/// has both `parse_cant_cast_type_spells` (active) and
+/// `parse_passive_cant_be_cast` (passive) in `oracle_static::restriction` —
+/// same split, applied at the effect (temporary, spell-sourced) layer, which
+/// had neither before this.
+///
+/// Also composes the CR 305.1 land-play compound (Conjurer's Ban: "spells with
+/// the chosen name can't be cast AND lands with the chosen name can't be
+/// played") — a genuine compound of two INDEPENDENT subject+predicate pairs
+/// under one shared leading duration, structurally analogous to the
+/// compound-SUBJECT statics elsewhere in this codebase (#5219/#5406): a
+/// narrow single-clause dispatcher generalized via delegation to the same
+/// per-axis subject-filter parser the land-play sibling
+/// ([`try_parse_passive_cant_be_played_land_effect`]) independently exposes,
+/// rather than re-implemented inline. The land sub-ability's `duration` is set
+/// explicitly from the parent's (not re-derived from a second duration
+/// prefix, since the compound's `" and "` tail carries none of its own) —
+/// `AddRestriction` resolution (`game/effects/add_restriction.rs::fill_runtime_fields`)
+/// reads `ability.duration` per sub-ability independently, so an unset child
+/// duration would silently fall back to the parse-time `EndOfTurn` placeholder
+/// instead of "until your next turn".
+fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
+
+    // A compound land-play tail ("... can't be cast and lands ... can't be
+    // played") must be split off BEFORE the spell clause's own suffix-strip,
+    // so the spell half never sees the land clause's text.
+    let (spell_tp, land_tail_tp) = match scope_tp.split_around(" and ") {
+        Some((spell_half, land_half)) => (spell_half, Some(land_half)),
+        None => (scope_tp, None),
+    };
+
+    let before_cant =
+        strip_required_suffix(spell_tp.lower.trim_end_matches('.'), " can't be cast")?;
+    let spell_filter = parse_passive_cant_be_cast_spell_filter(before_cant)?;
+
+    let sub_ability = match land_tail_tp {
+        None => None,
+        Some(land_tp) => {
+            let land_before_played =
+                strip_required_suffix(land_tp.lower.trim_end_matches('.'), " can't be played")?;
+            let land_filter = parse_passive_cant_be_played_land_filter(land_before_played)?;
+            let mut land_ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        source: ObjectId(0),
+                        affected_players: RestrictionPlayerScope::AllPlayers,
+                        expiry: expiry.clone(),
+                        activity: ProhibitedActivity::PlayLands {
+                            land_filter: Some(land_filter),
+                        },
+                    },
+                },
+            );
+            if let Some(d) = duration.clone() {
+                land_ability = land_ability.duration(d);
+            }
+            Some(Box::new(land_ability))
+        }
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::AllPlayers,
+                expiry,
+                activity: ProhibitedActivity::CastSpells {
+                    spell_filter: Some(spell_filter),
+                },
             },
         },
         duration,
@@ -7691,6 +7882,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 101.2 + CR 305.1: "Spells with the chosen name can't be cast[ and
+    // lands with the chosen name can't be played]" — the PASSIVE-voice, card-
+    // scoped sibling of the active-voice check above (Conjurer's Ban). Must run
+    // AFTER the active-voice form, whose explicit scope tags never match this
+    // subject-first construction.
+    if let Some(clause) = try_parse_passive_cant_be_cast_effect(tp) {
+        return clause;
+    }
+
     // CR 611.2a: shared-duration exile-play grant + play-from-zone prohibition
     // ("Until your next turn, players may play cards they exiled this way, and
     // they can't play cards from their hand" — Memory Vessel). Compound first —
@@ -7704,6 +7904,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // CR 116.2a + CR 305.1: "[scope] can't play cards from [zone]" prohibition
     // (Shaman's Trance's graveyard clause, Memory Vessel's hand sub-clause).
     if let Some(clause) = try_parse_cant_play_from_zone(tp) {
+        return clause;
+    }
+
+    // CR 305.1: "Lands with the chosen name can't be played" — the standalone,
+    // filter-scoped land-play sibling of the zone-scoped check above. Reached
+    // directly only when the compound cast+land-play form above didn't apply
+    // (e.g. a hypothetical card printing just this half on its own); the
+    // compound form is handled inline by `try_parse_passive_cant_be_cast_effect`.
+    if let Some(clause) = try_parse_passive_cant_be_played_land_effect(tp) {
         return clause;
     }
 
@@ -15589,7 +15798,20 @@ fn try_parse_multi_target_damage_chain_inner(
     // target phrase's announcing-player override leak into its first recipient.
     ctx.target_chooser = None;
     let lower = text.to_lowercase();
-    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // CR 608.2c + CR 107.3i: A trailing ", where X is <expr>" is later text that
+    // defines X for the whole instruction (Judgment Bolt); every instance of X
+    // resolves to the same value. Strip it so the bare-damage continuation loop
+    // does not choke on it — mirrors the identical idiom in
+    // try_parse_compound_player_object_damage. The 2nd amount stays
+    // QuantityExpr::Variable("X"); the binding is re-derived and applied at
+    // lowering by compute_sentence_where_x + apply_where_x_ability_expression,
+    // which read the un-stripped ClauseChunk text (a separate path). Fixed
+    // amounts (the primary 5) are untouched — apply_where_x_quantity_expression
+    // only rewrites Variable("X")/CostXPaid leaves.
+    let (stripped, _binding) = strip_trailing_where_x(TextPair::new(text, &lower));
+    let text = stripped.original;
+    let lower = stripped.lower;
+    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
     // Each segment parses through the shared context, so retain the primary
     // segment's announcer before a continuation can overwrite it.
     let primary_target_chooser = ctx.target_chooser.clone();
@@ -21962,7 +22184,7 @@ fn trailing_bare_article_only(input: &str) -> bool {
         all_consuming(terminated(take_until::<_, _, E>(" a"), tag(" a"))),
     )))
     .parse(input.trim())
-    .is_ok()
+    .is_ok_and(|(_, article)| article.is_some())
 }
 
 /// Merge the pre-`from it` card phrase with the plain trailing restriction
@@ -22817,6 +23039,64 @@ fn rewrite_filter_parent_to_tracked_set(filter: &mut TargetFilter) {
             }
         }
         _ => {}
+    }
+}
+
+/// issue #6065: If `effect` is "draw a card for each `<filter>`" — a `Draw` whose
+/// count is `ObjectCount { filter }` — return that count filter. This is the
+/// antecedent a following "those creatures" grant refers to. Unlike a tracked-set
+/// publisher, `Draw` does not publish the counted objects at resolution (its
+/// `target` is the drawing player), so a `ParentTarget` grant chained after it
+/// must bind directly to this filter rather than to the tracked-set sentinel.
+pub(super) fn draw_object_count_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Draw {
+            count:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            ..
+        } => Some(filter),
+        _ => None,
+    }
+}
+
+/// Re-anchor a `ParentTarget` anaphor in `filter` to `replacement`. Mirrors
+/// `rewrite_filter_parent_to_tracked_set` but binds to a concrete antecedent
+/// filter (issue #6065: "those creatures" → the counted-creature filter).
+fn rewrite_filter_parent_to(filter: &mut TargetFilter, replacement: &TargetFilter) {
+    match filter {
+        TargetFilter::ParentTarget => *filter = replacement.clone(),
+        TargetFilter::Not { filter } => rewrite_filter_parent_to(filter, replacement),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for f in filters {
+                rewrite_filter_parent_to(f, replacement);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CR 603.7 + issue #6065: Re-anchor a "those creatures gain `<keyword>`" grant's
+/// `ParentTarget` to `replacement` — the filter of a preceding "draw a card for
+/// each `<creature filter>`" count (Inspiring Call). Only the grant surface
+/// (`GenericEffect`) is rewritten; the tracked-set path (`PutCounterAll` etc.)
+/// is untouched and keeps producing `TrackedSet(0)`.
+pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &TargetFilter) {
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    {
+        if let Some(target) = target {
+            rewrite_filter_parent_to(target, replacement);
+        }
+        for static_def in static_abilities {
+            if let Some(affected) = &mut static_def.affected {
+                rewrite_filter_parent_to(affected, replacement);
+            }
+        }
     }
 }
 
@@ -27130,6 +27410,41 @@ pub(crate) fn parse_effect_chain_ir(
                     ],
                 };
                 (body, Some(condition), DeclineDispatch::SubjectOnly)
+            } else if let Some((scope, filter, body)) =
+                strip_each_scope_who_didnt_verb_filter_this_way_subject(&text)
+            {
+                // CR 701.9a + CR 608.2c + CR 109.5: subject-only mandatory-FILTERED
+                // decline-tail (Kroxa, Titan of Death's Hunger: "each opponent
+                // discards a card, then each opponent who didn't discard a nonland
+                // card this way loses 3 life."). Unlike the `who can't` arm (whether
+                // the action happened at all), this gates on WHAT moved:
+                // `Not { ZoneChangedThisWay { filter } }` reads `last_zone_changed_ids`
+                // from the just-completed per-iteration discard/sacrifice/exile, so an
+                // opponent with an empty hand (who discarded nothing) still satisfies
+                // "didn't discard a nonland card" — matching the printed ruling.
+                //
+                // The `ScopedPlayerMatches { filter: scope }` conjunct mirrors the
+                // `who can't` / `who does` arms' cross-scope fix; a no-op for Kroxa
+                // (both clauses scope `Opponent`) but uniformly safe for the class.
+                //
+                // Do NOT stamp `player_scope`: the body inherits the parent's
+                // per-player iteration via `sub_ability` attachment, so
+                // `ZoneChangedThisWay` reads THIS iteration's own zone change, not a
+                // detached whole-chain aggregate.
+                if let Some(prev) = builder.last_mut() {
+                    if prev.boundary == Some(ClauseBoundary::Sentence) {
+                        prev.boundary = Some(ClauseBoundary::Then);
+                    }
+                }
+                let condition = AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::Not {
+                            condition: Box::new(AbilityCondition::ZoneChangedThisWay { filter }),
+                        },
+                        AbilityCondition::ScopedPlayerMatches { filter: scope },
+                    ],
+                };
+                (body, Some(condition), DeclineDispatch::SubjectOnly)
             } else {
                 (text, condition, DeclineDispatch::None)
             };
@@ -30326,6 +30641,150 @@ mod tests;
 /// sub_ability assembly.
 #[cfg(test)]
 mod snapshot_tests;
+
+/// Tests for the trailing ", where X is <expr>" tolerance in the compound
+/// bare-damage chain (Judgment Bolt) — see `try_parse_multi_target_damage_chain_inner`.
+#[cfg(test)]
+mod where_x_damage_chain_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{Effect, QuantityExpr, QuantityRef, TargetFilter};
+
+    fn parse_instant(name: &str, text: &str) -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(text, name, &[], &["Instant".to_string()], &[])
+    }
+
+    /// Judgment Bolt: "deals 5 damage to target creature and X damage to that
+    /// creature's controller, where X is the number of Equipment you control."
+    /// The 2nd damage clause must chain as a `sub_ability` whose amount is the
+    /// dynamic Equipment `ObjectCount`. On main the trailing where-X clause made
+    /// the chain parser bail, so `sub_ability` was `None`; reverting the strip
+    /// restores that `None` and flips this test.
+    #[test]
+    fn judgment_bolt_compound_dynamic_damage_ast() {
+        let parsed = parse_instant(
+            "Judgment Bolt",
+            "Judgment Bolt deals 5 damage to target creature and X damage to that \
+             creature's controller, where X is the number of Equipment you control.",
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "the where-X damage chain must parse cleanly (no swallowed clause), got {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.abilities.len(), 1, "one spell ability");
+        let ability = &parsed.abilities[0];
+        // Primary: fixed 5 to the creature — untouched by the where-X strip.
+        match &*ability.effect {
+            Effect::DealDamage { amount, .. } => {
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 5 })
+            }
+            other => panic!("primary must be DealDamage(5), got {other:?}"),
+        }
+        // 2nd clause: chains only because the where-X tail was stripped.
+        let sub = ability.sub_ability.as_deref().expect(
+            "the 2nd damage clause must chain as a sub_ability — this is None on main \
+             (FLIPs to None if the where-X strip is reverted)",
+        );
+        match &*sub.effect {
+            Effect::DealDamage { amount, target, .. } => {
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { .. }
+                        }
+                    ),
+                    "2nd amount must be the dynamic Equipment ObjectCount, not Fixed: {amount:?}"
+                );
+                // CR 109.4: "that creature's controller".
+                assert_eq!(target, &TargetFilter::ParentTargetController);
+            }
+            other => panic!("2nd clause must be DealDamage, got {other:?}"),
+        }
+    }
+
+    /// Class generalization: any "A to target creature and X to that creature's
+    /// controller, where X is <count>" keeps the 1st amount Fixed while binding
+    /// the 2nd to the dynamic count — proven with a synthetic Artifact card.
+    /// A single-damage line produces NO phantom sub_ability (negative reach-guard,
+    /// paired with a positive "still parses to DealDamage" check so the absence is
+    /// meaningful).
+    #[test]
+    fn compound_dynamic_damage_parameterized_and_single_ast() {
+        let parsed = parse_instant(
+            "Test Bolt",
+            "Test Bolt deals 3 damage to target creature and X damage to that creature's \
+             controller, where X is the number of Artifacts you control.",
+        );
+        let ability = &parsed.abilities[0];
+        assert!(matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("dynamic 2nd clause must chain");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                },
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let single = parse_instant("Test Bolt", "Test Bolt deals 3 damage to target creature.");
+        let single_ability = &single.abilities[0];
+        assert!(
+            matches!(&*single_ability.effect, Effect::DealDamage { .. }),
+            "single-damage line must still parse to a real DealDamage (not Unimplemented), got {:?}",
+            single_ability.effect
+        );
+        assert!(
+            single_ability.sub_ability.is_none(),
+            "a single-damage line must not synthesize a phantom 2nd clause"
+        );
+    }
+
+    /// Reach-guard: a compound damage sibling with NO where-X clause
+    /// (Chandra's Outrage) must be unaffected — both amounts stay Fixed. This
+    /// proves the where-X strip does not corrupt a no-where-x sibling and that
+    /// the where-X binder never rewrites a Fixed amount.
+    #[test]
+    fn chandras_outrage_no_where_x_keeps_both_fixed() {
+        let parsed = parse_instant(
+            "Chandra's Outrage",
+            "Chandra's Outrage deals 4 damage to target creature and 2 damage to that \
+             creature's controller.",
+        );
+        let ability = &parsed.abilities[0];
+        assert!(matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                ..
+            }
+        ));
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("the 2nd fixed clause must chain");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+    }
+}
 
 #[test]
 fn issue_2405_broken_bond_optional_land_from_hand() {

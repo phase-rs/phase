@@ -115,6 +115,14 @@ pub(crate) fn handle_select_modes(
     let mut resolved = build_chained_resolved(&abilities, &indices, pending.object_id, controller)?;
     resolved.set_context_recursive(pending.ability.context.clone());
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
+    // CR 700.2a + CR 700.2d + CR 601.2b: latch the chosen modal-mode indices onto
+    // the spell's context so finalize can stamp them on the stack object (read by
+    // QuantityRef::EventContextSourceModesChosen). `sorted_indices` is the same
+    // ground-truth vector stored on every derived PendingCast.chosen_modes below;
+    // `resolved` becomes the finalize `ability` on all three sub-paths (direct via
+    // finish_pending_cast_cost_or_pay, deferred-X and deferred-target-selection via
+    // PendingCast::new), so the top-level context carries the count to finalize.
+    resolved.context.chosen_modes = sorted_indices.clone();
 
     if pending.activation_ability_index.is_none()
         && pending.additional_cost_flow.is_none()
@@ -127,6 +135,7 @@ pub(crate) fn handle_select_modes(
         pending_x.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_x.target_constraints = pending.target_constraints;
         pending_x.casting_variant = pending.casting_variant;
+        pending_x.casting_permission_index = pending.casting_permission_index;
         pending_x.cast_timing_permission = pending.cast_timing_permission;
         pending_x.distribute = pending.distribute;
         pending_x.origin_zone = pending.origin_zone;
@@ -203,6 +212,7 @@ pub(crate) fn handle_select_modes(
         pending_sel.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_sel.target_constraints = pending.target_constraints;
         pending_sel.casting_variant = pending.casting_variant;
+        pending_sel.casting_permission_index = pending.casting_permission_index;
         pending_sel.origin_zone = pending.origin_zone;
         pending_sel.additional_cost_flow = pending.additional_cost_flow;
         pending_sel.deferred_target_selection = pending.deferred_target_selection;

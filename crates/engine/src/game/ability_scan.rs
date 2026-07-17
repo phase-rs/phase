@@ -100,7 +100,7 @@ use crate::types::ability::{
     TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{DisguiseCost, Keyword};
 
 /// The three independent classification axes, accumulated over one AST walk.
 /// `true` on an axis means "reads (or may read) that dimension"; the fail-safe
@@ -195,6 +195,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         distribution: _,          // concrete pre-assigned (TargetRef, u32) portions
         chosen_x: _,              // concrete cast-time X
         cost_paid_object: _,      // concrete captured-object snapshot
+        cost_paid_object_ids: _,  // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _,   // concrete captured-object snapshot
         ability_index: _,         // usize provenance
@@ -1123,6 +1124,7 @@ fn scan_effect(x: &Effect) -> Axes {
         Effect::VentureIntoDungeon => Axes::NONE,
         Effect::VentureInto { dungeon: _ } => Axes::NONE,
         Effect::TakeTheInitiative => Axes::NONE,
+        Effect::ArrangePlanarDeckTop { .. } => Axes::NONE,
         Effect::Planeswalk => Axes::NONE,
         Effect::OpenAttractions { count: _ } => Axes::NONE,
         Effect::RollToVisitAttractions => Axes::NONE,
@@ -1883,6 +1885,13 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             acc
         }
         QuantityRef::EventContextSourceCostX => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
+        // CR 700.2: reads the triggering-spell object (same event axis as
+        // EventContextSourceCostX and TimesCostPaidThisResolution).
+        QuantityRef::EventContextSourceModesChosen => Axes {
             event: true,
             sibling: false,
             projected: false,
@@ -3132,6 +3141,7 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -3903,6 +3913,8 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Casualty(_)
         | Keyword::Assist => true,
 
+        Keyword::Disguise(DisguiseCost::Reduced { .. }) => true,
+
         // SAFE: no casting/activation cost that reads a growing board/graveyard class.
         Keyword::Flying
         | Keyword::FirstStrike
@@ -3994,7 +4006,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Morph(_)
         | Keyword::Megamorph(_)
         | Keyword::Madness(_)
-        | Keyword::Disguise(_)
+        | Keyword::Disguise(DisguiseCost::Mana(_))
         | Keyword::Mayhem(_)
         | Keyword::Suspend { .. }
         | Keyword::Blitz(_)
@@ -4321,6 +4333,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
@@ -4580,6 +4593,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::AssembleContraptions { .. }
@@ -4730,6 +4744,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         forward_result: _, // bool
         chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
+        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance

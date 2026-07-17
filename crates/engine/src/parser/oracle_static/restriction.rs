@@ -1108,14 +1108,19 @@ pub(crate) fn parse_cant_cast_type_spells(
     attach_parsed_static_gate(def, gate_condition_text)
 }
 
-/// Parse passive voice "[Type] spells can't be cast" pattern.
-/// E.g., Aether Storm: "Creature spells can't be cast."
-/// Also handles "[Type] spells with mana value N or greater/less can't be cast."
-pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
-    // Look for "spells can't be cast" suffix
-    let trimmed = tp.trim_end_matches('.');
-    let before_cant = trimmed.strip_suffix(" can't be cast")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-
+/// CR 101.2: Shared passive-voice "`<subject>` can't be cast" SUBJECT filter
+/// parser — `<subject>` may be "[type] spells", "[type] spells with mana value
+/// N or greater/less", "[type] spells with {X} in their mana cost[s]", or
+/// "spells with the chosen name". `before_cant` is the text with the trailing
+/// " can't be cast" suffix already stripped.
+///
+/// Shared by the static-layer wrapper [`parse_passive_cant_be_cast`] (Aether
+/// Storm class permanents) and the effect-layer wrapper
+/// `try_parse_passive_cant_be_cast_effect` in `oracle_effect/mod.rs`
+/// (Conjurer's Ban class temporary spell-sourced bans) — the subject grammar
+/// is identical; only the produced ability type (`StaticDefinition` vs
+/// `Effect::AddRestriction`) differs.
+pub(crate) fn parse_passive_cant_be_cast_spell_filter(before_cant: &str) -> Option<TargetFilter> {
     // Check for "spells with mana value N or less/greater" pattern
     // E.g., "noncreature spells with mana value 4 or greater can't be cast"
     // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -1146,13 +1151,7 @@ pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticD
                 }]);
             }
         }
-        return Some(
-            StaticDefinition::new(StaticMode::CantBeCast {
-                who: ProhibitionScope::AllPlayers,
-            })
-            .affected(TargetFilter::Typed(tf))
-            .description(text.to_string()),
-        );
+        return Some(TargetFilter::Typed(tf));
     }
 
     // --- "[Type] spells with {X} in their mana costs can't be cast" (passive voice) ---
@@ -1182,13 +1181,7 @@ pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticD
                 _ => return None,
             };
             let tf = tf.properties(vec![FilterProp::HasXInManaCost]);
-            return Some(
-                StaticDefinition::new(StaticMode::CantBeCast {
-                    who: ProhibitionScope::AllPlayers,
-                })
-                .affected(TargetFilter::Typed(tf))
-                .description(text.to_string()),
-            );
+            return Some(TargetFilter::Typed(tf));
         }
     }
 
@@ -1200,13 +1193,7 @@ pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticD
     // time by `cant_cast_filter_matches` against the source's chosen card name.
     if let Some(rest) = nom_tag_lower(before_cant, before_cant, "spells with the chosen name") {
         if rest.trim().is_empty() {
-            return Some(
-                StaticDefinition::new(StaticMode::CantBeCast {
-                    who: ProhibitionScope::AllPlayers,
-                })
-                .affected(TargetFilter::HasChosenName)
-                .description(text.to_string()),
-            );
+            return Some(TargetFilter::HasChosenName);
         }
     }
 
@@ -1222,6 +1209,17 @@ pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticD
         _ => return None,
     }
 
+    Some(filter)
+}
+
+/// Parse passive voice "[Type] spells can't be cast" pattern.
+/// E.g., Aether Storm: "Creature spells can't be cast."
+/// Also handles "[Type] spells with mana value N or greater/less can't be cast."
+pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
+    // Look for "spells can't be cast" suffix
+    let trimmed = tp.trim_end_matches('.');
+    let before_cant = trimmed.strip_suffix(" can't be cast")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+    let filter = parse_passive_cant_be_cast_spell_filter(before_cant)?;
     Some(
         StaticDefinition::new(StaticMode::CantBeCast {
             who: ProhibitionScope::AllPlayers,

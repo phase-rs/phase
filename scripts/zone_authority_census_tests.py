@@ -22,7 +22,13 @@ from __future__ import annotations
 
 import unittest
 
-from zone_authority_census import CensusError, iter_production_lines
+from zone_authority_census import (
+    CensusError,
+    TEST_SUPPORT_FILES,
+    iter_production_lines,
+    test_support_modules,
+    unannotated_hits,
+)
 
 
 def scan(src: str) -> list[tuple[int, str, str, str]]:
@@ -521,6 +527,39 @@ class PreservedBehaviourTests(unittest.TestCase):
         src = "#[cfg(test)]\nmod tests {\n    fn t() { } } }\n"
         with self.assertRaises(CensusError):
             code_of(src)
+
+
+class TestSupportBoundaryTests(unittest.TestCase):
+    """Scenario infrastructure is excluded by its feature boundary, not basename."""
+
+    def test_recognizes_explicit_test_support_exports(self) -> None:
+        source = (
+            '#[cfg(any(test, feature = "test-support"))]\n'
+            'pub mod scenario;\n'
+            '#[cfg(any(test, feature = "test-support"))]\n'
+            'pub mod scenario_db;\n'
+        )
+        self.assertEqual(test_support_modules(source), {"scenario", "scenario_db"})
+
+    def test_ignores_modules_without_the_test_support_boundary(self) -> None:
+        source = '#[cfg(test)]\npub mod scenario;\npub mod scenario_db;\n'
+        self.assertEqual(test_support_modules(source), set())
+
+    def test_scenarios_are_not_a_basename_whitelist(self) -> None:
+        self.assertNotIn("scenario.rs", TEST_SUPPORT_FILES)
+        self.assertNotIn("scenario_db.rs", TEST_SUPPORT_FILES)
+
+
+class HardGateTests(unittest.TestCase):
+    """The gate is zero-tolerance for unannotated production mutations."""
+
+    def test_nonannotated_synthetic_hit_fails(self) -> None:
+        hit = {("synthetic.rs", "raw_move", "mover"): 1}
+        self.assertEqual(unannotated_hits(hit), hit)
+
+    def test_annotated_synthetic_hit_passes(self) -> None:
+        hit = {("synthetic.rs", "special_setup", "exempt"): 1}
+        self.assertEqual(unannotated_hits(hit), {})
 
 
 if __name__ == "__main__":

@@ -15,7 +15,9 @@ use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::effects::resolve_ability_chain;
 use crate::game::scenario::GameScenario;
 use crate::parser::oracle::{parse_oracle_text, ParsedAbilities};
-use crate::types::ability::{ModalChoice, QuantityExpr, QuantityRef, TargetRef};
+use crate::types::ability::{
+    AbilityCondition, Effect, ModalChoice, QuantityExpr, QuantityRef, TargetRef,
+};
 use crate::types::actions::GameAction;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::mana::{ManaType, ManaUnit};
@@ -28,6 +30,12 @@ const HAWKEYE_ORACLE: &str = "First strike, reach\n\
      • Net — Target creature can't block this turn.\n\
      • Explosive — Hawkeye deals 2 damage to target player.\n\
      • Boomerang — Discard a card, then draw a card.";
+
+const FRILLBACK_ORACLE: &str = "When this creature enters, you may pay {G} up to three times. \
+     When you pay this cost one or more times, choose up to that many —\n\
+     • Destroy target artifact or enchantment.\n\
+     • Exile target player's graveyard.\n\
+     • You gain 4 life.";
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -79,6 +87,71 @@ fn hawkeye_modal_parses_with_resolution_local_dynamic_cap() {
         }),
         "the cap binds to the resolution-local repeated-payment count"
     );
+}
+
+#[test]
+fn tranquil_frillback_parses_as_repeated_green_payment_modal() {
+    let parsed = parse_oracle_text(
+        FRILLBACK_ORACLE,
+        "Tranquil Frillback",
+        &[],
+        &["Creature".to_string()],
+        &["Dinosaur".to_string()],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("ETB execute");
+    assert!(matches!(execute.effect.as_ref(), Effect::PayCost { .. }));
+    assert!(execute.optional);
+    assert_eq!(execute.repeat_for, Some(QuantityExpr::Fixed { value: 3 }));
+    let modal = execute.sub_ability.as_deref().expect("reflexive modal");
+    assert_eq!(modal.condition, Some(AbilityCondition::WhenYouDo));
+    assert_eq!(
+        modal
+            .modal
+            .as_ref()
+            .and_then(|modal| modal.dynamic_max_choices.clone()),
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::TimesCostPaidThisResolution
+        })
+    );
+}
+
+#[test]
+fn tranquil_frillback_paying_once_and_choosing_life_gains_four() {
+    let mut scenario = GameScenario::new();
+    scenario.with_life(P0, 20);
+    let frillback = scenario
+        .add_creature_from_oracle(P0, "Tranquil Frillback", 3, 3, FRILLBACK_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Green,
+            crate::types::identifiers::ObjectId(9_999),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let parsed = parse_oracle_text(
+        FRILLBACK_ORACLE,
+        "Tranquil Frillback",
+        &[],
+        &["Creature".to_string()],
+        &["Dinosaur".to_string()],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("ETB execute");
+    let resolved = build_resolved_from_def(execute, frillback, P0);
+    resolve_ability_chain(runner.state_mut(), &resolved, &mut Vec::new(), 0)
+        .expect("resolve Frillback ETB");
+
+    decide(&mut runner, true);
+    decide(&mut runner, false);
+    assert_eq!(modal_cap(runner.state()), Some((0, 1)));
+    runner
+        .act(GameAction::SelectModes { indices: vec![2] })
+        .expect("select Frillback life mode");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[0].life, 24);
 }
 
 // ── Runtime harness ─────────────────────────────────────────────────────

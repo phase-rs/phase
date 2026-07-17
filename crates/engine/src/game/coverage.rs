@@ -1019,6 +1019,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             // CR 608.2c: "chosen this way" / a member of the resolution-chain set.
             FilterProp::InTrackedSet { .. } => parts.push("chosen this way".into()),
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasAdventure => parts.push("with an Adventure".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
@@ -1724,6 +1725,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("mana spent to cast ({scope:?}, {metric:?})")
         }
         QuantityRef::EventContextSourceCostX => "X of triggering spell".into(),
+        QuantityRef::EventContextSourceModesChosen => {
+            "modes chosen for the triggering spell".into()
+        }
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
         }
@@ -3558,6 +3562,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
@@ -4203,6 +4208,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedAbilityFromSource {
             source_ability_index,
         } => format!("retain printed ability {source_ability_index}"),
+        ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+            "retain source's other abilities".into()
+        }
         ContinuousModification::AddSupertype { supertype } => {
             format!("add supertype {supertype}")
         }
@@ -7463,6 +7471,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TimesCostPaidThisResolution => ("TimesCostPaidThisResolution", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
+        QuantityRef::EventContextSourceModesChosen => ("EventContextSourceModesChosen", Handled),
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)
         }

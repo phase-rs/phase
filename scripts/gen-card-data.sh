@@ -319,8 +319,10 @@ GEN_COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 MTGJSON_VERSION="unknown"
 MTGJSON_DATE="unknown"
 if [ -s "$MTGJSON_META_FILE" ]; then
-  MTGJSON_VERSION=$(jq -r '.meta.version // "unknown"' "$MTGJSON_META_FILE")
-  MTGJSON_DATE=$(jq -r '.meta.date // "unknown"' "$MTGJSON_META_FILE")
+  # tr strips Windows jq's trailing \r, which would otherwise embed a raw
+  # control character inside the JSON string values written to META_OUTPUT.
+  MTGJSON_VERSION=$(jq -r '.meta.version // "unknown"' "$MTGJSON_META_FILE" | tr -d '\r')
+  MTGJSON_DATE=$(jq -r '.meta.date // "unknown"' "$MTGJSON_META_FILE" | tr -d '\r')
 fi
 track_tmp "$META_OUTPUT_TMP"
 cat > "$META_OUTPUT_TMP" <<METAEOF
@@ -365,6 +367,7 @@ FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
 NAMES_SIZE=$(du -h "$NAMES_OUTPUT" | cut -f1)
 # Count entries in the small names array (648K) rather than grepping the 90MB
 # card-data for `"name"` — the latter is slower and overcounts nested keys.
-CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT")
+# tr strips Windows jq's trailing \r, which would otherwise corrupt this summary line.
+CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT" | tr -d '\r')
 echo "Generated $OUTPUT ($FILE_SIZE, ~$CARD_COUNT cards)"
 echo "Generated $NAMES_OUTPUT ($NAMES_SIZE)"

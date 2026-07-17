@@ -48,6 +48,10 @@ const mocks = vi.hoisted(() => {
     actions: [],
     autoPassRecommended: false,
   }));
+  const checkDeckCompatibility = vi.fn(async () => ({
+    selected_format_compatible: true,
+    selected_format_reasons: [] as string[],
+  }));
   // Local monotonic stamp — the hoisted factory runs before imports, so it
   // can't call the adapter module's `nextSnapshotSeq`. Only ordering matters
   // to these assertions, and `seq` is never compared across clients.
@@ -55,6 +59,7 @@ const mocks = vi.hoisted(() => {
   return {
     initialize: vi.fn(async () => undefined),
     submitAction: vi.fn(async (_action: unknown) => ({ events: [] })),
+    checkDeckCompatibility,
     getState,
     getLegalActions,
     /**
@@ -135,6 +140,7 @@ const mocks = vi.hoisted(() => {
   };
 });
 const mockSubmitAction = mocks.submitAction;
+const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
 const mockInitializeGame = mocks.initializeGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
@@ -208,6 +214,7 @@ vi.mock("../wasm-adapter", () => ({
       initialize: mocks.initialize,
       initializeGame: mocks.initializeGame,
       submitAction: mocks.submitAction,
+      checkDeckCompatibility: mocks.checkDeckCompatibility,
       getState: mocks.getState,
       getLegalActions: mocks.getLegalActions,
       getSnapshot: mocks.getSnapshot,
@@ -233,6 +240,7 @@ beforeEach(() => {
   );
   mockInitialize.mockClear();
   mockSubmitAction.mockClear();
+  mockCheckDeckCompatibility.mockClear();
   mockGetViewerSnapshot.mockClear();
   mockInitializeGame.mockClear();
   mockSetMultiplayerMode.mockClear();
@@ -312,6 +320,23 @@ function twoHeadedGiantConfig(): FormatConfig {
   };
 }
 
+function commanderConfig(): FormatConfig {
+  return {
+    format: "Commander",
+    starting_life: 40,
+    min_players: 2,
+    max_players: 6,
+    deck_size: 100,
+    singleton: true,
+    command_zone: true,
+    commander_damage_threshold: 21,
+    range_of_influence: null,
+    team_based: false,
+    uses_commander: true,
+    allow_debug_actions: false,
+  };
+}
+
 function makeHost(playerCount: number, gracePeriodMs = 5_000, formatConfig?: FormatConfig) {
   const { peer, onGuestConnected, emitConnection } = createFakePeer();
   const hostDeck = {
@@ -380,6 +405,52 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
     expect(mockSetMultiplayerMode).toHaveBeenCalledWith(true);
+  });
+
+  it("rejects a non-Oathbreaker guest signature spell before game setup", async () => {
+    mockCheckDeckCompatibility.mockResolvedValueOnce({
+      selected_format_compatible: false,
+      selected_format_reasons: ["Commander does not use a signature spell slot"],
+    });
+    const { adapter, emitConnection } = makeHost(2, 5_000, commanderConfig());
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: {
+        player: {
+          main_deck: ["Plains"],
+          sideboard: [],
+          commander: ["Legal Commander"],
+          companion: [],
+          signature_spell: ["Invalid Signature Spell"],
+        },
+      },
+    });
+    await flushPromises(20);
+
+    expect(mockCheckDeckCompatibility).toHaveBeenCalledWith({
+      main_deck: ["Plains"],
+      sideboard: [],
+      commander: ["Legal Commander"],
+      companion: [],
+      signature_spell: ["Invalid Signature Spell"],
+      selected_format: "Commander",
+    });
+    expect(mockInitializeGame).not.toHaveBeenCalled();
+
+    const kicked = (await guest.getSentMessages()).find(
+      (message) =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "kick",
+    );
+    expect(kicked).toMatchObject({
+      type: "kick",
+      reason: "Deck rejected: Commander does not use a signature spell slot",
+      format: "Commander",
+    });
+    expect(guest.open).toBe(false);
   });
 
   it("projects team metadata from wire SeatView into player slots", () => {

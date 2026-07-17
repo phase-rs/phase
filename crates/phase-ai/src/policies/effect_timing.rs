@@ -1,4 +1,3 @@
-use engine::game::players;
 use engine::game::turn_control;
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
@@ -8,7 +7,7 @@ use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
-use crate::eval::{evaluate_creature, threat_level, StrategicIntent};
+use crate::eval::StrategicIntent;
 use crate::features::DeckFeatures;
 
 use super::activation::turn_only;
@@ -16,7 +15,9 @@ use super::context::{collect_ability_effects, PolicyContext};
 use super::effect_classify::{extract_target_filter, targets_creatures_only};
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::stack_awareness::assess_spell_impact;
-use super::strategy_helpers::{targetable_threat_value, untapped_opponent_blocker_value};
+use super::strategy_helpers::{
+    targetable_threat_value, untapped_opponent_blocker_value, visible_opponent_creature_value,
+};
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
 
@@ -176,23 +177,7 @@ fn removal_score(ctx: &PolicyContext<'_>) -> f64 {
 
 /// Fallback: max threat across all opponent creatures (no filter applied).
 fn all_opponent_creature_threat(ctx: &PolicyContext<'_>) -> f64 {
-    let opponents = players::opponents(ctx.state, ctx.ai_player);
-    ctx.state
-        .battlefield
-        .iter()
-        .filter_map(|&id| {
-            let object = ctx.state.objects.get(&id)?;
-            if opponents.contains(&object.controller)
-                && object.card_types.core_types.contains(&CoreType::Creature)
-            {
-                let creature_value = evaluate_creature(ctx.state, id);
-                let threat_weight = threat_level(ctx.state, ctx.ai_player, object.controller) + 0.5;
-                Some(creature_value * threat_weight)
-            } else {
-                None
-            }
-        })
-        .fold(0.0_f64, f64::max)
+    visible_opponent_creature_value(ctx.state, ctx.ai_player)
 }
 
 fn burn_score(ctx: &PolicyContext<'_>) -> f64 {

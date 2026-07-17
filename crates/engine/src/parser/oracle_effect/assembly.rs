@@ -60,13 +60,14 @@ use super::{
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate,
+    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate, draw_object_count_filter,
     fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
     mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
     publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
     rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
+    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -2086,6 +2087,23 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
                         rewrite_parent_targets_to_tracked_set(&mut current.effect);
+                    }
+                }
+            } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
+                // CR 603.7 + issue #6065: "those creatures gain <keyword>" after a
+                // "draw a card for each <creature filter>" clause (Inspiring Call).
+                // Draw publishes no tracked set (its target is the drawing player),
+                // so the branch above skips it and the grant's ParentTarget would
+                // resolve to the controller. Bind it directly to the nearest prior
+                // Draw's count filter — the counted creatures the pronoun names.
+                if let Some(filter) = defs
+                    .iter()
+                    .rev()
+                    .find_map(|d| draw_object_count_filter(&d.effect))
+                    .cloned()
+                {
+                    for current in &mut current_defs {
+                        rewrite_grant_parent_to_filter(&mut current.effect, &filter);
                     }
                 }
             }

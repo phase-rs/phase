@@ -1,13 +1,13 @@
 use rand::seq::SliceRandom;
 
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
     ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -313,53 +313,51 @@ pub fn resolve(
         &collected_targets[..collected_targets.len().min(expected)]
     };
 
-    let index = match &position {
-        // Top = index 0, Bottom = None (push to end), NthFromTop = index n-1
-        // ("second from the top" = index 1).
-        LibraryPosition::Top => Some(0),
-        LibraryPosition::Bottom => None,
-        LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+    let position = match position {
         // CR 401.7 (Unexpectedly Absent class): "just beneath the top N cards"
         // leaves exactly `depth` cards above the placed object, i.e. the 0-based
         // insertion index IS the resolved depth (no `-1`, unlike `NthFromTop`).
-        // Per CR 401.7 `move_to_library_at_index` clamps an index past the
-        // library size to the bottom.
-        LibraryPosition::BeneathTop { depth } => {
-            Some(resolve_quantity_with_targets(state, depth, ability).max(0) as usize)
-        }
-        // Digital-only Alchemy: `RandomWithinTop` is produced only for the Conjure
-        // keyword action (`conjure.rs`), never for `PutAtLibraryPosition`.
-        // Exhaustiveness arm: default (bottom) placement.
-        LibraryPosition::RandomWithinTop { .. } => None,
+        // Resolve the depth before it enters the batch request because a parked
+        // request must carry a concrete placement across CR 616.1 pauses.
+        LibraryPosition::BeneathTop { depth } => LibraryPosition::BeneathTop {
+            depth: QuantityExpr::Fixed {
+                value: resolve_quantity_with_targets(state, &depth, ability).max(0),
+            },
+        },
+        other => other,
     };
-    match position {
-        LibraryPosition::Top => {
-            for object_id in to_place.iter().rev() {
-                zones::move_to_library_at_index(state, *object_id, index, events);
-            }
-        }
+    // CR 701.24a + CR 401.4: Top placement is reversed at request construction so the
+    // selected order remains top-to-bottom after sequential delivery; every
+    // other position preserves selection order. `move_objects_simultaneously`
+    // owns the suffix when a Library-destination replacement pauses.
+    let placement_order: Vec<ObjectId> = match &position {
+        LibraryPosition::Top => to_place.iter().rev().copied().collect(),
         LibraryPosition::Bottom
         | LibraryPosition::NthFromTop { .. }
         | LibraryPosition::BeneathTop { .. }
-        | LibraryPosition::RandomWithinTop { .. } => {
-            for object_id in to_place {
-                zones::move_to_library_at_index(state, *object_id, index, events);
-            }
-        }
-    }
-    // CR 406.6: The exiled cards left the exile zone — drop their source links
-    // for both the bare and And-composed `ExiledBySource` cleanup forms.
-    if target_filter.references_exiled_by_source() {
-        state.exile_links.retain(|link| {
-            link.source_id != ability.source_id || !to_place.contains(&link.exiled_id)
-        });
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::PutAtLibraryPosition,
-        source_id: ability.source_id,
-        subject: None,
-    });
+        | LibraryPosition::RandomWithinTop { .. } => to_place.to_vec(),
+    };
+    let requests = placement_order
+        .into_iter()
+        .map(|object_id| {
+            ZoneMoveRequest::effect(object_id, Zone::Library, ability.source_id)
+                .at_library_position(position.clone())
+        })
+        .collect();
+    let removed_exile_links = if target_filter.references_exiled_by_source() {
+        to_place.to_vec()
+    } else {
+        Vec::new()
+    };
+    zone_pipeline::move_objects_simultaneously_then(
+        state,
+        requests,
+        Some(BatchCompletion::PutOnTopComplete {
+            source_id: ability.source_id,
+            removed_exile_links,
+        }),
+        events,
+    );
 
     Ok(())
 }

@@ -5130,6 +5130,20 @@ fn dispatch_pending_trigger_context(
     // exists on the stack.
     if let Some(modal_ref) = trigger.modal.as_ref() {
         if !trigger.mode_abilities.is_empty() {
+            // CR 603.3c + CR 603.3d: a triggered modal's mode choice is announced as
+            // the ability is put on the stack, by the same process as casting a spell
+            // (CR 601.2c-d). The triggering event must be live for the ENTIRE choice,
+            // including the "choose up to X" dynamic cap resolved by
+            // modal_choice_for_player -- push the event window BEFORE cap resolution,
+            // not just around target-legality filtering, so event-context quantity
+            // refs (e.g. EventContextSourceModesChosen, Riku of Many Paths) resolve
+            // against the triggering spell rather than an unset event.
+            let context_snapshot = push_trigger_event_context(
+                state,
+                trigger.trigger_event.as_ref(),
+                &trigger_events,
+                trigger.subject_match_count,
+            );
             let modal_for_player = super::ability_utils::modal_choice_for_player(
                 state,
                 trigger.controller,
@@ -5141,12 +5155,6 @@ fn dispatch_pending_trigger_context(
                 state,
                 trigger.source_id,
                 &modal_for_player,
-            );
-            let context_snapshot = push_trigger_event_context(
-                state,
-                trigger.trigger_event.as_ref(),
-                &trigger_events,
-                trigger.subject_match_count,
             );
             super::ability_utils::filter_modes_by_target_legality(
                 state,
@@ -8145,6 +8153,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
@@ -22120,6 +22129,11 @@ pub mod tests {
     fn printed_casualty_no_copy_when_not_paid() {
         let mut state = setup();
         let caster = PlayerId(0);
+        let mut face = crate::types::card::CardFace::default();
+        face.card_type.core_types.push(CoreType::Instant);
+        face.keywords.push(Keyword::Casualty(2));
+        crate::database::synthesis::synthesize_casualty(&mut face);
+        let casualty_trigger = face.triggers.remove(0);
 
         let spell = create_object(
             &mut state,
@@ -22140,6 +22154,7 @@ pub mod tests {
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             obj.keywords.push(Keyword::Casualty(2));
+            obj.trigger_definitions.push(casualty_trigger);
         }
         let ability = ResolvedAbility::new(
             Effect::Draw {
@@ -22336,26 +22351,156 @@ pub mod tests {
             "Kicked Creature".to_string(),
             Zone::Battlefield,
         );
+        let condition = TriggerCondition::AdditionalCostPaid {
+            source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
+            origin: None,
+            origin_ordinal: None,
+            variant: None,
+            kicker_cost: None,
+            min_count: 2,
+        };
         state
             .objects
             .get_mut(&source)
             .unwrap()
             .kickers_paid
-            .extend([KickerVariant::First, KickerVariant::First]);
+            .push(KickerVariant::First);
 
-        assert!(check_trigger_condition(
+        assert!(!check_trigger_condition(
             &state,
-            &TriggerCondition::AdditionalCostPaid {
-                source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
-                origin: None,
-                origin_ordinal: None,
-                variant: None,
-                kicker_cost: None,
-                min_count: 2,
-            },
+            &condition,
             PlayerId(0),
             Some(source),
             None,
+        ));
+
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .kickers_paid
+            .push(KickerVariant::Second);
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+    }
+
+    #[test]
+    fn additional_cost_paid_checks_bargained_entering_object() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bargained Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let event = zone_changed_event(
+            source,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec![],
+        );
+        let condition = TriggerCondition::AdditionalCostPaid {
+            source: crate::types::ability::AdditionalCostPaymentSource::NonKicker,
+            origin: None,
+            origin_ordinal: None,
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        };
+
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .additional_cost_payment_count = 1;
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+    }
+
+    #[test]
+    fn bargained_etb_does_not_accept_an_unrelated_additional_cost() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Realm-Scorcher Hellkite".to_string(),
+            Zone::Battlefield,
+        );
+        let event = zone_changed_event(
+            source,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec![],
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Bargain\nWhen this creature enters, if it was bargained, add four mana in any combination of colors.",
+            "Realm-Scorcher Hellkite",
+            &[String::from("Bargain")],
+            &[String::from("Creature")],
+            &[String::from("Dragon")],
+        );
+        let condition = parsed.triggers[0]
+            .condition
+            .as_ref()
+            .expect("bargained ETB must have an intervening-if condition");
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .additional_cost_payments =
+            vec![crate::types::ability::AdditionalCostInstancePayment::new(
+                AdditionalCostOrigin::Other,
+                1,
+            )];
+
+        assert!(!check_trigger_condition(
+            &state,
+            condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .additional_cost_payments =
+            vec![crate::types::ability::AdditionalCostInstancePayment::new(
+                AdditionalCostOrigin::Bargain,
+                1,
+            )];
+
+        assert!(check_trigger_condition(
+            &state,
+            condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
         ));
     }
 
