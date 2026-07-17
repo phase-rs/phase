@@ -1,17 +1,17 @@
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 
-use crate::eval::evaluate_creature;
+use crate::eval::opponent_battlefield_creature_threat_value;
 use crate::features::DeckFeatures;
 use crate::projection::{ProjectionHorizon, VelocitySample};
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
-use super::effect_classify::is_spell_beneficial;
+use super::effect_classify::targeted_object_impact;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::strategy_helpers::ai_can_block;
 
@@ -28,6 +28,13 @@ const VELOCITY_BONUS_MAX: f64 = 3.0;
 
 impl EvasionRemovalPriorityPolicy {
     pub fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
+        if !matches!(
+            ctx.decision.waiting_for,
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            return 0.0;
+        }
+
         let GameAction::ChooseTarget {
             target: Some(TargetRef::Object(target_id)),
         } = &ctx.candidate.action
@@ -35,21 +42,20 @@ impl EvasionRemovalPriorityPolicy {
             return 0.0;
         };
 
-        // Only for harmful effects (removal)
-        if is_spell_beneficial(ctx) {
+        if !targeted_object_impact(ctx, *target_id).is_some_and(|impact| impact < -0.25) {
             return 0.0;
         }
 
+        let Some(target_value) =
+            opponent_battlefield_creature_threat_value(ctx.state, ctx.ai_player, *target_id)
+        else {
+            return 0.0;
+        };
         let Some(target) = ctx.state.objects.get(target_id) else {
             return 0.0;
         };
 
-        // Only relevant for creatures
-        if !target.card_types.core_types.contains(&CoreType::Creature) {
-            return 0.0;
-        }
-
-        let target_quality_bonus = removal_target_quality_score(ctx, target, *target_id);
+        let target_quality_bonus = removal_target_quality_score(target_value);
         let evasion_bonus = evasion_score(ctx, target, *target_id);
         let velocity_bonus = velocity_score(ctx, target, *target_id);
 
@@ -57,29 +63,7 @@ impl EvasionRemovalPriorityPolicy {
     }
 }
 
-fn removal_target_quality_score(
-    ctx: &PolicyContext<'_>,
-    target: &engine::game::game_object::GameObject,
-    target_id: engine::types::identifiers::ObjectId,
-) -> f64 {
-    if target.controller == ctx.ai_player {
-        return 0.0;
-    }
-
-    let value = if target.card_types.core_types.contains(&CoreType::Creature) {
-        evaluate_creature(ctx.state, target_id)
-    } else if target
-        .card_types
-        .core_types
-        .contains(&CoreType::Planeswalker)
-    {
-        2.0 + target.loyalty.unwrap_or(0) as f64 * 0.4
-    } else if target.card_types.core_types.contains(&CoreType::Land) {
-        1.0
-    } else {
-        target.mana_cost.mana_value() as f64 * 0.5
-    };
-
+fn removal_target_quality_score(value: f64) -> f64 {
     if value < 2.0 {
         -0.8
     } else {
@@ -210,26 +194,427 @@ impl TacticalPolicy for EvasionRemovalPriorityPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("evasion_removal_priority_score"),
-        }
+        PolicyVerdict::score(
+            self.score(ctx),
+            PolicyReason::new("evasion_removal_priority_score"),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AiConfig;
-    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use crate::config::{create_config, AiConfig, AiDifficulty, Platform};
+    use engine::ai_support::{
+        build_decision_context, ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass,
+    };
+    use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
-    use engine::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
-    use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, EffectKind, PtValue, ResolvedAbility, TargetFilter,
+        TargetRef, TypedFilter,
+    };
+    use engine::types::format::FormatConfig;
+    use engine::types::game_state::{
+        CastPaymentMode, CopyTargetSlot, GameState, PendingCast, TargetSelectionProgress,
+        TargetSelectionSlot, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
-    use engine::types::mana::ManaCost;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+
+    const BEAST_WITHIN_ORACLE: &str =
+        "Destroy target permanent. Its controller creates a 3/3 green Beast creature token.";
+
+    fn add_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.power = Some(power);
+        object.toughness = Some(toughness);
+        id
+    }
+
+    fn candidate_for(target: ObjectId) -> CandidateAction {
+        CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+            metadata: ActionMetadata {
+                actor: Some(P0),
+                tactical_class: TacticalClass::Target,
+            },
+        }
+    }
+
+    fn policy_score(
+        state: &GameState,
+        decision: &AiDecisionContext,
+        target: ObjectId,
+        config: &AiConfig,
+    ) -> f64 {
+        let candidate = candidate_for(target);
+        let ai_context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config,
+            context: &ai_context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        EvasionRemovalPriorityPolicy.score(&ctx)
+    }
+
+    fn registry_delta(
+        state: &GameState,
+        decision: &AiDecisionContext,
+        target: ObjectId,
+        config: &AiConfig,
+    ) -> f64 {
+        let candidate = candidate_for(target);
+        let ai_context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config,
+            context: &ai_context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        crate::policies::registry::PolicyRegistry::shared()
+            .verdicts(&ctx)
+            .into_iter()
+            .find_map(|(id, verdict)| {
+                (id == PolicyId::EvasionRemovalPriority).then(|| match verdict {
+                    PolicyVerdict::Score { delta, .. } => delta,
+                    PolicyVerdict::Reject { .. } => {
+                        panic!("removal target priority must not reject legal targets")
+                    }
+                })
+            })
+            .expect("EvasionRemovalPriorityPolicy must be active in the production registry")
+    }
+
+    fn full_score_for_target(scores: &[(GameAction, f64)], target: ObjectId) -> f64 {
+        scores
+            .iter()
+            .find_map(|(action, score)| match action {
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(id)),
+                } if *id == target => Some(*score),
+                _ => None,
+            })
+            .expect("target must be a scored legal candidate")
+    }
+
+    fn activated_target_state(effect: Effect) -> (GameState, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        let source = scenario
+            .add_creature(P0, "Targeting Engine", 1, 1)
+            .with_ability_definition(AbilityDefinition::new(AbilityKind::Activated, effect))
+            .id();
+        let low = scenario.add_creature(PlayerId(1), "Frog", 3, 3).id();
+        let high = scenario.add_creature(PlayerId(2), "Krenko", 3, 3).id();
+        for index in 0..10 {
+            scenario.add_creature(PlayerId(2), &format!("Goblin {index}"), 1, 1);
+        }
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("activation should reach target selection");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "activated targeted ability must use ordinary TargetSelection"
+        );
+        (runner.state().clone(), low, high)
+    }
+
+    #[test]
+    fn beast_within_targets_equal_body_controlled_by_board_threat() {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let beast_within = scenario
+            .add_spell_to_hand_from_oracle(P0, "Beast Within", true, BEAST_WITHIN_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 2,
+            })
+            .id();
+        let frog = scenario.add_creature(PlayerId(1), "Frog Lizard", 3, 3).id();
+        let krenko = scenario
+            .add_creature(PlayerId(2), "Krenko, Mob Boss", 3, 3)
+            .id();
+        for index in 0..10 {
+            scenario.add_creature(PlayerId(2), &format!("Goblin {index}"), 1, 1);
+        }
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&beast_within].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: beast_within,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the real Beast Within fixture should reach target selection");
+
+        let (pending_cast, target_slots) = match &runner.state().waiting_for {
+            WaitingFor::TargetSelection {
+                pending_cast,
+                target_slots,
+                ..
+            } => (pending_cast, target_slots),
+            other => panic!("expected Beast Within target selection, got {other:?}"),
+        };
+        let effects = crate::policies::context::collect_ability_effects(&pending_cast.ability);
+        assert!(
+            effects
+                .first()
+                .is_some_and(|effect| matches!(effect, Effect::Destroy { .. })),
+            "reach guard: Beast Within must parse its primary Destroy effect"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Token {
+                    power: PtValue::Fixed(3),
+                    toughness: PtValue::Fixed(3),
+                    colors,
+                    owner: TargetFilter::ParentTargetController,
+                    ..
+                } if colors.contains(&ManaColor::Green)
+            )),
+            "reach guard: Beast Within must retain the controller-owned green 3/3 compensation"
+        );
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+            "the regression fixture must not silently drop an unsupported clause"
+        );
+        assert_eq!(target_slots.len(), 1);
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(frog)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(krenko)));
+
+        let state = runner.state();
+        let decision = build_decision_context(state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(42);
+        let frog_delta = registry_delta(state, &decision, frog, &config);
+        let krenko_delta = registry_delta(state, &decision, krenko, &config);
+        assert!(
+            krenko_delta > frog_delta,
+            "registered removal policy must prefer the equal body controlled by the larger threat: Krenko={krenko_delta}, Frog={frog_delta}"
+        );
+
+        let scores = crate::search::score_candidates(state, P0, &config);
+        assert!(
+            full_score_for_target(&scores, krenko) > full_score_for_target(&scores, frog),
+            "the complete Very Hard scorer must preserve the controller-threat preference"
+        );
+
+        let mut rng = SmallRng::seed_from_u64(42);
+        assert_eq!(
+            crate::choose_action(state, P0, &config, &mut rng),
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(krenko)),
+            }),
+            "Very Hard must spend Beast Within on Krenko rather than the Frog Lizard"
+        );
+    }
+
+    #[test]
+    fn activated_removal_weights_controller_threat_but_beneficial_activation_is_neutral() {
+        let destroy = Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        };
+        let (state, low, high) = activated_target_state(destroy);
+        let decision = build_decision_context(&state);
+        let config = AiConfig::default();
+        assert!(
+            policy_score(&state, &decision, high, &config)
+                > policy_score(&state, &decision, low, &config)
+        );
+
+        let pump = Effect::Pump {
+            power: PtValue::Fixed(2),
+            toughness: PtValue::Fixed(2),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        let (state, _, high) = activated_target_state(pump);
+        let decision = build_decision_context(&state);
+        assert_eq!(policy_score(&state, &decision, high, &config), 0.0);
+    }
+
+    #[test]
+    fn harmful_trigger_uses_controller_threat_but_copy_retarget_is_neutral() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let low = add_creature(&mut state, PlayerId(1), "Frog", 3, 3);
+        let high = add_creature(&mut state, PlayerId(2), "Krenko", 3, 3);
+        for index in 0..10 {
+            add_creature(&mut state, PlayerId(2), &format!("Goblin {index}"), 1, 1);
+        }
+        let trigger_source = ObjectId(999);
+        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+            source_id: trigger_source,
+            controller: P0,
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::Any,
+                    cant_regenerate: false,
+                },
+                Vec::new(),
+                trigger_source,
+                P0,
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: Vec::new(),
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        });
+        let config = AiConfig::default();
+        let slot = TargetSelectionSlot {
+            legal_targets: vec![TargetRef::Object(low), TargetRef::Object(high)],
+            optional: false,
+            chooser: None,
+        };
+        let trigger = AiDecisionContext {
+            waiting_for: WaitingFor::TriggerTargetSelection {
+                player: P0,
+                trigger_controller: Some(P0),
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                target_slots: vec![slot],
+                mode_labels: Vec::new(),
+                target_constraints: Vec::new(),
+                selection: TargetSelectionProgress::default(),
+                source_id: Some(trigger_source),
+                description: None,
+            },
+            candidates: vec![candidate_for(low), candidate_for(high)],
+        };
+        assert!(
+            policy_score(&state, &trigger, high, &config)
+                > policy_score(&state, &trigger, low, &config),
+            "harmful triggered removal must retain controller-threat targeting"
+        );
+
+        let copy = AiDecisionContext {
+            waiting_for: WaitingFor::CopyRetarget {
+                player: P0,
+                copy_id: ObjectId(1000),
+                target_slots: vec![CopyTargetSlot {
+                    current: Some(TargetRef::Object(low)),
+                    legal_alternatives: vec![TargetRef::Object(high)],
+                }],
+                effect_kind: EffectKind::Destroy,
+                effect_source_id: None,
+                current_slot: 0,
+                paradigm_remaining_offers: None,
+            },
+            candidates: vec![candidate_for(high)],
+        };
+        assert_eq!(policy_score(&state, &copy, high, &config), 0.0);
+    }
+
+    #[test]
+    fn teammate_and_eliminated_creatures_are_neutral() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let teammate = add_creature(&mut state, PlayerId(1), "Teammate", 4, 4);
+        let opponent = add_creature(&mut state, PlayerId(2), "Opponent", 4, 4);
+        let eliminated = add_creature(&mut state, PlayerId(3), "Eliminated", 4, 4);
+        state.players[3].is_eliminated = true;
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            Vec::new(),
+            ObjectId(100),
+            P0,
+        );
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: P0,
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(100),
+                    CardId(100),
+                    ability,
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![
+                        TargetRef::Object(teammate),
+                        TargetRef::Object(opponent),
+                        TargetRef::Object(eliminated),
+                    ],
+                    optional: false,
+                    chooser: None,
+                }],
+                mode_labels: Vec::new(),
+                selection: TargetSelectionProgress::default(),
+            },
+            candidates: vec![
+                candidate_for(teammate),
+                candidate_for(opponent),
+                candidate_for(eliminated),
+            ],
+        };
+        let config = AiConfig::default();
+        assert_eq!(policy_score(&state, &decision, teammate, &config), 0.0);
+        assert_eq!(policy_score(&state, &decision, eliminated, &config), 0.0);
+        assert!(policy_score(&state, &decision, opponent, &config) > 0.0);
+    }
 
     #[test]
     fn bonus_for_unblockable_flyer() {

@@ -29,10 +29,8 @@ crates/engine/src/game/deck_loading.rs	create_scheme_deck_card	container	1
 crates/engine/src/game/effects/cascade.rs	resolve	mover	1
 crates/engine/src/game/effects/cast_copy_of_card.rs	cast_one_copy	zone-assign	1
 crates/engine/src/game/effects/cast_from_zone.rs	grant_lingering_permissions	mover	1
-crates/engine/src/game/effects/choose_from_zone.rs	drain_pending_per_category_zone_choice	mover	1
 crates/engine/src/game/effects/cloak.rs	resolve	mover	1
 crates/engine/src/game/effects/copy_spell.rs	resolve	zone-assign	1
-crates/engine/src/game/effects/drawn_this_turn_choice.rs	handle_topdeck_choice	mover	1
 crates/engine/src/game/effects/epic.rs	resolve	zone-assign	1
 crates/engine/src/game/effects/explore.rs	resolve_explore_effect	mover	1
 crates/engine/src/game/effects/paradigm.rs	cast_paradigm_copy	zone-assign	1

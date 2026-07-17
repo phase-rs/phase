@@ -2209,8 +2209,9 @@ pub fn compute_combat_tax(
         return None;
     }
 
-    // Drop creatures with no tax — keep per_creature as the subset that is actually taxed.
-    per_creature.retain(|(_, cost)| cost.mana_value() > 0 || !matches!(cost, ManaCost::NoCost));
+    // Drop creatures with no tax — the decline path uses this exact subset to
+    // remove only creatures that actually owe a cost from the declaration.
+    per_creature.retain(|(_, cost)| cost.mana_value() > 0);
     if per_creature.is_empty() {
         return None;
     }
@@ -2774,6 +2775,35 @@ pub fn declare_attackers_with_bands(
     bands: &[Vec<ObjectId>],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
+    declare_attackers_with_bands_impl(state, attacks, bands, None, events)
+}
+
+/// CR 508.1d: Finalize a declaration after its player declined an "unless pay"
+/// attack cost. A declined creature is unavailable for requirement maximization,
+/// so its attack requirements do not make the reduced declaration illegal.
+pub(super) fn declare_attackers_with_bands_after_combat_tax_declined(
+    state: &mut GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
+    declined_taxed_attackers: &HashSet<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), String> {
+    declare_attackers_with_bands_impl(
+        state,
+        attacks,
+        bands,
+        Some(declined_taxed_attackers),
+        events,
+    )
+}
+
+fn declare_attackers_with_bands_impl(
+    state: &mut GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
+    declined_taxed_attackers: Option<&HashSet<ObjectId>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), String> {
     let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
     validate_attackers(state, &attacker_ids)?;
     // CR 508.1c + CR 508.5: defender-scoped attacker caps ("...attack you each
@@ -2794,6 +2824,12 @@ pub fn declare_attackers_with_bands(
     // exemption logic; this loop only adds the "already declared?" check and
     // the rejection error text.
     for &obj_id in &state.battlefield {
+        // CR 508.1d: A player need not pay a cost just to satisfy an attack
+        // requirement. A creature removed after its tax was declined is therefore
+        // unavailable when maximizing requirements for this declaration.
+        if declined_taxed_attackers.is_some_and(|ids| ids.contains(&obj_id)) {
+            continue;
+        }
         if !creature_must_attack_with_attackable_players_gated(
             state,
             obj_id,

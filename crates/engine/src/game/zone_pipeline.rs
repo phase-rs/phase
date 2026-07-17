@@ -1413,11 +1413,31 @@ fn legal_aura_attachment_targets(
     enchant_filter: &TargetFilter,
 ) -> Vec<TargetRef> {
     let ctx = crate::game::filter::FilterContext::from_source_with_controller(aura_id, controller);
-    let mut targets: Vec<TargetRef> = state
-        .battlefield
-        .iter()
-        .copied()
+    // CR 303.4f: the controller chooses a legal object per the Aura's current
+    // enchant ability. Enumerate candidate hosts across whatever zone(s) that
+    // ability implies — an ordinary Aura (Pacifism) imposes no zone property and
+    // defaults to the battlefield, while a graveyard/hand-scoped enchant ability
+    // (Animate Dead, Dance of the Dead, Spellweaver Volute, Don't Worry About It)
+    // carries a `FilterProp::InZone`/`InAnyZone` that `extract_zones` surfaces.
+    // Mirrors `object_count_matching_ids` in `game/quantity.rs`. Using
+    // `zone_object_ids` for the battlefield case also (correctly) excludes
+    // phased-out permanents per CR 702.26b — they're treated as nonexistent and
+    // can never be a legal new host.
+    let zones = enchant_filter.extract_zones();
+    let zones = if zones.is_empty() {
+        vec![Zone::Battlefield]
+    } else {
+        zones
+    };
+    let mut targets: Vec<TargetRef> = zones
+        .into_iter()
+        .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
+        // CR 303.4d: an Aura can't enchant itself.
         .filter(|id| *id != aura_id)
+        // CR 115.1b + CR 303.4f: this consult is a controller CHOICE, not a
+        // targeting event (an Aura permanent doesn't target) — use
+        // `matches_target_filter`, never the `find_legal_targets` enumerator, so
+        // hexproof (CR 702.11) / shroud (CR 702.18) never remove a legal host.
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, enchant_filter, &ctx))
         .filter(|id| crate::game::effects::attach::can_attach_to_object(state, aura_id, *id))
         .map(TargetRef::Object)
