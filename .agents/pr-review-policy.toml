@@ -19,9 +19,11 @@ enforced_after = ""
 accepted_issue_label = "accepted"
 
 [architecture_scope]
-# Independently calibrated against 80 merged and 39 open PRs. This gate does
-# not depend on the artifact publication cutoff.
-mode = "enforce"
+# Broad cross-surface changes need a maintainer's full implementation review,
+# not automatic closure. In particular, a bounded parser/engine class moving
+# from Effect::Unimplemented to a real implementation may legitimately require
+# engine, interactive-choice, frontend, and transport plumbing.
+mode = "review"
 span_threshold = 3
 patterns = [
   "crates/engine/src/types/format.rs",

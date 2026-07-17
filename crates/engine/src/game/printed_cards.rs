@@ -36,6 +36,8 @@ pub fn printed_core_types_for_name<'a>(state: &'a GameState, name: &str) -> Opti
             pool.registered_sideboard.as_ref(),
             pool.current_main.as_ref(),
             pool.current_sideboard.as_ref(),
+            pool.registered_companion.as_ref(),
+            pool.current_companion.as_ref(),
             pool.registered_commander.as_ref(),
             pool.current_commander.as_ref(),
         ] {
@@ -797,6 +799,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::AddCounterOnEnter { .. }
@@ -1147,6 +1150,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
@@ -1256,6 +1260,8 @@ fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> Vec<Strin
             &pool.registered_sideboard,
             &pool.current_main,
             &pool.current_sideboard,
+            &pool.registered_companion,
+            &pool.current_companion,
             &pool.registered_commander,
             &pool.current_commander,
         ];

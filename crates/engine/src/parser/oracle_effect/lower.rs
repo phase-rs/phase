@@ -9,7 +9,7 @@ use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once
 use super::super::oracle_nom::duration::{
     parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
 };
-use super::super::oracle_nom::error::{OracleError, OracleResult};
+use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
@@ -19,7 +19,7 @@ use super::super::oracle_quantity::{
 };
 use super::super::oracle_target::{
     parse_anaphoric_target_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
-    parse_type_phrase_with_ctx,
+    parse_type_phrase, parse_type_phrase_with_ctx,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -1073,8 +1073,8 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
     true
 }
 
-/// CR 601.2f: Detect the "each spell cast this way costs {N} more to cast"
-/// rider sentence (Lightstall Inquisitor) and return the cost increase. This is
+/// CR 601.2f: Detect an "each/a spell cast this way costs {N} more to cast"
+/// rider sentence (Lightstall Inquisitor, Invasion of Gobakhan) and return the cost increase. This is
 /// a cost-raise scoped to spells cast via the immediately-preceding
 /// `PlayFromExile` grant ("this way" = the just-granted exile play), not a
 /// global static cost increase — so it folds into the grant's `cast_cost_raise`
@@ -1091,7 +1091,11 @@ pub(super) fn cast_cost_raise_rider(clause: &ClauseIr) -> Option<ManaCost> {
         clause.source.fragment().unwrap_or_default().trim(),
         lower.trim(),
         |i| {
-            let (i, _) = tag("each spell cast this way costs ").parse(i)?;
+            let (i, _) = alt((
+                tag("each spell cast this way costs "),
+                tag("a spell cast this way costs "),
+            ))
+            .parse(i)?;
             let (i, cost) = nom_primitives::parse_mana_cost(i)?;
             let (i, _) = tag(" more to cast").parse(i)?;
             let (i, _) = opt(tag(".")).parse(i)?;
@@ -3626,6 +3630,15 @@ fn parse_excluded_player_anchor(i: &str) -> OracleResult<'_, PlayerFilter> {
 }
 
 pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
+    // CR 701.9a + CR 608.2c: Reserve only the exact Kroxa/Strongarm
+    // mandatory-FILTERED decline-tail grammar for its dedicated dispatcher.
+    // A broad `who didn't` reservation also captures unrelated relative clauses
+    // (for example, sacrifice and choose), changing their parser routes even
+    // though this dispatcher intentionally supports discard only.
+    if strip_each_scope_who_didnt_verb_filter_this_way_subject(text).is_some() {
+        return (None, text.to_string());
+    }
+
     let lower = text.to_lowercase();
     let scope_rest = nom_on_lower(text, &lower, |i| {
         alt((
@@ -3938,6 +3951,58 @@ pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFil
         Ok((i, scope))
     })
     .map(|(scope, rest)| (scope, rest.to_string()))
+}
+
+/// CR 701.9a + CR 608.2c + CR 109.5: Strip a leading "each <scope> who
+/// didn't / did not <verb> a [filter] this way, <body>" subject-only
+/// mandatory-FILTERED decline-tail. Returns the player scope, the filter the
+/// scoped player's own zone change failed to match, and the body text.
+///
+/// Sibling of `strip_each_scope_who_cant_subject` (mandatory-IMPOSSIBLE: the
+/// action couldn't happen at all) and `strip_each_scope_who_doesnt_subject`
+/// (OPTIONAL-decline): this fills the mandatory-FILTERED cell, where the
+/// scoped player's mandatory action always happens but the body only cares
+/// whether the moved object matched a filter (Kroxa, Titan of Death's Hunger:
+/// "each opponent discards a card, then each opponent who didn't discard a
+/// nonland card this way loses 3 life"). The gate reads
+/// `ZoneChangedThisWay { filter }` (CR 608.2c) rather than a pass/fail signal
+/// — an opponent who discarded nothing (empty hand) still "didn't discard a
+/// nonland card", matching the official ruling that Kroxa's life loss still
+/// applies to an opponent with no cards in hand.
+///
+/// Verb is scoped to "discard" — the only verb this exact "who didn't <verb>
+/// a [filter] this way" relative-clause construction is verified against
+/// (Kroxa, Titan of Death's Hunger — opponent scope, nonland filter; and
+/// Strongarm Tactics — all-players scope, creature filter: "Each player
+/// discards a card. Then each player who didn't discard a creature card
+/// this way loses 4 life."). `ZoneChangedThisWay` itself is verb-agnostic
+/// (it reads `last_zone_changed_ids`, which sacrifice/exile populate
+/// identically to discard), so widening the `alt()` to those verbs is a
+/// one-line change once a card actually prints that construction —
+/// deferred rather than speculatively added ahead of a verified card.
+pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
+    text: &str,
+) -> Option<(PlayerFilter, TargetFilter, String)> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |i| {
+        let (i, scope) = alt((
+            value(PlayerFilter::Opponent, tag("each other player who ")),
+            value(PlayerFilter::Opponent, tag("each opponent who ")),
+            value(PlayerFilter::All, tag("each player who ")),
+        ))
+        .parse(i)?;
+        let (i, _) = alt((tag("didn't "), tag("did not "))).parse(i)?;
+        let (i, _) = tag("discard ").parse(i)?;
+        let (i, _) = alt((tag("a "), tag("an "))).parse(i)?;
+        let (filter, after_filter) = parse_type_phrase(i);
+        if matches!(filter, TargetFilter::Any) {
+            return Err(oracle_err(i));
+        }
+        let (i, _) = tag("this way").parse(after_filter.trim_start())?;
+        let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
+        Ok((i, (scope, filter)))
+    })
+    .map(|((scope, filter), rest)| (scope, filter, rest.to_string()))
 }
 
 /// CR 608.2e + CR 608.2c + CR 101.3: Strip a leading "For each opponent who
@@ -8802,6 +8867,7 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::RemoveManaCost => {}
@@ -8901,6 +8967,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::RemoveManaCost => {}
@@ -10542,7 +10609,9 @@ mod tests {
             collect(&def, &mut effects);
 
             assert!(
-                effects.iter().any(|e| matches!(e, Effect::ExtraTurn { .. })),
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::ExtraTurn { .. })),
                 "expected an ExtraTurn effect in {text:?}, got {effects:?}"
             );
             let delayed_lose = effects.iter().any(|e| {
@@ -10561,7 +10630,7 @@ mod tests {
             assert!(
                 delayed_lose,
                 "expected a delayed LoseTheGame at the extra turn's end step in {text:?}, got {effects:?}"
-                        );
+            );
         }
     }
 

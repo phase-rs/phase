@@ -7,6 +7,7 @@
 //! payoff is rejected (scoring `-inf`, so Pass wins); a cheap cost is merely
 //! deprioritized; anything with a genuine payoff is left alone.
 
+use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -48,20 +49,19 @@ impl TacticalPolicy for SelfCostValuePolicy {
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
         let GameAction::ActivateAbility {
             source_id,
-            ability_index,
+            ability_index: _,
         } = &ctx.candidate.action
         else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
 
-        let Some(ability) = ctx
-            .state
-            .objects
-            .get(source_id)
-            .and_then(|object| object.abilities.get(*ability_index))
-        else {
+        let Some(ability) = ctx.effective_activated_ability() else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
+
+        if ability.ability_tag == Some(AbilityTag::Cycling) {
+            return PolicyVerdict::neutral(PolicyReason::new("self_cost_cycling_deferred"));
+        }
 
         let Some(cost) = ability.cost.as_ref() else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
@@ -79,13 +79,13 @@ impl TacticalPolicy for SelfCostValuePolicy {
             .cloned()
             .unwrap_or_default();
 
-        if synergy_justifies_self_cost(&features, ctx.state, ctx.ai_player, ability) {
+        if synergy_justifies_self_cost(&features, ctx.state, ctx.ai_player, &ability) {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_synergy_justified"));
         }
 
         let cost_value =
             real_self_cost(ctx.state, ctx.ai_player, *source_id, cost, ctx.penalties());
-        let trivial = benefit_is_trivial(ctx.state, ctx.ai_player, *source_id, ability);
+        let trivial = benefit_is_trivial(ctx.state, ctx.ai_player, *source_id, &ability);
 
         let cost_milli = (cost_value * 1000.0) as i64;
 
@@ -1105,7 +1105,6 @@ mod tests {
 
         let mut state = GameState::new_two_player(42);
         state.active_player = OPP;
-        let me_creature = creature(&mut state, AI, "Defender", 2, 2);
         let cost = AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
@@ -1118,8 +1117,8 @@ mod tests {
             &[CoreType::Creature],
             activated(shroud_self_grant(), cost),
         );
-        // Opponent removal on the stack targeting an AI creature makes the
-        // protection grant a live payoff.
+        // Opponent removal on the stack targeting the creature that receives
+        // shroud makes the protection grant a live payoff.
         let spell_id = create_object(
             &mut state,
             CardId(next_id()),
@@ -1132,7 +1131,7 @@ mod tests {
                 target: TargetFilter::Any,
                 cant_regenerate: false,
             },
-            vec![TargetRef::Object(me_creature)],
+            vec![TargetRef::Object(source)],
             spell_id,
             OPP,
         );

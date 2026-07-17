@@ -4,7 +4,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, Effect, EffectError, EffectKind, ForEachCategoryAction,
-    ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
+    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -79,7 +79,7 @@ pub fn resolve(
     // CR 608.2d: If there are no objects to choose from, skip the choice
     // (a player can't choose an option that's illegal or impossible).
     if cards.is_empty() || count == 0 {
-        state.last_choose_from_zone_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -283,9 +283,9 @@ pub(crate) fn drain_pending_per_category_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
-) {
+) -> crate::game::zone_pipeline::BatchMoveResult {
     let Some(pending) = state.pending_per_category_zone_choice.take() else {
-        return;
+        return crate::game::zone_pipeline::BatchMoveResult::Done;
     };
     let crate::types::game_state::PendingPerCategoryZoneChoice {
         ability,
@@ -293,47 +293,87 @@ pub(crate) fn drain_pending_per_category_zone_choice(
         remaining_member_filters,
     } = pending;
 
-    match &ability.effect {
+    if matches!(
+        &ability.effect,
         Effect::ForEachCategory {
             action: ForEachCategoryAction::ExileFromPool { .. },
             ..
-        } => {
-            for &card_id in chosen {
-                crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
-            }
-            if !chosen.is_empty() {
-                super::publish_tracked_set(state, chosen.to_vec());
-            }
         }
-        Effect::ForEachCategory {
-            action:
-                ForEachCategoryAction::PutCounter {
-                    counter_type,
-                    count,
-                    ..
-                },
-            ..
-        } => {
-            let count_val =
-                crate::game::quantity::resolve_quantity_with_targets(state, count, &ability).max(0)
-                    as u32;
-            for &card_id in chosen {
-                crate::game::effects::counters::apply_counter_addition(
-                    state,
-                    ability.controller,
+    ) {
+        // CR 701.13a + CR 614.1 + CR 616.1: Each chosen card's exile is an
+        // effect-owned zone-change event. Keep the tracked-set extension and
+        // next-member prompt on the batch tail so neither can run before a
+        // replacement choice settles the exile.
+        let requests = chosen
+            .iter()
+            .map(|&card_id| {
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(
                     card_id,
-                    counter_type.clone(),
-                    count_val,
-                    events,
-                );
-            }
-            if !chosen.is_empty() {
-                publish_tracked_set_unique(state, chosen);
-            }
-        }
-        _ => {}
+                    Zone::Exile,
+                    ability.source_id,
+                )
+            })
+            .collect();
+        return crate::game::zone_pipeline::move_objects_simultaneously_then(
+            state,
+            requests,
+            Some(
+                crate::types::game_state::BatchCompletion::ForEachCategoryExileComplete {
+                    ability,
+                    pool,
+                    remaining_member_filters,
+                    chosen: chosen.to_vec(),
+                },
+            ),
+            events,
+        );
     }
 
+    if let Effect::ForEachCategory {
+        action:
+            ForEachCategoryAction::PutCounter {
+                counter_type,
+                count,
+                ..
+            },
+        ..
+    } = &ability.effect
+    {
+        let count_val = crate::game::quantity::resolve_quantity_with_targets(state, count, &ability)
+            .max(0) as u32;
+        for &card_id in chosen {
+            crate::game::effects::counters::apply_counter_addition(
+                state,
+                ability.controller,
+                card_id,
+                counter_type.clone(),
+                count_val,
+                events,
+            );
+        }
+        if !chosen.is_empty() {
+            publish_tracked_set_unique(state, chosen);
+        }
+    }
+
+    let _ = prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events);
+    crate::game::zone_pipeline::BatchMoveResult::Done
+}
+
+/// CR 608.2c: Complete one settled `ForEachCategoryExile` member. The typed
+/// batch tail owns both the tracked-set extension and the next-member prompt so
+/// a CR 616.1 replacement choice resolves before the iteration advances.
+pub(crate) fn complete_per_category_exile(
+    state: &mut GameState,
+    ability: Box<ResolvedAbility>,
+    pool: Vec<ObjectId>,
+    remaining_member_filters: Vec<TargetFilter>,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) {
+    if !chosen.is_empty() {
+        super::publish_tracked_set(state, chosen);
+    }
     let _ = prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events);
 }
 
@@ -453,7 +493,7 @@ pub(crate) fn resolve_random_in_chain(
     // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
     // any continuation that depends on the missing pick.
     if cards.is_empty() || count == 0 {
-        state.last_choose_from_zone_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,

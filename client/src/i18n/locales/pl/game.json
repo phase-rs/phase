@@ -506,6 +506,11 @@
     "castCommander": "Rzuć {{name}} — kliknij dwukrotnie lub przeciągnij, aby zagrać",
     "castCommanderTax": "Rzuć {{name}} (Podatek: +{{tax}}) — kliknij dwukrotnie lub przeciągnij, aby zagrać",
     "ninjutsuCommander": "Ninjutsu dowódcy: {{name}} — kliknij, aby zwrócić niezablokowanego atakującego do ręki i umieścić tego dowódcę na polu bitwy przekręconego i atakującego",
+    "signatureSpell": "Zaklęcie sygnaturowe",
+    "signatureSpellTitle": "Zaklęcie sygnaturowe: {{name}}",
+    "signatureSpellTitleTax": "Zaklęcie sygnaturowe: {{name}} (Podatek: +{{tax}})",
+    "castSignatureSpell": "Rzuć {{name}} — kliknij dwukrotnie lub przeciągnij, aby zagrać",
+    "castSignatureSpellTax": "Rzuć {{name}} (Podatek: +{{tax}}) — kliknij dwukrotnie lub przeciągnij, aby zagrać",
     "tax": "Podatek: +{{tax}}",
     "companion": "Towarzysz",
     "companionTitle": "Towarzysz: {{name}}",
@@ -715,6 +720,7 @@
     "confirmTap": "Potwierdź obrócenie ({{selected}}/{{count}})",
     "keepCurrentTargets": "Zachowaj bieżące cele",
     "skip": "Pomiń",
+    "opponentChoice": "(wybór przeciwnika)",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
     "sacrificeExact_other": "Sacrifice {{count}} permanents",
     "sacrificeUpTo_one": "Sacrifice up to {{count}} permanent",
@@ -1670,6 +1676,13 @@
     "title": "Wybierz obrońcę",
     "battleFallback": "Bitwa",
     "subtitle": "{{name}} potrzebuje nowego obrońcy. Wybierz, który przeciwnik będzie jej bronił."
+  },
+  "announcingOpponent": {
+    "title": "Wybierz ogłaszającego przeciwnika ({{current}} z {{total}})",
+    "subtitle": "Wybierz, który przeciwnik ogłasza {{target}} ({{current}} z {{total}}).",
+    "targetLand": "cel lądu",
+    "targetCreature": "cel stwora",
+    "targetChoice": "ten wybór celu"
   },
   "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",

@@ -250,13 +250,19 @@ fn resolve_ability_cost_payment(
         // `DiscardChoice` — interrupted payment. `state.waiting_for` is already
         // set by the authority; the resolution chain resumes from there.
         Ok(PaymentOutcome::Paused { remaining_cost }) => {
-            if let Some(remaining_cost) = remaining_cost.clone() {
-                super::prepend_remaining_pay_cost_continuation(
-                    state,
-                    ability,
-                    payer,
-                    remaining_cost,
-                );
+            // CR 118.12 + CR 605.3b + CR 616.1: A paused mana-source payment
+            // owns its complete unpaid suffix in `ManaAbilityResume`, never in
+            // the effect continuation queue.  The queue remains only for
+            // ordinary non-mana cost choices such as discard selection.
+            if !crate::game::casting::mana_ability_cost_payment_is_paused(state) {
+                if let Some(remaining_cost) = remaining_cost.clone() {
+                    super::prepend_remaining_pay_cost_continuation(
+                        state,
+                        ability,
+                        payer,
+                        remaining_cost,
+                    );
+                }
             }
             Ok(PaymentOutcome::Paused { remaining_cost })
         }

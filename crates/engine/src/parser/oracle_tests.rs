@@ -1,6 +1,8 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
-use crate::types::ability::{CountScope, CounterAdjustment, DoorLockOp};
+use crate::types::ability::{
+    AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
+};
 use crate::types::counter::{CounterMatch, CounterType};
 
 /// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses
@@ -3567,6 +3569,37 @@ fn scoped_player_of_their_choice_marks_target_chooser() {
     );
 }
 
+/// CR 601.2c + CR 115.1: An announcing-player override belongs only to the
+/// printed target phrase that carries it. Ordinary target phrases following
+/// "of an opponent's choice" must return target choice to the controller.
+#[test]
+fn opponent_choice_chooser_does_not_leak_to_following_target_phrase() {
+    let r = parse(
+        "Destroy target nonbasic land you don't control and target nonbasic land of an opponent's choice you don't control. ~ deals 7 damage to target creature you don't control and 7 damage to target creature of an opponent's choice you don't control.",
+        "Volcanic Offering",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    let mut choosers = Vec::new();
+    let mut link = r.abilities.first();
+    while let Some(ability) = link {
+        choosers.push(ability.target_chooser.clone());
+        link = ability.sub_ability.as_deref();
+    }
+
+    assert_eq!(
+        choosers,
+        vec![
+            None,
+            Some(TargetFilter::Opponent),
+            None,
+            Some(TargetFilter::Opponent),
+        ],
+        "only Volcanic Offering's two explicit opponent-choice targets may override the controller"
+    );
+}
+
 /// CR 601.2c: an ordinary "destroy target creature" has no scoped-player
 /// chooser — controller chooses (default `None`). Negative guard so a
 /// regression that always stamps the chooser cannot pass silently.
@@ -3801,6 +3834,74 @@ fn kicker_and_or_line_sets_two_kicker_costs() {
         }
         other => panic!("expected two-cost Kicker, got {other:?}"),
     }
+}
+
+#[test]
+fn kicker_etb_intervening_if_is_gated_at_trigger_time() {
+    let parsed = parse(
+        "Kicker {B} and/or {R}\n\
+         When ~ enters, if it was kicked, it deals 2 damage to any target.\n\
+         When ~ enters, if it was kicked twice, it deals 2 damage to any target.",
+        "Archangel of Wrath",
+        &[],
+        &["Creature"],
+        &["Angel"],
+    );
+
+    assert_eq!(parsed.triggers.len(), 2);
+    for (trigger, min_count) in parsed.triggers.iter().zip([1, 2]) {
+        assert!(matches!(
+            &trigger.condition,
+            Some(TriggerCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Kicker,
+                variant: None,
+                kicker_cost: None,
+                min_count: actual,
+                ..
+            }) if *actual == min_count
+        ));
+        assert!(trigger
+            .execute
+            .as_ref()
+            .is_some_and(|ability| ability.condition.is_none()));
+    }
+}
+
+#[test]
+fn bargained_etb_intervening_if_is_gated_at_trigger_time() {
+    let parsed = parse(
+        "Bargain\nWhen ~ enters, if it was bargained, add four mana in any combination of colors.",
+        "Realm-Scorcher Hellkite",
+        &[Keyword::Bargain],
+        &["Creature"],
+        &["Dragon"],
+    );
+
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    assert!(matches!(
+        trigger.condition,
+        Some(TriggerCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::NonKicker,
+            origin: Some(AdditionalCostOrigin::Bargain),
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+            ..
+        })
+    ));
+    assert_eq!(
+        serde_json::to_value(&trigger.condition).unwrap(),
+        serde_json::json!({
+            "type": "AdditionalCostPaid",
+            "source": "NonKicker",
+            "origin": "Bargain",
+        })
+    );
+    assert!(trigger
+        .execute
+        .as_ref()
+        .is_some_and(|ability| ability.condition.is_none()));
 }
 
 #[test]
@@ -16036,6 +16137,59 @@ fn blossombind_compound_splits_into_untap_and_counter_replacements() {
             .any(|def| def.event == ReplacementEvent::AddCounter),
         "compound must emit an AddCounter-prevention replacement, got {:?}",
         r.replacements
+    );
+}
+
+/// CR 701.26b + CR 613.1f: Frozen in Ice — "Enchanted creature loses all
+/// abilities and can't become untapped." must decompose into BOTH the
+/// loses-all-abilities static AND an unconditional Untap-prevention
+/// replacement, sharing the layer/replacement split established by
+/// `blossombind_compound_splits_into_untap_and_counter_replacements`. Before
+/// `try_split_and_cant_become_untapped`, the leading "loses all abilities"
+/// clause made `is_static_pattern` claim the whole line, and the generic
+/// continuous-modification scanner silently dropped the trailing "can't
+/// become untapped" clause — the enchanted creature lost its abilities but
+/// untapped normally next turn (issue #5801).
+#[test]
+fn frozen_in_ice_compound_splits_into_grant_and_untap_replacement() {
+    let r = parse(
+        "Enchant creature\nWhen this Aura enters, tap enchanted creature.\nEnchanted creature loses all abilities and can't become untapped.",
+        "Frozen in Ice",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert!(
+        r.statics
+            .iter()
+            .any(|def| matches!(def.mode, StaticMode::Continuous)),
+        "the loses-all-abilities grant must be preserved, got {:?}",
+        r.statics
+    );
+    // The broad untap prohibition must NOT lower to a CantUntap static (that
+    // class is untap-step-only per CR 502.3 and would not stop a spell/
+    // ability untap).
+    assert!(
+        !r.statics
+            .iter()
+            .any(|def| def.mode == StaticMode::CantUntap),
+        "broad 'can't become untapped' must not be a CantUntap static, got {:?}",
+        r.statics
+    );
+    let untap = r
+        .replacements
+        .iter()
+        .find(|def| def.event == ReplacementEvent::Untap)
+        .expect("compound must emit an Untap-prevention replacement");
+    assert!(
+        untap.condition.is_none(),
+        "the untap prevention must be unconditional (apply to every untap), got {:?}",
+        untap.condition
+    );
+    assert!(
+        untap.execute.is_none(),
+        "a bare 'can't become untapped' has no alternative effect, got {:?}",
+        untap.execute
     );
 }
 

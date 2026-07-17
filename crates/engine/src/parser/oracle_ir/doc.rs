@@ -1333,6 +1333,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::VentureIntoDungeon => {}
         Effect::VentureInto { .. } => {}
         Effect::TakeTheInitiative => {}
+        Effect::ArrangePlanarDeckTop { .. } => {}
         Effect::Planeswalk => {}
         Effect::ChaosEnsues => {}
         Effect::ReverseTurnOrder => {}
