@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::game::combat::{AttackTarget, DamageAssignment, DamageTarget, TrampleKind};
 use crate::types::ability::{CostPaidObjectSnapshot, TargetRef};
 use crate::types::events::GameEvent;
@@ -425,7 +427,7 @@ pub(super) fn handle_pay_combat_tax(
         });
         match pending {
             CombatTaxPending::Attack { attacks, bands } => {
-                return resume_declare_attackers(state, &attacks, &bands, events);
+                return resume_declare_attackers(state, &attacks, &bands, None, events);
             }
             CombatTaxPending::Block { assignments } => {
                 return resume_declare_blockers(state, player, &assignments, events);
@@ -434,8 +436,7 @@ pub(super) fn handle_pay_combat_tax(
     }
 
     // Decline — filter the taxed creatures out of the pending declaration.
-    let taxed: std::collections::HashSet<ObjectId> =
-        per_creature.iter().map(|(id, _)| *id).collect();
+    let taxed: HashSet<ObjectId> = per_creature.iter().map(|(id, _)| *id).collect();
     match pending {
         CombatTaxPending::Attack { attacks, bands } => {
             let filtered: Vec<(ObjectId, AttackTarget)> = attacks
@@ -464,7 +465,7 @@ pub(super) fn handle_pay_combat_tax(
                 player,
                 dropped: taxed.iter().copied().collect(),
             });
-            resume_declare_attackers(state, &filtered, &filtered_bands, events)
+            resume_declare_attackers(state, &filtered, &filtered_bands, Some(&taxed), events)
         }
         CombatTaxPending::Block { assignments } => {
             let filtered: Vec<(ObjectId, ObjectId)> = assignments
@@ -485,18 +486,24 @@ fn resume_declare_attackers(
     state: &mut GameState,
     attacks: &[(ObjectId, AttackTarget)],
     bands: &[Vec<ObjectId>],
+    declined_taxed_attackers: Option<&HashSet<ObjectId>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if attacks.is_empty() {
         // CR 508.8: No creatures declared as attackers — skip to end of combat.
-        return handle_empty_attackers(state, events);
+        return handle_empty_attackers_with_declined_tax(state, declined_taxed_attackers, events);
     }
     // CR 702.22c + CR 702.22h: re-run the band-aware declaration so `band_id` is
     // stamped on the attacking-band members and block propagation groups them
     // (this resume path previously dropped bands, leaving members individually
     // blockable behind a combat-tax static like Ghostly Prison).
-    super::combat::declare_attackers_with_bands(state, attacks, bands, events)
-        .map_err(EngineError::InvalidAction)?;
+    match declined_taxed_attackers {
+        Some(taxed) => super::combat::declare_attackers_with_bands_after_combat_tax_declined(
+            state, attacks, bands, taxed, events,
+        ),
+        None => super::combat::declare_attackers_with_bands(state, attacks, bands, events),
+    }
+    .map_err(EngineError::InvalidAction)?;
 
     let trigger_events = events.clone();
     if let Some(prompt) =
@@ -834,7 +841,25 @@ pub(super) fn handle_empty_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    super::combat::declare_attackers(state, &[], events).map_err(EngineError::InvalidAction)?;
+    handle_empty_attackers_with_declined_tax(state, None, events)
+}
+
+fn handle_empty_attackers_with_declined_tax(
+    state: &mut GameState,
+    declined_taxed_attackers: Option<&HashSet<ObjectId>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match declined_taxed_attackers {
+        Some(taxed) => super::combat::declare_attackers_with_bands_after_combat_tax_declined(
+            state,
+            &[],
+            &[],
+            taxed,
+            events,
+        ),
+        None => super::combat::declare_attackers(state, &[], events),
+    }
+    .map_err(EngineError::InvalidAction)?;
 
     let trigger_events = events.clone();
     if let Some(prompt) =
@@ -930,8 +955,11 @@ mod tests {
     use super::*;
     use crate::game::combat::{AttackerInfo, CombatState};
     use crate::game::zones::create_object;
+    use crate::types::ability::{StaticDefinition, TargetFilter};
     use crate::types::game_state::CombatDamageAssignmentMode;
     use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::StaticMode;
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -1462,6 +1490,30 @@ mod tests {
         id
     }
 
+    fn install_static_goad(
+        state: &mut GameState,
+        controller: PlayerId,
+        target: ObjectId,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Parasitic Impetus".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .expect("goad source exists")
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::Goaded)
+                    .affected(TargetFilter::SpecificObject { id: target }),
+            );
+        id
+    }
+
     /// L9-52 regression: with Norn's Annex on the battlefield, declaring
     /// attackers must yield `WaitingFor::CombatTaxPayment` (not deadlock or
     /// panic), and accepting the tax must resolve cleanly to
@@ -1598,5 +1650,88 @@ mod tests {
             state.players[0].life, life_before,
             "generic-mana tax must not change life total"
         );
+    }
+
+    /// CR 508.1d + CR 701.15b: A player need not pay an attack cost solely to
+    /// satisfy a goad requirement. Declining Ghostly Prison's tax must therefore
+    /// let the taxed goaded attacker remain undeclared and finish combat normally.
+    #[test]
+    fn declining_combat_tax_allows_static_goaded_attacker_to_remain_undeclared() {
+        let mut state = setup();
+        install_attack_tax_static(
+            &mut state,
+            PlayerId(1),
+            "Ghostly Prison",
+            ManaCost::generic(2),
+        );
+        let attacker = create_creature(&mut state, PlayerId(0), "Goaded Bear", 2, 2);
+        install_static_goad(&mut state, PlayerId(1), attacker);
+
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+        let mut events = Vec::new();
+        let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &[], &mut events)
+            .expect("attack declaration reaches the combat-tax choice");
+        assert!(matches!(waiting, WaitingFor::CombatTaxPayment { .. }));
+
+        let mut events = Vec::new();
+        let resumed = handle_pay_combat_tax(&mut state, waiting, false, &mut events)
+            .expect("declining a tax must not force payment to satisfy goad");
+
+        assert!(
+            !matches!(resumed, WaitingFor::CombatTaxPayment { .. }),
+            "declining the tax must advance the game, got {resumed:?}"
+        );
+        assert!(
+            state.combat.is_none(),
+            "no attackers should remain in combat"
+        );
+        assert!(
+            !state.objects[&attacker].tapped,
+            "a declined attacker must remain untapped"
+        );
+    }
+
+    /// CR 508.1d + CR 701.15b: Declining a tax removes only the taxed goaded
+    /// creature. Untaxed attackers still complete the same declaration.
+    #[test]
+    fn declining_combat_tax_keeps_untaxed_attackers() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        install_attack_tax_static(
+            &mut state,
+            PlayerId(1),
+            "Ghostly Prison",
+            ManaCost::generic(2),
+        );
+        let taxed_goaded = create_creature(&mut state, PlayerId(0), "Goaded Bear", 2, 2);
+        let untaxed = create_creature(&mut state, PlayerId(0), "Untaxed Bear", 2, 2);
+        install_static_goad(&mut state, PlayerId(2), taxed_goaded);
+
+        let attacks = vec![
+            (taxed_goaded, AttackTarget::Player(PlayerId(1))),
+            (untaxed, AttackTarget::Player(PlayerId(2))),
+        ];
+        let mut events = Vec::new();
+        let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &[], &mut events)
+            .expect("attack declaration reaches the combat-tax choice");
+        let WaitingFor::CombatTaxPayment { per_creature, .. } = &waiting else {
+            panic!("expected CombatTaxPayment, got {waiting:?}");
+        };
+        assert_eq!(per_creature.len(), 1);
+        assert_eq!(per_creature[0].0, taxed_goaded);
+
+        let mut events = Vec::new();
+        let resumed = handle_pay_combat_tax(&mut state, waiting, false, &mut events)
+            .expect("declining a tax must preserve untaxed attackers");
+
+        assert!(matches!(resumed, WaitingFor::Priority { .. }));
+        let combat = state
+            .combat
+            .as_ref()
+            .expect("untaxed attacker remains in combat");
+        assert_eq!(combat.attackers.len(), 1);
+        assert_eq!(combat.attackers[0].object_id, untaxed);
     }
 }
