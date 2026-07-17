@@ -90,7 +90,7 @@ pub enum TrampleKind {
 }
 
 /// Represents who a creature is attacking: a player, planeswalker, or battle (CR 506.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AttackTarget {
     Player(PlayerId),
@@ -3563,6 +3563,15 @@ pub fn blocker_constraints_for_player(
     constraints
 }
 
+/// Return the blocker keys in stable numeric object-id order for prompt payloads.
+pub(crate) fn ordered_valid_blocker_ids(
+    valid_block_targets: &HashMap<ObjectId, Vec<ObjectId>>,
+) -> Vec<ObjectId> {
+    let mut blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+    blocker_ids.sort_unstable_by_key(|id| id.0);
+    blocker_ids
+}
+
 /// CR 508.1a / CR 509.1a: Rebuild the eligibility snapshot carried by the
 /// `DeclareAttackers` / `DeclareBlockers` waiting states from the live game
 /// queries. The declare-step waiting payloads are computed exactly once by
@@ -3599,7 +3608,7 @@ pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
             let player = *player;
             // CR 509.1a: Mirror turns.rs:1394-1396 — player-scoped block targets.
             let valid_block_targets = get_valid_block_targets_for_player(state, player);
-            let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+            let valid_blocker_ids = ordered_valid_blocker_ids(&valid_block_targets);
             let block_requirements = block_requirements_for_player(state, player);
             // CR 509.1b/c: recompute the display constraints from the same
             // recomputed `valid_block_targets` (self-heal parity).
@@ -4281,6 +4290,116 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
     targets
 }
 
+/// CR 508.4 + CR 508.4c: destinations for a creature put onto the battlefield
+/// attacking. This intentionally does not call attack-declaration legality:
+/// requirements, restrictions, costs, protection, goad, summoning sickness,
+/// and taxes do not apply to an object that was never declared as an attacker.
+pub fn valid_entry_attack_targets(
+    state: &GameState,
+    controller: PlayerId,
+    domain: &crate::types::ability::EntryAttackDestination,
+) -> Vec<AttackTarget> {
+    let attacking_players: Vec<PlayerId> = std::iter::once(state.active_player)
+        .chain(players::teammates(state, state.active_player))
+        .collect();
+    if state.combat.is_none() || !attacking_players.contains(&controller) {
+        return Vec::new();
+    }
+    let allies = players::teammates(state, controller);
+    let defending_players: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|player| {
+            player.id != controller
+                && !allies.contains(&player.id)
+                && !state.eliminated_players.contains(&player.id)
+                && player.is_phased_in()
+        })
+        .map(|player| player.id)
+        .collect();
+    let mut targets: Vec<AttackTarget> = defending_players
+        .iter()
+        .copied()
+        .map(AttackTarget::Player)
+        .collect();
+    for &id in &state.battlefield {
+        let Some(object) = state.objects.get(&id) else {
+            continue;
+        };
+        if defending_players.contains(&object.controller)
+            && object
+                .card_types
+                .core_types
+                .contains(&CoreType::Planeswalker)
+        {
+            targets.push(AttackTarget::Planeswalker(id));
+        }
+        if object.card_types.core_types.contains(&CoreType::Battle)
+            && object
+                .protector()
+                .is_some_and(|protector| defending_players.contains(&protector))
+        {
+            targets.push(AttackTarget::Battle(id));
+        }
+    }
+
+    match domain {
+        crate::types::ability::EntryAttackDestination::AnyDefender => targets,
+        crate::types::ability::EntryAttackDestination::PlayerOrPlaneswalker => targets
+            .into_iter()
+            .filter(|candidate| !matches!(candidate, AttackTarget::Battle(_)))
+            .collect(),
+        crate::types::ability::EntryAttackDestination::Exact { target } => targets
+            .into_iter()
+            .filter(|candidate| candidate == target)
+            .collect(),
+    }
+}
+
+/// CR 508.4a: resolve a still-valid entry-attack target to its defending
+/// player. Returns `None` when the selected player/permanent is no longer a
+/// legal combat destination, in which case the permanent enters nonattacking.
+pub fn entry_attack_target_defender(
+    state: &GameState,
+    controller: PlayerId,
+    target: AttackTarget,
+) -> Option<PlayerId> {
+    if !valid_entry_attack_targets(
+        state,
+        controller,
+        &crate::types::ability::EntryAttackDestination::AnyDefender,
+    )
+    .contains(&target)
+    {
+        return None;
+    }
+    match target {
+        AttackTarget::Player(player) => state
+            .players
+            .iter()
+            .any(|candidate| {
+                candidate.id == player
+                    && candidate.is_phased_in()
+                    && !state.eliminated_players.contains(&player)
+            })
+            .then_some(player),
+        AttackTarget::Planeswalker(id) => state.objects.get(&id).and_then(|object| {
+            (object.zone == Zone::Battlefield
+                && object
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Planeswalker))
+            .then_some(object.controller)
+        }),
+        AttackTarget::Battle(id) => state.objects.get(&id).and_then(|object| {
+            (object.zone == Zone::Battlefield
+                && object.card_types.core_types.contains(&CoreType::Battle))
+            .then(|| object.protector())
+            .flatten()
+        }),
+    }
+}
+
 /// CR 506.4: A creature stops being an attacker when it leaves the battlefield
 /// or phases out. Attackers that left during the declare-attackers step may
 /// remain listed until pruned.
@@ -4370,6 +4489,24 @@ mod tests {
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
+
+    #[test]
+    fn ordered_valid_blocker_ids_sorts_numeric_keys_and_handles_small_maps() {
+        let mut targets = HashMap::new();
+        for id in [ObjectId(91), ObjectId(7), ObjectId(42), ObjectId(3)] {
+            targets.insert(id, Vec::new());
+        }
+        assert_eq!(
+            ordered_valid_blocker_ids(&targets),
+            vec![ObjectId(3), ObjectId(7), ObjectId(42), ObjectId(91)]
+        );
+
+        assert!(ordered_valid_blocker_ids(&HashMap::new()).is_empty());
+        assert_eq!(
+            ordered_valid_blocker_ids(&HashMap::from([(ObjectId(12), Vec::new())])),
+            vec![ObjectId(12)]
+        );
+    }
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -4878,6 +5015,89 @@ mod tests {
         assert!(validate_attackers(&state, &[plain_creature]).is_err());
         assert!(validate_attackers(&state, &[akron, artifact_creature]).is_ok());
         assert!(validate_attackers(&state, &[akron, plain_creature]).is_err());
+    }
+
+    /// CR 508.1c + CR 509.1b: Storm, Windrider's compound static is enforced
+    /// through the parser and combat pipeline. The restriction applies to all
+    /// flying creatures, not only Storm, and it distinguishes the source's
+    /// controller from another defending player.
+    #[test]
+    fn storm_windrider_compound_static_scopes_attack_and_block_restrictions() {
+        let defs = parse_static_line_multi(
+            "Creatures with flying can't attack you or block creatures you control.",
+        );
+        assert_eq!(
+            defs.len(),
+            2,
+            "compound static must parse to two definitions"
+        );
+
+        let mut attack_state = setup_multiplayer_combat(3);
+        attack_state.active_player = PlayerId(1);
+        let storm = create_creature(&mut attack_state, PlayerId(0), "Storm, Windrider", 3, 3);
+        let storm_definitions = &mut attack_state
+            .objects
+            .get_mut(&storm)
+            .unwrap()
+            .static_definitions;
+        for definition in defs.clone() {
+            storm_definitions.push(definition);
+        }
+        let flyer = create_creature(&mut attack_state, PlayerId(1), "Sky Drake", 2, 2);
+        attack_state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        assert!(
+            declare_attackers(
+                &mut attack_state,
+                &[(flyer, AttackTarget::Player(PlayerId(0)))],
+                &mut vec![],
+            )
+            .is_err(),
+            "a flying creature cannot attack Storm's controller"
+        );
+        assert!(
+            declare_attackers(
+                &mut attack_state,
+                &[(flyer, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![],
+            )
+            .is_ok(),
+            "the same flyer may attack another defending player"
+        );
+
+        let mut block_state = setup_multiplayer_combat(3);
+        let storm = create_creature(&mut block_state, PlayerId(0), "Storm, Windrider", 3, 3);
+        let storm_definitions = &mut block_state
+            .objects
+            .get_mut(&storm)
+            .unwrap()
+            .static_definitions;
+        for definition in defs {
+            storm_definitions.push(definition);
+        }
+        let flyer = create_creature(&mut block_state, PlayerId(1), "Sky Drake", 2, 2);
+        block_state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let protected_attacker = create_creature(&mut block_state, PlayerId(0), "Bear", 2, 2);
+        let other_attacker = create_creature(&mut block_state, PlayerId(2), "Wolf", 2, 2);
+
+        assert!(
+            validate_blockers(&block_state, &[(flyer, protected_attacker)]).is_err(),
+            "a flying creature cannot block a creature Storm's controller controls"
+        );
+        assert!(
+            validate_blockers(&block_state, &[(flyer, other_attacker)]).is_ok(),
+            "the same flyer may block a creature another player controls"
+        );
     }
 
     #[test]
@@ -5901,6 +6121,83 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("cannot attack player"), "err={err}");
+    }
+
+    #[test]
+    fn entry_attacker_controlled_by_active_teammate_uses_defending_team() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+
+        let targets = valid_entry_attack_targets(
+            &state,
+            PlayerId(1),
+            &crate::types::ability::EntryAttackDestination::AnyDefender,
+        );
+        assert!(targets.contains(&AttackTarget::Player(PlayerId(2))));
+        assert!(targets.contains(&AttackTarget::Player(PlayerId(3))));
+        assert!(!targets.contains(&AttackTarget::Player(PlayerId(0))));
+        assert!(!targets.contains(&AttackTarget::Player(PlayerId(1))));
+        assert_eq!(
+            entry_attack_target_defender(&state, PlayerId(1), AttackTarget::Player(PlayerId(2)),),
+            Some(PlayerId(2))
+        );
+    }
+
+    /// CR 508.4a-c: an effect may specify the player, planeswalker, or battle
+    /// that an entering creature attacks. Exact destinations use the same live
+    /// defender validation as the open choice domain, including protected
+    /// battles, and disappear when the specified destination becomes stale.
+    #[test]
+    fn exact_entry_attack_destination_validates_all_target_kinds_and_staleness() {
+        use crate::types::ability::EntryAttackDestination;
+
+        let mut state = setup();
+        state.combat = Some(CombatState::default());
+        let planeswalker = create_planeswalker(&mut state, PlayerId(1), "Defending Jace");
+        let battle = create_battle(&mut state, PlayerId(0), "Protected Invasion", PlayerId(1));
+
+        for target in [
+            AttackTarget::Player(PlayerId(1)),
+            AttackTarget::Planeswalker(planeswalker),
+            AttackTarget::Battle(battle),
+        ] {
+            assert_eq!(
+                valid_entry_attack_targets(
+                    &state,
+                    PlayerId(0),
+                    &EntryAttackDestination::Exact { target },
+                ),
+                vec![target],
+                "each exact live defender kind must remain available"
+            );
+        }
+
+        crate::game::zones::move_to_zone(
+            &mut state,
+            planeswalker,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+        crate::game::zones::move_to_zone(&mut state, battle, Zone::Graveyard, &mut Vec::new());
+        state.eliminated_players.push(PlayerId(1));
+
+        for target in [
+            AttackTarget::Player(PlayerId(1)),
+            AttackTarget::Planeswalker(planeswalker),
+            AttackTarget::Battle(battle),
+        ] {
+            assert!(
+                valid_entry_attack_targets(
+                    &state,
+                    PlayerId(0),
+                    &EntryAttackDestination::Exact { target },
+                )
+                .is_empty(),
+                "a stale exact destination must produce a nonattacking entry"
+            );
+        }
     }
 
     /// CR 805.10d: "Creatures controlled by the defending players can block

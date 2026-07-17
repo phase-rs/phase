@@ -25,7 +25,7 @@ use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
 use super::oracle_static::{parse_pt_mod, parse_static_line};
 use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
-use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
+use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst};
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());
@@ -153,6 +153,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             chooser: PlayerFilter::Controller,
             selection: TargetSelectionMode::Chosen,
             dynamic_max_choices: None,
+            optionality: ModalOptionality::Mandatory,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -172,6 +173,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             chooser: PlayerFilter::Controller,
             selection: TargetSelectionMode::Chosen,
             dynamic_max_choices: None,
+            optionality: ModalOptionality::Mandatory,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -483,6 +485,7 @@ fn parse_tiered_shared_effect_block(
         chooser: PlayerFilter::Controller,
         selection: TargetSelectionMode::Chosen,
         dynamic_max_choices: None,
+        optionality: ModalOptionality::Mandatory,
     };
     Some((OracleBlockAst::Modal { header, modes }, next))
 }
@@ -711,6 +714,20 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         TargetSelectionMode::Chosen
     };
 
+    // CR 608.2c: "you may choose N" makes the triggered ability optional; "you
+    // may choose up to N" only lowers min_choices (handled by count parsing).
+    let optionality = if tag::<_, _, OracleError<'_>>("you may choose ")
+        .parse(header_lower.as_str())
+        .is_ok()
+        && tag::<_, _, OracleError<'_>>("you may choose up to ")
+            .parse(header_lower.as_str())
+            .is_err()
+    {
+        ModalOptionality::MayDecline
+    } else {
+        ModalOptionality::Mandatory
+    };
+
     Some(ModalHeaderAst {
         raw: text.to_string(),
         min_choices,
@@ -720,6 +737,7 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         chooser,
         selection,
         dynamic_max_choices,
+        optionality,
     })
 }
 
@@ -1027,6 +1045,12 @@ pub(crate) fn lower_oracle_block(
                 relative_player_scope,
                 host_self_reference,
             );
+            if matches!(header.optionality, ModalOptionality::MayDecline) {
+                // CR 608.2c: Resolution-time optionality lives on the execute
+                // ability (`build_triggered_ability` clones it); the trigger
+                // definition flag is stamped for coverage and card-data export.
+                modal_ability.optional = true;
+            }
 
             let execute = match optional_cost {
                 // CR 603.12 + CR 700.2b: The modal is gated behind a reflexive
@@ -1055,6 +1079,9 @@ pub(crate) fn lower_oracle_block(
 
             for trigger in &mut triggers {
                 trigger.execute = Some(execute.clone());
+                if matches!(header.optionality, ModalOptionality::MayDecline) {
+                    trigger.optional = true;
+                }
             }
             result.triggers.extend(triggers);
         }
@@ -2129,6 +2156,32 @@ mod tests {
 
     fn fixed(min: usize, max: usize) -> ModalCountSpec {
         ModalCountSpec::Fixed { min, max }
+    }
+
+    #[test]
+    fn parse_modal_header_you_may_choose_fixed_count_sets_optional_trigger() {
+        // CR 608.2c: Shadrix Silverquill — "you may choose two" declines the
+        // entire triggered ability; when accepted, exactly two modes are chosen.
+        let header =
+            parse_modal_header_ast("you may choose two. Each mode must target a different player.")
+                .expect("modal header recognized");
+        assert_eq!(header.optionality, ModalOptionality::MayDecline);
+        assert_eq!(header.min_choices, 2);
+        assert_eq!(header.max_choices, 2);
+        assert_eq!(
+            header.constraints,
+            vec![ModalSelectionConstraint::DifferentTargetPlayers]
+        );
+    }
+
+    #[test]
+    fn parse_modal_header_you_may_choose_up_to_does_not_set_optional_trigger() {
+        // "you may choose up to N" lowers min_choices only; the trigger stays mandatory.
+        let header =
+            parse_modal_header_ast("you may choose up to two.").expect("modal header recognized");
+        assert_eq!(header.optionality, ModalOptionality::Mandatory);
+        assert_eq!(header.min_choices, 0);
+        assert_eq!(header.max_choices, 2);
     }
 
     #[test]

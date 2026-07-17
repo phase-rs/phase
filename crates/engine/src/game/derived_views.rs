@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::game_object::AttachTarget;
-use crate::game::stack::{stack_display_groups, StackDisplayGroup};
+use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
     GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
     TargetRef,
@@ -34,6 +34,10 @@ use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// A single commander-damage badge the HUD renders: which victim received
 /// `damage` from `commander` (the ObjectId is stable across zone changes
@@ -80,6 +84,10 @@ pub struct StackEntryDisplay {
     pub kind_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_mode_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_pending: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<StackTargetDisplay>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -189,6 +197,14 @@ pub struct TurnOrderSlotView {
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// The live (post-layer) keyword badges each battlefield permanent should
+    /// display. The engine classifies the complete keyword list so the client
+    /// can render the compact strip without reinterpreting keyword timing.
+    /// Keyed by object ID; absent when a permanent has no display-relevant
+    /// keyword.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+
     /// Commander damage grouped by the attacking commander's current
     /// controller. Each inner entry preserves per-commander identity so
     /// partner commanders under one controller render as separate badges.
@@ -409,6 +425,15 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         };
         if obj.zone != Zone::Battlefield {
             continue;
+        }
+        let badges: Vec<Keyword> = obj
+            .keywords
+            .iter()
+            .filter(|keyword| keyword.is_battlefield_display_relevant())
+            .cloned()
+            .collect();
+        if !badges.is_empty() {
+            views.battlefield_keyword_badges.insert(obj_id, badges);
         }
         if let Some(AttachTarget::Player(host)) = obj.attached_to {
             views
@@ -770,6 +795,7 @@ fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay
 
 fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDisplay {
     let source_name = stack_source_name(state, entry);
+    let effective_ability = effective_stack_ability(state, entry);
     let (kind_label, ability_description) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (
             "Spell".to_string(),
@@ -800,6 +826,11 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
         token_image_ref: stack_source_token_image_ref(state, entry),
         kind_label,
         ability_description,
+        selected_mode_labels: effective_ability
+            .ability
+            .map(|ability| ability.selected_mode_labels.clone())
+            .unwrap_or_default(),
+        is_pending: effective_ability.is_pending,
         targets: stack_entry_targets(state, entry),
         paid: stack_paid_facts(state.stack_paid_facts.get(&entry.id)),
         trigger_context: stack_trigger_context(state, entry),
@@ -844,8 +875,8 @@ fn keyword_action_label(action: &KeywordAction) -> String {
 fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
     let targets = match &entry.kind {
         StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
-        _ => entry
-            .ability()
+        _ => effective_stack_ability(state, entry)
+            .ability
             .map(flatten_targets_in_chain)
             .unwrap_or_default(),
     };
@@ -1074,12 +1105,14 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility, RestrictionExpiry, TargetRef};
+    use crate::types::ability::{
+        Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, TargetRef,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
-        ZoneChangeRecord,
+        CommanderDamageEntry, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot,
+        WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -1122,6 +1155,45 @@ mod tests {
         assert!(
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
+        );
+    }
+
+    #[test]
+    fn derive_views_projects_only_battlefield_relevant_keyword_badges() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Keyword Test Creature".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&permanent).unwrap().keywords = vec![
+            Keyword::Flying,
+            Keyword::Ravenous,
+            Keyword::Evoke(crate::types::keywords::EvokeCost::Mana(ManaCost::NoCost)),
+            Keyword::Fading(3),
+        ];
+
+        let hand_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Off-Battlefield Flyer".into(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&hand_card).unwrap().keywords = vec![Keyword::Flying];
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.battlefield_keyword_badges.get(&permanent),
+            Some(&vec![Keyword::Flying, Keyword::Fading(3)]),
+            "the strip keeps live battlefield abilities but hides Ravenous and Evoke"
+        );
+        assert!(
+            !views.battlefield_keyword_badges.contains_key(&hand_card),
+            "only battlefield permanents receive keyword badge entries"
         );
     }
 
@@ -1547,6 +1619,116 @@ mod tests {
             .paid
             .iter()
             .any(|fact| matches!(fact, StackPaidFactView::ColorsSpent { distinct: 2 })));
+    }
+
+    #[test]
+    fn pending_modal_spell_details_survive_filtering_and_client_wire_round_trip() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brotherhood's End".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let mut pending_ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "destroy".to_string(),
+                description: None,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        pending_ability.selected_mode_labels = vec![
+            "Brotherhood's End deals 3 damage to each creature and each planeswalker.".to_string(),
+        ];
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(PendingCast::new(
+                spell,
+                CardId(1),
+                pending_ability,
+                ManaCost::NoCost,
+            )),
+            unavailable_modes: Vec::new(),
+        };
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let json = serde_json::to_string(&ClientGameStateRef::wrap(&filtered, Some(PlayerId(1))))
+            .expect("serialize filtered opponent view");
+        let client: ClientGameState = serde_json::from_str(&json).expect("deserialize client view");
+        let details = client
+            .derived
+            .stack_entry_details
+            .get(&spell)
+            .expect("public pending spell has stack details");
+
+        assert!(
+            details.is_pending,
+            "the engine marks the matching entry pending"
+        );
+        assert_eq!(
+            details.selected_mode_labels,
+            ["Brotherhood's End deals 3 damage to each creature and each planeswalker."],
+            "the public selected mode reaches an opponent through filtering and the client wrapper",
+        );
+        assert_eq!(details.targets[0].label, "Sol Ring");
+    }
+
+    #[test]
+    fn stack_entry_display_selected_modes_are_wire_compatible_and_cloneable() {
+        let empty = StackEntryDisplay {
+            source_name: "Spell".to_string(),
+            token_image_ref: None,
+            kind_label: "Spell".to_string(),
+            ability_description: None,
+            selected_mode_labels: Vec::new(),
+            is_pending: false,
+            targets: Vec::new(),
+            paid: Vec::new(),
+            trigger_context: Vec::new(),
+        };
+        let empty_json = serde_json::to_string(&empty).expect("serialize empty display");
+        assert!(
+            !empty_json.contains("selected_mode_labels") && !empty_json.contains("is_pending"),
+            "empty additions must preserve the legacy wire shape",
+        );
+        let legacy: StackEntryDisplay =
+            serde_json::from_str(r#"{"source_name":"Spell","kind_label":"Spell"}"#)
+                .expect("legacy display payload deserializes");
+        assert!(legacy.selected_mode_labels.is_empty());
+        assert!(!legacy.is_pending);
+
+        let mut selected = empty;
+        selected.selected_mode_labels = vec!["Choose this mode.".to_string()];
+        selected.is_pending = true;
+        let copied = selected.clone();
+        let selected_json = serde_json::to_string(&selected).expect("serialize selected modes");
+        assert!(selected_json.contains("selected_mode_labels"));
+        assert_eq!(
+            copied, selected,
+            "derived display copies retain selected modes"
+        );
     }
 
     #[test]

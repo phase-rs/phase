@@ -10,7 +10,7 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    GameState, PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
+    GameState, PendingCostMoveResume, PendingCounterPostAction, TokenEntryEventEmission, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -117,7 +117,23 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Err(EngineError::InvalidAction(
+            "replacement choice has no pending replacement".to_string(),
+        ));
+    };
+    let option_count = super::replacement::pending_replacement_option_count(state, pending);
+    if index >= option_count {
+        return Err(EngineError::InvalidAction(format!(
+            "replacement choice index {index} is outside 0..{option_count}"
+        )));
+    }
     let replacement_action_event_start = events.len();
+    let parked_search_found_replacement = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::SearchFound { .. }))
+        .cloned();
     let pending_was_counter_move = state
         .pending_replacement
         .as_ref()
@@ -152,6 +168,15 @@ pub(super) fn handle_replacement_choice(
         .as_ref()
         .map(|pending| pending.lifelink_bonus)
         .unwrap_or(0);
+    // CR 701.21a + CR 614.1: An inner graveyard move can have parked after a
+    // sacrifice was accepted. The resumed payload is only a ZoneChange, so
+    // capture the enclosing sacrifice before `continue_replacement` consumes
+    // the pending record; the ZoneChange arm below emits its trigger event only
+    // after delivery succeeds.
+    let parked_sacrifice_provenance = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.sacrifice_provenance);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -242,7 +267,30 @@ pub(super) fn handle_replacement_choice(
                         // epilogue still owns the continuation drain). Surface
                         // the parked prompt; the epilogue must not run yet.
                         crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                            if let (Some(provenance), Some(pending)) = (
+                                parked_sacrifice_provenance,
+                                state.pending_replacement.as_mut(),
+                            ) {
+                                if pending.proposed.affected_object_id()
+                                    == Some(provenance.object_id)
+                                {
+                                    pending.sacrifice_provenance = Some(provenance);
+                                }
+                            }
                             return Ok(state.waiting_for.clone());
+                        }
+                    }
+                    if let Some(provenance) = parked_sacrifice_provenance {
+                        if provenance.object_id == object_id {
+                            // CR 701.21a + CR 603.2: The resumed move is the
+                            // terminal part of the already-accepted sacrifice.
+                            // Emit this exactly once, after the move completes,
+                            // so sacrifice triggers see its real event rather
+                            // than a generic ZoneChanged surrogate.
+                            events.push(GameEvent::PermanentSacrificed {
+                                object_id,
+                                player_id: provenance.player_id,
+                            });
                         }
                     }
                     enters_battlefield = to == Zone::Battlefield;
@@ -258,7 +306,7 @@ pub(super) fn handle_replacement_choice(
                             events,
                         ) {
                             state.pending_liminal_entry_resume =
-                                Some(crate::types::game_state::PendingLiminalEntryResume {
+                                Some(crate::types::game_state::PendingLiminalEntryResume::Token {
                                     source_id: entry_ref,
                                     player: waiting_for
                                         .acting_player()
@@ -379,6 +427,34 @@ pub(super) fn handle_replacement_choice(
                 // does not prevent the turn-up), so there is nothing to apply on
                 // the post-replacement Execute path here.
                 ProposedEvent::TurnFaceUp { .. } => {}
+                // CR 701.3a + CR 616.1: Attach accepted after a replacement
+                // ordering choice (2+ "as it becomes attached, choose …"
+                // definitions on the same attachment). Unreachable today — the
+                // parser pool has exactly one `ReplacementEvent::Attached`
+                // producer (Psychic Paper) — but wired for correctness if a
+                // future card shares the class. `source_id` for the
+                // `EffectResolved` push is approximated as `attachment_id`:
+                // `ProposedEvent::Attach` doesn't carry the original ability's
+                // source, which only differs from the attachment for a
+                // non-Equip "attach ~ to" effect (e.g. a triggered ability on
+                // another permanent) — no such card has BOTH that shape AND a
+                // second Attached-event replacement to order against today.
+                ProposedEvent::Attach {
+                    attachment_id,
+                    target_id,
+                    ..
+                } => {
+                    if let Some(waiting_for) = crate::game::effects::attach::deliver_attach(
+                        state,
+                        attachment_id,
+                        target_id,
+                        attachment_id,
+                        events,
+                    ) {
+                        state.waiting_for = waiting_for;
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -634,6 +710,21 @@ pub(super) fn handle_replacement_choice(
                         "CoinFlip replacement reached the optional-choice resume path"
                     );
                 }
+                // CR 701.23a + CR 614.6: modified SearchFound events are delivered by
+                // the search-resolution continuation. This arm is reached only
+                // when CR 616 ordering required a replacement choice; the bound
+                // modified event remains authoritative and is not rescanned.
+                event @ ProposedEvent::SearchFound { .. } => {
+                    return match super::engine_resolution_choices::resume_search_found_after_replacement(
+                        state, event, events,
+                    ) {
+                        Ok(waiting) => Ok(waiting),
+                        Err(error) => {
+                            state.pending_replacement = parked_search_found_replacement;
+                            Err(error)
+                        }
+                    };
+                }
             }
 
             let mut waiting_for = WaitingFor::Priority {
@@ -642,7 +733,14 @@ pub(super) fn handle_replacement_choice(
             state.waiting_for = waiting_for.clone();
 
             let mut replacement_ctx = None;
-            if let Some(ctx) = state.pending_spell_resolution.take() {
+            if zone_change_object_id
+                .zip(state.pending_spell_resolution.as_ref())
+                .is_some_and(|(object_id, ctx)| object_id == ctx.object_id)
+            {
+                let ctx = state
+                    .pending_spell_resolution
+                    .take()
+                    .expect("matching spell-resolution context was checked above");
                 if enters_battlefield {
                     apply_pending_spell_resolution(state, &ctx, events);
                 }
@@ -673,6 +771,23 @@ pub(super) fn handle_replacement_choice(
                 ) {
                     waiting_for = next_waiting_for;
                 }
+            }
+
+            // CR 702.143a-c + CR 614.1 + CR 616.1: A Foretell cost move may
+            // deliver its card and then surface an interactive post-replacement
+            // effect. Complete the special action at the delivery boundary,
+            // before preserving that non-priority prompt, so the card cannot be
+            // left face up or with a stranded cost continuation.
+            if zone_change_object_id.is_some_and(|object_id| {
+                matches!(
+                    state.pending_cost_move_resume.as_ref(),
+                    Some(PendingCostMoveResume::Foretell {
+                        object_id: pending_object_id,
+                        ..
+                    }) if *pending_object_id == object_id
+                )
+            }) {
+                super::casting::complete_foretell_cost_move(state, events);
             }
 
             // CR 805.4b: a draw-step draw that paused on the choice just
@@ -794,25 +909,6 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && (state.pending_continuation.is_some()
-                    || state.pending_change_zone_iteration.is_some())
-            {
-                // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
-                // continuation and the multi-target ChangeZone iteration that
-                // paused on this replacement choice (issue #535). The drain
-                // helper covers both: it runs the continuation chain (if any)
-                // then the ChangeZone iteration drain hook.
-                effects::drain_pending_continuation(state, events);
-                // CR 616.1e: The continuation may itself pause on another replacement
-                // (e.g., the second direction of fight damage hitting the same shield),
-                // in which case it sets `state.waiting_for` to the next ReplacementChoice.
-                // Propagate that back so the engine surfaces the correct prompt.
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    waiting_for = state.waiting_for.clone();
-                }
-            }
-
-            if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_player_scope_sacrifice_choice.is_some()
             {
                 // CR 101.4: a simultaneous each-player sacrifice paused by a
@@ -831,6 +927,33 @@ pub(super) fn handle_replacement_choice(
                             waiting_for = state.waiting_for.clone();
                         }
                     }
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.pending_continuation.is_some()
+                    || state.pending_change_zone_iteration.is_some())
+                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
+                // owns the unpaid cost suffix.  Do not drain the ordinary
+                // effect rider before that typed root has settled it.
+                && !matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                )
+            {
+                // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
+                // continuation and the multi-target ChangeZone iteration that
+                // paused on this replacement choice (issue #535). This runs
+                // AFTER a collected simultaneous sacrifice queue: CR 101.4
+                // requires every already-announced sacrifice to finish before
+                // the original ability's later instructions resume.
+                effects::drain_pending_continuation(state, events);
+                // CR 616.1e: The continuation may itself pause on another replacement
+                // (e.g., the second direction of fight damage hitting the same shield),
+                // in which case it sets `state.waiting_for` to the next ReplacementChoice.
+                // Propagate that back so the engine surfaces the correct prompt.
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
                 }
             }
 
@@ -880,8 +1003,37 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
-            // CR 601.2h + CR 602.2b + CR 616.1: Resume cast/activation cost payment paused for a
-            // replacement choice during discard or sacrifice cost payment.
+            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A delivered cost
+            // move resumes through the single typed dispatcher before ordinary
+            // effect continuations. Foretell completed above at its dedicated
+            // delivery boundary and is intentionally ineligible here.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
+                    state,
+                    events,
+                    super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                        action_event_start: replacement_action_event_start,
+                    },
+                )? {
+                    waiting_for = resumed;
+                }
+            }
+
+            // CR 118.12 + CR 605.3b + CR 616.1: The ordinary effect rider may
+            // resume only after the whole typed mana-cost root has either paid
+            // or failed its suffix.  This mirrors the prevention path below.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.pending_continuation.is_some()
+                    || state.pending_change_zone_iteration.is_some())
+            {
+                effects::drain_pending_continuation(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
+            // activation cost payment paused during discard or sacrifice.
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
             {
@@ -922,6 +1074,11 @@ pub(super) fn handle_replacement_choice(
                 // re-parked record so a second ordering choice cannot drop it.
                 if pending.lifelink_bonus == 0 {
                     pending.lifelink_bonus = parked_lifelink_bonus;
+                }
+                if let Some(provenance) = parked_sacrifice_provenance {
+                    if pending.proposed.affected_object_id() == Some(provenance.object_id) {
+                        pending.sacrifice_provenance = Some(provenance);
+                    }
                 }
             }
             Ok(super::replacement::replacement_choice_waiting_for(
@@ -1043,6 +1200,36 @@ pub(super) fn handle_replacement_choice(
                 crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
                 return Ok(state.waiting_for.clone());
             }
+            // CR 601.2h + CR 602.2b + CR 614.12a + CR 616.1: A fully
+            // substituted cost move still completes that cost-payment step.
+            // No fresh prompt remains at this point, so restore the normal
+            // reducer boundary before draining its typed continuation.
+            state.waiting_for = WaitingFor::Priority {
+                player: state.active_player,
+            };
+            let resumed_mana_ability_cost = matches!(
+                state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+            );
+            if let Some(waiting_for) = super::engine::drain_pending_cost_move_resume(
+                state,
+                events,
+                super::engine::CostMoveDrainBoundary::ReplacementPrevented {
+                    action_event_start: replacement_action_event_start,
+                },
+            )? {
+                // CR 118.12 + CR 605.3b + CR 616.1: A prevented mana cost has
+                // the same rider ordering as a delivered one: its typed root
+                // settles before any ordinary continuation drains.
+                if resumed_mana_ability_cost
+                    && matches!(waiting_for, WaitingFor::Priority { .. })
+                    && (state.pending_continuation.is_some()
+                        || state.pending_change_zone_iteration.is_some())
+                {
+                    effects::drain_pending_continuation(state, events);
+                }
+                return Ok(state.waiting_for.clone());
+            }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
             //
@@ -1116,12 +1303,22 @@ pub(super) fn handle_copy_target_choice(
                 "Missing liminal entry resume".to_string(),
             ));
         };
-        if resume.source_id != source_id || resume.player != player {
+        let (resume_source_id, resume_player) = match &resume {
+            crate::types::game_state::PendingLiminalEntryResume::Token {
+                source_id,
+                player,
+                ..
+            }
+            | crate::types::game_state::PendingLiminalEntryResume::Meld {
+                source_id, player, ..
+            } => (*source_id, *player),
+        };
+        if resume_source_id != source_id || resume_player != player {
             return Err(EngineError::InvalidAction(
                 "Mismatched liminal entry resume".to_string(),
             ));
         }
-        let ability = copy_effect_for_source(state, source_id)
+        let mut ability = copy_effect_for_source(state, source_id)
             .map(|effect_def| {
                 build_resolved_from_def_with_targets(
                     effect_def,
@@ -1144,6 +1341,53 @@ pub(super) fn handle_copy_target_choice(
                     player,
                 )
             });
+        if let crate::types::game_state::PendingLiminalEntryResume::Meld { context, .. } = resume {
+            // The empty batch record only carried `MeldEntry` across the copy
+            // choice. The typed liminal resume now owns completion, including a
+            // possible counter-replacement pause, so remove that superseded
+            // record before the generic copy finisher tries to drain it.
+            if state
+                .pending_batch_deliveries
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.remaining.is_empty()
+                        && matches!(
+                            &pending.completion,
+                            Some(crate::types::game_state::BatchCompletion::MeldEntry { .. })
+                        )
+                })
+            {
+                state.pending_batch_deliveries = None;
+            }
+            if !crate::game::meld::commit_meld_battlefield(state, &context) {
+                crate::game::meld::finish_deferred_meld_resolution(state, source_id, events);
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 707.9: the copy effect is installed after the meld result's
+            // layer-1 identity, so its later timestamp determines the entering
+            // permanent's copiable values.
+            let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+            let post_actions = vec![PendingCounterPostAction::FinishMeldEntry {
+                context: context.clone(),
+            }];
+            if let Some(waiting_for) =
+                finish_copy_target_choice_entry(state, source_id, events, post_actions, false)?
+            {
+                if state.pending_counter_additions.is_none() {
+                    crate::game::meld::finish_deferred_meld_entry(state, context, events);
+                }
+                return Ok(waiting_for);
+            }
+            crate::game::meld::finish_deferred_meld_entry(state, context, events);
+            return Ok(state.waiting_for.clone());
+        }
+        let crate::types::game_state::PendingLiminalEntryResume::Token {
+            event: resume_event,
+            ..
+        } = resume
+        else {
+            unreachable!("meld resume returned above")
+        };
         let entry_events = state
             .liminal_entries
             .get(&source_id)
@@ -1161,39 +1405,57 @@ pub(super) fn handle_copy_target_choice(
                 })
             })
         });
+        // CR 707.9b: a copy effect's "except" clauses (Embalm/Eternalize's
+        // "the token has no mana cost, it's white, and it's a Zombie in
+        // addition to its other types", etc.) are part of the copy's COPIABLE
+        // values, so they must be folded into the `BecomeCopy` that copies the
+        // chosen source rather than re-applied as a separate layered effect on
+        // top of it. Fold the pending `CopyTokenSpec` exceptions (from the
+        // synthesized Embalm/Eternalize `CopyTokenOf`, which reach this liminal
+        // accept path only because the copied card carries its own "enter as a
+        // copy" replacement) into the `BecomeCopy`'s `additional_modifications`.
+        // `become_copy::resolve` is the single authority that consumes
+        // `RemoveManaCost` / `SetStartingLoyalty` into the copiable values and
+        // layers the remaining exceptions atop the `CopyValues` clone — the
+        // only rules-correct home for stamp-only modifications that must never
+        // be layered directly.
         let copy_token_exceptions = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().map(|copy| {
                 (
-                    entry.controller,
                     copy.extra_keywords.clone(),
                     copy.additional_modifications.clone(),
                 )
             })
         });
+        if let Some((extra_keywords, additional_modifications)) = copy_token_exceptions {
+            if let Effect::BecomeCopy {
+                additional_modifications: become_copy_mods,
+                ..
+            } = &mut ability.effect
+            {
+                become_copy_mods.extend(additional_modifications);
+                // CR 707.2 + CR 702: "except it has [keyword]" grants ride the
+                // typed `extra_keywords` channel on the token spec; carry them
+                // through as layered `AddKeyword` exceptions so they become
+                // part of the copy's copiable keyword set.
+                become_copy_mods.extend(extra_keywords.into_iter().map(|keyword| {
+                    crate::types::ability::ContinuousModification::AddKeyword { keyword }
+                }));
+            }
+        }
         if !super::effects::token::commit_liminal_token_entry_with_event_emission(
             state,
-            resume.event,
+            resume_event,
             events,
             TokenEntryEventEmission::Suppress,
         ) {
             return Ok(state.waiting_for.clone());
         }
+        // CR 614.12a: the copy target was chosen before the token entered; the
+        // `BecomeCopy` here overwrites the token's copiable values with the
+        // chosen source's values, then layers/consumes the folded copy
+        // exceptions (CR 707.9b).
         let _ = effects::resolve_ability_chain(state, &ability, events, 0);
-        if let Some((controller, extra_keywords, mut modifications)) = copy_token_exceptions {
-            modifications.extend(extra_keywords.into_iter().map(|keyword| {
-                crate::types::ability::ContinuousModification::AddKeyword { keyword }
-            }));
-            if !modifications.is_empty() {
-                state.add_transient_continuous_effect(
-                    source_id,
-                    controller,
-                    crate::types::ability::Duration::Permanent,
-                    TargetFilter::SpecificObject { id: source_id },
-                    modifications,
-                    None,
-                );
-            }
-        }
         let mut counter_pause_post_actions = Vec::new();
         if let Some((name, event_source_id)) = entry_events.clone() {
             counter_pause_post_actions.push(
@@ -1215,9 +1477,13 @@ pub(super) fn handle_copy_target_choice(
                 remaining_count,
             });
         }
-        if let Some(waiting_for) =
-            finish_copy_target_choice_entry(state, source_id, events, counter_pause_post_actions)?
-        {
+        if let Some(waiting_for) = finish_copy_target_choice_entry(
+            state,
+            source_id,
+            events,
+            counter_pause_post_actions,
+            true,
+        )? {
             return Ok(waiting_for);
         }
         if let Some((name, event_source_id)) = entry_events {
@@ -1291,7 +1557,7 @@ pub(super) fn handle_copy_target_choice(
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
     if let Some(waiting_for) =
-        finish_copy_target_choice_entry(state, source_id, events, Vec::new())?
+        finish_copy_target_choice_entry(state, source_id, events, Vec::new(), true)?
     {
         return Ok(waiting_for);
     }
@@ -1305,6 +1571,7 @@ fn finish_copy_target_choice_entry(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
+    replay_entry_events: bool,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // Force a full layer pass after the copy chain so the realized
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
@@ -1339,15 +1606,65 @@ fn finish_copy_target_choice_entry(
     // on the battlefield — concede / error / chained-replacement paths can
     // leave a stale event in the vec, and we discard rather than fire a
     // phantom entry trigger.
-    if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
-        return Ok(Some(waiting_for));
+    if replay_entry_events {
+        if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+            return Ok(Some(waiting_for));
+        }
     }
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
-    if state.pending_batch_deliveries.is_some() {
+    if replay_entry_events && state.pending_batch_deliveries.is_some() {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(Some(state.waiting_for.clone()));
+        }
+    }
+    // CR 303.4f + CR 303.4g: Copy Enchantment (and any "enter as a copy of an
+    // enchantment" effect) can realize into an Aura only AFTER `BecomeCopy` has
+    // applied the copied characteristics. `BecomeCopy` is resolved post-entry, so
+    // the object was still its pre-copy, non-Aura self when the normal aura-attach
+    // slot ran in `move_object` — that consult was skipped and the copy sits
+    // unattached, dying to the CR 704.5m unattached-Aura SBA before its copied
+    // "level up"/Class ability can matter. Resolve the entering Aura's attachment
+    // now that the copy is realized and layers are flushed. This runs LAST — after
+    // the entry-trigger replay and batch drain above — so a multi-host player
+    // choice can pause on `ReturnAsAuraTarget` with nothing left to strand along
+    // the NON-liminal (real Copy Enchantment) caller: the pause resumes straight
+    // to priority, and any entry trigger already placed on the stack resolves with
+    // the host chosen (CR 303.4f). The auto-attach (0/1 host) branch never pauses.
+    //
+    // Liminal-path caveat: the copy-token caller (`handle_copy_target_choice`,
+    // ~1236) has a `copy_continuation` / committed-token-entry tail that runs only
+    // if this function returns `Ok(None)`. A multi-host `NeedsChoice` pause here
+    // would return `Ok(Some(..))` and skip that tail — the same drop the existing
+    // `replay_deferred_entry_events` pause above already causes. No card reaches
+    // that intersection today (the liminal accept path requires the COPIED card to
+    // carry its own enter-as-a-copy replacement, and none of those realize into a
+    // multi-host Aura with a token continuation); if one ever does, thread the
+    // continuation through the resume like the ETB-counter pause does.
+    match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+        crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+        | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+        crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
+            controller,
+            legal_targets,
+        } => {
+            state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                player: controller,
+                source_id,
+                returned_id: source_id,
+                legal_targets,
+                pending_effect: Box::new(ResolvedAbility::new(
+                    Effect::Attach {
+                        attachment: TargetFilter::SelfRef,
+                        target: TargetFilter::Any,
+                    },
+                    Vec::new(),
+                    source_id,
+                    controller,
+                )),
+            };
             return Ok(Some(state.waiting_for.clone()));
         }
     }
@@ -1694,7 +2011,7 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
 fn capture_deferred_entry_events_if_mid_entry_choice(
     state: &mut GameState,
     waiting_for: Option<&WaitingFor>,
-    events: &[GameEvent],
+    events: &mut Vec<GameEvent>,
 ) {
     let source_id = match waiting_for {
         Some(WaitingFor::CopyTargetChoice { source_id, .. }) => *source_id,
@@ -1727,7 +2044,7 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
     // events. This already affects CopyTargetChoice today, is unreachable in real
     // cards, and is the CR 614.12b simultaneous-entry boundary.
     state.deferred_entry_events.clear();
-    for event in events {
+    for event in events.iter() {
         if matches!(
             event,
             GameEvent::ZoneChanged { object_id, to, .. }
@@ -1735,6 +2052,27 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
         ) {
             state.deferred_entry_events.push(event.clone());
         }
+    }
+    let is_meld_entry = state.liminal_entries.get(&source_id).is_some_and(|entry| {
+        matches!(
+            entry.kind,
+            crate::types::game_state::LiminalEntryKind::Meld { .. }
+        )
+    });
+    if is_meld_entry {
+        // The final copy characteristics and CR 508.4 combat status are not
+        // known yet. Unlike ordinary copy entry animation, emit this meld entry
+        // only after its final snapshot has been refreshed.
+        events.retain(|event| {
+            !matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == source_id
+            )
+        });
     }
 }
 
@@ -2659,10 +2997,12 @@ mod tests {
                 cant_regenerate: false,
                 applied: std::collections::HashSet::new(),
             },
+            sacrifice_provenance: None,
             candidates: vec![ReplacementId {
                 source: bear,
                 index: 0,
             }],
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -3021,6 +3361,152 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::PermanentSacrificed { object_id, .. } if *object_id == victim)),
             "PermanentSacrificed event must be emitted"
         );
+    }
+
+    /// CR 101.4 + CR 616.1 + CR 701.21a: A player-scope sacrifice batch whose
+    /// final announced permanent pauses on an inner graveyard-move replacement
+    /// must retain its terminal bookkeeping through the real replacement
+    /// response. In particular, an empty remaining queue must still publish the
+    /// completed count and changed id before any chained effect could continue.
+    #[test]
+    fn final_player_scope_sacrifice_replacement_resume_commits_batch_bookkeeping() {
+        use crate::game::effects::{
+            perform_collected_player_scope_sacrifices, PendingPlayerScopeSacrificeOutcome,
+        };
+        use crate::types::ability::EffectKind;
+
+        let mut state = GameState::new_two_player(42);
+        let victim = make_creature(&mut state, PlayerId(0), "Final sacrifice victim");
+        // The outer Sacrifice proposal proceeds, then this optional Moved
+        // replacement pauses its inner Battlefield→graveyard move.
+        install_optional_replacement(&mut state, ReplacementEvent::Moved);
+
+        let mut events = Vec::new();
+        let outcome = perform_collected_player_scope_sacrifices(
+            &mut state,
+            ObjectId(9_999),
+            PlayerId(0),
+            vec![(PlayerId(0), vec![victim])],
+            &mut events,
+        )
+        .expect("the announced sacrifice must enter the replacement pipeline");
+        assert!(matches!(
+            outcome,
+            PendingPlayerScopeSacrificeOutcome::PausedForReplacement
+        ));
+        let pending = state
+            .pending_player_scope_sacrifice_choice
+            .as_ref()
+            .expect("the final paused sacrifice must retain a terminal batch record");
+        assert!(
+            pending.selections.is_empty(),
+            "the regression requires the replacement to pause the final queue item"
+        );
+        assert_eq!(pending.completion.announced, vec![victim]);
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accepting the replacement must drain the empty sacrifice queue");
+
+        assert!(state.players[0].graveyard.contains(&victim));
+        assert_eq!(state.last_effect_count, Some(1));
+        assert_eq!(state.last_zone_changed_ids, vec![victim]);
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    source_id,
+                    subject: None,
+                } if *source_id == ObjectId(9_999)
+            )),
+            "the empty queue still has to publish its terminal sacrifice result"
+        );
+    }
+
+    /// CR 603.10a + CR 616.1 + CR 701.21a: two permanents announced for one
+    /// simultaneous sacrifice instruction remain one co-departure group even
+    /// when the second permanent's inner move pauses for a replacement choice.
+    /// The first action must not leak a partial `ZoneChanged` event span; the
+    /// replacement response reunites both events, stamps reciprocal
+    /// `co_departed` values, and updates the per-turn LKI records.
+    #[test]
+    fn player_scope_sacrifice_replacement_resume_stamps_the_full_departure_batch() {
+        use crate::game::effects::{
+            perform_collected_player_scope_sacrifices, PendingPlayerScopeSacrificeOutcome,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let first = make_creature(&mut state, PlayerId(0), "First sacrifice victim");
+        let paused = make_creature(&mut state, PlayerId(0), "Paused sacrifice victim");
+        let shield = install_optional_replacement(&mut state, ReplacementEvent::Moved);
+        state
+            .objects
+            .get_mut(&shield)
+            .unwrap()
+            .replacement_definitions[0]
+            .valid_card = Some(TargetFilter::SpecificObject { id: paused });
+
+        let mut events = Vec::new();
+        let outcome = perform_collected_player_scope_sacrifices(
+            &mut state,
+            ObjectId(9_998),
+            PlayerId(0),
+            vec![(PlayerId(0), vec![first, paused])],
+            &mut events,
+        )
+        .expect("the second sacrifice must pause on its selected Moved replacement");
+        assert!(matches!(
+            outcome,
+            PendingPlayerScopeSacrificeOutcome::PausedForReplacement
+        ));
+        assert!(
+            events.is_empty(),
+            "the first departed permanent's events must stay pending until the full batch completes"
+        );
+        let pending = state
+            .pending_player_scope_sacrifice_choice
+            .as_ref()
+            .expect("the pause must retain the full sacrifice completion");
+        assert!(pending.completion.spans_replacement_pause);
+        assert!(pending.completion.deferred_events.iter().any(
+            |event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == first)
+        ));
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accepting the replacement must complete the whole sacrifice batch");
+        assert!(state.players[0].graveyard.contains(&first));
+        assert!(state.players[0].graveyard.contains(&paused));
+
+        let event_co_departed = |object_id| {
+            result
+                .events
+                .iter()
+                .find_map(|event| match event {
+                    GameEvent::ZoneChanged {
+                        object_id: changed,
+                        from: Some(Zone::Battlefield),
+                        record,
+                        ..
+                    } if *changed == object_id => Some(record.co_departed.clone()),
+                    _ => None,
+                })
+                .expect("every sacrifice batch member must be present in the terminal event span")
+        };
+        assert_eq!(event_co_departed(first), vec![paused]);
+        assert_eq!(event_co_departed(paused), vec![first]);
+
+        let record_co_departed = |object_id| {
+            state
+                .zone_changes_this_turn
+                .iter()
+                .find_map(|record| {
+                    (record.object_id == object_id && record.from_zone == Some(Zone::Battlefield))
+                        .then(|| record.co_departed.clone())
+                })
+                .expect("terminal stamping must update the authoritative LKI record")
+        };
+        assert_eq!(record_co_departed(first), vec![paused]);
+        assert_eq!(record_co_departed(paused), vec![first]);
     }
 
     /// CR 701.21a + CR 614.6: When the inner ZoneChange is redirected (e.g.,
@@ -4917,6 +5403,462 @@ mod tests {
         assert!(
             trigger_fired,
             "Callidus's granted destroy-same-name trigger must fire from the deferred entry replay"
+        );
+    }
+
+    /// Build a "Level Up"-style Aura source (Enchantment with the `Aura` subtype
+    /// and `Enchant creature`) plus `num_hosts` legal creature hosts, then drive
+    /// Copy Enchantment through `Stack → Battlefield` with its real parsed
+    /// `BecomeCopy` replacement, accept the "may", and surface `CopyTargetChoice`.
+    /// Returns the state paused on the copy-target choice, the Copy Enchantment
+    /// object, the Aura source, and the host ids. Callers then pick the Aura as
+    /// the copy source and assert the CR 303.4f/303.4g attachment outcome.
+    fn drive_copy_enchantment_of_aura(
+        num_hosts: usize,
+    ) -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
+        use crate::types::ability::{Effect, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+
+        let hosts: Vec<ObjectId> = (0..num_hosts)
+            .map(|i| make_creature(&mut state, PlayerId(0), &format!("Grizzly Bears {i}")))
+            .collect();
+
+        // "Enchant creature" — the copiable Enchant keyword the copy inherits.
+        let enchant_creature =
+            Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+
+        // Aura copy SOURCE (stands in for Level Up): a real Enchantment/Aura on
+        // the battlefield with `Enchant creature`. Set base_* so the layer system
+        // (which `finish_copy_target_choice_entry` flushes) recomputes the copy's
+        // live characteristics from copiable values.
+        let aura = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Level Up".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.base_card_types.subtypes = vec!["Aura".to_string()];
+            obj.card_types.subtypes = vec!["Aura".to_string()];
+            obj.base_keywords = vec![enchant_creature.clone()];
+            obj.keywords = vec![enchant_creature];
+        }
+
+        // Copy Enchantment on the stack, entering the battlefield.
+        let copy_ench = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&copy_ench).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+        }
+
+        // Use the REAL parsed copy filter so the test pins parser + runtime.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+            "Copy Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let copy_filter = parsed
+            .replacements
+            .iter()
+            .find_map(|r| match r.execute.as_deref()?.effect.as_ref() {
+                Effect::BecomeCopy { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Copy Enchantment must parse a BecomeCopy clone replacement");
+
+        state
+            .objects
+            .get_mut(&copy_ench)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            recipient: TargetFilter::SelfRef,
+                            target: copy_filter,
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: Vec::new(),
+                        },
+                    )),
+            );
+
+        // Propose the Stack → Battlefield entry so the replacement pipeline
+        // surfaces the optional "may enter as a copy" choice.
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: copy_ench,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied: std::collections::HashSet::new(),
+            face_down_profile: None,
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for Copy Enchantment's optional copy, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Copy Enchantment's enter-as-a-copy");
+
+        // The mid-entry copy target choice must now be pending, with the Aura as
+        // the only legal copy source (a creature host is not an enchantment).
+        let WaitingFor::CopyTargetChoice { valid_targets, .. } = state.waiting_for.clone() else {
+            panic!(
+                "expected CopyTargetChoice after accepting the copy, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            valid_targets.contains(&aura),
+            "the Level Up Aura must be a legal copy source"
+        );
+
+        (state, copy_ench, aura, hosts)
+    }
+
+    /// Build an "Enchant player" Aura source plus Copy Enchantment entering
+    /// through the real `BecomeCopy` replacement. Both players are legal hosts,
+    /// so picking the Aura as the copy source must pause on
+    /// `ReturnAsAuraTarget` with `TargetRef::Player` choices.
+    fn drive_copy_enchantment_of_player_aura() -> (GameState, ObjectId, ObjectId) {
+        use crate::types::ability::Effect;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+
+        let enchant_player = Keyword::Enchant(TargetFilter::Player);
+
+        let aura = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(0),
+            "Psychic Venom".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.base_card_types.subtypes = vec!["Aura".to_string()];
+            obj.card_types.subtypes = vec!["Aura".to_string()];
+            obj.base_keywords = vec![enchant_player.clone()];
+            obj.keywords = vec![enchant_player];
+        }
+
+        let copy_ench = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(0),
+            "Copy Enchantment".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&copy_ench).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+        }
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+            "Copy Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let copy_filter = parsed
+            .replacements
+            .iter()
+            .find_map(|r| match r.execute.as_deref()?.effect.as_ref() {
+                Effect::BecomeCopy { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Copy Enchantment must parse a BecomeCopy clone replacement");
+
+        state
+            .objects
+            .get_mut(&copy_ench)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            recipient: TargetFilter::SelfRef,
+                            target: copy_filter,
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: Vec::new(),
+                        },
+                    )),
+            );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: copy_ench,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+            cause: None,
+            attach_to: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied: std::collections::HashSet::new(),
+            face_down_profile: None,
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for Copy Enchantment's optional copy, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Copy Enchantment's enter-as-a-copy");
+
+        let WaitingFor::CopyTargetChoice { valid_targets, .. } = state.waiting_for.clone() else {
+            panic!(
+                "expected CopyTargetChoice after accepting the copy, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            valid_targets.contains(&aura),
+            "the enchant-player Aura must be a legal copy source"
+        );
+
+        (state, copy_ench, aura)
+    }
+
+    /// CR 303.4f + CR 704.5m: Copy Enchantment entering as a copy of an Aura
+    /// ("Level Up") with exactly one legal host must AUTO-ATTACH to that host as
+    /// the copy is realized, then SURVIVE the unattached-Aura state-based action.
+    /// Before the fix, `BecomeCopy` realized the Aura post-entry — after the
+    /// normal `move_object` aura-attach slot had already been skipped (the object
+    /// was still a non-Aura enchantment then) — so the copy sat unattached and
+    /// was destroyed by CR 704.5m before its copied ability could ever matter.
+    #[test]
+    fn copy_enchantment_becomes_aura_copy_auto_attaches_and_survives_sba() {
+        use crate::game::game_object::AttachTarget;
+
+        let (mut state, copy_ench, aura, hosts) = drive_copy_enchantment_of_aura(1);
+        let host = hosts[0];
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(crate::types::ability::TargetRef::Object(aura)),
+            },
+        )
+        .expect("pick the Aura as the copy source");
+
+        let copy = &state.objects[&copy_ench];
+        assert!(
+            copy.card_types.subtypes.iter().any(|s| s == "Aura"),
+            "the copy must have realized into an Aura"
+        );
+        assert_eq!(
+            copy.attached_to,
+            Some(AttachTarget::Object(host)),
+            "CR 303.4f: the copied Aura must auto-attach to its sole legal host"
+        );
+
+        // CR 704.5m: the attached Aura must survive the state-based action that
+        // sends UNATTACHED Auras to the graveyard.
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&copy_ench),
+            "the attached copy must survive the unattached-Aura SBA"
+        );
+    }
+
+    /// CR 303.4g + CR 704.5m: With NO legal host on the battlefield, the copied
+    /// Aura stays unattached (the engine's post-entry equivalent of "it doesn't
+    /// enter") and is moved to its owner's graveyard by the unattached-Aura SBA.
+    #[test]
+    fn copy_enchantment_becomes_aura_copy_with_no_host_dies_to_sba() {
+        let (mut state, copy_ench, _aura, _hosts) = drive_copy_enchantment_of_aura(0);
+
+        // The only battlefield permanent is the Aura source itself (an
+        // Enchantment, not a creature), so "Enchant creature" has no legal host.
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(crate::types::ability::TargetRef::Object(_aura)),
+            },
+        )
+        .expect("pick the Aura as the copy source");
+
+        assert!(
+            state.objects[&copy_ench].attached_to.is_none(),
+            "with no legal host the copied Aura must stay unattached"
+        );
+
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            !state.battlefield.contains(&copy_ench),
+            "CR 704.5m: an unattached Aura copy must be moved off the battlefield by SBA"
+        );
+        assert_eq!(
+            state.objects[&copy_ench].zone,
+            Zone::Graveyard,
+            "CR 303.4g: the unattached Aura copy goes to its owner's graveyard"
+        );
+    }
+
+    /// CR 303.4f: With MULTIPLE legal hosts, the copied Aura must PAUSE on
+    /// `ReturnAsAuraTarget` for the controller's choice, then attach to the
+    /// chosen host and survive SBA. Exercises the interactive branch of the
+    /// entering-Aura attachment building block.
+    #[test]
+    fn copy_enchantment_becomes_aura_copy_multi_host_prompts_then_attaches() {
+        use crate::game::game_object::AttachTarget;
+
+        let (mut state, copy_ench, _aura, hosts) = drive_copy_enchantment_of_aura(2);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(crate::types::ability::TargetRef::Object(_aura)),
+            },
+        )
+        .expect("pick the Aura as the copy source");
+
+        // Two legal hosts → the controller must choose which to enchant.
+        let WaitingFor::ReturnAsAuraTarget {
+            returned_id,
+            legal_targets,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected ReturnAsAuraTarget for the multi-host attach choice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            returned_id, copy_ench,
+            "the entering copy is the Aura to attach"
+        );
+        assert!(
+            hosts
+                .iter()
+                .all(|h| legal_targets.contains(&TargetRef::Object(*h))),
+            "both creatures must be offered as legal Aura hosts"
+        );
+
+        let chosen = hosts[1];
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(chosen)),
+            },
+        )
+        .expect("choose the Aura's host");
+
+        assert_eq!(
+            state.objects[&copy_ench].attached_to,
+            Some(AttachTarget::Object(chosen)),
+            "the copied Aura must attach to the chosen host"
+        );
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&copy_ench),
+            "the attached copy must survive the unattached-Aura SBA"
+        );
+    }
+
+    /// CR 303.4f: With multiple legal player hosts, an entering copied
+    /// "Enchant player" Aura must offer player hosts and attach to the chosen
+    /// player. This guards the shared `ReturnAsAuraTarget` resume path for
+    /// `TargetRef::Player`, not only object hosts.
+    #[test]
+    fn copy_enchantment_becomes_enchant_player_aura_prompts_then_attaches_to_player() {
+        use crate::game::game_object::AttachTarget;
+
+        let (mut state, copy_ench, aura) = drive_copy_enchantment_of_player_aura();
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(aura)),
+            },
+        )
+        .expect("pick the enchant-player Aura as the copy source");
+
+        let WaitingFor::ReturnAsAuraTarget {
+            returned_id,
+            legal_targets,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected ReturnAsAuraTarget for the multi-player attach choice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            returned_id, copy_ench,
+            "the entering copy is the Aura to attach"
+        );
+        assert!(
+            legal_targets.contains(&TargetRef::Player(PlayerId(0)))
+                && legal_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "both players must be offered as legal Aura hosts"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        )
+        .expect("choose the Aura's player host");
+
+        assert_eq!(
+            state.objects[&copy_ench].attached_to,
+            Some(AttachTarget::Player(PlayerId(1))),
+            "the copied Aura must attach to the chosen player"
+        );
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&copy_ench),
+            "the attached player-enchanting copy must survive the unattached-Aura SBA"
         );
     }
 

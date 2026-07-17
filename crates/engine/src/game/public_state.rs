@@ -510,6 +510,7 @@ mod tests {
                 kind: CastOfferKind::Discover {
                     hit_card: ObjectId(10),
                     exiled_misses: Vec::new(),
+                    source_id: ObjectId(11),
                     discover_value: 0,
                 },
             },
@@ -527,6 +528,7 @@ mod tests {
             kind: CastOfferKind::Discover {
                 hit_card: ObjectId(10),
                 exiled_misses: Vec::new(),
+                source_id: ObjectId(11),
                 discover_value: 0,
             },
         };
@@ -567,7 +569,7 @@ mod tests {
             PlayerId(0),
         );
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(ability)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(ability), &state));
         state.waiting_for = WaitingFor::EffectZoneChoice {
             enters_modified_if: None,
             player: PlayerId(0),

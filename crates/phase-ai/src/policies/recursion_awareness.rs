@@ -190,6 +190,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -284,6 +285,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),

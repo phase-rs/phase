@@ -188,7 +188,7 @@ fn hordewing_skaab_discard_that_many_uses_previous_effect_amount() {
         &*sub.effect,
         Effect::Discard {
             count: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount { .. },
             },
             ..
         }

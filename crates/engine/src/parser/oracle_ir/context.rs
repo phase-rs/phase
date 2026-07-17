@@ -5,7 +5,8 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, PtValue, QuantityRef, TargetFilter, TargetSelectionMode,
+    ControllerRef, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
+    TargetSelectionMode,
 };
 use crate::types::zones::Zone;
 
@@ -54,6 +55,27 @@ pub(crate) struct ParseContext {
     /// CR 109.4 + CR 115.1: Relative-player scope for "that player controls"
     /// resolution inside trigger effects. Replaces thread-local oracle_target_scope.
     pub relative_player_scope: Option<ControllerRef>,
+    /// CR 608.2c + CR 109.4: Transient per-chunk `player_scope` lifted from a
+    /// subject-predicate whose EFFECT carries no player field to stamp the
+    /// subject onto (the fieldless `Effect::Investigate` — Declaration in Stone's
+    /// "That player investigates"). `inject_subject_target` drops such a subject
+    /// silently, so `lower_subject_predicate_ast` records it here instead; the
+    /// effect-chain loop folds it into the chunk's `player_scope` local (→
+    /// `ClauseIr.player_scope` → `AbilityDefinition.player_scope`) so resolution
+    /// fans the effect out to the anchored player rather than the caster. Set and
+    /// consumed within a single chunk parse; never serialized.
+    pub pending_player_scope: Option<PlayerFilter>,
+    /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
+    /// fieldless-effect subject-predicate that carries a "for each <filter> …
+    /// this way" SUFFIX count (Declaration in Stone's "investigate for each
+    /// nontoken creature exiled this way"). `Effect::Investigate` has no count
+    /// slot and the suffix `for each` handler is CopySpell-only, so the count is
+    /// otherwise dropped. `lower_subject_predicate_ast` records it here; the
+    /// effect-chain loop folds it into the chunk's `repeat_for` (→
+    /// `AbilityDefinition.repeat_for`), composing with `player_scope` via the
+    /// resolver's outermost-repeat driver. Set and consumed within a single
+    /// chunk parse; never serialized.
+    pub pending_repeat_for: Option<QuantityExpr>,
     /// CR 608.2c + CR 109.4: Count of `Effect::Choose { choice_type: Player }`
     /// clauses emitted so far in the current effect chain. Each "choose a
     /// player" / "choose a [second|third] player" clause increments this; the
@@ -214,6 +236,19 @@ pub(crate) struct ParseContext {
     /// top-level morph reminder/special-action text). Set by
     /// `parse_quoted_ability`; defaults to `false` everywhere else.
     pub in_granted_activated_ability: bool,
+    /// CR 400.1/400.2 + CR 601.2a + CR 608.2c: The player-referencing target of
+    /// an EARLIER same-chain `Effect::RevealHand` clause ("look at that
+    /// player's hand" / "reveal their hand"), e.g. `TriggeringPlayer`. When a
+    /// LATER clause in the SAME chain references "them"/"those cards" in a
+    /// cast-permission clause (Silent-Blade Oni: "You may cast a spell from
+    /// among those cards without paying its mana cost"), the anaphor binds to
+    /// THIS revealed player's hand instead of the exile-only
+    /// `TargetFilter::ExiledBySource` default — no exile ever happened, so
+    /// `ExiledBySource` would resolve to an empty set and silently swallow the
+    /// cast permission. Mirrors `chain_has_prior_exile_producer`'s same-chain
+    /// scan, but for the hand-reveal producer shape. `None` when no such
+    /// producer exists in this chain, or during standalone clause parsing.
+    pub chain_prior_hand_reveal_target: Option<TargetFilter>,
 }
 
 impl ParseContext {

@@ -1403,6 +1403,22 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     {
         return true;
     }
+    // CR 111.3 + CR 608.2c (issue #5844): a token/permanent granted-ability quote
+    // that ends a sentence can be followed by a fresh IMPERATIVE sibling sentence
+    // that acts on the created object — Alien Invasion: `… and "This token
+    // attacks each combat if able." Put a +1/+1 counter on it for each invasion
+    // counter on this enchantment, then …`. Without splitting here the whole
+    // remainder is swallowed into the token-creation clause: its "for each
+    // invasion counter" is mis-read as the token COUNT and the "+1/+1 counter"
+    // pump is dropped entirely. Split when the continuation begins with an
+    // imperative game-action verb; anaphoric-subject continuations ("It becomes
+    // a 2/2 …", "The token is goaded", "That creature gains …") begin with a
+    // pronoun/determiner, NOT a verb, and stay attached so the token-creation
+    // path handles them inline.
+    if starts_imperative_action_continuation(trimmed_lower.as_str()) {
+        return true;
+    }
+
     // CR 608.2c: read the whole text and apply the rules of English — a
     // granted-ability quote that ends a sentence can be followed by a fresh
     // causative "may have …" sentence directed at the affected object's
@@ -1414,6 +1430,48 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         tag::<_, _, OracleError<'_>>("may have ").parse(i)
     })
     .is_some()
+}
+
+/// True iff `remainder_lower` begins a fresh IMPERATIVE sibling sentence — a game-
+/// action verb such as "put "/"exile "/"create "/"tap " — as opposed to an
+/// anaphoric-subject continuation ("It becomes …", "The token is goaded", "That
+/// creature gains …") that the token-creation path keeps attached to the quote.
+///
+/// Reuses the shared clause-starter verb table (`starts_clause_text_lower`) but
+/// first excludes the pronoun/determiner/subject starters it also recognizes for
+/// comma / "then" / bare-"and" splits. Those subject starters, after a granted
+/// quote, are anaphors that must stay attached (per the guardrail in
+/// `quote_closes_sentence_before_sequence`); only a bare imperative verb marks a
+/// genuine sibling effect here.
+fn starts_imperative_action_continuation(remainder_lower: &str) -> bool {
+    !starts_anaphoric_subject(remainder_lower) && starts_clause_text_lower(remainder_lower)
+}
+
+/// True iff `remainder_lower` begins with a demonstrative/pronoun word that, after
+/// a token/permanent's granted-ability quote, refers back to the CREATED object —
+/// an anaphor ("It becomes …", "Its power …", "That creature gains …", "Those
+/// tokens …", "They gain haste") that must stay attached to the quote rather than
+/// split as a sibling imperative. Each starter carries a trailing space so only a
+/// complete word matches (e.g. "it " does not fire on "item").
+///
+/// Restricted to genuine last-created anaphors. Independent subject-led clauses
+/// that `starts_clause_text_lower` recognizes as fresh instructions — "You gain
+/// …", "Each opponent …", "All creatures …" — are NOT token anaphors and must be
+/// allowed to split, so they are deliberately absent here (issue #5844 review).
+/// "The …" is likewise absent: it is not a `starts_clause_text_lower` starter, so
+/// "The token is goaded" already fails the authority check and stays attached
+/// without an explicit guard.
+fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("it "),
+        tag("its "),
+        tag("that "),
+        tag("this "),
+        tag("those "),
+        tag("they "),
+    ))
+    .parse(remainder_lower)
+    .is_ok()
 }
 
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
@@ -2556,6 +2614,23 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("you surveil ")),
         value((), tag("you get ")),
         value((), tag("you may ")),
+        // CR 614.1b + CR 603.7a: "Effects that use the word 'skip' are
+        // replacement effects" — a skip is its own instruction, never a
+        // continuation of the conjunct before it. Ivory Gargoyle / Molten
+        // Firebird: "return it to the battlefield under its owner's control at
+        // the beginning of the next end step AND YOU SKIP YOUR NEXT DRAW STEP";
+        // Waterspout Elemental: "return all other creatures to their owners'
+        // hands and you skip your next turn."
+        //
+        // Without this arm the bare-and splitter left the whole sentence as ONE
+        // clause, which cost both halves at once: the skip tail was swallowed by
+        // the leading imperative (the CR 614.1b replacement vanished), AND the
+        // temporal phrase stopped being a suffix — so `strip_temporal_suffix`
+        // (lower.rs), which only matches a temporal phrase at the END of the
+        // clause, never fired and the delayed return collapsed into an immediate
+        // one. Splitting here restores the temporal phrase to clause-final
+        // position, so ONE arm recovers both behaviors.
+        value((), tag("you skip ")),
         // CR 707.10c: "[subject] may copy this spell and may choose a new
         // target for that copy" — the Chain cycle joins the optional copy and
         // its retarget grant with "and". "may choose" begins a verb phrase,
@@ -3216,6 +3291,33 @@ pub(super) fn effect_wraps_copy_spell(effect: &Effect) -> bool {
     }
 }
 
+/// CR 608.2c: A `Destroy`/`DestroyAll` may be the chain's effect directly, or
+/// nested inside a `CreateDelayedTrigger` wrapper ("When Merieke Ri Berit
+/// leaves the battlefield or becomes untapped, destroy that creature.").
+/// Mirrors `effect_wraps_copy_spell`'s descent through the same wrapper.
+pub(super) fn effect_wraps_destroy_like(effect: &Effect) -> bool {
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => true,
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            effect_wraps_destroy_like(&inner.effect)
+        }
+        _ => false,
+    }
+}
+
+/// Mutable counterpart to `effect_wraps_destroy_like` — the effect to patch
+/// when a "can't be regenerated" rider binds to the `DestroyLike` role,
+/// unwrapping the same `CreateDelayedTrigger` wrapper.
+pub(super) fn destroy_like_effect_mut(effect: &mut Effect) -> Option<&mut Effect> {
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => Some(effect),
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            destroy_like_effect_mut(&mut inner.effect)
+        }
+        _ => None,
+    }
+}
+
 /// CR 701.8 + CR 608.2c: nom recognizer for the "if a permanent's ability is
 /// countered this way, destroy that permanent" continuation clause (Teferi's
 /// Response, Green Slime). Operates on lowercased text; tolerates a trailing
@@ -3294,9 +3396,28 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<SpellStackToGrav
 /// (Increasing Vengeance's "You may choose new targets for the copies" — every
 /// copy the spell makes is retargetable), `false` for the singular "the copy" /
 /// "that copy" forms (Fork/Twincast; the Chain cycle).
+///
+/// The leading `opt(parse_affirmative_reflexive_connector)` axis accepts the form
+/// where the grant is printed as the CONSEQUENT of a reflexive gate rather than as
+/// its own sentence — Spider-Verse's "you may copy it. IF YOU DO, you may choose new
+/// targets for the copy." (compare Spinerock Tyrant, which prints the same grant as a
+/// standalone sentence). Without it the clause reached the continuation recognizer
+/// still wearing its "if you do, " prefix, failed `all_consuming`, and fell through
+/// to an honest `orphaned_copy_retarget` residual — the copy was modeled, but its
+/// controller could never retarget it.
+///
+/// Folding the gate away is sound precisely BECAUSE it is affirmative and the copy it
+/// rides is itself optional: "if you do" means "if you made the copy", and a retarget
+/// permission on a copy that was never made is unreachable. So the gate carries no
+/// information the `CopySpell`'s own optionality does not already carry, and CR 707.10c
+/// is satisfied without a separate condition node. This reasoning does NOT extend to
+/// the NEGATED connectors, which is exactly why the affirmative half is its own
+/// combinator (see `oracle_nom::condition`) rather than the whole set with the
+/// condition thrown away.
 pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, bool> {
     map(
         (
+            opt(crate::parser::oracle_nom::condition::parse_affirmative_reflexive_connector),
             opt(alt((tag(", and "), tag("and ")))),
             opt(tag("you ")),
             tag("may choose "),
@@ -3308,7 +3429,7 @@ pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, bool> 
             )),
             opt(alt((tag("."), tag(",")))),
         ),
-        |(_, _, _, _, _, all_copies, _)| all_copies,
+        |(_, _, _, _, _, _, all_copies, _)| all_copies,
     )
     .parse(input)
 }
@@ -3386,6 +3507,35 @@ fn set_copy_retarget_in_ability(
     patched_here || patched_sub
 }
 
+/// CR 707.10c: Absorb an ORPHANED copy-retarget clause into a `CopySpell` the caller
+/// has just brought into existence. Returns true if a copy was found and patched.
+///
+/// Exists for the mana-spend trigger fold (`oracle::extract_mana_spend_trigger_from_chain`),
+/// which is a POST-PASS: "When that mana is spent to cast …, copy that spell" first
+/// lowers to an `Unimplemented` gap node and is only re-parsed into a
+/// `ManaSpellGrant::TriggerOnSpend` afterwards. So when the clause-streaming
+/// continuation recognizer looked for the retarget sentence's antecedent, the
+/// `CopySpell` DID NOT EXIST YET — the ordinary binding path cannot work here, by
+/// construction, and the sentence necessarily fell through to an honest
+/// `orphaned_copy_retarget` residual. This lets the fold reclaim it once the copy is
+/// real (Pyromancer's Goggles, Primal Wellspring).
+///
+/// Declines (returns false) when the text is not a retarget clause or when no
+/// `CopySpell` is reachable, so it can never strip an unrelated gap node.
+pub(crate) fn absorb_orphaned_copy_retarget(
+    ability: &mut AbilityDefinition,
+    clause_lower: &str,
+) -> bool {
+    let Some(all_copies) = copy_retarget_clause_all_copies(clause_lower) else {
+        return false;
+    };
+    set_copy_retarget_in_ability(
+        ability,
+        &CopyRetargetPermission::MayChooseNewTargets,
+        all_copies,
+    )
+}
+
 /// Membership mirror for `AntecedentRole::CopySpellBearer` (CR 707.10c) — does this
 /// def's effect TREE bear a `CopySpell` that `set_copy_retarget_in_ability` can reach?
 ///
@@ -3414,6 +3564,11 @@ pub(super) fn def_bears_retargetable_copy(def: &AbilityDefinition) -> bool {
 }
 
 /// The effect half of `def_bears_retargetable_copy` — mirrors `set_copy_retarget`.
+///
+/// Every arm here MUST have a counterpart there and vice versa. A predicate WIDER
+/// than its mutator is the dangerous direction: `LastWithRole` stops the walk at the
+/// node it binds, so claiming membership for a def the mutator cannot patch would
+/// swallow the retarget instead of reaching the real copy further back.
 fn effect_bears_retargetable_copy(effect: &Effect) -> bool {
     match effect {
         Effect::CopySpell { .. } => true,
@@ -3686,13 +3841,17 @@ pub(super) fn apply_clause_continuation(
             );
             if let Some(bound_index) = bound {
                 let def = &mut defs[bound_index];
-                match &mut *def.effect {
-                    Effect::Destroy {
+                // CR 608.2c: the DestroyLike antecedent may be nested inside a
+                // CreateDelayedTrigger wrapper (Merieke Ri Berit), so descend
+                // through it via destroy_like_effect_mut rather than matching
+                // def.effect directly — the registry now includes wrapped nodes.
+                match destroy_like_effect_mut(&mut def.effect) {
+                    Some(Effect::Destroy {
                         cant_regenerate, ..
-                    }
-                    | Effect::DestroyAll {
+                    })
+                    | Some(Effect::DestroyAll {
                         cant_regenerate, ..
-                    } => {
+                    }) => {
                         *cant_regenerate = true;
                     }
                     _ => unreachable!(),
@@ -4350,6 +4509,11 @@ pub(super) fn apply_clause_continuation(
                     // object's type at ChangeZone resolution instead of
                     // applying them unconditionally.
                     *enters_modified_if = moved_filter;
+                }
+                Effect::Meld { entry, .. } => {
+                    *entry = crate::types::ability::PermanentEntryMode::TappedAndAttacking {
+                        destination: crate::types::ability::EntryAttackDestination::AnyDefender,
+                    };
                 }
                 _ => {}
             }
@@ -5038,7 +5202,8 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             let (parsed_filter, _) = parse_target(filter_text);
             parsed_filter
         };
-        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref());
+        // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
+        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
 
         // CR 110.2a: "... under your control" routes the kept cards to the
         // ability controller. Scan the FULL clause — the controller phrase
@@ -5139,7 +5304,8 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         };
         // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
         // with the stripped "where X is <expression>" defining clause.
-        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref());
+        // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
+        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
 
         // CR 110.2a + CR 708.2a/708.3: detect "under your control" / "face down" on
         // the full clause for the from-among put-step.
@@ -5761,7 +5927,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::CreateEmblem { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -6190,6 +6356,13 @@ pub(super) fn parse_followup_continuation_ast(
         // CopySpell — directly, or wrapped in a CreateDelayedTrigger ("When you
         // next cast ..., copy that spell"). The guard re-confirms the wrapper
         // actually contains a CopySpell.
+        //
+        // NOT the mana-spend-trigger shape (Pyromancer's Goggles, Primal Wellspring):
+        // there the `CopySpell` is created by a POST-pass fold
+        // (`oracle::extract_mana_spend_trigger_from_chain`), so it does not exist yet
+        // when this recognizer runs and no arm here could bind it. That sentence is
+        // reclaimed from its honest `orphaned_copy_retarget` residual by the fold
+        // itself, via `absorb_orphaned_copy_retarget`.
         Effect::CopySpell { .. } | Effect::CreateDelayedTrigger { .. }
             if effect_wraps_copy_spell(previous_effect)
                 && recognize_copy_retarget_clause(&lower) =>
@@ -6544,10 +6717,17 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::SuspectLastCreated)
         }
         // CR 701.19c + CR 608.2c: "It can't be regenerated" prevents regeneration shields;
-        // later text modifies the preceding Destroy instruction per CR 608.2c.
-        Effect::Destroy { .. } | Effect::DestroyAll { .. }
-            if nom_primitives::scan_contains(&lower, "can't be regenerated")
-                || nom_primitives::scan_contains(&lower, "cannot be regenerated") =>
+        // later text modifies the preceding Destroy instruction per CR 608.2c. The
+        // antecedent may be nested inside a CreateDelayedTrigger wrapper (Merieke Ri
+        // Berit's "When ~ leaves the battlefield or becomes untapped, destroy that
+        // creature. It can't be regenerated.") — mirrors the CopySpell arm above.
+        // Ordered after the CopySpell arm (whose guard fails for a destroy-wrapping
+        // trigger), so a CreateDelayedTrigger that wraps a Destroy falls through to
+        // here rather than being intercepted.
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } | Effect::CreateDelayedTrigger { .. }
+            if effect_wraps_destroy_like(previous_effect)
+                && (nom_primitives::scan_contains(&lower, "can't be regenerated")
+                    || nom_primitives::scan_contains(&lower, "cannot be regenerated")) =>
         {
             Some(ContinuationAst::CantRegenerate)
         }
@@ -6771,9 +6951,12 @@ pub(super) fn parse_followup_continuation_ast(
         }
         // CR 508.4 / CR 614.1: "It/The token enters tapped and attacking" (singular)
         // or "They/Those tokens enter tapped and attacking" (plural)
-        // after CopyTokenOf or Token. Tokens/copies always enter
+        // after CopyTokenOf, Token, or Meld. Tokens/copies always enter
         // unconditionally — no moved-object type gate applies.
-        Effect::CopyTokenOf { .. } | Effect::Token { .. }
+        // CR 701.42c: a successfully melded permanent is the single object
+        // entering in the follow-up sentence, so the same entry modifier is
+        // applied to the preceding Meld effect.
+        Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::Meld { .. }
             if nom_primitives::scan_contains(&lower, "enters tapped and attacking")
                 || nom_primitives::scan_contains(&lower, "enter tapped and attacking") =>
         {
@@ -7747,6 +7930,83 @@ mod tests {
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
 
+    #[test]
+    fn quoted_grant_splits_before_imperative_sibling_sentence() {
+        // CR 111.3 + CR 608.2c (issue #5844): Alien Invasion — the token's quoted
+        // ability ends the sentence (`able."`); the following IMPERATIVE sentence
+        // ("Put a +1/+1 counter on it …") is a sibling effect and must split off.
+        // Without the split the token-creation clause swallows it, mis-reading
+        // "for each invasion counter" as the token COUNT and dropping the pump.
+        let chunks = clause_texts(
+            "create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\" Put a +1/+1 counter on it for each invasion counter on this enchantment, then put an invasion counter on this enchantment.",
+        );
+        assert_eq!(
+            chunks[0],
+            "create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\"",
+            "the token + quoted ability must be its own chunk: {chunks:?}"
+        );
+        // allow-noncombinator: structural test assertion over the pre-tokenized chunk vector, not parser dispatch
+        let counter_clause_split_off = chunks.len() >= 2
+            && chunks[1].starts_with("Put a +1/+1 counter on it for each invasion counter"); // allow-noncombinator: same, on the `.starts_with` line
+        assert!(
+            counter_clause_split_off,
+            "the imperative counter sentence must split into its own chunk: {chunks:?}"
+        );
+    }
+
+    /// CR 608.2c (#5844 review): an INDEPENDENT subject-led continuation after a
+    /// granted-ability quote — "You gain …", "Each opponent …", "All creatures …" —
+    /// is a fresh sibling instruction, NOT an anaphor to the created token, so it
+    /// must split off. `starts_clause_text_lower` already recognizes `you `,
+    /// `each `/`each opponent `, and `all ` as clause starters; the anaphor guard
+    /// must not reject them before that authority is consulted, or they stay glued
+    /// to the token clause and are swallowed — the very bug class this PR fixes.
+    #[test]
+    fn quoted_grant_splits_before_independent_subject_continuation() {
+        for (text, expected_head) in [
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" You gain 3 life.",
+                "You gain 3 life",
+            ),
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" Each opponent loses 2 life.",
+                "Each opponent loses 2 life",
+            ),
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" All creatures you control get +1/+1 until end of turn.",
+                "All creatures you control get +1/+1 until end of turn",
+            ),
+        ] {
+            let chunks = clause_texts(text);
+            assert_eq!(
+                chunks[0],
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\"",
+                "the token + quoted ability must stay its own chunk: {chunks:?}"
+            );
+            assert_eq!(
+                chunks.get(1).map(String::as_str),
+                Some(expected_head),
+                "an independent subject-led continuation must split into its own chunk: {chunks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_grant_keeps_anaphoric_subject_continuation() {
+        // The exclusion side of #5844: an anaphoric-SUBJECT continuation after a
+        // token quote ("It gains …", "That creature gets …") refers back to the
+        // CREATED object, not a fresh instruction, so it must stay attached — the
+        // token-creation path resolves the anaphor inline.
+        let chunks = clause_texts(
+            "create a 1/1 white Soldier creature token with \"This creature can't block.\" It gains haste until end of turn.",
+        );
+        assert_eq!(
+            chunks.len(),
+            1,
+            "anaphoric 'It gains …' must not split: {chunks:?}"
+        );
+    }
+
     // --- Bare " and " splitting: positive cases (should split) ---
 
     #[test]
@@ -8427,6 +8687,7 @@ mod tests {
             choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
             sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
             total_power_cap: None,
+            keeper_constraint: None,
         };
         assert_eq!(
             parse_followup_continuation_ast(
@@ -8687,6 +8948,34 @@ mod tests {
         assert!(!recognize_copy_retarget_clause("copy that spell"));
         assert!(!recognize_copy_retarget_clause(
             "may choose a new target for the creature"
+        ));
+
+        // CR 707.10c + CR 603.12: the grant printed as the CONSEQUENT of an
+        // AFFIRMATIVE reflexive gate rather than as its own sentence (Spider-Verse's
+        // "you may copy it. If you do, you may choose new targets for the copy.").
+        // The gate is redundant on an already-optional copy — no copy, nothing to
+        // retarget — so it folds into the same continuation.
+        assert!(recognize_copy_retarget_clause(
+            "if you do, you may choose new targets for the copy."
+        ));
+        assert!(recognize_copy_retarget_clause(
+            "when you do, you may choose new targets for the copies"
+        ));
+        assert_eq!(
+            copy_retarget_clause_all_copies("if you do, you may choose new targets for the copies"),
+            Some(true),
+            "the gate must not disturb the plurality axis"
+        );
+
+        // A NEGATED reflexive gate must NOT be folded away. "if you don't" gates a
+        // branch that runs precisely when the antecedent did NOT happen, so swallowing
+        // it into an unconditional retarget permission would invert the clause. Only
+        // the affirmative half of the connector set is accepted.
+        assert!(!recognize_copy_retarget_clause(
+            "if you don't, you may choose new targets for the copy"
+        ));
+        assert!(!recognize_copy_retarget_clause(
+            "if they don't, you may choose new targets for the copy"
         ));
     }
 

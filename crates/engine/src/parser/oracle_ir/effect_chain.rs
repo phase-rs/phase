@@ -36,6 +36,16 @@ pub(crate) struct EffectChainIr {
     pub(crate) chain_rounding: Option<RoundingMode>,
     /// CR 701.21a: Actor context threaded from ParseContext (per D-07).
     pub(crate) actor: Option<ControllerRef>,
+    /// CR 603.2c: Whether this chain is the body of a TRIGGERED ability,
+    /// threaded from `ParseContext::in_trigger` (mirrors `actor`).
+    ///
+    /// Assembly needs it to reject an unbindable batch anaphor: a
+    /// `TrackedSetAggregate { source: TriggeringBatch }` names the objects of
+    /// the CURRENT TRIGGER EVENT, so in a chain with no trigger event (a spell,
+    /// or a loyalty/activated ability) the pronoun has no antecedent and would
+    /// silently reduce an empty set to 0. Such a chain must fail honestly
+    /// instead. See `assemble_effect_chain`.
+    pub(crate) in_trigger: bool,
     /// CR 608.2c + CR 107.1c: chain-level "repeat this process" loop predicate.
     /// Set when a trailing "you may repeat this process" / "if you do, repeat
     /// this process" directive is recognized. Lowering applies it to the root
@@ -757,6 +767,7 @@ mod tests {
             kind: AbilityKind::Spell,
             chain_rounding: None,
             actor: None,
+            in_trigger: false,
             repeat_until: None,
         };
         assert!(ir.clauses.is_empty());
@@ -871,6 +882,7 @@ mod tests {
             kind: AbilityKind::Spell,
             chain_rounding: None,
             actor: None,
+            in_trigger: false,
             repeat_until: None,
         };
         assert_eq!(ir.clauses.len(), 1);

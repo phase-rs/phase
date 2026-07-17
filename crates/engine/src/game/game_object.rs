@@ -7,8 +7,9 @@ use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
     AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
-    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ModalChoice, ReplacementDefinition,
-    SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
+    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
+    TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -109,7 +110,7 @@ pub struct PrototypeFormState {
 /// treatment as other command-zone leaders. Stored as a typed marker to avoid
 /// proliferating bare role booleans on `GameObject`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SignatureSpellState;
+pub struct SignatureSpellState {}
 
 /// CR 702.148a-b + CR 612: Cleave form marker — `Some(_)` while this object's
 /// cleave text-changing effect is live (the spell was cast for its cleave cost
@@ -219,7 +220,7 @@ pub struct CaseState {
 /// truth and lets exhaustive `match` arms force every consumer to handle both
 /// variants. Equipment-only call sites use `as_object()` with a CR-cited
 /// `expect` to assert the rules invariant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AttachTarget {
     /// CR 301.5 / CR 303.4f: attached to a permanent.
@@ -260,7 +261,7 @@ impl From<ObjectId> for AttachTarget {
 
 /// CR 709.5c: Which half, or door, of a shared-type-line split permanent is
 /// being locked or unlocked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RoomDoor {
     Left,
     Right,
@@ -969,6 +970,18 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_from_stack_linked_source: Option<ObjectId>,
 
+    /// CR 603.7a + CR 614.1a + CR 702.170c: While set alongside the
+    /// exile-instead rider, the stack-resolution router applies the "If you do,
+    /// ..." consequence at the moment the replacement is actually APPLIED (the
+    /// spell lands in exile), per CR 603.7a — arming Feather, the Redeemed's
+    /// return-to-hand delayed trigger, or granting Lilah, Undefeated
+    /// Slickshot's plotted permission. Set by
+    /// `Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(..) }`.
+    /// Transient: cleared on any zone exit, so a spell countered or fizzled
+    /// before it would have resolved never takes the consequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_from_stack_rider: Option<ExiledSpellRider>,
+
     /// CR 305.1 + CR 603.4: Transient field tracking the zone a land was played
     /// from. Consumed by ETB trigger processing for conditions like "without
     /// being played"; permanents put onto the battlefield by effects leave this
@@ -1166,6 +1179,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cast_controller: _,
         cast_spell_keywords: _,
         exile_from_stack_linked_source: _,
+        exile_from_stack_rider: _,
         played_from_zone: _,
         mana_spent_to_cast: _,
         colors_spent_to_cast: _,
@@ -1333,7 +1347,7 @@ impl GameObject {
 
     /// Oathbreaker RC: mark this command-zone object as a signature spell.
     pub fn mark_signature_spell(&mut self) {
-        self.signature_spell = Some(SignatureSpellState);
+        self.signature_spell = Some(SignatureSpellState {});
     }
 
     /// CR 903 + Oathbreaker RC: command-zone cards that use commander tax and
@@ -1483,6 +1497,33 @@ impl GameObject {
                 .filter(|c| self.color.contains(c) || bf.color.contains(c))
                 .collect(),
             None => self.color.clone(),
+        }
+    }
+
+    /// CR 702.102b + CR 709.4d: Restore the combined card types and colors of
+    /// a fused split spell after a characteristic reset. The fusion marker is
+    /// cast-state, while the union is a derived stack characteristic and must
+    /// therefore be re-applied on every layer pass.
+    pub fn restore_fused_split_characteristics(&mut self) {
+        if self.zone != Zone::Stack || !self.fused_split_spell {
+            return;
+        }
+        let right_half_characteristics = self
+            .back_face
+            .as_ref()
+            .filter(|back| back.layout_kind == Some(LayoutKind::Split))
+            .map(|back| (back.card_types.core_types.clone(), back.color.clone()));
+        if let Some((core_types, colors)) = right_half_characteristics {
+            for core_type in core_types {
+                if !self.card_types.core_types.contains(&core_type) {
+                    self.card_types.core_types.push(core_type);
+                }
+            }
+            for color in colors {
+                if !self.color.contains(&color) {
+                    self.color.push(color);
+                }
+            }
         }
     }
 
@@ -1730,6 +1771,7 @@ impl GameObject {
             cast_controller: None,
             cast_spell_keywords: Vec::new(),
             exile_from_stack_linked_source: None,
+            exile_from_stack_rider: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
@@ -1773,6 +1815,15 @@ impl GameObject {
             // still on the battlefield (cost-paid snapshot precedes the sacrifice
             // zone-change that resets the flag), so `self.is_suspected` is authoritative.
             is_suspected: self.is_suspected,
+            // Empty by construction, NOT by choice: classifying an attachment as
+            // Aura/Equipment requires looking each attached object up in `GameState`
+            // (see `zones::capture_attachment_snapshot`), and this method has only
+            // `&self`. Callers that need the attachment look-back (the CR 608.2h
+            // battlefield-exit LKI) go through `apply_zone_exit_cleanup`, which does
+            // have `&GameState` and populates it. The damage-source and mana-spent
+            // snapshots that use this method never ask an attachment predicate, so an
+            // empty set here is the same fail-closed answer they got before.
+            attachments: Vec::new(),
         }
     }
 

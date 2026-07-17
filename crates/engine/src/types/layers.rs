@@ -151,7 +151,7 @@ impl ContinuousModification {
             ),
             ContinuousModification::SetColor { .. }
             | ContinuousModification::AddColor { .. }
-            | ContinuousModification::AddChosenColor => Layer::Color,
+            | ContinuousModification::AddChosenColor { .. } => Layer::Color,
             // CR 613.4d: Switch P/T is applied in layer 7d.
             ContinuousModification::SwitchPowerToughness => Layer::SwitchPT,
             ContinuousModification::AssignDamageFromToughness
@@ -166,7 +166,8 @@ impl ContinuousModification {
             // CopyValues / SetName so downstream copy effects observe the
             // retained ability when reading copiable values.
             ContinuousModification::RetainPrintedTriggerFromSource { .. }
-            | ContinuousModification::RetainPrintedAbilityFromSource { .. } => Layer::Copy,
+            | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+            | ContinuousModification::RetainAllOtherAbilitiesFromSource => Layer::Copy,
         }
     }
 }

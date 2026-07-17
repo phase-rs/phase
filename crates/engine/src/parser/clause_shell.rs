@@ -335,6 +335,15 @@ fn try_peel_opponent_may_prefix(
                 (Some(OpponentMayScope::AnyOpponent), None),
                 tag("any opponent may "),
             ),
+            // CR 608.2d + CR 101.4: "any other player may" — every player except
+            // the affected player of the resolving replaced event (Zur's
+            // Weirding). Must precede the bare "any player may " arm; the tag
+            // is disjoint ("any other …" vs "any player …") but ordering keeps
+            // the more specific phrase first.
+            value(
+                (Some(OpponentMayScope::AnyOtherPlayer), None),
+                tag("any other player may "),
+            ),
             value(
                 (Some(OpponentMayScope::AnyPlayer), None),
                 tag("any player may "),

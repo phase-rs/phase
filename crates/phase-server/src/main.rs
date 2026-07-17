@@ -635,6 +635,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
+        | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
@@ -2659,6 +2660,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
             commander: deck.commander,
+            companion: deck.companion,
             planar_deck: deck.planar_deck,
             scheme_deck: deck.scheme_deck,
             attraction_deck: deck.attraction_deck,
@@ -3119,6 +3121,35 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
+            }
+        }
+
+        ClientMessage::PreviewManaPayment { request_id, action } => {
+            let response = match (identity.game_code.clone(), identity.player_token.clone()) {
+                (Some(game_code), Some(player_token)) => {
+                    if let Err(reason) = guard_game_action_payload(&action) {
+                        ServerMessage::ManaPaymentPreviewRejected { request_id, reason }
+                    } else {
+                        let mgr = state.lock().await;
+                        match mgr.preview_mana_payment(&game_code, &player_token, &action) {
+                            Ok(source_ids) => ServerMessage::ManaPaymentPreview {
+                                request_id,
+                                source_ids,
+                            },
+                            Err(reason) => {
+                                ServerMessage::ManaPaymentPreviewRejected { request_id, reason }
+                            }
+                        }
+                    }
+                }
+                _ => ServerMessage::ManaPaymentPreviewRejected {
+                    request_id,
+                    reason: "Not in a game".to_string(),
+                },
+            };
+
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
             }
         }
 
@@ -3813,6 +3844,7 @@ async fn handle_client_message(
                     &deck.main_deck,
                     &deck.sideboard,
                     &deck.commander,
+                    &deck.companion,
                     &deck.planar_deck,
                     &deck.scheme_deck,
                     &deck.signature_spell,
@@ -3865,6 +3897,7 @@ async fn handle_client_message(
                         &ai_deck_data.main_deck,
                         &ai_deck_data.sideboard,
                         &ai_deck_data.commander,
+                        &ai_deck_data.companion,
                         &ai_deck_data.planar_deck,
                         &ai_deck_data.scheme_deck,
                         &ai_deck_data.signature_spell,
@@ -6504,6 +6537,10 @@ mod mode_gate_tests {
             ClientMessage::Action {
                 action: GameAction::PassPriority,
             },
+            ClientMessage::PreviewManaPayment {
+                request_id: 1,
+                action: GameAction::PassPriority,
+            },
             ClientMessage::Reconnect {
                 game_code: "X".into(),
                 player_token: "t".into(),
@@ -6604,6 +6641,10 @@ mod mode_gate_tests {
         let msgs: Vec<ClientMessage> = vec![
             ClientMessage::CreateGame { deck: deck() },
             ClientMessage::Action {
+                action: GameAction::PassPriority,
+            },
+            ClientMessage::PreviewManaPayment {
+                request_id: 1,
                 action: GameAction::PassPriority,
             },
             ClientMessage::Concede,

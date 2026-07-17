@@ -9,12 +9,12 @@ use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow, CopyScale,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PileSource,
-    QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
-    TriggerCondition, TriggerDefinition,
+    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow,
+    CopyChooseScope, CopyScale, CostPaidObjectSnapshot, CounterCostSelection,
+    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
+    LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
+    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -144,10 +144,9 @@ pub enum ConvokeMode {
     Delve,
 }
 
-/// CR 702.132a: Tracks the once-per-cast Assist offer/decision on a `PendingCast`.
-/// A typed enum (not a bool) so the offered-once guard and the committed
-/// contribution share one field. `Committed` defers the helper's actual mana
-/// spend to `finalize_cast`, so cancelling the cast never leaks tapped lands.
+/// CR 702.132a + CR 601.2h: Tracks the once-per-cast Assist offer and payment
+/// lifecycle on a `PendingCast`. A typed enum (not a bool) keeps the selected
+/// contribution distinct from the irreversible helper-payment boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AssistState {
     /// The Assist offer has not been made for this cast.
@@ -156,9 +155,17 @@ pub enum AssistState {
     /// The offer was made and the caster declined (or contributed nothing).
     Offered,
     /// The caster chose `helper`, who will pay `generic` of the spell's generic
-    /// mana. The caster's owed cost is reduced by `generic` now; the helper's
-    /// sources are tapped only at `finalize_cast` (the non-cancellable commit).
+    /// mana. The caster's owed cost is reduced by `generic` now, but the helper
+    /// has not yet begun paying; the cast remains cancellable.
     Committed { helper: PlayerId, generic: u32 },
+    /// The helper has started paying its committed contribution. This survives
+    /// a paused source-cost replacement so cancellation cannot strand a paid
+    /// prefix or allow the helper contribution to be applied twice on resume.
+    PaymentStarted { helper: PlayerId, generic: u32 },
+    /// The committed helper contribution has been paid. This checkpoint is
+    /// retained if the caster's later mana payment pauses on a replacement
+    /// choice, so the helper is never charged again on resume.
+    Paid { helper: PlayerId, generic: u32 },
 }
 
 /// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip lifecycle for a single
@@ -261,6 +268,23 @@ pub struct LKISnapshot {
     /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to `false`.
     #[serde(default)]
     pub is_suspected: bool,
+    /// CR 608.2h + CR 400.7: Attachments (Auras/Equipment) as they last existed on
+    /// the battlefield. Attachment is a battlefield-only relationship — SBA unattaches
+    /// everything the instant the host leaves (CR 704.5m/n) — so a source-referential
+    /// intervening-if ("if this creature is enchanted" — Dreampod Druid; "if he's
+    /// equipped" — Whiplash) re-checked at resolution (CR 603.4) has nothing live to
+    /// read once its source is gone. CR 608.2h routes that question to LAST KNOWN
+    /// INFORMATION, so the attachment set must be captured on battlefield exit like
+    /// every other look-back characteristic here.
+    ///
+    /// Captured via [`capture_attachment_snapshot`](crate::game::zones::capture_attachment_snapshot),
+    /// the same authority that fills `ZoneChangeRecord::attachments` — one snapshot
+    /// shape, one capture site.
+    ///
+    /// `#[serde(default)]` ⇒ pre-existing saved states deserialize to an empty set,
+    /// which is exactly the pre-change fail-closed behavior.
+    #[serde(default)]
+    pub attachments: Vec<AttachmentSnapshot>,
 }
 
 /// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.
@@ -712,21 +736,21 @@ pub struct BattlefieldEntryRecord {
     pub controller: PlayerId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AutoMayChoice {
     Accept,
     Decline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MayTriggerOrigin {
     Printed { trigger_index: usize },
     Keyword { keyword: KeywordKind },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MayTriggerAutoChoiceKey {
     pub player: PlayerId,
     pub source_id: ObjectId,
@@ -747,7 +771,7 @@ pub struct MayTriggerAutoChoiceRecord {
 /// `AllCopies` yields for every trigger from any object sharing the source's
 /// card identity, so it keeps matching after a token source ceases to exist
 /// (CR 704.5d) and matches newly created copies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum YieldScope {
     ThisObject,
     AllCopies,
@@ -1056,17 +1080,27 @@ pub struct PendingContinuation {
     /// CR 303.4f: Attach host captured before SearchChoice overwrites parent targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_attach_host: Option<AttachTarget>,
+    /// CR 608.2: The resolving ability's trigger-event context, snapshotted at
+    /// stash time so TargetFilter::TriggeringPlayer and its siblings resolve
+    /// correctly when drain_pending_continuation resumes this chain —
+    /// stack::resolve_top unconditionally clears the live context once the
+    /// stack entry that started this resolution has left the stack (CR 603.7c
+    /// cleanup), regardless of whether the ability's OWN resolution actually
+    /// finished or merely paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
 }
 
 impl PendingContinuation {
     /// Construct a continuation with no parent-kind emission. Used for chains
     /// whose per-node `EffectResolved` events are the full observable story
     /// (targeted damage continuations, Learn rummage, Bolster, Clash, etc.).
-    pub fn new(chain: Box<ResolvedAbility>) -> Self {
+    pub fn new(chain: Box<ResolvedAbility>, state: &GameState) -> Self {
         Self {
             chain,
             parent_kind: None,
             search_attach_host: None,
+            trigger_context: ResolvingTriggerContext::capture(state),
         }
     }
 
@@ -1074,11 +1108,16 @@ impl PendingContinuation {
     /// `EffectResolved { kind, source_id }` once the chain completes. The
     /// `source_id` used for emission is read from `chain.source_id` at drain
     /// time, matching the non-pause path.
-    pub fn with_parent_kind(chain: Box<ResolvedAbility>, parent_kind: EffectKind) -> Self {
+    pub fn with_parent_kind(
+        chain: Box<ResolvedAbility>,
+        parent_kind: EffectKind,
+        state: &GameState,
+    ) -> Self {
         Self {
             chain,
             parent_kind: Some(parent_kind),
             search_attach_host: None,
+            trigger_context: ResolvingTriggerContext::capture(state),
         }
     }
 }
@@ -1363,6 +1402,10 @@ pub struct PendingEachPlayerCopyChosen {
     pub copy_modifications: Vec<ContinuousModification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<CopyScale>,
+    /// CR 102.1 + CR 103.1: whose battlefield the paused chooser drew from, so a
+    /// mid-flight save/reload reconstructs the correct eligibility controller.
+    #[serde(default)]
+    pub choose_scope: CopyChooseScope,
     pub source_id: ObjectId,
     pub source_controller: PlayerId,
     /// APNAP-ordered scoped player set (for a mid-choice save/reload).
@@ -1449,6 +1492,144 @@ pub struct PendingPlayerScopeSacrificeChoice {
     /// Already collected choices, paired with the player who will sacrifice
     /// those permanents once all choices are known.
     pub selections: Vec<(PlayerId, Vec<ObjectId>)>,
+    /// CR 101.4 + CR 701.21a + CR 616.1: Terminal bookkeeping for the one
+    /// simultaneous sacrifice action. It survives every replacement-choice
+    /// pause, including a pause on the final announced permanent when
+    /// `selections` is empty, so the batch is finalized before any later
+    /// continuation can run.
+    #[serde(default)]
+    pub completion: PendingPlayerScopeSacrificeCompletion,
+}
+
+/// CR 101.4 + CR 701.21a: Accumulated terminal state for a simultaneous
+/// player-scope sacrifice action that may span one or more CR 616.1 choices.
+/// The individual choice queue can become empty while the final proposed
+/// sacrifice is still awaiting replacement resolution, so this state must be
+/// carried independently of the remaining selections.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPlayerScopeSacrificeCompletion {
+    /// Every permanent announced for this sacrifice action. The ids scope
+    /// event-derived bookkeeping to this batch when a replacement resumes.
+    #[serde(default)]
+    pub announced: Vec<ObjectId>,
+    /// Announced permanents whose sacrifice event has actually completed.
+    #[serde(default)]
+    pub sacrificed: Vec<ObjectId>,
+    /// Announced permanents that changed zones while being sacrificed.
+    #[serde(default)]
+    pub zone_changed: Vec<ObjectId>,
+    /// Per-turn `ZoneChangeRecord` identities for the announced permanents that
+    /// actually departed. These records are retained across a replacement
+    /// pause so terminal co-departure stamping updates both the resumed event
+    /// stream and the authoritative per-turn LKI ledger.
+    #[serde(default)]
+    pub departed_zone_change_indices: Vec<usize>,
+    /// CR 603.10a + CR 616.1: Zone-change and sacrifice events emitted before
+    /// an inner replacement choice are held until the entire simultaneous
+    /// sacrifice instruction has completed. The resumed delivery appends its
+    /// events to this span, then terminal completion stamps one co-departure
+    /// group and exposes the complete event batch to trigger collection.
+    #[serde(default)]
+    pub deferred_events: Vec<GameEvent>,
+    /// True once this sacrifice action has crossed a replacement-choice
+    /// boundary. The resumed action's event buffer already contains the event
+    /// just delivered by `engine_replacement`, even when no earlier event was
+    /// available to defer, so terminal stamping must cover the full resumed
+    /// buffer rather than only events produced by the tail drain.
+    #[serde(default)]
+    pub spans_replacement_pause: bool,
+}
+
+/// CR 101.4 + CR 701.23i: APNAP state for a self-library search instruction
+/// whose selected cards are delivered only after every searching player has
+/// made their private choice. The original spell's controller remains on
+/// `ability`; a per-player clone is rebound only while calculating that
+/// player's local candidates and local-X quantity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingScopedLibrarySearch {
+    /// Search + parent-target delivery template, with the outer player scope
+    /// removed by the resolution driver.
+    pub ability: Box<ResolvedAbility>,
+    /// Players not yet offered their optional search / private selection, in
+    /// APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Accepted searchers' selected cards. An empty selection is retained: a
+    /// player can search and fail to find while still needing the final shuffle.
+    pub selections: Vec<(PlayerId, Vec<ObjectId>)>,
+    /// The player currently answering either the optional-search offer or the
+    /// associated `SearchChoice`.
+    pub current_player: Option<PlayerId>,
+    /// The once-after-all-searches tail (Natural Balance's searched-this-way
+    /// shuffle). It is carried through a replacement-paused batch delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_scope: Option<Box<ResolvedAbility>>,
+}
+
+/// CR 701.23e: Whether cards surviving a SearchFound replacement batch are
+/// publicly revealed by the containing search instruction. The enum remains
+/// boolean on the wire so persisted in-flight searches from before the typed
+/// migration continue to round-trip unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum SearchFoundVisibility {
+    #[default]
+    Private,
+    Public,
+}
+
+impl SearchFoundVisibility {
+    pub fn is_public(self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
+impl From<bool> for SearchFoundVisibility {
+    fn from(reveal: bool) -> Self {
+        if reveal {
+            Self::Public
+        } else {
+            Self::Private
+        }
+    }
+}
+
+impl From<SearchFoundVisibility> for bool {
+    fn from(visibility: SearchFoundVisibility) -> Self {
+        visibility.is_public()
+    }
+}
+
+/// CR 616.1 + CR 701.23a: A per-card found-event batch parked while the
+/// affected card's owner orders multiple applicable replacement effects. The
+/// current event itself lives in `pending_replacement`; this record preserves
+/// the already-processed survivors and the exact unprocessed suffix so resume
+/// never rescans earlier cards.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingSearchFoundBatch {
+    pub searcher: PlayerId,
+    /// CR 701.23a: Owner of the library component actually searched. Bound
+    /// after search prohibitions remove impossible zones; never reconstructed
+    /// from an individual selected card's current zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_owner: Option<PlayerId>,
+    pub remaining: Vec<ObjectId>,
+    pub survivors: Vec<ObjectId>,
+    pub continuation: PendingSearchFoundContinuation,
+    #[serde(default, rename = "reveal")]
+    pub visibility: SearchFoundVisibility,
+}
+
+/// The mutually exclusive continuation protocols available after every
+/// SearchFound event in a batch reaches its terminal disposition. Encoding the
+/// protocol as an enum prevents a malformed `scoped = true, split = Some(_)`
+/// state from being serialized or resumed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PendingSearchFoundContinuation {
+    Standard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split: Option<crate::types::ability::SearchDestinationSplit>,
+    },
+    Scoped,
 }
 
 /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
@@ -1490,14 +1671,14 @@ pub struct PendingVoteBallotIteration {
     pub controller: PlayerId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CounterMoveChoice {
     pub destination_id: ObjectId,
     pub counter_type: CounterType,
     pub count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CounterCostChoice {
     pub object_id: ObjectId,
     pub counter_type: CounterType,
@@ -1509,7 +1690,7 @@ pub struct CounterCostChoice {
 /// Unlike [`CounterCostChoice`], there is no `object_id`: the removal source is
 /// the single object fixed by the effect (the ability's target or `SelfRef`),
 /// so the client only chooses which counter types and how many of each to shed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CounterRemoveChoice {
     pub counter_type: CounterType,
     pub count: u32,
@@ -1612,6 +1793,12 @@ pub struct PendingBatchDeliveries {
     /// is the moves themselves (mill, mass bounce). See [`BatchCompletion`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<BatchCompletion>,
+    /// CR 614.5: replacement definitions already applied to the event whose
+    /// physical-card delivery is being resumed. Meld result redirects reuse
+    /// this set for each component move so the redirect cannot apply again to
+    /// either modified event.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -1628,6 +1815,73 @@ pub struct PendingBatchDeliveries {
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
+    /// CR 702.85a + CR 616.1: A no-hit Cascade's randomized bottom batch has
+    /// settled (including any redirected cards), so its completion events may
+    /// fire exactly once.
+    CascadeBottomComplete {
+        controller: PlayerId,
+        source_id: ObjectId,
+        exiled_count: u32,
+    },
+    /// CR 701.57a + CR 616.1: A no-hit Discover's randomized bottom batch has
+    /// settled, so the discover resolution completes exactly once.
+    DiscoverBottomComplete { source_id: ObjectId },
+    /// CR 701.57a + CR 616.1: A Discover that found a card has finished placing
+    /// every miss after its cast/hand decision. Its resolution event waits for
+    /// that batch.
+    DiscoverPlacementComplete { source_id: ObjectId },
+    /// CR 701.57a + CR 616.1: A declined Discover's miss batch settled; carry
+    /// the printed hit-to-hand instruction through its own replacement-aware
+    /// delivery before the Discover completion tail.
+    DiscoverDeclined {
+        player: PlayerId,
+        hit_card: ObjectId,
+        source_id: ObjectId,
+    },
+    /// CR 608.2g + CR 701.57a + CR 616.1: A Discover cast rejected at
+    /// finalization waits for the miss batch before its replacement-aware
+    /// hit-to-hand delivery and priority tail.
+    ResolutionCastRejectedToHand {
+        player: PlayerId,
+        hit_card: ObjectId,
+        source_id: ObjectId,
+    },
+    /// CR 701.57a + CR 616.1: The declined Discover's replacement-aware
+    /// hit-to-hand delivery settled, so its resolution event and continuation
+    /// may run exactly once.
+    DiscoverDeclinedComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
+    /// CR 608.2g + CR 701.57a + CR 616.1: The rejected Discover hit's
+    /// replacement-aware hand delivery settled, so its resolution event and
+    /// priority restoration may run exactly once.
+    ResolutionCastRejectionComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
+    /// CR 401.4 + CR 616.1: All requested library placements for one
+    /// PutAtLibraryPosition instruction have settled. Source-linked exile
+    /// bookkeeping and the resolution event occur only after the full batch.
+    PutOnTopComplete {
+        source_id: ObjectId,
+        removed_exile_links: Vec<ObjectId>,
+    },
+    /// CR 614.1 + CR 616.1: A PutOnTopOrBottom object's Library delivery has settled, so
+    /// its chained resolution tail may run exactly once.
+    TopOrBottomComplete { player: PlayerId },
+    /// CR 614.1 + CR 616.1 + CR 608.2c: A Dig kept-card batch settled outside
+    /// the battlefield. Its rest routing, tracked-set publication, and
+    /// continuation drain must follow the delivery, while the published set and
+    /// parent-target continuation set remain independently typed.
+    DigKeptDeliveryComplete {
+        player: PlayerId,
+        source_id: Option<ObjectId>,
+        rest_cards: Vec<ObjectId>,
+        rest_destination: Zone,
+        publish_tracked_set: Vec<ObjectId>,
+        continuation_targets: Vec<ObjectId>,
+    },
     /// CR 701.25a: After the surveil rest pile reaches the graveyard, the kept
     /// cards rest on top of the player's library in the chosen order
     /// (`top_cards[0]` becomes the topmost card).
@@ -1641,15 +1895,19 @@ pub enum BatchCompletion {
         player: PlayerId,
         revealed: Vec<ObjectId>,
     },
-    /// CR 303.4f / CR 616.1 + CR 701.20b: A reveal-until / dig kept card routed
-    /// onto the battlefield paused on an as-enters choice (aura host pick or a
-    /// replacement-ordering prompt) before the unkept "rest pile" was moved.
-    /// Defer the rest-pile move + reveal-marker cleanup onto the parked batch
-    /// tail so it runs exactly once after the kept card's entry resolves —
-    /// otherwise the rest cards strand in the library (the early-`return` bug).
+    /// CR 614.1 + CR 616.1 + CR 701.20b: A reveal-until / dig kept-card
+    /// delivery paused before its unkept "rest pile" was moved. Defer the
+    /// rest-pile move + reveal-marker cleanup onto the parked batch tail so it
+    /// runs exactly once after the kept delivery settles — otherwise the rest
+    /// cards strand in the library (the early-`return` bug).
     RevealRestPile {
         /// The player whose continuation drains after the pile lands.
         player: PlayerId,
+        /// CR 400.7: The resolving effect's source, preserved so any rest-pile
+        /// requests rebuilt after an earlier kept-card pause retain their
+        /// original attribution. `None` retains the legacy self-anchor only for
+        /// synthesized test/compatibility states that have no ability source.
+        source_id: Option<ObjectId>,
         /// Unkept cards to move once the kept card finishes entering.
         rest_cards: Vec<ObjectId>,
         /// Where the rest pile goes (`Library` => bottom in a reposition, else
@@ -1668,6 +1926,33 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+    },
+    /// CR 608.2c + CR 616.1: The rest half of a deterministic mass Dig settled
+    /// after a replacement choice. Resume its selected-card delivery only now,
+    /// preserving the printed rest-before-kept sequence across the pause.
+    DigMassPutAllRestComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        selected: Vec<ObjectId>,
+        destination: Zone,
+        enter_tapped: EtbTapState,
+    },
+    /// CR 608.2c + CR 616.1: Every selected card of a deterministic mass Dig
+    /// has settled. Publish only cards that actually reached `destination`, then
+    /// emit the parent Dig result; the normal resolver/resume path owns the
+    /// continuation drain.
+    DigMassPutAllComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        selected: Vec<ObjectId>,
+        destination: Zone,
+    },
+    /// CR 608.2c + CR 616.1: A prior-look Dig's automatic rest move settled.
+    /// The private-look window and parent resolution event remain live until the
+    /// full replacement-aware batch has finished.
+    DigPriorLookRestComplete {
+        player: PlayerId,
+        source_id: ObjectId,
     },
     /// CR 610.3 + CR 614.1c: An "exile until ~ leaves" return (Banisher Priest /
     /// Fiend Hunter / Oblivion Ring class) routed its exiled cards back to the
@@ -1721,6 +2006,66 @@ pub enum BatchCompletion {
         sprocket: u8,
         remaining_after: u32,
     },
+    /// CR 101.4 + CR 701.23i + CR 616.1: A simultaneous scoped-library-search
+    /// delivery paused on an individual zone-change replacement. Once every
+    /// selected card has entered, continue with the once-after-all-searches
+    /// tail; the tail retains its `PlayerFilter::PerformedActionThisWay` ledger
+    /// and therefore shuffles only players who actually searched.
+    ScopedLibrarySearchDelivery {
+        player: PlayerId,
+        source_id: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_scope: Option<Box<ResolvedAbility>>,
+    },
+    /// CR 701.23a + CR 616.1: A found-card replacement sent the card through a
+    /// zone move that itself paused for replacement ordering. Resume the saved
+    /// found-card batch only after that move finishes.
+    SearchFoundZoneDelivery {
+        object_id: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<crate::types::proposed_event::BoundSearchFoundGrant>,
+    },
+    /// CR 701.42 + CR 616.1: both selected meld referents have completed their
+    /// simultaneous exile attempts. The typed context survives any replacement
+    /// ordering pauses so physical-pair validation runs exactly once afterward.
+    MeldExile { context: MeldSelection },
+    /// CR 701.42 + CR 508.4: the meld result's battlefield entry paused on an
+    /// as-enters replacement. Finish result layers/combat placement and emit the
+    /// resolution marker exactly once after delivery.
+    MeldEntry {
+        context: MeldSelection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attack_target: Option<AttackTarget>,
+    },
+    /// CR 400.6 + CR 614.5: finish a redirected meld instruction after the
+    /// second physical card has completed its independently replaceable move,
+    /// carrying the originating event's applied-set through every pause.
+    MeldRedirect { source_id: ObjectId },
+}
+
+/// Resolution-stable identity for one selected meld pair. Live filters choose
+/// these object IDs before exile; the canonical names validate their physical
+/// card identities only after the simultaneous exile instruction completes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeldSelection {
+    pub source_id: ObjectId,
+    pub partner_id: ObjectId,
+    pub controller: PlayerId,
+    pub expected_source: String,
+    pub expected_partner: String,
+    pub result: String,
+    #[serde(default)]
+    pub entry: PermanentEntryMode,
+}
+
+/// Canonical meld relation derived from the loaded [`CardDatabase`]'s meld
+/// layouts and parsed instigator instruction. Runtime resolution uses this
+/// registry after exile instead of trusting live names or arbitrary effect data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeldPairRecord {
+    pub source: String,
+    pub partner: String,
+    pub result: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1904,6 +2249,11 @@ pub enum PendingCounterPostAction {
         name: String,
         source_id: ObjectId,
     },
+    /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
+    /// choice whose entry counters paused on their own replacement choice.
+    FinishMeldEntry {
+        context: MeldSelection,
+    },
     ClearPendingEtbCounters {
         object_id: ObjectId,
     },
@@ -2075,7 +2425,7 @@ fn default_copy_retarget_effect_kind() -> EffectKind {
 /// CR 601.2g-h: Whether the engine may auto-pay an unambiguous spell mana cost
 /// or must pause after announcement so the player can activate mana abilities
 /// manually before committing payment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CastPaymentMode {
     #[default]
@@ -2105,6 +2455,28 @@ pub enum ActivationResidual {
     ManaLeg,
 }
 
+/// CR 601.2c + CR 602.2b: Tracks whether an activation's target-declaration
+/// step has completed before a later payment continuation reaches the stack.
+///
+/// This is intentionally distinct from `ActivationResidual`: the latter owns
+/// unpaid cost legs, while this lifecycle records the completed target step.
+/// A typed state prevents an explicitly declined optional target from being
+/// presented again after a cost-move replacement pause.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ActivationTargetSelection {
+    #[default]
+    Pending,
+    Settled,
+}
+
+impl ActivationTargetSelection {
+    /// `true` iff target declaration has not completed; used to omit the
+    /// default from serialized pending roots for legacy save compatibility.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
 impl ActivationResidual {
     /// `true` iff no residual detour was taken. Used as the serde
     /// `skip_serializing_if` predicate so the default does not hit the wire.
@@ -2118,6 +2490,12 @@ pub struct DeferredSacrificeSelection {
     pub object_id: ObjectId,
     pub filter: TargetFilter,
 }
+
+/// Stable identity of a permission in a spell object's `casting_permissions`
+/// vector while that spell is being cast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CastingPermissionIndex(pub usize);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingCast {
@@ -2144,11 +2522,22 @@ pub struct PendingCast {
     pub activation_cost: Option<AbilityCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_ability_index: Option<usize>,
+    /// CR 606.3: Loyalty activation history is recorded only after the loyalty
+    /// cost is successfully paid. Positive loyalty costs can pause for a CR 616.1
+    /// replacement-choice ordering prompt, so this marker carries the activator
+    /// across the pause/resume path until the ability reaches the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_loyalty_activation_player: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
     #[serde(default)]
     pub casting_variant: CastingVariant,
+    /// CR 601.2a: Object-attached permission elected for this cast. Keeping the
+    /// exact index prevents payment concessions from leaking between competing
+    /// `PlayFromExile` / `ExileWithAltCost` grants on the same object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub casting_permission_index: Option<CastingPermissionIndex>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
@@ -2262,20 +2651,254 @@ pub struct PendingCast {
     /// across a multiplayer save/restore.
     #[serde(default, skip_serializing_if = "ActivationResidual::is_none")]
     pub activation_residual: ActivationResidual,
+    /// CR 601.2c + CR 602.2b: Preserves a completed activation target step
+    /// through a cost-payment continuation without conflating it with cost legs.
+    #[serde(default, skip_serializing_if = "ActivationTargetSelection::is_pending")]
+    pub activation_target_selection: ActivationTargetSelection,
+    /// CR 118.9 + CR 601.2b: When this cast is offered a once-per-turn
+    /// `CastWithAlternativeCost` grant (As Foretold), the granting permanent's id.
+    /// Carried across the `OptionalCostChoice` round-trip so the accept handler can
+    /// stamp `ability.context.alt_cost_grant_source`; `None` for self-options and
+    /// `Unlimited` grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_cost_grant_source: Option<ObjectId>,
 }
 
 fn default_origin_zone() -> Zone {
     Zone::Hand
 }
 
-/// CR 601.2h + CR 616.1: Resume paying a discard cost after a replacement choice.
+/// CR 601.2h + CR 616.1: Tail behavior for a sequential cost move that paused
+/// on a replacement choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingCostMoveCompletion {
+    FinishPending,
+    /// The automatic prefix of an activation cost paused before its already
+    /// selected return-to-hand leg could move. Finish that selected leg before
+    /// the activation resumes and surfaces any later return costs.
+    CompleteSelectedReturnToHand {
+        selected: Vec<ObjectId>,
+        /// The automatic suffix left unpaid when its preceding self-move paused
+        /// for a replacement choice. It must finish before the selected return
+        /// move and any later return-to-hand chooser resume.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        automatic_remaining: Option<AbilityCost>,
+    },
+    PublishExileTrackedSet,
+    FinalizeCast {
+        phyrexian_choices: Option<Vec<ShardChoice>>,
+        cascade_cast_transformed: bool,
+        resolution_success_waiting_for: Option<Box<WaitingFor>>,
+        pool_before: usize,
+        prepaid_actual_mana_spent: Option<u32>,
+    },
+}
+
+/// CR 605.3b: Selects whether completing a mana-ability cost payment may ask
+/// the activator to choose the produced mana. An auto-tap plan already selected
+/// production; a direct activation has not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityCostResolutionMode {
+    #[default]
+    Interactive,
+    AutoResolved,
+}
+
+/// CR 605.3b + CR 616.1: Re-entry ownership for a costed parent mana ability.
+/// This state exists only with a parent frame, so a parentless cursor cannot be
+/// marked suspended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityCostParentLifecycle {
+    #[default]
+    Synchronous,
+    Suspended,
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A parent mana ability while
+/// one of its mana sub-cost sources is resolving. The parent cursor still
+/// contains its current Mana component, because that component is unpaid until
+/// the child has produced mana and the parent can spend it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityCostParent {
+    pub pending: Box<PendingManaAbility>,
+    pub cursor: Box<ManaAbilityCostCursor>,
+    #[serde(default)]
+    pub lifecycle: ManaAbilityCostParentLifecycle,
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: The unpaid suffix of an
+/// activated mana ability's cost. The selected-list cursors prevent a
+/// replacement-choice resume from re-paying components or selections that
+/// already completed before the interrupted move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityCostCursor {
+    pub remaining: Vec<AbilityCost>,
+    /// Direct auto-tap resolution has already chosen its production path and
+    /// therefore must not surface an output-color prompt after a paused cost
+    /// move resumes. Interactive activation retains the prompt.
+    #[serde(default)]
+    pub resolution_mode: ManaAbilityCostResolutionMode,
+    /// CR 605.3c: Ancestor mana sources excluded while a nested mana sub-cost
+    /// is being auto-paid. Serialized with the root so a replacement choice
+    /// cannot re-enable a suspended source after the move resumes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_sources: Vec<ObjectId>,
+    /// CR 107.4b + CR 118.10: Colored demand from an outer mana payment.
+    /// Preserving it prevents a resumed nested activation from consuming mana
+    /// reserved for the outer cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_cost_demand: Option<[u32; 5]>,
+    #[serde(default)]
+    pub next_tapper: usize,
+    #[serde(default)]
+    pub next_discard: usize,
+    #[serde(default)]
+    pub next_exiled: usize,
+    #[serde(default)]
+    pub next_sacrificed: usize,
+    /// The current selected-exile component, after the move that paused has
+    /// been consumed. Its remaining objects must move before the cost cursor
+    /// advances to the next component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_exile_remaining: Option<Vec<ObjectId>>,
+    /// The current selected-sacrifice component, after the sacrifice that
+    /// paused has been consumed. Its remaining objects must be sacrificed
+    /// before the cost cursor advances to the next component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_sacrifice_remaining: Option<Vec<ObjectId>>,
+    /// CR 603.2 + CR 603.3b: Cost events produced before a replacement-choice
+    /// pause cannot reach the ordinary post-action pipeline. Keep them with
+    /// their typed payment root so observers are collected exactly once when
+    /// that root completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_cost_events: Vec<GameEvent>,
+    /// Ephemeral split point for the active reducer action. It lets a newly
+    /// nested typed root prepend its parent's unscanned batch without copying
+    /// the local events this root already captured on pause. The split is
+    /// consumed before state is returned to a player, so it is not serialized.
+    #[serde(skip)]
+    pub current_action_deferred_start: usize,
+    /// A nested costed mana source owns this parent until it completes. This
+    /// is a typed activation stack, never an effect continuation: on child
+    /// completion the parent resumes its current unpaid Mana component without
+    /// replaying any paid prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Box<ManaAbilityCostParent>>,
+}
+
+/// CR 601.2h + CR 602.2b + CR 616.1: The typed terminal path for a
+/// replacement-paused sacrifice cost. Selected sacrifices remove their
+/// activation-cost component; a SelfRef sacrifice resumes the automatic
+/// additional-cost path without replaying the sacrifice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PendingSacrificeCostCompletion {
+    SelectedNonSelf,
+    SelfRef,
+}
+
+/// CR 601.2h + CR 614.1 + CR 616.1: A cost move paused for a replacement
+/// choice. `Cast` resumes a cast or activation after its next object is
+/// delivered. `ReplacementMayCost` keeps the outer optional replacement parked
+/// while an inner MayCost move finishes through the replacement pipeline.
+/// `Foretell` records the special action until its replacement-aware exile move
+/// has been delivered or prevented. `ManaAbilityPayment` owns the exact
+/// activation and unpaid payment cursor until the move has settled.
+/// `DelveManaPayment` owns the single Delve fuel's post-move payment state;
+/// the zone pipeline's delivery tail owns its delivered-only exile link.
+/// `SacrificeForCost` owns a full selected sacrifice component across one or
+/// more replacement-choice action boundaries, including its event span and
+/// LKI record identities. `CollectEvidencePayment` and `UnlessBouncePayment`
+/// retain their selected-object program counters and exact completion tails.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PendingCostMoveResume {
+    Cast {
+        player: PlayerId,
+        pending: Option<Box<PendingCast>>,
+        chosen: Vec<ObjectId>,
+        /// Index into `chosen` whose move completes during
+        /// `handle_replacement_choice`; resumption starts with the next object.
+        paused_at_index: usize,
+        destination: Zone,
+        completion: PendingCostMoveCompletion,
+    },
+    SacrificeForCost {
+        player: PlayerId,
+        pending: Box<PendingCast>,
+        chosen: Vec<ObjectId>,
+        /// Index into `chosen` whose sacrifice completes or is prevented by
+        /// the replacement action. Resumption continues at the next index.
+        paused_at_index: usize,
+        completion: PendingSacrificeCostCompletion,
+        /// CR 603.2 + CR 603.10a: Cost events emitted in earlier actions of
+        /// this one logical sacrifice payment. They are stamped and settled
+        /// only when every selected sacrifice has completed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deferred_cost_events: Vec<GameEvent>,
+        /// CR 603.10a: Per-turn LKI record identities emitted by completed
+        /// sacrifices before a replacement-choice boundary.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        departure_record_indices: Vec<usize>,
+    },
+    ReplacementMayCost {
+        source_id: ObjectId,
+        /// The object whose delivery is currently waiting on a replacement
+        /// choice. It is indexed only if it actually arrives in exile.
+        current: ObjectId,
+        remaining: Vec<ObjectId>,
+        paid_count: i32,
+        /// The outer optional replacement is restored only after every inner
+        /// cost move is delivered or prevented.
+        outer_replacement: Option<Box<PendingReplacement>>,
+    },
+    Foretell {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: ManaCost,
+        turn_foretold: u32,
+    },
+    DelveManaPayment {
+        player: PlayerId,
+        fuel_id: ObjectId,
+    },
+    /// CR 701.59a + CR 614.1 + CR 616.1: The selected evidence cards are
+    /// exiled one at a time as a cost. A replacement choice settles the card
+    /// at `paused_at_index`; resumption continues with the unpaid suffix and
+    /// performs the linked completion exactly once.
+    CollectEvidencePayment {
+        player: PlayerId,
+        chosen: Vec<ObjectId>,
+        paused_at_index: usize,
+        resume: Box<CollectEvidenceResume>,
+    },
+    /// CR 118.12 + CR 614.1 + CR 616.1: A selected return-to-hand unless cost
+    /// awaits its replacement outcome. Its typed tail either surfaces the next
+    /// return choice or records that the unless payment avoided the effect.
+    UnlessBouncePayment {
+        player: PlayerId,
+        moved: ObjectId,
+        permanents: Vec<ObjectId>,
+        pending_effect: Box<ResolvedAbility>,
+        remaining: u32,
+    },
+    ManaAbilityPayment {
+        pending: Box<PendingManaAbility>,
+        cursor: ManaAbilityCostCursor,
+    },
+}
+
+/// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement
+/// choice. The object at `paused_at_index` completes during
+/// `handle_replacement_choice`; resumption starts with the following object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingDiscardForCostResume {
     pub player: PlayerId,
     pub pending: PendingCast,
     pub chosen: Vec<ObjectId>,
-    /// Index into `chosen` whose discard was paused; that discard completes
-    /// during `handle_replacement_choice` before this resume runs.
+    /// Index into `chosen` whose move was paused; that move completes during
+    /// `handle_replacement_choice` before this resume runs.
     pub paused_at_index: usize,
 }
 
@@ -2295,8 +2918,10 @@ impl PendingCast {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
@@ -2318,6 +2943,8 @@ impl PendingCast {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            activation_target_selection: ActivationTargetSelection::Pending,
+            alt_cost_grant_source: None,
         }
     }
 
@@ -2350,11 +2977,30 @@ pub enum CollectEvidenceResume {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaAbilityResume {
     Priority,
+    /// CR 116.2g + CR 702.139a + CR 605.3b + CR 616.1: A companion special
+    /// action whose auto-tapped mana source paused on a replacement-aware cost
+    /// move. `cost` is the final cost locked at action initiation, after
+    /// special-action reductions; resumption must not recompute it against a
+    /// changed board.
+    CompanionToHand {
+        player: PlayerId,
+        cost: ManaCost,
+    },
     ManaPayment {
+        /// The payer of the outer spell/ability cost. This is intentionally
+        /// independent from `PendingManaAbility::player`: Assist can activate
+        /// a helper-controlled mana source while returning to the caster's
+        /// `WaitingFor::ManaPayment` root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outer_player: Option<PlayerId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         convoke_mode: Option<ConvokeMode>,
     },
     UnlessPayment {
+        /// The player who owns the outer unless-payment poll. It can differ
+        /// from the controller of a helper mana source activated while paying.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outer_player: Option<PlayerId>,
         /// CR 118.12: Carried-through cost from `WaitingFor::UnlessPayment`.
         /// See the matching `WaitingFor::UnlessPayment.cost` doc-comment for
         /// the legacy-shape deserialization contract. Boxed so the
@@ -2372,6 +3018,33 @@ pub enum ManaAbilityResume {
         /// mana ability mid-payment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+    },
+    /// CR 118.12 + CR 605.3b + CR 616.1: A resolving `Effect::PayCost` whose
+    /// auto-tapped mana source paused on a replaceable cost move. The exact
+    /// payer-adjusted ability and concrete outer cost are retried by the cost
+    /// authority after that source finishes; this is not an effect-chain
+    /// continuation.
+    EffectPayCost {
+        payer: PlayerId,
+        return_to: PlayerId,
+        ability: Box<ResolvedAbility>,
+        cost: Box<AbilityCost>,
+    },
+    /// CR 107.4f + CR 601.2f-h + CR 605.3b + CR 616.1: Submitted
+    /// Phyrexian shard choices remain authoritative while a helper's or
+    /// caster's auto-tapped mana source pauses on a replaceable cost move.
+    /// The pending cast is restored by the finalizer; this root retries that
+    /// exact finalization rather than falling back to either player's priority.
+    PhyrexianCastPayment {
+        caster: PlayerId,
+        choices: Vec<ShardChoice>,
+    },
+    /// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: An automatic cast or
+    /// mana-leg activation paused while an auto-tapped source paid a cost.
+    /// The live `PendingCast` is the authoritative root; retry its shared
+    /// finalizer rather than returning to priority or opening a manual window.
+    FinalizePendingManaPayment {
+        player: PlayerId,
     },
 }
 
@@ -2418,7 +3091,7 @@ pub enum ManaChoicePrompt {
 
 /// CR 608.2d + CR 605.3b: Player's answer to a `ManaChoicePrompt`, carried by
 /// `GameAction::ChooseManaColor`. Shape mirrors the prompt variant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ManaChoice {
     SingleColor(ManaType),
@@ -2449,6 +3122,13 @@ pub struct PendingManaAbility {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
     pub resume: ManaAbilityResume,
+    /// CR 605.3b + CR 616.1: An auto-tapped mana source normally returns to
+    /// its immediate caller. If one of its own cost moves pauses, this is the
+    /// serialized outer payment root that must be promoted before resumption.
+    /// Keeping it separate prevents synchronous auto-taps from replaying an
+    /// already-live outer payment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_move_resume: Option<ManaAbilityResume>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_tappers: Vec<ObjectId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2511,6 +3191,15 @@ pub struct TargetSelectionSlot {
     pub legal_targets: Vec<TargetRef>,
     #[serde(default)]
     pub optional: bool,
+    /// CR 601.2c + CR 115.1: The player who *announces* (chooses the target for)
+    /// this slot. `None` (the default) means the spell/ability's controller — the
+    /// CR-601.2c default announcer. `Some(player)` is set only when the slot's
+    /// Oracle text routes the announcement to another player ("of an opponent's
+    /// choice", e.g. Volcanic Offering). The spell is
+    /// still controlled, paid for, and put on the stack by its controller
+    /// (CR 115.1) regardless of who announced a slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chooser: Option<PlayerId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2542,7 +3231,7 @@ pub enum LayersDirty {
     /// Only these objects entered the battlefield since the last flush and no
     /// other layer-affecting mutation occurred. Candidate for the incremental
     /// fast path.
-    EnteredObjects(HashSet<ObjectId>),
+    EnteredObjects(BTreeSet<ObjectId>),
     /// A full battlefield re-evaluation is required.
     Full,
 }
@@ -2565,7 +3254,7 @@ impl LayersDirty {
     pub fn mark_entered(&mut self, id: ObjectId) {
         match self {
             Self::Full => {}
-            Self::Clean => *self = Self::EnteredObjects(HashSet::from([id])),
+            Self::Clean => *self = Self::EnteredObjects(BTreeSet::from([id])),
             Self::EnteredObjects(s) => {
                 s.insert(id);
             }
@@ -2696,7 +3385,7 @@ pub enum ShardOptions {
 }
 
 /// CR 107.4f + CR 601.2f: The caster's resolved choice for one Phyrexian shard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ShardChoice {
     /// Pay one mana of the shard's color (or either component color for hybrid-Phyrexian).
@@ -2736,6 +3425,14 @@ pub struct PlayerDeckPool {
     pub registered_sideboard: std::sync::Arc<Vec<DeckEntry>>,
     pub current_main: std::sync::Arc<Vec<DeckEntry>>,
     pub current_sideboard: std::sync::Arc<Vec<DeckEntry>>,
+    /// Commander-family companion registered outside the 100-card deck. This
+    /// is intentionally distinct from `current_sideboard`: Commander games do
+    /// not use sideboards (CR 903.5e), while a companion remains outside the
+    /// game until it is revealed (CR 702.139a).
+    #[serde(default)]
+    pub registered_companion: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_companion: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
@@ -2763,6 +3460,67 @@ pub struct PlayerDeckPool {
     /// compatibility with saved states and test fixtures that omit the field.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+}
+
+/// The authoritative source of a companion offered during pre-game setup.
+///
+/// Keeping the provenance in the offered value (rather than exposing an
+/// untyped index) makes a response self-validating across independent deck
+/// pools and prevents a stale client from selecting a different card after a
+/// pool changes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CompanionChoiceSource {
+    Sideboard { index: usize },
+    Dedicated,
+}
+
+/// One companion offer published by `WaitingFor::CompanionReveal`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct CompanionRevealChoice {
+    pub name: String,
+    pub source: CompanionChoiceSource,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CompanionRevealChoiceWire {
+    Current {
+        name: String,
+        source: CompanionChoiceSource,
+    },
+    /// Legacy saves encoded each normal-format offer as `(name, sideboard_index)`.
+    /// The old engine never offered a Commander companion, so that representation
+    /// unambiguously maps to the typed sideboard source.
+    LegacySideboard((String, usize)),
+}
+
+impl<'de> Deserialize<'de> for CompanionRevealChoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match CompanionRevealChoiceWire::deserialize(deserializer)? {
+            CompanionRevealChoiceWire::Current { name, source } => Ok(Self { name, source }),
+            CompanionRevealChoiceWire::LegacySideboard((name, index)) => Ok(Self {
+                name,
+                source: CompanionChoiceSource::Sideboard { index },
+            }),
+        }
+    }
+}
+
+/// A player's complete response to a pre-game companion offer.
+///
+/// This is deliberately an enum rather than `Option<CompanionRevealChoice>`:
+/// serde treats a missing `Option` field as `None`, which would turn an
+/// incompatible legacy `card_index` payload into a silent decline. The wire
+/// response must make both revealing and declining explicit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CompanionDeclaration {
+    Reveal(CompanionRevealChoice),
+    Decline,
 }
 
 /// CR 400.11/400.11a/400.11b: Tracks sideboard cards brought into this game
@@ -2970,7 +3728,7 @@ impl VoteActor {
 /// self-documenting domain and the parser/AI cannot accidentally swap
 /// pile semantics. Pile A is the partitioner's chosen subset; pile B is
 /// `eligible \ pile_a`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PileSide {
     A,
@@ -3229,11 +3987,17 @@ pub enum CastOfferKind {
         hit_card: ObjectId,
         exiled_misses: Vec<ObjectId>,
         source_mv: u32,
+        /// CR 702.85a: Preserve the cascading ability's source across the
+        /// cast-offer boundary for a declined or rejected cleanup batch.
+        source_id: ObjectId,
     },
     /// CR 701.57a: Discover — cast the discovered card or put it to hand.
     Discover {
         hit_card: ObjectId,
         exiled_misses: Vec<ObjectId>,
+        /// CR 701.57a: Preserve the resolving discover ability's source across
+        /// the cast-offer boundary for a declined or rejected cleanup batch.
+        source_id: ObjectId,
         /// CR 701.57a: "Discover N" — the resulting spell's mana value must be
         /// less than or equal to N for the cast to proceed. Carried on the
         /// offer so the cast-during-resolution path can build the `ManaValue`
@@ -3250,6 +4014,9 @@ pub enum CastOfferKind {
         hit_card: ObjectId,
         remaining_hits: Vec<ObjectId>,
         revealed_misses: Vec<ObjectId>,
+        /// CR 702.60a: Preserve the resolving Ripple source for its shared
+        /// bottom-placement cleanup.
+        source_id: ObjectId,
     },
     /// CR 608.2g + CR 601.2 + CR 118.9: Interactive free-cast window opened by
     /// `Effect::FreeCastFromZones` (Invoke Calamity). The controller repeatedly
@@ -3327,11 +4094,150 @@ pub struct LifeRedistributionOption {
     pub assignment: Vec<(PlayerId, i32)>,
 }
 
+/// Private, live-only state for the finite pre-cast Chain-copy shortcut.
+///
+/// The public `WaitingFor` variants deliberately carry only actor-facing
+/// opaque capabilities and display counts. The verified transcript, selected
+/// route, suppression latch, and replay controls stay engine-private so a
+/// viewer cannot fabricate or recover a route from serialized game state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct PrecastShortcutRuntime {
+    pub(crate) next_epoch: u64,
+    pub(crate) offer: Option<PrecastShortcutOfferRuntime>,
+    pub(crate) suppressed_cast: Option<ObjectId>,
+    pub(crate) must_diverge: Option<PlayerId>,
+    pub(crate) materializing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PrecastShortcutOfferRuntime {
+    pub(crate) caster: PlayerId,
+    pub(crate) spell_id: ObjectId,
+    pub(crate) epoch: u64,
+    pub(crate) route_id: u64,
+    pub(crate) responders: Vec<PlayerId>,
+    pub(crate) transcript: Vec<PrecastShortcutReplayStep>,
+    pub(crate) breakpoints: Vec<PrecastShortcutBreakpoint>,
+    pub(crate) shortened: Option<PrecastShortcutBreakpoint>,
+}
+
+/// One exact normal-reducer action in the private route prefix. A shortener
+/// never supplies these actions; they are authored and replayed only by the
+/// engine after every responder has answered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PrecastShortcutReplayStep {
+    pub(crate) actor: PlayerId,
+    pub(crate) action: crate::types::actions::GameAction,
+}
+
+/// A reducer-valid, actor-owned pass boundary. `prefix_length` indexes the
+/// private replay transcript; the public protocol exposes only `id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PrecastShortcutBreakpoint {
+    pub(crate) id: u64,
+    pub(crate) owner: PlayerId,
+    pub(crate) prefix_length: usize,
+    pub(crate) expected_priority_holder: PlayerId,
+    pub(crate) expected_active_player: PlayerId,
+    pub(crate) expected_priority_passes: BTreeSet<PlayerId>,
+    pub(crate) fingerprint: u64,
+}
+
+/// Trusted-persistence-only envelope for runtime data that must never cross a
+/// raw or public `GameState` serialization boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedGameStateEnvelope {
+    state: GameState,
+    #[serde(default)]
+    precast_shortcut_runtime: PrecastShortcutRuntime,
+}
+
+impl TrustedGameStateEnvelope {
+    /// Captures a trusted persistence snapshot without changing `GameState`'s
+    /// raw serialization contract.
+    pub fn capture(state: GameState) -> Self {
+        Self {
+            precast_shortcut_runtime: state.precast_shortcut_runtime.clone(),
+            state,
+        }
+    }
+
+    /// Restores private runtime data and rotates opaque capabilities before the
+    /// restored state is exposed to clients.
+    pub fn into_game_state(self) -> GameState {
+        let mut state = self.state;
+        state.precast_shortcut_runtime = self.precast_shortcut_runtime;
+        crate::game::precast_copy_shortcut::rekey_after_trusted_restore(&mut state);
+        state
+    }
+}
+
+/// Decodes both current trusted snapshots and historical raw `GameState`
+/// snapshots. The raw form has no pre-cast route authority, so restoring it
+/// always drops any protocol wait before it reaches a live game session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum PersistedGameState {
+    Raw(Box<GameState>),
+    Trusted(Box<TrustedGameStateEnvelope>),
+}
+
+impl<'de> Deserialize<'de> for PersistedGameState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("state").is_some() {
+            serde_json::from_value(value)
+                .map(|envelope| Self::Trusted(Box::new(envelope)))
+                .map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(|state| Self::Raw(Box::new(state)))
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+impl PersistedGameState {
+    /// Captures a current trusted snapshot for a persistence boundary.
+    pub fn capture(state: GameState) -> Self {
+        Self::Trusted(Box::new(TrustedGameStateEnvelope::capture(state)))
+    }
+
+    /// Restores the persisted form through the appropriate trust boundary.
+    pub fn into_game_state(self) -> GameState {
+        match self {
+            Self::Raw(state) => {
+                let mut state = *state;
+                crate::game::precast_copy_shortcut::normalize_untrusted_restore(&mut state);
+                state
+            }
+            Self::Trusted(envelope) => (*envelope).into_game_state(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
     Priority {
         player: PlayerId,
+    },
+    /// CR 608.2d + CR 701.42: choose the exact pair of current battlefield
+    /// referents the meld instruction will exile. Candidate identity is frozen
+    /// in the tuples; the physical meld-card check intentionally happens later.
+    MeldPairChoice {
+        player: PlayerId,
+        choices: Vec<MeldSelection>,
+    },
+    /// CR 508.4a: choose what the meld result enters attacking. The engine
+    /// supplies the complete legal topology; clients only return one member.
+    MeldAttackTargetChoice {
+        player: PlayerId,
+        context: MeldSelection,
+        valid_targets: Vec<AttackTarget>,
     },
     /// CR 103.5 + 103.5b: London mulligan — each un-kept player decides
     /// simultaneously. The `pending` list holds every player who has not yet
@@ -3721,6 +4627,10 @@ pub enum WaitingFor {
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {
         player: PlayerId,
+        /// CR 701.23a: Owner of the library component actually included in
+        /// this search after prohibitions are applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_owner: Option<PlayerId>,
         /// Object IDs of legal choices (pre-filtered from library).
         cards: Vec<ObjectId>,
         /// How many cards to select.
@@ -4342,6 +5252,25 @@ pub enum WaitingFor {
         remaining_players: Vec<PlayerId>,
         proposal: crate::analysis::loop_check::ShortcutProposal,
     },
+    /// CR 732.2a: an engine-proved finite, pre-cast shortcut proposal. This
+    /// family is intentionally separate from `LoopShortcut`; it is not a
+    /// generic loop declaration and exposes no replay transcript.
+    PrecastCopyShortcutOffer {
+        proposer: PlayerId,
+        epoch: u64,
+        route_count: u8,
+    },
+    /// CR 732.2b/c: a responder's accept-or-shorten turn for the finite
+    /// pre-cast route. `breakpoint_ids` are opaque, engine-issued pass
+    /// boundaries owned by this responder.
+    RespondToPrecastCopyShortcut {
+        player: PlayerId,
+        epoch: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        breakpoint_ids: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining_players: Vec<PlayerId>,
+    },
     /// CR 118.12: Opponent must decide whether to pay a cost to prevent an effect.
     /// Used by "counter unless pays {X}" (Mana Leak), tax triggers (Esper Sentinel),
     /// and ward costs (CR 702.21a).
@@ -4628,6 +5557,26 @@ pub enum WaitingFor {
         candidates: Vec<PlayerId>,
         ability: Box<crate::types::ability::ResolvedAbility>,
     },
+    /// CR 601.2c + CR 115.1: A spell with an "of an opponent's choice" target slot
+    /// is being cast in a multiplayer game; the controller (`player`) chooses
+    /// which opponent will announce that slot's target. Only entered with two or
+    /// more opponents (one opponent has no decision). `candidates` is the legal
+    /// opponent set; `choice_index` and `choice_count` identify the printed
+    /// opponent-choice target group currently being assigned, so a display
+    /// client can distinguish consecutive prompts without reinterpreting the
+    /// pending spell. `pending_cast` carries the in-flight cast so target
+    /// declaration resumes (deferred) once the announcer is chosen.
+    ChooseAnnouncingOpponent {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+        choice_index: usize,
+        choice_count: usize,
+        /// The primary type constraint of the target group, when there is one.
+        /// This is a display fact only: target legality remains engine-owned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_type: Option<crate::types::card_type::CoreType>,
+        pending_cast: Box<PendingCast>,
+    },
     /// CR 701.30c: After a clash, each player puts their revealed card on top or
     /// bottom of their library. Choices are made in APNAP order. `remaining` holds
     /// the next player/card pairs still awaiting a choice.
@@ -4815,8 +5764,9 @@ pub enum WaitingFor {
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
         player: PlayerId,
-        /// Eligible companion cards from sideboard: (card_name, sideboard_index).
-        eligible_companions: Vec<(String, usize)>,
+        /// The exact companions the player may reveal, including their source.
+        /// Responses must exactly equal one of these offered values.
+        eligible_companions: Vec<CompanionRevealChoice>,
     },
     /// CR 704.5j: Player chooses which legendary permanent to keep.
     /// The rest are put into their owners' graveyards (not destroyed — indestructible does not apply).
@@ -4925,7 +5875,8 @@ pub enum WaitingFor {
     /// each subsequent player in APNAP order.
     EachPlayerCopyChosenSelection {
         player: PlayerId,
-        /// The choosing player's own eligible objects (public battlefield info).
+        /// Eligible objects for this chooser — either their own or their
+        /// seat-neighbor's, per `choose_scope` (all public battlefield info).
         eligible: Vec<TargetRef>,
         min: u32,
         max: u32,
@@ -4934,6 +5885,10 @@ pub enum WaitingFor {
         copy_modifications: Vec<ContinuousModification>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<CopyScale>,
+        /// CR 102.1 + CR 103.1: whose battlefield this chooser's pool was drawn
+        /// from, so live re-validation (CR 608.2c) uses the right controller.
+        #[serde(default)]
+        choose_scope: CopyChooseScope,
         source_id: ObjectId,
         source_controller: PlayerId,
         /// Players still to choose after the current one (APNAP order).
@@ -4976,6 +5931,37 @@ pub enum WaitingFor {
         /// Creatures kept by previous players — protected from the sacrifice sweep.
         all_kept: Vec<ObjectId>,
         /// APNAP-ordered set of players within the effect's `player_scope`.
+        #[serde(default)]
+        scoped_players: Vec<PlayerId>,
+    },
+    /// CR 101.4 + CR 701.21a: The player protects exactly `count` of the
+    /// eligible permanents; every other in-scope permanent is sacrificed after
+    /// all scoped players have chosen. Used by the generic exact keeper
+    /// constraint, not a card-specific choice shape.
+    KeepExactPermanentsChoice {
+        player: PlayerId,
+        target_player: PlayerId,
+        eligible: Vec<ObjectId>,
+        /// Exact number of permanents the engine requires the player to keep,
+        /// already capped to this prompt's eligible pool under CR 609.3's
+        /// "do as much as possible" rule. Display clients render this value
+        /// directly; they must not derive a second legality rule from
+        /// `eligible.len()`.
+        #[serde(alias = "count")]
+        required_count: usize,
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
+        #[serde(default)]
+        chooser_scope: CategoryChooserScope,
+        source_id: ObjectId,
+        #[serde(default)]
+        source_controller: PlayerId,
+        #[serde(default)]
+        remaining_players: Vec<PlayerId>,
+        #[serde(default)]
+        all_kept: Vec<ObjectId>,
         #[serde(default)]
         scoped_players: Vec<PlayerId>,
     },
@@ -5152,7 +6138,7 @@ pub struct CopyTargetSlot {
 
 /// CR 510.1c: Optional combat-damage assignment mode for attackers with text like
 /// "you may have this creature assign its combat damage as though it weren't blocked."
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum CombatDamageAssignmentMode {
     #[default]
     Normal,
@@ -5239,6 +6225,8 @@ impl WaitingFor {
     pub fn variant_name(&self) -> &'static str {
         match self {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
+            WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
@@ -5306,6 +6294,8 @@ impl WaitingFor {
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
             WaitingFor::LoopShortcut { .. } => "LoopShortcut",
             WaitingFor::RespondToShortcut { .. } => "RespondToShortcut",
+            WaitingFor::PrecastCopyShortcutOffer { .. } => "PrecastCopyShortcutOffer",
+            WaitingFor::RespondToPrecastCopyShortcut { .. } => "RespondToPrecastCopyShortcut",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
@@ -5329,6 +6319,7 @@ impl WaitingFor {
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::SeparatePilesChooseOpponent { .. } => "SeparatePilesChooseOpponent",
@@ -5346,6 +6337,7 @@ impl WaitingFor {
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
             WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
             WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
+            WaitingFor::KeepExactPermanentsChoice { .. } => "KeepExactPermanentsChoice",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
@@ -5382,6 +6374,8 @@ impl WaitingFor {
                 }
             }
             WaitingFor::Priority { player }
+            | WaitingFor::MeldPairChoice { player, .. }
+            | WaitingFor::MeldAttackTargetChoice { player, .. }
             | WaitingFor::ManaPayment { player, .. }
             | WaitingFor::ChooseXValue { player, .. }
             | WaitingFor::TargetSelection { player, .. }
@@ -5454,6 +6448,7 @@ impl WaitingFor {
             | WaitingFor::PairChoice { player, .. }
             | WaitingFor::OpponentMayChoice { player, .. }
             | WaitingFor::RespondToShortcut { player, .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { player, .. }
             | WaitingFor::TributeChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::UnlessPaymentChooseCost { player, .. }
@@ -5462,6 +6457,7 @@ impl WaitingFor {
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
             | WaitingFor::ClashChooseOpponent { player, .. }
+            | WaitingFor::ChooseAnnouncingOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
@@ -5473,6 +6469,7 @@ impl WaitingFor {
             | WaitingFor::CategoryChoice { player, .. }
             | WaitingFor::EachPlayerCopyChosenSelection { player, .. }
             | WaitingFor::KeepWithinTotalPowerChoice { player, .. }
+            | WaitingFor::KeepExactPermanentsChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::AssignBlockerDamage { player, .. }
@@ -5505,6 +6502,7 @@ impl WaitingFor {
             // CR 732.2a: the loop-shortcut proposer is the player with priority, carried
             // in `proposer` (not a `player` field) — dedicated arm like `AssistPayment`.
             WaitingFor::LoopShortcut { proposer, .. } => Some(*proposer),
+            WaitingFor::PrecastCopyShortcutOffer { proposer, .. } => Some(*proposer),
             WaitingFor::GameOver { .. } => None,
         }
     }
@@ -5556,7 +6554,8 @@ impl WaitingFor {
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
             | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
-            | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
+            | WaitingFor::HarmonizeTapChoice { pending_cast, .. }
+            | WaitingFor::ChooseAnnouncingOpponent { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
@@ -5589,7 +6588,8 @@ impl WaitingFor {
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
             | WaitingFor::CostTypeChoice { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
-            | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
+            | WaitingFor::HarmonizeTapChoice { pending_cast, .. }
+            | WaitingFor::ChooseAnnouncingOpponent { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
@@ -5698,7 +6698,7 @@ impl WaitingFor {
 ///
 /// The session owner is compared against the active player (CR 102.1) at each
 /// turn start (CR 500.1) to decide whether the session survives the boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum TurnBoundary {
     /// Clears at the next turn start (i.e. the end of the session owner's
     /// current turn), regardless of whose turn begins. Legacy behavior; the
@@ -5717,7 +6717,7 @@ pub enum TurnBoundary {
 /// `GameAction::SetPhaseStops`. Keeping them out of the request preserves a
 /// single source of truth and lets the preference change mid-session without
 /// requiring a new auto-pass request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AutoPassRequest {
     UntilStackEmpty,
@@ -6584,16 +7584,61 @@ pub struct StaticSourceIndex {
 /// generalization of the `pending_optional_trigger_event` /
 /// `pending_optional_trigger_match_count` pair (The Ur-Dragon) and the
 /// `WaitingFor::ChooseObjectsSelection` save/restore.
+///
+/// Mechanism map (as of the `PendingContinuation.trigger_context` fix):
+/// - **Primary / generic** — `PendingContinuation.trigger_context` (this type)
+///   preserves the trigger context across ANY continuation-based pause, and is
+///   the mechanism to reach for going forward.
+/// - **Narrower pre-existing #1** — `GameState.pending_choose_zone_trigger_context`
+///   (this type), used only by `ChooseFromZoneChoice`.
+/// - **Narrower pre-existing #2** — `WaitingFor::ChooseObjectsSelection.trigger_event`,
+///   used only by that specific choice type.
+///
+/// The two narrower mechanisms solve the same conceptual problem for their
+/// specific pause types and were deliberately NOT deleted or consolidated as
+/// part of the `PendingContinuation` fix. Both remain independently functional,
+/// giving redundant (not conflicting) protection to the pauses they cover —
+/// those pauses ALSO route through `PendingContinuation`, so they are now
+/// additionally covered by the primary mechanism. Consolidating all three onto
+/// the single `PendingContinuation.trigger_context` path is a real, identified
+/// follow-up opportunity, deliberately deferred here to keep that fix's blast
+/// radius on the reported bug rather than bundling a deletion of currently
+/// working code into a user-facing bugfix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvingTriggerContext {
     /// CR 608.2: The triggering event — source of `extract_amount_from_event`.
     pub event: Option<GameEvent>,
+    /// CR 603.2c + CR 603.7c: the plural batched-trigger event list mirroring
+    /// GameState::current_trigger_events — added so a batched trigger's
+    /// plural-event-context reads during a drained continuation don't fall back
+    /// to just the singular event.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<GameEvent>,
     /// CR 603.2c: The firing trigger's filtered subject/occurrence count (the
     /// batched "that many"); outranks the event amount in the cascade.
     pub match_count: Option<u32>,
     /// CR 706.4: A die result recorded earlier in this resolution ("roll a die …
     /// remove that many counters"); outranks the event amount in the cascade.
     pub die_result: Option<i32>,
+}
+
+impl ResolvingTriggerContext {
+    /// CR 608.2: Snapshot the live, resolution-scoped trigger context for
+    /// later replay across an interactive pause. `None` when nothing is
+    /// live (an activated ability or untriggered resolution has no context
+    /// to preserve).
+    pub(crate) fn capture(state: &GameState) -> Option<Self> {
+        (state.current_trigger_event.is_some()
+            || !state.current_trigger_events.is_empty()
+            || state.current_trigger_match_count.is_some()
+            || state.die_result_this_resolution.is_some())
+        .then(|| Self {
+            event: state.current_trigger_event.clone(),
+            events: state.current_trigger_events.clone(),
+            match_count: state.current_trigger_match_count,
+            die_result: state.die_result_this_resolution,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6611,13 +7656,107 @@ pub struct LiminalEntry {
     pub spec_resume: Option<Box<TokenSpec>>,
     pub enter_tapped: EtbTapState,
     pub enter_with_counters: Vec<(CounterType, u32)>,
+    #[serde(default)]
+    pub kind: LiminalEntryKind,
+    /// CR 614.5: applied replacement identities from the projected entry. Meld
+    /// redirects seed both physical component moves with this shared set.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingLiminalEntryResume {
-    pub source_id: ObjectId,
-    pub player: PlayerId,
-    pub event: ProposedEvent,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum LiminalEntryKind {
+    #[default]
+    Token,
+    Meld {
+        context: MeldSelection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attack_target: Option<AttackTarget>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub enum PendingLiminalEntryResume {
+    Token {
+        source_id: ObjectId,
+        player: PlayerId,
+        event: ProposedEvent,
+    },
+    Meld {
+        source_id: ObjectId,
+        player: PlayerId,
+        context: MeldSelection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attack_target: Option<AttackTarget>,
+    },
+}
+
+#[derive(Deserialize)]
+enum TaggedPendingLiminalEntryResume {
+    Token {
+        source_id: ObjectId,
+        player: PlayerId,
+        event: ProposedEvent,
+    },
+    Meld {
+        source_id: ObjectId,
+        player: PlayerId,
+        context: MeldSelection,
+        #[serde(default)]
+        attack_target: Option<AttackTarget>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PendingLiminalEntryResumeCompat {
+    Tagged(TaggedPendingLiminalEntryResume),
+    LegacyToken {
+        source_id: ObjectId,
+        player: PlayerId,
+        event: ProposedEvent,
+    },
+}
+
+impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(
+            match PendingLiminalEntryResumeCompat::deserialize(deserializer)? {
+                PendingLiminalEntryResumeCompat::Tagged(
+                    TaggedPendingLiminalEntryResume::Token {
+                        source_id,
+                        player,
+                        event,
+                    },
+                )
+                | PendingLiminalEntryResumeCompat::LegacyToken {
+                    source_id,
+                    player,
+                    event,
+                } => Self::Token {
+                    source_id,
+                    player,
+                    event,
+                },
+                PendingLiminalEntryResumeCompat::Tagged(
+                    TaggedPendingLiminalEntryResume::Meld {
+                        source_id,
+                        player,
+                        context,
+                        attack_target,
+                    },
+                ) => Self::Meld {
+                    source_id,
+                    player,
+                    context,
+                    attack_target,
+                },
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6648,6 +7787,11 @@ pub struct GameState {
     /// state equality — it is empty outside the synchronous finalize window.
     #[serde(skip)]
     pub active_payment_pins: Vec<ManaPipId>,
+    /// CR 601.2a: transient copy of the object-attached casting permission
+    /// identity while finalization owns the `PendingCast` by value. Payment
+    /// consults it only inside that synchronous window; it is never serialized.
+    #[serde(skip)]
+    pub active_casting_permission_index: Option<CastingPermissionIndex>,
 
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
@@ -6929,6 +8073,11 @@ pub struct GameState {
     /// dedup on semantically-identical positions is unaffected.
     #[serde(skip, default)]
     pub loop_detect_ring: std::collections::VecDeque<std::sync::Arc<GameState>>,
+    /// Live-only authority for the finite pre-cast shortcut. It is absent from
+    /// raw/public serialization; trusted persistence uses the explicit codec
+    /// envelope in `game::precast_copy_shortcut`.
+    #[serde(skip, default)]
+    pub(crate) precast_shortcut_runtime: PrecastShortcutRuntime,
     pub next_timestamp: u64,
     #[serde(skip, default = "PublicStateDirty::all_dirty")]
     pub public_state_dirty: PublicStateDirty,
@@ -6948,6 +8097,19 @@ pub struct GameState {
     /// only — never read by game logic. Empty objects skip serialization.
     #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
     pub attribution: im::HashMap<ObjectId, ObjectAttribution>,
+
+    /// CR 613.1d: Remote recipients whose live card types were derived by a
+    /// Layer-4 continuous effect during the preceding evaluation. The next
+    /// full pass restores only these objects' type baselines before applying
+    /// the new Layer-4 effect set, leaving independent spell/card state (such
+    /// as cast-time ability grants) untouched.
+    ///
+    /// This is an engine-only derived cache. It is reconstructed from the
+    /// serialized attribution side-table on the first post-deserialization
+    /// layer pass, then rebuilt directly by the layer application pipeline.
+    /// It is intentionally excluded from equality like the other layer caches.
+    #[serde(skip, default)]
+    pub(crate) remote_type_layer_recipients: im::HashSet<ObjectId>,
 
     // Day/night tracking
     #[serde(default)]
@@ -7493,6 +8655,14 @@ pub struct GameState {
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
     #[serde(default)]
     pub hand_cast_free_permissions_used: HashSet<ObjectId>,
+    /// CR 118.9 + CR 601.2b: Tracks which once-per-turn `CastWithAlternativeCost`
+    /// grant sources (As Foretold) have already had their alternative cost applied
+    /// to a spell this turn. Keyed by the granting permanent's ObjectId. Unlimited
+    /// grants (Fist of Suns, Rooftop Storm, Jodah) never populate this.
+    /// CR 400.7: Zone change creates a new ObjectId, so the permission naturally
+    /// resets when the source leaves and returns.
+    #[serde(default)]
+    pub alt_cost_grant_permissions_used: HashSet<ObjectId>,
     /// CR 601.2a: Tracks once-per-turn `PlayFromExile` permission sources
     /// consumed this turn. Keyed by the granting source's ObjectId.
     #[serde(default)]
@@ -7896,6 +9066,14 @@ pub struct GameState {
     /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
+    /// CR 101.4 + CR 701.23i: Pending private selections for a simultaneous
+    /// scoped self-library search. Kept separate from the generic continuation
+    /// so the action phase cannot begin before every player has chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_scoped_library_search: Option<PendingScopedLibrarySearch>,
+    /// CR 616.1: search-found replacement batch parked across a choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
     /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
     /// `Effect::ForEachCategoryExile` iteration paused by the current member's
     /// interactive choice ("for each color/card type, you may exile a card of
@@ -8051,6 +9229,11 @@ pub struct GameState {
     #[serde(skip)]
     pub card_face_registry: Arc<HashMap<String, CardFace>>,
 
+    /// CR 701.42b: canonical physical meld pairs derived from the loaded card
+    /// database. Key is `lowercase(source) + NUL + lowercase(partner)`.
+    #[serde(skip)]
+    pub meld_pair_registry: Arc<HashMap<String, MeldPairRecord>>,
+
     /// Momir Basic selection index: mana value -> sorted creature face names.
     /// CR 707.2 + CR 202.3: the random-token pool, keyed by mana value so the
     /// emblem's `{X}` ability can pick a creature with mana value X. Built only
@@ -8082,36 +9265,26 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
 
-    /// CR 401.5 + CR 608.2c: Set when the most recently resolved `Dig` looked
-    /// at an empty library (`count == 0`) — distinct from "no Dig has run in
-    /// this chain link," which is `false`. This is a brief, transient relay:
-    /// `effects::apply_parent_chain_context` reads and immediately clears it
-    /// at the very next parent->child hand-off (whatever that child turns out
-    /// to be), copying it onto that ONE child's typed
-    /// `ResolvedAbility::dig_found_nothing_for_parent_target` field. Nothing
-    /// else reads this flag directly — in particular, the shared
-    /// `resolved_targets` chokepoint does not, so an empty Dig can never
-    /// affect any `ParentTarget` consumer beyond its own immediate
-    /// sub_ability (e.g. Avenging Angel's unrelated LTB self-return stays
-    /// unaffected). The `PutAtLibraryPosition` Dig-tail seam
-    /// (`put_on_top.rs`) is the one place that acts on the per-ability field
-    /// for "put up to one of them on top … the rest on the bottom" — without
-    /// it, a reanimated Thassa's Oracle with an empty library (issue #1365)
-    /// would fall back to moving its own source into the library it just
-    /// found empty, corrupting devotion and library-count reads for the
-    /// trailing win condition. Transient resolution bookkeeping — not
-    /// serialized.
+    /// CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Set when the most
+    /// recently resolved `Dig`/`ChooseFromZone`/`RevealHand` reveal-choice
+    /// came up with nothing (empty library, no eligible card, or an empty
+    /// reveal-choice set respectively) — distinct from "none of those has run
+    /// in this chain link," which is `None`. This is a brief, transient
+    /// relay: `effects::apply_parent_chain_context` reads and immediately
+    /// clears it at the very next parent->child hand-off (whatever that
+    /// child turns out to be), copying it onto that ONE child's typed
+    /// `ResolvedAbility::parent_target_missing_reason` field. Nothing else
+    /// reads this flag directly — in particular, the shared
+    /// `resolved_targets` chokepoint does not, so an empty Dig/ChooseFromZone/
+    /// RevealHand can never affect any `ParentTarget` consumer beyond its own
+    /// immediate sub_ability (e.g. Avenging Angel's unrelated LTB self-return
+    /// stays unaffected). See [`crate::types::ability::ParentTargetMissingReason`]
+    /// for what each reason gates and who consults it. Transient resolution
+    /// bookkeeping — not serialized. (Consolidated from three parallel
+    /// booleans — `last_dig_found_nothing`, `last_choose_from_zone_found_nothing`,
+    /// `last_reveal_choice_found_nothing` — per the PR #5834/#5836 review.)
     #[serde(skip)]
-    pub last_dig_found_nothing: bool,
-
-    /// CR 609.3 + CR 608.2c: Set when the most recently resolved
-    /// `ChooseFromZone` had no card to choose. Like `last_dig_found_nothing`,
-    /// this is a transient relay consumed by the very next parent->child
-    /// hand-off and copied onto the child ability. It lets `ParentTarget`
-    /// consumers of the missing choice no-op without changing the shared
-    /// unresolved-anaphor fallback for unrelated effects.
-    #[serde(skip)]
-    pub last_choose_from_zone_found_nothing: bool,
+    pub last_parent_target_missing_reason: Option<crate::types::ability::ParentTargetMissingReason>,
 
     /// CR 701.20e: Cards the controller is privately "looking at" during the
     /// current resolution — the looker-scoped peek window of a bare
@@ -8365,6 +9538,59 @@ pub struct GameState {
     /// `current_trigger_event`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolving_stack_entry: Option<StackEntry>,
+    /// CR 107.3i: the X announced for an in-flight COST, keyed by the object whose cost
+    /// it is. CR 107.3i: "Normally, all instances of X on an object have the same value
+    /// at any given time" — so a triggered ability of that SAME object which fires
+    /// because of that announcement reads the same X.
+    /// `triggers::build_triggered_ability` consumes this and stamps it onto the
+    /// triggered ability's `chosen_x`.
+    ///
+    /// There are exactly TWO announce surfaces, and this one field serves both — they
+    /// differ only in *which* rule fixes the value, never in what is carried:
+    ///
+    /// * **CR 107.3a — an activated ability.** "While an activated ability is on the
+    ///   stack, any X in its activation cost equals the announced value." Covers Hydra
+    ///   Broodmaster ("when this becomes monstrous, create X X/X tokens") and Shark
+    ///   Typhoon ("when you cycle this card, create an X/X Shark").
+    /// * **CR 107.3d — a SPECIAL ACTION.** "If a cost associated with a special action,
+    ///   such as a suspend cost or a morph cost, has an {X} … in it, the value of X is
+    ///   chosen by the player taking the special action immediately before they pay that
+    ///   cost." A turn-face-up (CR 116.2b) is such a special action: it uses no stack and
+    ///   never passes through `push_ability_entry`, so it needs its own publication.
+    ///   **CR 702.37f** (morph) / **CR 702.168e** (disguise) then bind it: "If a
+    ///   permanent's morph cost includes X, other abilities of that permanent may also
+    ///   refer to X. The value of X in those abilities is equal to the value of X chosen
+    ///   as the morph special action was taken." Covers Warbreak Trumpeter, Bane of the
+    ///   Living, and Aurelia's Vindicator.
+    ///
+    /// This MUST be a channel of its own and must NOT reuse `GameObject::cost_x_paid`:
+    /// that field is the CR 107.3m *cast*-X channel (`QuantityRef::CostXPaid`), and CR
+    /// 107.3k makes an activated ability's X "independent of any other values of X
+    /// chosen for that object". Writing an announced X there would read the wrong X
+    /// by rule, not merely a missing one.
+    ///
+    /// Published at exactly the three moments an announced X can precede a trigger event
+    /// — an activated ability's announcement (`casting_costs::push_ability_entry`, which
+    /// emits `Cycled` / `KeywordAbilityActivated`), its own resolution
+    /// (`stack::resolve_top`, covering `EffectResolved` emitters such as Monstrosity),
+    /// and the turn-face-up special action (`engine`'s `GameAction::TurnFaceUp` handler,
+    /// which emits `TurnedFaceUp`). Set to `None` for every other stack-entry kind and
+    /// cleared at the start of each `resolve_top` alongside `resolving_stack_entry`, so a
+    /// resolving SPELL never publishes: that is what keeps a permanent put onto the
+    /// battlefield by an unrelated X-spell at X=0 (CR 107.3m: "the value of X for that
+    /// permanent is 0") instead of inheriting the spell's X.
+    /// Transient decision context, serialized so a mid-activation pause round-trips.
+    ///
+    /// `serde(alias)`: this field was named `activated_ability_x` before the special-action
+    /// surface was added. `GameState` sets no `deny_unknown_fields`, so without the alias an
+    /// older save written mid-activation would have its live X **silently dropped** rather
+    /// than rejected.
+    #[serde(
+        default,
+        alias = "activated_ability_x",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub announced_source_x: Option<(ObjectId, u32)>,
     /// CR 400.7j (+ CR 400.7g/h cast hop): a resolution-scoped record of a source
     /// object that the currently-resolving ability moved as part of its own
     /// resolution (Siege "exile it, then you may cast it"). It lets
@@ -8445,9 +9671,15 @@ pub struct GameState {
     #[serde(skip)]
     pub current_triggered_mana_override: Option<ProductionOverride>,
 
-    /// CR 601.2h + CR 616.1: Resume state when `handle_discard_for_cost` pauses mid-loop
-    /// for a replacement choice. The card at `paused_at_index` is completed by
-    /// `handle_replacement_choice`; resume continues at `paused_at_index + 1`.
+    /// CR 601.2h + CR 614.12a + CR 616.1: Typed continuation for a sequential
+    /// cost move paused by a replacement choice. This remains serialized with
+    /// the matching `WaitingFor::ReplacementChoice`, so a host checkpoint can
+    /// resume the same cost-payment action after the player answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_cost_move_resume: Option<PendingCostMoveResume>,
+
+    /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
+    /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
     pub pending_discard_for_cost: Option<PendingDiscardForCostResume>,
 
@@ -8885,6 +10117,18 @@ pub struct PendingMultiDraw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DrawSequenceOrigin {
+    #[default]
+    Plain,
+    /// CR 701.50a/701.50d: after the connive draws settle, discard `count` cards and
+    /// put +1/+1 counters equal to nonland cards discarded on `conniver`.
+    ConniveTail { conniver: ObjectId, count: u32 },
+    /// CR 701.22d-adjacent bookkeeping: a scry replaced into a draw completes by
+    /// emitting EffectResolved{Scry} for `source_id` once the draws settle.
+    ScryCompletion { source_id: ObjectId },
+}
+
 /// CR 121.2: "Cards may only be drawn one at a time. If a player is instructed to
 /// draw multiple cards, that player performs that many individual card draws."
 ///
@@ -8896,6 +10140,15 @@ pub struct DrawSequenceFrameId(pub u64);
 pub struct DrawSequenceFrame {
     pub frame_id: DrawSequenceFrameId,
     pub player: PlayerId,
+    /// CR 614.5: replacement identities already applied to the draw instruction
+    /// that produced this frame. Every individual draw, including one resumed
+    /// after a replacement choice, starts with this set so an originating
+    /// replacement cannot apply to its own substitute draw.
+    #[serde(default)]
+    pub applied: HashSet<AppliedReplacementKey>,
+    /// The instruction's completion behavior. Old saves default to [`DrawSequenceOrigin::Plain`].
+    #[serde(default)]
+    pub origin: DrawSequenceOrigin,
     /// CR 121.6b: individual draws of this instruction not yet attempted. "If an
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
@@ -8963,11 +10216,40 @@ impl DrawSequenceStack {
     /// Push a new instruction and return its ID. Monotonic: the allocator never
     /// rewinds, so an ID from a popped frame is never reissued.
     pub fn push(&mut self, player: PlayerId, count: u32) -> DrawSequenceFrameId {
+        self.push_with_replacement_applied(player, count, HashSet::new())
+    }
+
+    /// Push a draw instruction carrying replacement identity from its origin.
+    pub fn push_with_replacement_applied(
+        &mut self,
+        player: PlayerId,
+        count: u32,
+        applied: HashSet<AppliedReplacementKey>,
+    ) -> DrawSequenceFrameId {
+        self.push_with_replacement_applied_and_origin(
+            player,
+            count,
+            applied,
+            DrawSequenceOrigin::Plain,
+        )
+    }
+
+    /// Push a draw instruction carrying its originating replacement identities and
+    /// completion behavior.
+    pub fn push_with_replacement_applied_and_origin(
+        &mut self,
+        player: PlayerId,
+        count: u32,
+        applied: HashSet<AppliedReplacementKey>,
+        origin: DrawSequenceOrigin,
+    ) -> DrawSequenceFrameId {
         let frame_id = DrawSequenceFrameId(self.next_frame_id);
         self.next_frame_id += 1;
         self.frames.push(DrawSequenceFrame {
             frame_id,
             player,
+            applied,
+            origin,
             remaining: count,
             accumulated: 0,
         });
@@ -9002,7 +10284,9 @@ impl DrawSequenceStack {
     /// over its lifetime are the same position, so the monotonic `next_frame_id`
     /// allocator and the per-frame `frame_id` (both pure identity) are excluded.
     /// What remains is exactly what the predecessor `Option<PendingMultiDraw>`
-    /// compared: who is drawing, how many units are owed, how many have landed.
+    /// compared: who is drawing, how many units are owed, how many have landed,
+    /// and the completion origin. Origin is included because different origins
+    /// produce different eventual game states when their frames complete.
     ///
     /// This must NOT be the derived `PartialEq`. Comparing the allocator would
     /// mean two identical positions never compare equal, and CR 104.4b loop
@@ -9014,7 +10298,10 @@ impl DrawSequenceStack {
     pub(crate) fn loop_equal(&self, other: &Self) -> bool {
         self.frames.len() == other.frames.len()
             && self.frames.iter().zip(&other.frames).all(|(a, b)| {
-                a.player == b.player && a.remaining == b.remaining && a.accumulated == b.accumulated
+                a.player == b.player
+                    && a.remaining == b.remaining
+                    && a.accumulated == b.accumulated
+                    && a.origin == b.origin
             })
     }
 
@@ -9039,7 +10326,19 @@ impl DrawSequenceStack {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
+    /// CR 701.21a + CR 614.1: An inner Battlefield→graveyard `ZoneChange`
+    /// can pause for a `Moved` replacement after its enclosing sacrifice was
+    /// already accepted. Preserve that action's subject and controller until
+    /// the resumed zone change actually delivers, then emit the one
+    /// `PermanentSacrificed` event that sacrifice triggers observe (CR 603.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sacrifice_provenance: Option<PendingSacrificeProvenance>,
     pub candidates: Vec<ReplacementId>,
+    /// CR 616.1: SearchFound choices snapshot the selected source
+    /// incarnation, controller/grantee, modifier, and display data at offer
+    /// time. Empty for every other replacement event.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_found_candidates: Vec<crate::types::proposed_event::BoundSearchFoundCandidate>,
     pub depth: u16,
     /// When true, the replacement is Optional — index 0 = accept, index 1 = decline.
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
@@ -9083,6 +10382,14 @@ pub struct PendingReplacement {
     /// before the replacement is applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub may_cost_remaining: Option<AbilityCost>,
+}
+
+/// CR 701.21a: The subject and controller of a sacrifice whose inner zone
+/// change is paused in the replacement pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSacrificeProvenance {
+    pub object_id: ObjectId,
+    pub player_id: PlayerId,
 }
 
 /// CR 703.4q + CR 616.1 + CR 614.1a: One step-end mana handler entry pending
@@ -9482,6 +10789,7 @@ impl GameState {
             // `ManaPipId(0)` unstamped sentinel.
             next_pip_id: 1,
             active_payment_pins: Vec::new(),
+            active_casting_permission_index: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
             stack_paid_facts: HashMap::new(),
@@ -9526,12 +10834,14 @@ impl GameState {
             static_source_index: StaticSourceIndex::default(),
             static_mode_presence: crate::types::statics::StaticModePresence::all_present(),
             loop_detect_ring: std::collections::VecDeque::new(),
+            precast_shortcut_runtime: PrecastShortcutRuntime::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,
             transient_continuous_effects: im::Vector::new(),
             next_continuous_effect_id: 1,
             attribution: im::HashMap::new(),
+            remote_type_layer_recipients: im::HashSet::new(),
             day_night: None,
             spells_cast_this_turn: 0,
             spells_cast_last_turn: None,
@@ -9599,6 +10909,7 @@ impl GameState {
             graveyard_cast_permissions_used_per_type: HashSet::new(),
             pending_permanent_type_slot: None,
             hand_cast_free_permissions_used: HashSet::new(),
+            alt_cost_grant_permissions_used: HashSet::new(),
             exile_play_permissions_used: HashSet::new(),
             exile_play_single_use_consumed: HashSet::new(),
             exile_cast_permissions_used: HashSet::new(),
@@ -9662,6 +10973,8 @@ impl GameState {
             pending_vote_ballot_iteration: None,
             pending_per_player_zone_choice: None,
             pending_player_scope_sacrifice_choice: None,
+            pending_scoped_library_search: None,
+            pending_search_found_batch: None,
             pending_per_category_zone_choice: None,
             pending_counter_moves: None,
             pending_counter_removals: None,
@@ -9682,13 +10995,13 @@ impl GameState {
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
             card_face_registry: Arc::new(HashMap::new()),
+            meld_pair_registry: Arc::new(HashMap::new()),
             momir_pool: BTreeMap::new(),
             momir_pool_faces: Arc::new(HashMap::new()),
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
-            last_dig_found_nothing: false,
-            last_choose_from_zone_found_nothing: false,
+            last_parent_target_missing_reason: None,
             private_look_ids: Vec::new(),
             private_look_player: None,
             last_zone_changed_ids: Vec::new(),
@@ -9713,6 +11026,7 @@ impl GameState {
             pending_team_draw_step: Vec::new(),
             pending_untap_declines: Vec::new(),
             current_trigger_event: None,
+            announced_source_x: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,
             resolution_source_relatch: None,
@@ -9725,6 +11039,7 @@ impl GameState {
             cost_payment_failed_flag: false,
             pending_taps_for_mana_overrides: std::collections::HashMap::new(),
             current_triggered_mana_override: None,
+            pending_cost_move_resume: None,
             pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),
@@ -9815,8 +11130,8 @@ impl GameState {
 
     /// CR 603.3b: upsert a trigger-ordering [`DecisionTemplate`], replacing any existing
     /// template with the same `(owner, key)`. Used by both tiers: the prompt path and
-    /// the persistent-permute path register ephemeral markers, `SetTriggerOrderTemplate`
-    /// saves persistent ones.
+    /// the persistent-permute path register ephemeral markers; the live
+    /// `OrderTriggers` submission records persistent ones.
     pub fn set_trigger_order_template(
         &mut self,
         tmpl: crate::analysis::decision_template::DecisionTemplate,
@@ -9846,16 +11161,6 @@ impl GameState {
         self.decision_templates
             .iter()
             .find(|t| t.owner == controller && t.key.kind == kind && t.key.covers(group_sources))
-    }
-
-    /// CR 603.3b: revoke one saved persistent ordering preference by `(actor, key)`.
-    pub fn remove_trigger_order_template(
-        &mut self,
-        actor: PlayerId,
-        key: &crate::analysis::decision_template::DecisionGroupKey,
-    ) {
-        self.decision_templates
-            .retain(|t| !(t.owner == actor && &t.key == key));
     }
 
     /// CR 603.3b: revoke all of `actor`'s PERSISTENT (`AllCopies`-keyed) ordering
@@ -10276,6 +11581,9 @@ impl GameState {
         // the live ring → recursive/quadratic growth. Cleared ⇒ every stored snapshot
         // has clone depth 1. Does not affect any comparison (the ring is eq-excluded).
         clone.loop_detect_ring.clear();
+        // Private shortcut capabilities are live interaction state, never part
+        // of a CR 104.4b position sample.
+        clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
         // zones would otherwise carry a growing `ResolvedAbility::source_incarnation`
@@ -10481,6 +11789,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_object_id: _,
         next_pip_id: _,
         active_payment_pins: _,
+        active_casting_permission_index: _,
         battlefield: _,
         stack: _,
         stack_paid_facts: _,
@@ -10520,12 +11829,14 @@ fn _gamestate_partition_is_total(s: &GameState) {
         static_source_index: _,
         static_mode_presence: _,
         loop_detect_ring: _,
+        precast_shortcut_runtime: _,
         next_timestamp: _,
         public_state_dirty: _,
         state_revision: _,
         transient_continuous_effects: _,
         next_continuous_effect_id: _,
         attribution: _,
+        remote_type_layer_recipients: _,
         day_night: _,
         spells_cast_this_turn: _,
         spells_cast_last_turn: _,
@@ -10601,6 +11912,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         graveyard_cast_permissions_used_per_type: _,
         pending_permanent_type_slot: _,
         hand_cast_free_permissions_used: _,
+        alt_cost_grant_permissions_used: _,
         exile_play_permissions_used: _,
         exile_play_single_use_consumed: _,
         exile_cast_permissions_used: _,
@@ -10683,13 +11995,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         all_creature_types: _,
         all_card_names: _,
         card_face_registry: _,
+        meld_pair_registry: _,
         momir_pool: _,
         momir_pool_faces: _,
         log_player_names: _,
         last_created_token_ids: _,
         last_revealed_ids: _,
-        last_dig_found_nothing: _,
-        last_choose_from_zone_found_nothing: _,
+        last_parent_target_missing_reason: _,
         private_look_ids: _,
         private_look_player: _,
         last_zone_changed_ids: _,
@@ -10715,6 +12027,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_untap_declines: _,
         current_trigger_event: _,
         current_trigger_match_count: _,
+        // CR 107.3a announce-scoped carrier, cleared at each `resolve_top`; a decision
+        // context, not durable board state — like `current_trigger_event`, it is not a
+        // per-cycle accumulator and PartialEq does not compare it.
+        announced_source_x: _,
         resolving_stack_entry: _,
         current_trigger_events: _,
         stack_trigger_event_batches: _,
@@ -10723,6 +12039,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         cost_payment_failed_flag: _,
         pending_taps_for_mana_overrides: _,
         current_triggered_mana_override: _,
+        pending_cost_move_resume: _,
         pending_discard_for_cost: _,
         pending_cast: _,
         ring_level: _,
@@ -10748,6 +12065,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //   - `pending_player_scope_sacrifice_choice`: COMPARED (upstream's `impl PartialEq`) — a
         //     paused sacrifice-choice interaction state; a differing value is correctly not a
         //     fixed-point repeat.
+        //   - `pending_scoped_library_search`: COMPARED (upstream's `impl PartialEq`) — a
+        //     paused multi-player search-selection state; a differing selection or player is
+        //     correctly not a fixed-point repeat.
         //   - `post_replacement_token_substitution_count` (CR 614.1a copy-token "that many" count):
         //     COMPARED — upstream's PartialEq excludes it, but excluding a COUNT from the cover gate
         //     is the fail-DANGEROUS direction, so `eq_except_growable` (resource.rs) compares it
@@ -10755,6 +12075,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     Priority`, effects/mod.rs:759) or a constant direct-assigned count across a real
         //     copy-token loop, so COMPARING never suppresses a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
+        pending_scoped_library_search: _,
+        pending_search_found_batch: _,
         post_replacement_token_substitution_count: _,
         //   - `last_recast_context` (PR-7 Phase 4d-ii object-growth recast snapshot):
         //     EXCLUDED from `impl PartialEq for GameState` (a transient decision context, not
@@ -10892,6 +12214,7 @@ impl PartialEq for GameState {
                 == other.graveyard_cast_permissions_used_per_type
             && self.pending_permanent_type_slot == other.pending_permanent_type_slot
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
+            && self.alt_cost_grant_permissions_used == other.alt_cost_grant_permissions_used
             && self.exile_play_permissions_used == other.exile_play_permissions_used
             && self.exile_play_single_use_consumed == other.exile_play_single_use_consumed
             && self.exile_cast_permissions_used == other.exile_cast_permissions_used
@@ -10974,11 +12297,14 @@ impl PartialEq for GameState {
             && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
+            && self.pending_scoped_library_search == other.pending_scoped_library_search
+            && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_counter_removals == other.pending_counter_removals
             && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
             && self.pending_proliferate_actions == other.pending_proliferate_actions
+            && self.pending_cost_move_resume == other.pending_cost_move_resume
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
@@ -11204,6 +12530,114 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter,
     };
+
+    #[test]
+    fn search_found_visibility_preserves_legacy_boolean_wire_shape() {
+        let batch = PendingSearchFoundBatch {
+            searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
+            remaining: vec![ObjectId(7)],
+            survivors: vec![ObjectId(8)],
+            continuation: PendingSearchFoundContinuation::Standard { split: None },
+            visibility: SearchFoundVisibility::Public,
+        };
+
+        let mut json = serde_json::to_value(&batch).expect("serialize SearchFound batch");
+        assert_eq!(json["reveal"], serde_json::Value::Bool(true));
+        assert_eq!(
+            serde_json::from_value::<PendingSearchFoundBatch>(json.clone())
+                .expect("deserialize current SearchFound batch")
+                .visibility,
+            SearchFoundVisibility::Public
+        );
+
+        json["reveal"] = serde_json::Value::Bool(false);
+        assert_eq!(
+            serde_json::from_value::<PendingSearchFoundBatch>(json.clone())
+                .expect("deserialize legacy private SearchFound batch")
+                .visibility,
+            SearchFoundVisibility::Private
+        );
+
+        json.as_object_mut()
+            .expect("batch serializes as an object")
+            .remove("reveal");
+        assert_eq!(
+            serde_json::from_value::<PendingSearchFoundBatch>(json)
+                .expect("deserialize pre-field SearchFound batch")
+                .visibility,
+            SearchFoundVisibility::Private
+        );
+    }
+
+    #[test]
+    fn search_found_delivery_grant_round_trips_and_legacy_defaults() {
+        let completion = BatchCompletion::SearchFoundZoneDelivery {
+            object_id: ObjectId(7),
+            grant: Some(crate::types::proposed_event::BoundSearchFoundGrant {
+                source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(9), 3),
+                controller: PlayerId(0),
+                grantee: PlayerId(1),
+                mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+            }),
+        };
+        let json = serde_json::to_value(&completion).expect("serialize bound delivery grant");
+        assert_eq!(
+            serde_json::from_value::<BatchCompletion>(json)
+                .expect("deserialize bound delivery grant"),
+            completion
+        );
+
+        let legacy = serde_json::json!({
+            "SearchFoundZoneDelivery": { "object_id": 7 }
+        });
+        assert_eq!(
+            serde_json::from_value::<BatchCompletion>(legacy)
+                .expect("deserialize pre-grant delivery completion"),
+            BatchCompletion::SearchFoundZoneDelivery {
+                object_id: ObjectId(7),
+                grant: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolving_trigger_context_captures_plural_events_without_singular_event() {
+        let mut state = GameState::new_two_player(42);
+        let event = GameEvent::LifeChanged {
+            player_id: PlayerId(1),
+            amount: -2,
+        };
+        state.current_trigger_events = vec![event.clone()];
+
+        let context = ResolvingTriggerContext::capture(&state)
+            .expect("a plural trigger event list is live resolution context");
+        assert_eq!(context.event, None);
+        assert_eq!(context.events, vec![event]);
+    }
+
+    #[test]
+    fn pending_liminal_entry_resume_accepts_legacy_token_struct_shape() {
+        let event = ProposedEvent::zone_change(
+            ObjectId(7),
+            Zone::Exile,
+            Zone::Battlefield,
+            Some(ObjectId(7)),
+        );
+        let legacy = serde_json::json!({
+            "source_id": ObjectId(7),
+            "player": PlayerId(1),
+            "event": event,
+        });
+        assert!(matches!(
+            serde_json::from_value::<PendingLiminalEntryResume>(legacy).unwrap(),
+            PendingLiminalEntryResume::Token {
+                source_id: ObjectId(7),
+                player: PlayerId(1),
+                ..
+            }
+        ));
+    }
 
     /// V1: legacy persisted `{"type":"UntilEndOfTurn"}` (pre-parameterization
     /// wire form) must deserialize to `UntilTurnBoundary { EndOfCurrentTurn }`
@@ -12067,8 +13501,10 @@ mod tests {
                 declared_mana_additions: Vec::new(),
                 activation_cost: None,
                 activation_ability_index: None,
+                pending_loyalty_activation_player: None,
                 target_constraints: vec![],
                 casting_variant: CastingVariant::Normal,
+                casting_permission_index: None,
                 cast_timing_permission: None,
                 distribute: None,
                 origin_zone: Zone::Hand,
@@ -12090,6 +13526,8 @@ mod tests {
                 payment_mode: CastPaymentMode::Auto,
                 assist_state: AssistState::NotOffered,
                 activation_residual: ActivationResidual::None,
+                activation_target_selection: ActivationTargetSelection::Pending,
+                alt_cost_grant_source: None,
             })
         }
 
@@ -12235,6 +13673,7 @@ mod tests {
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: vec![],
@@ -12434,8 +13873,10 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
@@ -12457,17 +13898,30 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
             activation_residual: ActivationResidual::None,
+            activation_target_selection: ActivationTargetSelection::Pending,
+            alt_cost_grant_source: None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
             min: 0,
             max: 5,
-            pending_cast: pending,
+            pending_cast: pending.clone(),
             convoke_mode: None,
             x_cost_previews: vec![],
         };
         assert!(choose_x.pending_cast_ref().is_some());
         assert!(choose_x.has_pending_cast());
+
+        let announcing_opponent = WaitingFor::ChooseAnnouncingOpponent {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+            choice_index: 1,
+            choice_count: 2,
+            target_type: Some(crate::types::card_type::CoreType::Land),
+            pending_cast: pending.clone(),
+        };
+        assert!(announcing_opponent.pending_cast_ref().is_some());
+        assert!(announcing_opponent.has_pending_cast());
     }
 
     #[test]
@@ -12510,6 +13964,7 @@ mod tests {
                     ability_snapshot: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
+                    cost_move_resume: None,
                     chosen_tappers: Vec::new(),
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
@@ -12622,6 +14077,7 @@ mod tests {
                     TargetRef::Object(ObjectId(2)),
                 ],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: vec![],
@@ -12658,6 +14114,40 @@ mod tests {
                 contributions: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn companion_reveal_legacy_sideboard_offer_deserializes() {
+        let json = r#"{
+            "type":"CompanionReveal",
+            "data":{
+                "player":0,
+                "eligible_companions":[["Lurrus of the Dream-Den",2]]
+            }
+        }"#;
+        let waiting_for: WaitingFor = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            waiting_for,
+            WaitingFor::CompanionReveal {
+                player: PlayerId(0),
+                eligible_companions: vec![CompanionRevealChoice {
+                    name: "Lurrus of the Dream-Den".to_string(),
+                    source: CompanionChoiceSource::Sideboard { index: 2 },
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn deck_pool_without_dedicated_companion_defaults_to_empty() {
+        let mut json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("registered_companion");
+        fields.remove("current_companion");
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert!(pool.registered_companion.is_empty());
+        assert!(pool.current_companion.is_empty());
     }
 
     #[test]

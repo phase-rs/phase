@@ -117,13 +117,20 @@ pub fn resolve(
                     hit_card,
                     remaining_hits: hits,
                     revealed_misses,
+                    source_id: ability.source_id,
                 },
             };
         }
         true => {
             // CR 702.60a: no same-named card revealed — put them all on the
             // bottom of the library.
-            super::cascade::shuffle_to_bottom(state, &revealed_misses, events);
+            let _ = super::cascade::shuffle_to_bottom(
+                state,
+                &revealed_misses,
+                ability.source_id,
+                None,
+                events,
+            );
         }
     }
 
@@ -173,6 +180,7 @@ mod tests {
                         hit_card,
                         remaining_hits,
                         revealed_misses,
+                        ..
                     },
                 ..
             } => {
@@ -204,6 +212,7 @@ mod tests {
                         hit_card,
                         remaining_hits,
                         revealed_misses,
+                        ..
                     },
                 ..
             } => {

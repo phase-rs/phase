@@ -6,7 +6,7 @@
 //!
 //! Before this change "Frenzy N" fell to `Keyword::Unknown` (a silent no-op) and
 //! the Frenzy Sliver static grant ("All Sliver creatures have frenzy 1") fell to
-//! `Effect::Unimplemented` because `parse_keyword_from_oracle("frenzy 1")`
+//! `Effect::Unimplemented` because `parse_granted_keyword_fragment("frenzy 1")`
 //! returned `None`. The fix adds the `Keyword::Frenzy(u32)` variant, the
 //! parser/`FromStr` arms, and the synthesis builder
 //! (`build_frenzy_trigger` → `TriggerMode::AttackerUnblocked` self-pump).
@@ -29,11 +29,11 @@ use super::rules::AttackTarget;
 /// A Frenzy 2 creature in the real MTGJSON Oracle form: the keyword line carries
 /// the numeral plus reminder text. Paired with the `["frenzy"]` keyword-name
 /// hint (the inline-Oracle analog of MTGJSON's keyword list), the parser's
-/// `parse_keyword_from_oracle` recovers N = 2 from this line.
+/// `parse_granted_keyword_fragment` recovers N = 2 from this line.
 const FRENZY_2_ORACLE: &str = "Frenzy 2 (Whenever this creature attacks and isn't \
 blocked, it gets +2/+0 until end of turn.)";
 /// Frenzy Sliver's real Oracle text — a static grant of `frenzy 1` to all
-/// Slivers. Before this change `parse_keyword_from_oracle("frenzy 1")` returned
+/// Slivers. Before this change `parse_granted_keyword_fragment("frenzy 1")` returned
 /// `None`, so the grant fell to `Effect::Unimplemented` (a silent no-op).
 const FRENZY_SLIVER_GRANT: &str = "All Sliver creatures have frenzy 1. \
 (Whenever a Sliver attacks and isn't blocked, it gets +1/+0 until end of turn.)";
@@ -205,7 +205,7 @@ fn frenzy_multiple_instances_stack_per_cr_702_68b() {
 /// via a static ability. A granted-frenzy Sliver that attacks unblocked gets
 /// +1/+0. This exercises the grant → layer-system `AddKeyword` → synthesis
 /// (`triggers_for` at `layers.rs:3417`) → combat path, and is the regression
-/// guard that `map_keyword`/`parse_keyword_from_oracle` no longer drops
+/// guard that `map_keyword`/`parse_granted_keyword_fragment` no longer drops
 /// "frenzy 1" to Unknown/Unimplemented.
 #[test]
 fn frenzy_sliver_grant_pumps_unblocked_sliver() {

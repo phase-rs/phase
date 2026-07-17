@@ -94,24 +94,18 @@ fn run_combat_unblocked(
 /// This asserts the in-scope behavior of this fix: while UNTAPPED, the shield
 /// FIRES and the controller is protected. It is the positive reach-guard that
 /// makes the tapped negative below non-vacuous (it proves the shield actually
-/// reaches the prevention arm for this fixture).
+/// reaches the redirect arm for this fixture).
 ///
-/// NOTE (out of scope — confirmed pre-existing runtime gap): per the card, the
-/// redirected damage should be *dealt to the Bodyguard* (marking damage on it,
-/// potentially lethal per CR 614.9). This test does NOT assert `damage_marked`
-/// on the Bodyguard because the runtime never actually redirects for this card
-/// class: `parse_replacement_line` emits `shield_kind = ShieldKind::Prevention
-/// { amount: PreventionAmount::All }` with `redirect_target: SelfRef` as a
-/// separate field, but `game::replacement::damage_done_applier`'s CR 614.9
-/// redirection logic ("Branch 1b", the `ShieldKind::Redirection { .. }` guard)
-/// only fires for `ShieldKind::Redirection`; the `ShieldKind::Prevention` arm
-/// ("Branch 2") returns `ApplyResult::Prevented` and never reads
-/// `redirect_target`. So `redirect_target: SelfRef` is dead data for the whole
-/// "damage is dealt to X instead" class (Pariah, Palisade Giant, and this
-/// cycle) — they currently only prevent, never redirect. That is a shared
-/// runtime-resolver gap with a wide blast radius, filed as a separate
-/// follow-up, NOT fixed by this parser-scoped PR. This test therefore asserts
-/// only the in-scope prevention half (controller protected while untapped).
+/// CR 614.9: per the card, the redirected damage is *dealt to the Bodyguard*
+/// (marking damage on it). `parse_replacement_line` emits `shield_kind =
+/// ShieldKind::Prevention { amount: PreventionAmount::All }` with
+/// `redirect_target: SelfRef`, and `game::replacement::damage_done_applier`'s
+/// Branch 2 now reads `redirect_target` and routes the whole
+/// "damage is dealt to X instead" class (Palisade Giant, Veteran Bodyguard,
+/// Weathered Bodyguards) through the shared CR 614.9 redirection mechanics —
+/// so the damage is redirected onto the Bodyguard, not merely prevented. This
+/// test therefore asserts BOTH halves: the controller is protected AND the
+/// unblocked attacker's damage lands on the Bodyguard.
 #[test]
 fn veteran_bodyguard_untapped_protects_controller_from_unblocked_damage() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -119,7 +113,7 @@ fn veteran_bodyguard_untapped_protects_controller_from_unblocked_damage() {
 
     // P1 (the defending player) controls Veteran Bodyguard, a 2/5 with the
     // tap-gated redirection static ability. Untapped by builder default.
-    scenario
+    let bodyguard = scenario
         .add_creature_from_oracle(P1, "Veteran Bodyguard", 2, 5, VETERAN_BODYGUARD_TEXT)
         .id();
 
@@ -138,6 +132,13 @@ fn veteran_bodyguard_untapped_protects_controller_from_unblocked_damage() {
         p1_life_before,
         "P1 must take NO life loss — while the Veteran Bodyguard is untapped, the \
          unblocked attacker's damage to P1 is redirected away (CR 604.2 + CR 614.9)"
+    );
+    // CR 614.9: the redirected damage is DEALT to the Bodyguard, not prevented.
+    // Revert guard for Branch 2's redirect check — without it this is 0.
+    assert_eq!(
+        runner.state().objects[&bodyguard].damage_marked,
+        3,
+        "the unblocked attacker's 3 damage must be redirected onto the untapped Veteran Bodyguard"
     );
 }
 

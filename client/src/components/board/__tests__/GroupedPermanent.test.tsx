@@ -57,11 +57,11 @@ function makeState(waitingFor: WaitingFor): GameState {
   });
 }
 
-function makeGroup(): GroupedPermanentType {
+function makeGroup(ids = [1, 2, 3, 4, 5]): GroupedPermanentType {
   return {
     name: "Saproling",
-    ids: [1, 2, 3, 4, 5],
-    count: 5,
+    ids,
+    count: ids.length,
     representative: toCardProps(makeObject(1)),
   };
 }
@@ -71,6 +71,7 @@ function renderGroup(options: {
   validAttackerIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
   committedAttackerIds?: Set<number>;
+  group?: GroupedPermanentType;
 } = {}) {
   return render(
     <BoardInteractionContext.Provider
@@ -88,7 +89,7 @@ function renderGroup(options: {
       }}
     >
       <GroupedPermanentDisplay
-        group={makeGroup()}
+        group={options.group ?? makeGroup()}
         rowType="creatures"
         manualExpanded={false}
         onExpand={vi.fn()}
@@ -129,6 +130,7 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
       waitingFor,
       legalActions: [],
       legalActionsByObject: {},
+      manaPaymentPreviewSourceIds: [],
       spellCosts: {},
     });
     useUiStore.setState({
@@ -171,6 +173,18 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     fireEvent.click(screen.getByRole("button", { name: "Regroup duplicate creature groups" }));
 
     expect(container.querySelectorAll("[data-object-id]")).toHaveLength(1);
+  });
+
+  it("lifts an engine-selected mana source above the other cards in a staggered group", () => {
+    useGameStore.setState({ manaPaymentPreviewSourceIds: [1] });
+
+    const { container } = renderGroup({ group: makeGroup([1, 2]) });
+
+    const selectedSource = container.querySelector('[data-object-id="1"]') as HTMLElement;
+    const coveredCard = container.querySelector('[data-object-id="2"]') as HTMLElement;
+
+    expect(selectedSource.parentElement?.style.zIndex).toBe("2");
+    expect(coveredCard.parentElement?.style.zIndex).toBe("1");
   });
 
   it("opens an attacker picker that replaces only this group's selected attackers", () => {

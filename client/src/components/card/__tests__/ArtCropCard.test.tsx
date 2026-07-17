@@ -119,4 +119,48 @@ describe("ArtCropCard", () => {
       }),
     );
   });
+
+  it("keeps loyalty and P/T readable for planeswalkers and creature planeswalkers", () => {
+    mockUseCardImage.mockReturnValue({
+      src: "card.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    const planeswalker = {
+      ...transformedPermanent(),
+      name: "Jace, Test Walker",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      loyalty: 4,
+      card_types: { supertypes: [], core_types: ["Planeswalker"], subtypes: [] },
+    };
+    useGameStore.setState({
+      gameState: { objects: { [planeswalker.id]: planeswalker } } as never,
+    });
+
+    const { unmount } = render(<ArtCropCard objectId={101} />);
+    const loyaltyBadge = screen.getByRole("img", { name: "4" });
+    expect(loyaltyBadge).toHaveStyle({ position: "absolute", bottom: "-5px", right: "-5px" });
+    expect(screen.queryByText("/")).not.toBeInTheDocument();
+    unmount();
+
+    const creaturePlaneswalker = {
+      ...planeswalker,
+      power: 4,
+      toughness: 4,
+      base_power: 4,
+      base_toughness: 4,
+      card_types: { supertypes: [], core_types: ["Creature", "Planeswalker"], subtypes: [] },
+    };
+    useGameStore.setState({
+      gameState: { objects: { [creaturePlaneswalker.id]: creaturePlaneswalker } } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+    expect(screen.getByRole("img", { name: "4" })).toHaveStyle({ position: "absolute", bottom: "-5px", left: "-5px" });
+    expect(screen.getByText("/")).toBeInTheDocument();
+  });
 });

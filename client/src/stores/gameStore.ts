@@ -11,14 +11,16 @@ import type {
   LegalActionsResult,
   ManaCost,
   MatchConfig,
+  ObjectId,
   PlayerId,
+  PersistedGameState,
   StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { getPlayerId } from "../hooks/usePlayerId";
-import { loadCheckpoints, saveGame } from "../services/gamePersistence";
+import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -36,6 +38,7 @@ export function legalResultState(result: LegalActionsResult): Pick<GameStoreStat
 export type { ActiveGameMeta, PersistedP2PHostSession } from "../services/gamePersistence";
 export {
   saveGame,
+  saveAuthoritativeGame,
   loadGame,
   clearGame,
   saveCheckpoints,
@@ -143,6 +146,17 @@ interface GameStoreState {
    * with the rest of `initialState` on `reset`.
    */
   lastCommittedSeq: number;
+  /**
+   * Monotonic local commit counter. Unlike `lastCommittedSeq`, this advances
+   * for an accepted equal-sequence snapshot too, so asynchronous display
+   * previews can prove they still describe the current engine snapshot.
+   */
+  engineCommitEpoch: number;
+  /**
+   * Engine-returned mana sources for the spell currently being dragged. This
+   * display state is cleared with every accepted engine snapshot.
+   */
+  manaPaymentPreviewSourceIds: ObjectId[];
 }
 
 /**
@@ -160,7 +174,9 @@ type CommitExtraState = Partial<Omit<GameStoreState,
   | "spellCosts"
   | "legalActionsByObject"
   | "stuckDiagnostic"
-  | "lastCommittedSeq">>;
+  | "lastCommittedSeq"
+  | "engineCommitEpoch"
+  | "manaPaymentPreviewSourceIds">>;
 
 interface GameStoreActions {
   initGame: (
@@ -172,7 +188,7 @@ interface GameStoreActions {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
   ) => Promise<void>;
-  resumeGame: (gameId: string, adapter: EngineAdapter, savedState: GameState) => Promise<void>;
+  resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
    * Resume a P2P host game. Distinct from `resumeGame` because the
    * adapter already loaded engine state internally via
@@ -235,6 +251,8 @@ interface GameStoreActions {
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
   setIsResolvingAll: (isResolvingAll: boolean) => void;
+  setManaPaymentPreviewSourceIds: (sourceIds: ObjectId[]) => void;
+  clearManaPaymentPreview: () => void;
   /** Clear the starting-player contest after the overlay has consumed it. */
   clearStartingContest: () => void;
 }
@@ -264,6 +282,8 @@ const initialState: GameStoreState = {
   startingContest: null,
   aiSeatIds: [],
   lastCommittedSeq: 0,
+  engineCommitEpoch: 0,
+  manaPaymentPreviewSourceIds: [],
 };
 
 export const useGameStore = create<GameStore>()(
@@ -292,6 +312,8 @@ export const useGameStore = create<GameStore>()(
                 waitingFor: snapshot.state.waiting_for,
                 ...legalResultState(snapshot.legalResult),
                 lastCommittedSeq: snapshot.seq,
+                engineCommitEpoch: prev.engineCommitEpoch + 1,
+                manaPaymentPreviewSourceIds: [],
               }
             : {}),
           // 2. History — ordered by arrival, so applied unconditionally.
@@ -361,7 +383,7 @@ export const useGameStore = create<GameStore>()(
           startingContest,
         },
       });
-      saveGame(gameId, state);
+      void saveAuthoritativeGame(gameId, adapter, state);
     },
 
     resumeGame: async (gameId, adapter, savedState) => {
@@ -451,7 +473,7 @@ export const useGameStore = create<GameStore>()(
         stateHistory,
       });
 
-      if (gameId) saveGame(gameId, snapshot.state);
+      if (gameId) void saveAuthoritativeGame(gameId, adapter, snapshot.state);
 
       return result.events;
     },
@@ -504,6 +526,14 @@ export const useGameStore = create<GameStore>()(
 
     setIsResolvingAll: (isResolvingAll) => {
       set({ isResolvingAll });
+    },
+
+    setManaPaymentPreviewSourceIds: (sourceIds) => {
+      set({ manaPaymentPreviewSourceIds: sourceIds });
+    },
+
+    clearManaPaymentPreview: () => {
+      set({ manaPaymentPreviewSourceIds: [] });
     },
 
     clearStartingContest: () => {

@@ -601,7 +601,6 @@ pub(super) fn handle_assign_combat_damage(
         if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
             return Ok(waiting_for);
         }
-
         priority::reset_priority(state);
         return Ok(WaitingFor::Priority { player });
     }
@@ -745,7 +744,6 @@ pub(super) fn handle_assign_combat_damage(
     if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
         return Ok(waiting_for);
     }
-
     priority::reset_priority(state);
     Ok(WaitingFor::Priority { player })
 }
@@ -815,7 +813,6 @@ pub(super) fn handle_assign_blocker_damage(
     if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
         return Ok(waiting_for);
     }
-
     priority::reset_priority(state);
     Ok(WaitingFor::Priority {
         player: state.active_player,
@@ -883,7 +880,7 @@ fn next_blocker_or_finish_declaration(
 ) -> Result<WaitingFor, EngineError> {
     if let Some(player) = super::combat::next_defending_player_to_declare_blockers(state) {
         let valid_block_targets = super::combat::get_valid_block_targets_for_player(state, player);
-        let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+        let valid_blocker_ids = super::combat::ordered_valid_blocker_ids(&valid_block_targets);
         let block_requirements = super::combat::block_requirements_for_player(state, player);
         let blocker_constraints =
             super::combat::blocker_constraints_for_player(state, player, &valid_block_targets);

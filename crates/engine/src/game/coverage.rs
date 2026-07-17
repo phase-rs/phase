@@ -546,6 +546,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Player => "player".into(),
         TargetFilter::AllPlayers => "any player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::Opponent => "opponent".into(),
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
@@ -657,6 +658,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         match prop {
             FilterProp::Token => parts.push("token".into()),
             FilterProp::NonToken => parts.push("nontoken".into()),
+            FilterProp::RepresentedByCard => parts.push("represented by a card".into()),
             FilterProp::ControllerChoseLabel { label } => {
                 parts.push(format!("controlled by a player who last chose {label}"))
             }
@@ -901,6 +903,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::NotHistoric => parts.push("nonhistoric".into()),
             // CR 903.3d
             FilterProp::IsCommander => parts.push("commander".into()),
+            // CR 205.3m + CR 903.3: Path of Ancestry's relational predicate.
+            FilterProp::SharesCreatureTypeWithCommander => {
+                parts.push("that shares a creature type with your commander".into())
+            }
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
             FilterProp::PowerExceedsBase => parts.push("power > base power".into()),
             FilterProp::DifferentNameFrom { .. } => parts.push("different name".into()),
@@ -938,7 +944,13 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("{prefix} {name}{suffix}"));
             }
-            FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
+            // Both damage-role filters share this human coverage label (the AST
+            // variant carries the source-vs-recipient distinction); keeping the
+            // passive label unchanged avoids a cosmetic coverage-diff on every
+            // existing "was dealt damage this turn" card.
+            FilterProp::WasDealtDamageThisTurn | FilterProp::DealtDamageThisTurn => {
+                parts.push("dealt damage this turn".into())
+            }
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
             FilterProp::ControlledContinuouslySinceTurnBegan => {
                 parts.push("controlled continuously since turn began".into())
@@ -1537,7 +1549,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("# of counter kinds among {}", fmt_target(filter))
         }
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
-        QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
+        QuantityRef::PreviousEffectAmount { .. } => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
@@ -2400,6 +2412,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
+                Some(SpellStackToGraveyardReplacement::Library {
+                    position: LibraryPosition::RandomWithinTop { .. },
+                }) => d.push(("redirect".into(), "library random within top N".into())),
                 Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
                 }
@@ -3274,8 +3289,22 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Cascade => {}
         Effect::Ripple { .. } => {}
         // CR 614.1a: the "exile it instead of putting it into a graveyard as it
-        // resolves" rider acts on the triggering spell; no displayable parameter.
-        Effect::ExileResolvingSpellInsteadOfGraveyard => {}
+        // resolves" rider acts on the triggering spell; the only displayable
+        // parameter is the optional "If you do, ..." consequence rider.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile } => match on_exile {
+            Some(crate::types::ability::ExiledSpellRider::ReturnTo {
+                destination,
+                timing,
+            }) => {
+                d.push(("return to".into(), format!("{destination:?}")));
+                d.push(("return at".into(), format!("{timing:?}")));
+            }
+            // CR 702.170c: Lilah's exiled spell becomes plotted.
+            Some(crate::types::ability::ExiledSpellRider::BecomePlotted) => {
+                d.push(("then".into(), "becomes plotted".into()));
+            }
+            None => {}
+        },
         // CR 702.94a: MiracleCast is an internal engine effect, not parsed from Oracle text.
         Effect::MiracleCast { .. } => {}
         // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.
@@ -3715,6 +3744,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         ),
         AbilityCondition::HasMaxSpeed => "has max speed".into(),
         AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::CompletedDungeon { specific } => match specific {
+            None => "you've completed a dungeon".into(),
+            Some(dungeon) => format!("you've completed {dungeon}"),
+        },
         AbilityCondition::IsInitiative => "has the initiative".into(),
         AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
         AbilityCondition::IsRingBearer => "is the ring-bearer".into(),
@@ -4130,7 +4163,10 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
         ContinuousModification::AddAllLandTypes => "all land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
-        ContinuousModification::AddChosenColor => "add chosen color".into(),
+        ContinuousModification::AddChosenColor { mode } => match mode {
+            crate::types::ability::ColorChangeMode::Set => "set chosen color".into(),
+            crate::types::ability::ColorChangeMode::Add => "add chosen color".into(),
+        },
         // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the
         // keyword chosen at resolution time.
         ContinuousModification::RemoveChosenKeyword => "remove chosen keyword".into(),
@@ -4167,6 +4203,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedAbilityFromSource {
             source_ability_index,
         } => format!("retain printed ability {source_ability_index}"),
+        ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+            "retain source's other abilities".into()
+        }
         ContinuousModification::AddSupertype { supertype } => {
             format!("add supertype {supertype}")
         }
@@ -4251,6 +4290,102 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     }
     if let Some(zone) = &stat.affected_zone {
         d.push(("zone".into(), fmt_zone(zone)));
+    }
+    d
+}
+
+/// Extract detail pairs from a `ReplacementDefinition` (non-effect fields).
+///
+/// Mirrors `trigger_details`/`static_details`: the replacement's scoping and
+/// modification fields must be projected into the parse signature so two
+/// replacements that differ only in *whom* or *what* they apply to produce
+/// distinct `ParsedItem`s. Without this, a scope-only fix (e.g. a self-scoped
+/// damage shield flipping `valid_card` from `None` to `Some(SelfRef)`) shows a
+/// false "no card-parse changes detected" diff.
+///
+/// Covers every parse-time semantic axis on the struct: recipient/player
+/// scope, mode, shield kind, damage source/target/combat/modification,
+/// quantity modification, destination zone, condition, redirect target, draw
+/// scope, token owner scope/redirect, mana modification/scope, additional and
+/// ensure-all token specs, counter match, and controller overrides
+/// (`enters_under`) and expiry. Deliberately excludes runtime-only state
+/// (`execute`, `runtime_execute`, `consume_on_apply`, `is_consumed`,
+/// `source_controller`) which carries no parse-time signal of its own.
+fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
+    let mut d = Vec::new();
+    // Recipient scope — the field a shield-scoping fix changes.
+    if let Some(vc) = &repl.valid_card {
+        d.push(("scope".into(), fmt_target(vc)));
+    }
+    if let Some(vp) = &repl.valid_player {
+        d.push(("player scope".into(), format!("{vp:?}")));
+    }
+    // Mode discriminant (Mandatory / Optional / MayCost).
+    match &repl.mode {
+        ReplacementMode::Mandatory => {}
+        ReplacementMode::Optional { .. } => d.push(("mode".into(), "optional".into())),
+        ReplacementMode::MayCost { .. } => d.push(("mode".into(), "may pay cost".into())),
+    }
+    // Shield kind, including the prevented amount (ShieldKind::Prevention).
+    if !repl.shield_kind.is_none() {
+        d.push(("shield".into(), format!("{:?}", repl.shield_kind)));
+    }
+    if let Some(src) = &repl.damage_source_filter {
+        d.push(("damage from".into(), fmt_target(src)));
+    }
+    if let Some(tgt) = &repl.damage_target_filter {
+        d.push(("damage to".into(), format!("{tgt:?}")));
+    }
+    if let Some(scope) = &repl.combat_scope {
+        d.push(("combat".into(), format!("{scope:?}")));
+    }
+    if let Some(dm) = &repl.damage_modification {
+        d.push(("damage mod".into(), format!("{dm:?}")));
+    }
+    if let Some(qm) = &repl.quantity_modification {
+        d.push(("quantity mod".into(), format!("{qm:?}")));
+    }
+    if let Some(zone) = &repl.destination_zone {
+        d.push(("to zone".into(), fmt_zone(zone)));
+    }
+    if let Some(cond) = &repl.condition {
+        d.push(("condition".into(), format!("{cond:?}")));
+    }
+    if let Some(redirect) = &repl.redirect_target {
+        d.push(("redirect to".into(), fmt_target(redirect)));
+    }
+    if let Some(scope) = &repl.draw_scope {
+        d.push(("draw scope".into(), format!("{scope:?}")));
+    }
+    if let Some(scope) = &repl.token_owner_scope {
+        d.push(("token owner scope".into(), format!("{scope:?}")));
+    }
+    if let Some(redirect) = &repl.token_owner_redirect {
+        d.push(("token owner redirect".into(), format!("{redirect:?}")));
+    }
+    if let Some(mm) = &repl.mana_modification {
+        d.push(("mana mod".into(), format!("{mm:?}")));
+    }
+    if !repl.mana_replacement_scope.is_any() {
+        d.push((
+            "mana scope".into(),
+            format!("{:?}", repl.mana_replacement_scope),
+        ));
+    }
+    if let Some(spec) = &repl.additional_token_spec {
+        d.push(("additional token".into(), format!("{spec:?}")));
+    }
+    if let Some(specs) = &repl.ensure_token_specs {
+        d.push(("ensure tokens".into(), format!("{specs:?}")));
+    }
+    if let Some(cm) = &repl.counter_match {
+        d.push(("counter match".into(), format!("{cm:?}")));
+    }
+    if let Some(cref) = &repl.enters_under {
+        d.push(("enters under".into(), format!("{cref:?}")));
+    }
+    if let Some(expiry) = &repl.expiry {
+        d.push(("expiry".into(), format!("{expiry:?}")));
     }
     d
 }
@@ -4366,7 +4501,7 @@ pub fn build_parse_details(
             label: format!("{}", repl.event),
             source_text: repl.description.clone(),
             supported: execute_supported,
-            details: vec![],
+            details: replacement_details(repl),
             children,
         });
     }
@@ -7082,6 +7217,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
+        AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         AbilityCondition::IsRingBearer => ("IsRingBearer", Handled),
@@ -7282,7 +7419,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
-        QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
+        QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::TrackedSetAggregate { .. } => ("TrackedSetAggregate", Handled),
@@ -8608,7 +8745,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             && (lower.starts_with("cast this spell only ")
                 || lower.starts_with("you can't cast ")
                 || lower.starts_with("you cannot cast ")
-                || lower.starts_with("you can\u{2019}t cast "));
+                || lower.starts_with("you can\u{2019}t cast ")
+                // Hogaak, Arisen Necropolis (issue #1095): "You can't spend mana
+                // to cast this spell" is parsed to CastingRestriction::CantSpendMana.
+                || lower.starts_with("you can't spend mana to cast ")
+                || lower.starts_with("you can\u{2019}t spend mana to cast "));
         // Casting option lines ("You may pay X rather than pay...", "If you control a
         // commander, you may cast this spell without paying its mana cost", etc.)
         let covered_by_casting_option = !face.casting_options.is_empty()
@@ -8616,8 +8757,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 || effective_lower.contains("without paying")
                 || effective_lower.contains("as though it had flash")
                 || effective_lower.contains("you may cast this spell for")
-                || effective_lower.contains("you may pay")
-                || effective_lower.contains("you can't spend mana to cast"));
+                || effective_lower.contains("you may pay"));
         let covered_by_additional_cost = face.additional_cost.is_some()
             && (lower.starts_with("as an additional cost ")
                 || effective_lower.starts_with("as an additional cost ")
@@ -9840,8 +9980,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("had no cards in hand")
             // "if no permanents left the battlefield" — turn-event check
             || lower.contains("no permanents left")
-            // "if [this card is] the only creature card in your graveyard" — zone state check
-            || lower.contains("only creature card in your graveyard")
             // "if you discarded a card this turn" — turn-event action check
             || lower.contains("if you discarded")
             // "if 4 or more damage was dealt" — turn-event damage check
@@ -10564,6 +10702,114 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replacement_signature_exposes_valid_card_scope() {
+        // #5673: the replacement projection hardcoded `details: vec![]` and never
+        // projected `valid_card`, so a fix that changes *whom* a shield applies to
+        // (e.g. a self-scoped damage shield flipping `valid_card` from `None` to
+        // `Some(SelfRef)`, Swans of Bryn Argoll / #5652) produced a byte-identical
+        // parse signature — a false "No card-parse changes detected" sticky.
+        let details = |vc: Option<TargetFilter>| -> Vec<(String, String)> {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::DealtDamage);
+            if let Some(vc) = vc {
+                repl = repl.valid_card(vc);
+            }
+            let mut face = make_face();
+            face.replacements = vec![repl];
+            let items = build_parse_details_for_face(&face);
+            let repl_item = items
+                .iter()
+                .find(|i| i.category == ParseCategory::Replacement)
+                .expect("replacement item must be projected");
+            repl_item.details.clone()
+        };
+
+        let unscoped = details(None);
+        let self_scoped = details(Some(TargetFilter::SelfRef));
+
+        // The scoping fix must change the projected signature, not be swallowed.
+        assert_ne!(
+            unscoped, self_scoped,
+            "a valid_card scope change must produce a different replacement signature",
+        );
+        assert!(
+            self_scoped.iter().any(|(k, _)| k == "scope"),
+            "a set valid_card must appear as a `scope` detail row; got {self_scoped:?}",
+        );
+        assert!(
+            !unscoped.iter().any(|(k, _)| k == "scope"),
+            "an absent valid_card must not appear, so unqualified signatures stay stable",
+        );
+    }
+
+    #[test]
+    fn replacement_signature_exposes_enters_under_and_token_owner_scope() {
+        // Review follow-up on #5673/#5800: the first projection pass covered
+        // `valid_card` but still left other parse-time semantic axes
+        // (`enters_under`, `token_owner_scope`, `mana_modification`, etc.)
+        // unprojected, so a fix that only changes one of those still produced
+        // a byte-identical signature. Guard the two axes matthewevans called
+        // out by name so this class of omission cannot silently recur.
+        let details = |enters_under: Option<ControllerRef>| -> Vec<(String, String)> {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield);
+            if let Some(cref) = enters_under {
+                repl = repl.enters_under(cref);
+            }
+            let mut face = make_face();
+            face.replacements = vec![repl];
+            let items = build_parse_details_for_face(&face);
+            let repl_item = items
+                .iter()
+                .find(|i| i.category == ParseCategory::Replacement)
+                .expect("replacement item must be projected");
+            repl_item.details.clone()
+        };
+
+        let owner_controlled = details(None);
+        let opponent_redirected = details(Some(ControllerRef::Opponent));
+
+        assert_ne!(
+            owner_controlled, opponent_redirected,
+            "an enters_under controller override must produce a different replacement signature",
+        );
+        assert!(
+            opponent_redirected.iter().any(|(k, _)| k == "enters under"),
+            "a set enters_under must appear as an `enters under` detail row; got {opponent_redirected:?}",
+        );
+        assert!(
+            !owner_controlled.iter().any(|(k, _)| k == "enters under"),
+            "an absent enters_under must not appear, so unqualified signatures stay stable",
+        );
+
+        let mut token_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::Opponent);
+        let mut token_face = make_face();
+        token_face.replacements = vec![token_repl.clone()];
+        let scoped = build_parse_details_for_face(&token_face)
+            .into_iter()
+            .find(|i| i.category == ParseCategory::Replacement)
+            .expect("replacement item must be projected")
+            .details;
+        token_repl.token_owner_scope = None;
+        token_face.replacements = vec![token_repl];
+        let unscoped_token = build_parse_details_for_face(&token_face)
+            .into_iter()
+            .find(|i| i.category == ParseCategory::Replacement)
+            .expect("replacement item must be projected")
+            .details;
+
+        assert!(
+            scoped.iter().any(|(k, _)| k == "token owner scope"),
+            "a set token_owner_scope must appear as a `token owner scope` detail row; got {scoped:?}",
+        );
+        assert!(
+            !unscoped_token.iter().any(|(k, _)| k == "token owner scope"),
+            "an absent token_owner_scope must not appear",
+        );
+    }
+
     /// #5601 (same swallowed-structure class as #5492/#5495/#5501): a parser
     /// change INSIDE a coin-flip branch — e.g. Desperate Gambit's lose-branch
     /// `damage_source_filter` flipping `SelfRef` → `ChosenDamageSource` — must be
@@ -10911,12 +11157,10 @@ mod tests {
 
     #[test]
     fn apnap_swallowed_clause_warning_counts_as_coverage_gap() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "APNAP".to_string(),
-            description: "Repeat the following process for each opponent in turn order."
-                .to_string(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "APNAP",
+            "Repeat the following process for each opponent in turn order.",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:APNAP"]);
@@ -10925,11 +11169,10 @@ mod tests {
     #[test]
     fn swallowed_clause_warning_counts_as_coverage_gap() {
         let warnings = vec![
-            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
-                detector: "Condition_If".to_string(),
-                description: "If foo, draw a card.".to_string(),
-                line_index: 0,
-            },
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::swallowed_clause(
+                "Condition_If",
+                "If foo, draw a card.",
+            ),
         ];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
@@ -11031,11 +11274,10 @@ mod tests {
     /// exactly `"Swallow:{detector}"`, so this locks it.
     #[test]
     fn check_parse_warnings_flags_swallowed_clause() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "Condition_If".into(),
-            description: "if you control a creature, …".into(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "Condition_If",
+            "if you control a creature, …",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:Condition_If".to_string()]);
@@ -11046,16 +11288,11 @@ mod tests {
     #[test]
     fn check_parse_warnings_dedupes_same_detector() {
         let warnings = vec![
-            OracleDiagnostic::SwallowedClause {
-                detector: "DynamicQty".into(),
-                description: "equal to the number of charge counters".into(),
-                line_index: 0,
-            },
-            OracleDiagnostic::SwallowedClause {
-                detector: "DynamicQty".into(),
-                description: "equal to that card's mana value".into(),
-                line_index: 1,
-            },
+            OracleDiagnostic::swallowed_clause(
+                "DynamicQty",
+                "equal to the number of charge counters",
+            ),
+            OracleDiagnostic::swallowed_clause("DynamicQty", "equal to that card's mana value"),
         ];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
@@ -11068,11 +11305,10 @@ mod tests {
     /// sub-effects must not be counted as supported.
     #[test]
     fn check_parse_warnings_flags_optional_you_may() {
-        let warnings = vec![OracleDiagnostic::SwallowedClause {
-            detector: "Optional_YouMay".into(),
-            description: "you may reveal that card and put it into your hand".into(),
-            line_index: 0,
-        }];
+        let warnings = vec![OracleDiagnostic::swallowed_clause(
+            "Optional_YouMay",
+            "you may reveal that card and put it into your hand",
+        )];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert_eq!(missing, vec!["Swallow:Optional_YouMay".to_string()]);

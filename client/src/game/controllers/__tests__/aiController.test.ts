@@ -371,6 +371,43 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     controller.dispose();
   });
 
+  it("routes a finite pre-cast shortcut offer through its proposer", async () => {
+    const decline: GameAction = {
+      type: "PrecastCopyShortcut",
+      data: { epoch: 7, response: { type: "Decline" } },
+    };
+    const waitingFor: WaitingFor = {
+      type: "PrecastCopyShortcutOffer",
+      data: { proposer: 1, epoch: 7, route_count: 1 },
+    };
+    const state = buildGameState({
+      waiting_for: waitingFor,
+      stack: [],
+      has_pending_cast: false,
+      priority_player: 1,
+      active_player: 1,
+      turn_decision_controller: null,
+    });
+    const getAiAction = vi.fn(async () => decline);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushMicrotasks();
+
+    expect(getAiAction).toHaveBeenCalledWith("Medium", 1, "PrecastCopyShortcutOffer");
+    expect(dispatchAction).toHaveBeenCalledWith(decline, 1);
+
+    controller.dispose();
+  });
+
   it("logs the actual random card-predicate guess returned by the AI", async () => {
     const gollumId = 300;
     const guess: GameAction = {

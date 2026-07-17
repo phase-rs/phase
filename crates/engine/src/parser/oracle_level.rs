@@ -7,7 +7,7 @@ use crate::types::ability::{
 use crate::types::counter::{CounterMatch, CounterType};
 
 use super::oracle::find_activated_colon;
-use super::oracle_keyword::parse_keyword_from_oracle;
+use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_special::normalize_self_refs_for_static;
 use super::oracle_static::{parse_static_line, parse_static_line_multi};
@@ -118,7 +118,7 @@ pub(crate) fn parse_level_blocks(lines: &[&str], card_name: &str) -> LevelBlocks
                     // must not prevent keyword recognition inside a {LEVEL} striation.
                     let stripped = strip_reminder_text(kw_text);
                     let kw_text = stripped.trim();
-                    if let Some(kw) = parse_keyword_from_oracle(&kw_text.to_lowercase()) {
+                    if let Some(kw) = parse_granted_keyword_fragment(&kw_text.to_lowercase()) {
                         if !matches!(kw, crate::types::keywords::Keyword::Unknown(_)) {
                             modifications.push(ContinuousModification::AddKeyword { keyword: kw });
                             any_keyword = true;

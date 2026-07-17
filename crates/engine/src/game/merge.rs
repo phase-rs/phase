@@ -65,7 +65,9 @@ use crate::types::zones::Zone;
 /// Serializes as the plain variant string ("Top" / "Bottom") so the frontend
 /// `GameAction::ChooseMutateMergeSide` payload is `{ side: "Top" | "Bottom" }`,
 /// parallel to the sibling `ChooseTopOrBottom { top: bool }`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum MergeSide {
     /// The mutating spell is placed on TOP of the target creature — the spell's
     /// card/token supplies the copiable characteristics.
@@ -114,8 +116,8 @@ pub fn merge_object_onto(
     // list; mark its zone as Battlefield so component queries see a consistent
     // location. The stack entry was already popped in `stack::resolve_top`. The
     // stack-only `mutate_form` marker is cleared — it is now a component.
+    crate::game::zones::absorb_component(state, merging_id, None);
     if let Some(merging) = state.objects.get_mut(&merging_id) {
-        merging.zone = Zone::Battlefield;
         merging.mutate_form = None;
     }
 
@@ -599,43 +601,15 @@ fn put_component_into_zone(
     // (mirrors `move_to_zone`, which snapshots before exit cleanup). Origin is
     // `None`: the component enters `dest` as a new object, not as a departure
     // from the battlefield.
-    let Some((owner, mut record)) = state.objects.get(&component_id).map(|obj| {
-        (
-            obj.owner,
-            obj.snapshot_for_zone_change(component_id, None, dest),
-        )
-    }) else {
+    let Some(mut record) = state
+        .objects
+        .get(&component_id)
+        .map(|obj| obj.snapshot_for_zone_change(component_id, None, dest))
+    else {
         return;
     };
 
-    // CR 400.7: the component becomes a new object with no memory of its prior
-    // existence (clears revealed/activation history, captures last-known info).
-    // It was part of a battlefield permanent, so its prior context is the
-    // battlefield — but no battlefield-exit event is emitted for it.
-    crate::game::zones::apply_zone_exit_cleanup(state, component_id, Zone::Battlefield, dest);
-
-    // CR 730.2: the component is absorbed into the survivor and is not an
-    // independent member of the battlefield list; defensively ensure it is not
-    // left there (a no-op under the runtime invariant) before adding it to its
-    // OWN owner's destination zone.
-    crate::game::zones::remove_from_zone(state, component_id, Zone::Battlefield, owner);
-    crate::game::zones::add_to_zone(state, component_id, dest, owner);
-    if let Some(obj) = state.objects.get_mut(&component_id) {
-        obj.zone = dest;
-        // CR 730.3 + CR 400.7: when a merged permanent leaves, each absorbed
-        // component becomes a NEW object in its own owner's zone. Bump here (beside
-        // this mover, NOT inside the shared `apply_zone_exit_cleanup`, which
-        // `move_to_zone` also calls → double-bump) so a stamp-N delayed trigger on
-        // the component reads `source_is_current` false against the new object.
-        obj.bump_incarnation();
-    }
-
-    // CR 700.11: a nontoken permanent card put into its owner's graveyard from
-    // anywhere counts as having descended this turn — shared single authority
-    // with `move_to_zone`.
-    if dest == Zone::Graveyard {
-        crate::game::zones::record_descend_on_graveyard_arrival(state, component_id, owner);
-    }
+    crate::game::zones::route_component(state, component_id, dest);
 
     let turn_zone_change_index =
         crate::game::restrictions::record_zone_change(state, record.clone());

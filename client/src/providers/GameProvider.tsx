@@ -2,7 +2,13 @@ import { createContext, useEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
+import {
+  type FormatConfig,
+  type GameAction,
+  type MatchConfig,
+  type MatchType,
+  persistedGameStateView,
+} from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
@@ -221,6 +227,7 @@ type ExpandedDeckWithTier = {
   planar_deck: string[];
   scheme_deck: string[];
   signature_spell: string[];
+  companion: string[];
   sticker_sheets: string[];
   bracket_tier: CommanderBracketTier;
 };
@@ -283,6 +290,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     },
@@ -312,6 +320,7 @@ async function buildLocalAiDeckList(
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     });
@@ -1154,7 +1163,7 @@ export function GameProvider({
           if (cancelled) return;
           // Derive player count from the restored state — the URL param may be
           // absent on resume (e.g. navigating directly to a saved game URL).
-          const resumedPlayerCount = savedState.players?.length ?? playerCount;
+          const resumedPlayerCount = persistedGameStateView(savedState).players.length;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai",
             difficulty,
@@ -1270,6 +1279,7 @@ export function GameProvider({
               scheme_deck: [] as string[],
               sticker_sheets: [] as string[],
               signature_spell: [] as string[],
+              companion: [] as string[],
             },
             opponent: {
               main_deck: run.opponentDeck,
@@ -1279,6 +1289,7 @@ export function GameProvider({
               scheme_deck: [] as string[],
               sticker_sheets: [] as string[],
               signature_spell: [] as string[],
+              companion: [] as string[],
             },
             ai_decks: [],
           };

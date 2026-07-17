@@ -440,6 +440,7 @@ impl EventObjectSnapshot {
             // semantics for a nonsensical player-Connives subject rather than inventing one.
             TargetFilter::Player
             | TargetFilter::Controller
+            | TargetFilter::Opponent
             | TargetFilter::Owner
             | TargetFilter::AllPlayers
             | TargetFilter::ScopedPlayer
@@ -592,6 +593,7 @@ impl EventObjectSnapshot {
 
             // ---- embedded per-turn history ----
             FilterProp::WasDealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn
             | FilterProp::EnteredThisTurn
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
@@ -630,6 +632,9 @@ impl EventObjectSnapshot {
             // Not reachable from the subject grammar today. Reaching one fails the gate,
             // which is the designed signal to extend the snapshot + evaluator together.
             FilterProp::WasPlayed
+            // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
+            // a nontoken object is a copy, so card representation cannot be reconstructed.
+            | FilterProp::RepresentedByCard
             | FilterProp::ControllerChoseLabel { .. }
             | FilterProp::ControllerMatches { .. }
             | FilterProp::BlockingSource
@@ -652,6 +657,11 @@ impl EventObjectSnapshot {
             | FilterProp::HasXInActivationCost
             | FilterProp::WasKicked
             | FilterProp::HasManaAbility
+            // CR 903.3: needs the live deck-pool commander registry (owner-scoped),
+            // not the subject snapshot. Parsed only inside mana-spend SPELL filters
+            // (CR 106.6 / CR 603.7a), which are evaluated live at the casting site —
+            // never from the event-subject grammar.
+            | FilterProp::SharesCreatureTypeWithCommander
             | FilterProp::Other { .. } => Unsupported,
         }
     }
