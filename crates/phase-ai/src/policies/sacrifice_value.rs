@@ -138,7 +138,16 @@ impl TacticalPolicy for SacrificeValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        if let Some(cost) = Self::optional_single_card_draw_sacrifices_only_source(ctx) {
+        // VeryEasy and Easy do not search optional-effect continuations, so they
+        // need a hard guard against accepting this immediately losing exchange.
+        // Search-enabled difficulties must remain free to discover death-trigger,
+        // recursion, and other continuation value that outweighs the source.
+        let protected_source_cost = if ctx.config.search.enabled {
+            None
+        } else {
+            Self::optional_single_card_draw_sacrifices_only_source(ctx)
+        };
+        if let Some(cost) = protected_source_cost {
             return PolicyVerdict::reject(
                 PolicyReason::new("optional_sacrifice_only_source_for_single_card")
                     .with_fact("cost_milli", (cost * 1000.0) as i64),
@@ -241,8 +250,7 @@ mod tests {
         (state, source)
     }
 
-    fn optional_verdict(state: &GameState, accept: bool) -> PolicyVerdict {
-        let config = AiConfig::default();
+    fn optional_verdict(state: &GameState, accept: bool, config: &AiConfig) -> PolicyVerdict {
         let decision = AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
             candidates: Vec::new(),
@@ -260,7 +268,7 @@ mod tests {
             decision: &decision,
             candidate: &candidate,
             ai_player: PlayerId(0),
-            config: &config,
+            config,
             context: &context,
             cast_facts: None,
             search_depth: crate::policies::context::SearchDepth::Root,
@@ -288,6 +296,7 @@ mod tests {
     #[test]
     fn optional_source_preservation_guard_stands_down_with_another_sacrifice() {
         let (mut state, _) = optional_sacrifice_for_card_state();
+        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
         let fodder = create_object(
             &mut state,
             CardId(3),
@@ -301,7 +310,7 @@ mod tests {
         object.toughness = Some(1);
 
         assert!(matches!(
-            optional_verdict(&state, true),
+            optional_verdict(&state, true, &config),
             PolicyVerdict::Score { .. }
         ));
     }
@@ -309,6 +318,7 @@ mod tests {
     #[test]
     fn optional_source_preservation_guard_does_not_block_explicit_self_sacrifice() {
         let (mut state, _) = optional_sacrifice_for_card_state();
+        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
         let ability = state.pending_optional_effect.as_mut().unwrap();
         let Effect::Sacrifice { target, .. } = &mut ability.effect else {
             panic!("fixture must contain a sacrifice effect");
@@ -316,9 +326,34 @@ mod tests {
         *target = TargetFilter::SelfRef;
 
         assert!(matches!(
-            optional_verdict(&state, true),
+            optional_verdict(&state, true, &config),
             PolicyVerdict::Score { .. }
         ));
+    }
+
+    #[test]
+    fn search_enabled_ai_can_evaluate_single_source_sacrifice() {
+        let (state, _) = optional_sacrifice_for_card_state();
+
+        for difficulty in [
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
+        ] {
+            let config = create_config(difficulty, Platform::Native);
+            assert!(
+                config.search.enabled,
+                "test premise: {difficulty:?} must search continuations"
+            );
+            assert!(
+                matches!(
+                    optional_verdict(&state, true, &config),
+                    PolicyVerdict::Score { .. }
+                ),
+                "{difficulty:?} must not hard-veto the sacrifice before search"
+            );
+        }
     }
 
     #[test]
