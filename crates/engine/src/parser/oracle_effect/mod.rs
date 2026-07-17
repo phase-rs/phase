@@ -3540,6 +3540,21 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     })
 }
 
+/// Nom-idiomatic combinator replacement for `str::strip_suffix` (forbidden
+/// for parsing dispatch by the parser-combinator gate — see
+/// `oracle_nom/PATTERNS.md` §2a): requires `input` to end EXACTLY with
+/// `suffix`, returning the text before it. Fails if the suffix is absent or
+/// if anything follows it (`take_until` + `tag` alone would accept trailing
+/// content after the first match; the explicit `is_empty` check anchors to
+/// the true end, matching `strip_suffix`'s semantics). Shared by every
+/// "`<subject>` can't be cast/played" suffix-strip in this module.
+fn strip_required_suffix<'a>(input: &'a str, suffix: &str) -> Option<&'a str> {
+    let (rest, before) = terminated(take_until::<_, _, OracleError<'_>>(suffix), tag(suffix))
+        .parse(input)
+        .ok()?;
+    rest.is_empty().then_some(before)
+}
+
 /// CR 101.2 + CR 201.2: Shared passive-voice "`<subject>` can't be played"
 /// SUBJECT filter parser for the land-play axis (CR 305.1) — `<subject>` may
 /// be "[type] lands" or "lands with the chosen name". `before_played` is the
@@ -3564,9 +3579,8 @@ fn parse_passive_cant_be_played_land_filter(before_played: &str) -> Option<Targe
     }
 
     // Require " lands" (or the singular "land") at the end of the subject.
-    let type_text = before_played
-        .strip_suffix(" lands")
-        .or_else(|| before_played.strip_suffix(" land"))?;
+    let type_text = strip_required_suffix(before_played, " lands")
+        .or_else(|| strip_required_suffix(before_played, " land"))?;
 
     let (filter, remainder) = parse_type_phrase(type_text);
     if !remainder.trim().is_empty() {
@@ -3591,7 +3605,7 @@ fn parse_passive_cant_be_played_land_filter(before_played: &str) -> Option<Targe
 fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
     let trimmed_lower = scope_tp.lower.trim_end_matches('.');
-    let before_played = trimmed_lower.strip_suffix(" can't be played")?;
+    let before_played = strip_required_suffix(trimmed_lower, " can't be played")?;
     let land_filter = parse_passive_cant_be_played_land_filter(before_played)?;
 
     Some(ParsedEffectClause {
@@ -3649,10 +3663,8 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
         None => (scope_tp, None),
     };
 
-    let before_cant = spell_tp
-        .lower
-        .trim_end_matches('.')
-        .strip_suffix(" can't be cast")?;
+    let before_cant =
+        strip_required_suffix(spell_tp.lower.trim_end_matches('.'), " can't be cast")?;
     let spell_filter = {
         use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
         parse_passive_cant_be_cast_spell_filter(before_cant)?
@@ -3661,10 +3673,8 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
     let sub_ability = match land_tail_tp {
         None => None,
         Some(land_tp) => {
-            let land_before_played = land_tp
-                .lower
-                .trim_end_matches('.')
-                .strip_suffix(" can't be played")?;
+            let land_before_played =
+                strip_required_suffix(land_tp.lower.trim_end_matches('.'), " can't be played")?;
             let land_filter = parse_passive_cant_be_played_land_filter(land_before_played)?;
             let mut land_ability = AbilityDefinition::new(
                 AbilityKind::Spell,
