@@ -676,6 +676,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::SearchChoice {
         player,
+        library_owner,
         ref cards,
         count,
         reveal,
@@ -688,6 +689,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::SearchChoice {
                 player,
+                library_owner,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 count,
                 reveal,
@@ -1074,9 +1076,27 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             pool.registered_sideboard = Arc::new(Vec::new());
             pool.current_main = Arc::new(Vec::new());
             pool.current_sideboard = Arc::new(Vec::new());
+            pool.registered_companion = Arc::new(Vec::new());
+            pool.current_companion = Arc::new(Vec::new());
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+        }
+    }
+
+    // CR 702.139a: A companion is outside the game and stays private until
+    // its owner reveals it. The offer is therefore visible only to the owner
+    // (or an authorized turn controller); the public player.companion field is
+    // populated only after the reveal action succeeds.
+    if let WaitingFor::CompanionReveal { player, .. } = &state.waiting_for {
+        if !can_view_private_for_player(*player) {
+            if let WaitingFor::CompanionReveal {
+                eligible_companions,
+                ..
+            } = &mut filtered.waiting_for
+            {
+                eligible_companions.clear();
+            }
         }
     }
 
@@ -1646,6 +1666,7 @@ mod tests {
         let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
         state.pending_search_found_batch = Some(PendingSearchFoundBatch {
             searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
             remaining: vec![ObjectId(101)],
             survivors: vec![ObjectId(102)],
             continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
@@ -2045,6 +2066,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,
@@ -2109,6 +2131,7 @@ mod tests {
         });
         state.waiting_for = WaitingFor::SearchChoice {
             player: p1,
+            library_owner: None,
             cards: vec![p1_candidate],
             count: 1,
             reveal: false,
@@ -2456,6 +2479,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,

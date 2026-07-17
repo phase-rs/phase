@@ -18,7 +18,7 @@ import {
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
-import { commandersInZone } from "../../viewmodel/commanderColumn.ts";
+import { commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
@@ -39,7 +39,7 @@ export function CommanderCardZone({ playerId, splitOverview = false }: Commander
   const gameState = useGameStore((s) => s.gameState);
 
   const commanders = useMemo(
-    () => (gameState ? commandersInZone(gameState, playerId) : []),
+    () => (gameState ? commandZoneLeaders(gameState, playerId) : []),
     [gameState, playerId],
   );
 
@@ -62,6 +62,7 @@ function CommanderCard({
   splitOverview: boolean;
 }) {
   const { t } = useTranslation("game");
+  const isSignatureSpell = commander.signature_spell != null;
   const isCompactHeight = useIsCompactHeight();
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const effectiveCost = useGameStore(
@@ -184,14 +185,22 @@ function CommanderCard({
       }`}
       title={
         canCast
-          ? tax > 0
-            ? t("zone.castCommanderTax", { name: commander.name, tax })
-            : t("zone.castCommander", { name: commander.name })
+          ? isSignatureSpell
+            ? tax > 0
+              ? t("zone.castSignatureSpellTax", { name: commander.name, tax })
+              : t("zone.castSignatureSpell", { name: commander.name })
+            : tax > 0
+              ? t("zone.castCommanderTax", { name: commander.name, tax })
+              : t("zone.castCommander", { name: commander.name })
           : canNinjutsu
             ? t("zone.ninjutsuCommander", { name: commander.name })
-            : tax > 0
-              ? t("zone.commanderTitleTax", { name: commander.name, tax })
-              : t("zone.commanderTitle", { name: commander.name })
+            : isSignatureSpell
+              ? tax > 0
+                ? t("zone.signatureSpellTitleTax", { name: commander.name, tax })
+                : t("zone.signatureSpellTitle", { name: commander.name })
+              : tax > 0
+                ? t("zone.commanderTitleTax", { name: commander.name, tax })
+                : t("zone.commanderTitle", { name: commander.name })
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
     >
@@ -225,7 +234,7 @@ function CommanderCard({
           card and hide the cost pips. */}
       {!splitOverview && (
         <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-sm bg-amber-700 px-1.5 py-px text-[8px] font-bold text-amber-100 shadow">
-          {t("zone.commander")}
+          {isSignatureSpell ? t("zone.signatureSpell") : t("zone.commander")}
         </div>
       )}
 

@@ -6591,6 +6591,33 @@ fn parse_that_much_damage_offset(
                     .map(|value| DamageModification::Plus { value })
             },
         ),
+        // CR 614.1a: dynamic additive offset phrased as "plus an amount of
+        // damage equal to <quantity> instead" (Fated Firepower: "...the number
+        // of fire counters on this enchantment") — a replacement effect keyed on
+        // "instead". The counter-quantity's own rules live in the reused
+        // `parse_cda_quantity` (already annotated). Mirrors the "plus x, where X
+        // is" arm for the "an amount of damage equal to" surface form.
+        // Placed before the bare "plus x" freeze and the numeric fallback so a
+        // recognized dynamic quantity is not shadowed by "an"->1. The leading
+        // `terminated(take_until(" instead"), tag(" instead"))` strips the trailing
+        // " instead" so `parse_cda_quantity` receives a clean quantity phrase
+        // ("the number of fire counters on ~"); a bare `rest` would append
+        // " instead" and fail parse_cda_quantity's strict counter suffix. map_opt
+        // delegates parse_cda_quantity's Option (fail-closed on unrecognized
+        // quantity → falls through to the numeric arm).
+        map_opt(
+            preceded(
+                tag("plus an amount of damage equal to "),
+                alt((
+                    terminated(take_until(" instead"), tag(" instead")),
+                    nom::combinator::rest,
+                )),
+            ),
+            |q: &str| {
+                crate::parser::oracle_quantity::parse_cda_quantity(q)
+                    .map(|value| DamageModification::Plus { value })
+            },
+        ),
         // "plus X" with no binding — variable offset frozen at install. Tried
         // before the numeric arm so the literal "x" token is not consumed by
         // parse_number.
@@ -6619,7 +6646,14 @@ fn parse_damage_modification_phrase(
     alt((
         value(
             DamageModification::Double,
-            alt((tag("double that damage"), tag("deals double that damage"))),
+            alt((
+                tag("double that damage"),
+                tag("deals double that damage"),
+                // CR 701.10g: "To double an amount of damage a source would
+                // deal, that source instead deals twice that much damage. This
+                // is a replacement effect." (Neriv, Heart of the Storm).
+                tag("twice that much damage"),
+            )),
         ),
         value(
             DamageModification::Triple,
@@ -15888,6 +15922,201 @@ mod tests {
         );
     }
 
+    // DynQty subgroup A — damage-modification replacement (CR 614.1a).
+
+    /// Test A — `parse_that_much_damage_offset` (Change 1). The new "plus an
+    /// amount of damage equal to <quantity> instead" arm (Fated Firepower)
+    /// carries the live fire-counter quantity as `Plus { Ref(CountersOn(..)) }`.
+    #[test]
+    fn fated_firepower_dynamic_offset_arm() {
+        use crate::types::ability::ObjectScope;
+
+        // A-positive (LOAD-BEARING; FLIPS on revert of Change 1): reverting the
+        // new arm lets the numeric fallback read "an" -> 1 (Plus{Fixed{1}}).
+        let (_, positive) = parse_that_much_damage_offset(
+            "that much damage plus an amount of damage equal to the number of fire counters on ~ instead",
+        )
+        .expect("dynamic additive offset must parse");
+        assert_eq!(
+            positive,
+            DamageModification::Plus {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Generic("fire".to_string())),
+                    }
+                }
+            },
+            "Fated Firepower must carry the live fire-counter Ref, not Fixed(1)"
+        );
+
+        // A-sibling: the pre-existing "plus x, where X is <quantity>" arm
+        // (Hawkeye) is not shadowed by the new arm.
+        let (_, hawkeye) =
+            parse_that_much_damage_offset("that much damage plus x, where x is ~'s power.")
+                .unwrap();
+        assert_eq!(
+            hawkeye,
+            DamageModification::Plus {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    }
+                }
+            }
+        );
+
+        // A-sibling: literal numeric offset still Fixed.
+        let (_, two) = parse_that_much_damage_offset("that much damage plus 2").unwrap();
+        assert_eq!(
+            two,
+            DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 2 }
+            }
+        );
+
+        // A-hostile (fail-closed GATE — explicitly NON-flipping): an
+        // unrecognized quantity makes `map_opt` fail, so the new arm yields to
+        // the numeric arm, which reads "an" -> 1. This asserts the ACTUAL
+        // result (Fixed(1)), not Err/None. It is Fixed(1) both WITH and WITHOUT
+        // Change 1, so it does not flip on revert — it guards that garbage never
+        // panics or mis-binds a dynamic quantity.
+        let (_, hostile) = parse_that_much_damage_offset(
+            "that much damage plus an amount of damage equal to florble glorp instead",
+        )
+        .unwrap();
+        assert_eq!(
+            hostile,
+            DamageModification::Plus {
+                value: QuantityExpr::Fixed { value: 1 }
+            },
+            "garbage quantity must fail closed to the numeric 'an'->1 arm"
+        );
+    }
+
+    /// Test B — `parse_damage_modification_phrase` (Change 2). The new "twice
+    /// that much damage" leaf (Neriv, Heart of the Storm) maps to `Double`.
+    #[test]
+    fn neriv_twice_that_much_damage_phrase() {
+        // B-positive (LOAD-BEARING; FLIPS on revert of Change 2 -> Err).
+        let (_, positive) = parse_damage_modification_phrase("twice that much damage").unwrap();
+        assert_eq!(positive, DamageModification::Double);
+
+        // B-siblings: pre-existing Double / Triple leaves unaffected.
+        assert_eq!(
+            parse_damage_modification_phrase("double that damage")
+                .unwrap()
+                .1,
+            DamageModification::Double
+        );
+        assert_eq!(
+            parse_damage_modification_phrase("triple that damage")
+                .unwrap()
+                .1,
+            DamageModification::Triple
+        );
+
+        // B-negative: an unsupported synonym does not match.
+        assert!(parse_damage_modification_phrase("half that much damage").is_err());
+    }
+
+    /// Test C — assembled Fated Firepower via the real pipeline
+    /// (`parse_replacement_line` normalizes "this enchantment" -> `~` and reaches
+    /// `parse_damage_modification_replacement`). FLIPS on revert of Change 1
+    /// (damage_modification becomes `Plus{Fixed{1}}`).
+    #[test]
+    fn fated_firepower_assembled_replacement() {
+        use crate::types::ability::ObjectScope;
+        let def = parse_replacement_line(
+            "If a source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus an amount of damage equal to the number of fire counters on this enchantment instead.",
+            "Fated Firepower",
+        )
+        .expect("Fated Firepower damage-modification replacement must parse");
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::Plus {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Generic("fire".to_string())),
+                    }
+                }
+            }),
+            "FF must carry the live fire-counter amount (revert -> Plus{{Fixed{{1}}}})"
+        );
+        assert_eq!(
+            def.damage_target_filter,
+            Some(damage_target_opponent_or_permanents())
+        );
+        assert_eq!(def.combat_scope, None);
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.is_empty());
+            }
+            other => panic!("Expected Typed source filter, got {other:?}"),
+        }
+    }
+
+    /// Test D — assembled Neriv via a direct call to
+    /// `parse_damage_modification_replacement`. Neriv has no self-reference in
+    /// the clause, so the `~`-normalized lowercase form is exactly the lowercase
+    /// text the pipeline produces. Reverting Change 2 makes the DIRECT call
+    /// return `None` outright (the function opens with
+    /// `scan_damage_modification(norm_lower)?`), so `is_some()` flips.
+    #[test]
+    fn neriv_assembled_replacement_direct() {
+        let text = "If a creature you control that entered this turn would deal damage, it deals twice that much damage instead.";
+        let norm_lower = text.to_lowercase();
+        let def = parse_damage_modification_replacement(&norm_lower, text)
+            .expect("Neriv doubling replacement must assemble (revert Change 2 -> None)");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        assert_eq!(def.combat_scope, None);
+        assert_eq!(def.damage_target_filter, None);
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::EnteredThisTurn)),
+                    "Neriv source is a creature that entered this turn"
+                );
+            }
+            other => panic!("Expected Typed source filter, got {other:?}"),
+        }
+    }
+
+    /// Test E — regression guard: Ojer Axonil, Deepest Might is unchanged by
+    /// this PR (no production change touches SetToSourcePower). Guards that the
+    /// Change-1 `take_until(" instead")` does not over-capture on Ojer's text
+    /// (which also contains "instead"). Ojer routes through the
+    /// `parse_damage_modification_phrase` scan (SetToSourcePower) BEFORE the
+    /// `parse_that_much_damage_offset` scan, so the new arm never runs.
+    #[test]
+    fn ojer_axonil_set_to_source_power_unchanged() {
+        let def = parse_replacement_line(
+            "If a red source you control would deal an amount of noncombat damage less than Ojer Axonil's power to an opponent, that source deals damage equal to Ojer Axonil's power instead.",
+            "Ojer Axonil, Deepest Might",
+        )
+        .expect("Ojer Axonil damage-modification replacement must parse");
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::SetToSourcePower)
+        );
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
+        assert_eq!(def.damage_target_filter, Some(damage_target_opponent()));
+        match def.damage_source_filter.unwrap() {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }));
+            }
+            other => panic!("Expected Typed source filter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn damage_fiery_emancipation_triple() {
         let def = parse_replacement_line(
@@ -16139,6 +16368,55 @@ mod tests {
             execute.sub_ability.is_some(),
             "When you do reflexive trigger should be sub_ability"
         );
+    }
+
+    /// CR 707.9a (issue #6009): Sakashima of a Thousand Faces — "except it has
+    /// Sakashima's other abilities" must retain ALL of Sakashima's own printed
+    /// abilities (the legend-rule exemption static, Partner) on the copy, not
+    /// just a single indexed ability like the "except it has this ability"
+    /// class (Irma / Cryptoplasm).
+    #[test]
+    fn clone_sakashima_of_a_thousand_faces_retains_all_other_abilities() {
+        let def = parse_replacement_line(
+            "You may have Sakashima enter as a copy of another creature you control, \
+             except it has Sakashima's other abilities.",
+            "Sakashima of a Thousand Faces",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::BecomeCopy {
+                additional_modifications,
+                target,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::RetainAllOtherAbilitiesFromSource
+                    )),
+                    "expected RetainAllOtherAbilitiesFromSource, got {additional_modifications:?}"
+                );
+                // "another creature you control" — copy source is restricted to
+                // the controller's own OTHER creatures (CR 707.2).
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.properties
+                                .iter()
+                                .any(|p| matches!(p, FilterProp::Another)),
+                            "expected Another filter property, got {target:?}"
+                        );
+                    }
+                    other => panic!("expected Typed target filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
     }
 
     #[test]

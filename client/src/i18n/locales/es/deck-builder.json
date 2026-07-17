@@ -229,6 +229,11 @@
       "remove": "Eliminar hechizo de firma",
       "mustBeInstantOrSorcery": "El hechizo de firma debe ser un instantáneo o conjuro",
       "outsideColorIdentity": "{{name}}: fuera de la identidad de color del Rompejuramentos"
+    },
+    "companion": {
+      "heading": "Compañero",
+      "noCompanion": "No se seleccionó compañero",
+      "remove": "Quitar compañero"
     }
   },
   "manaCurve": {

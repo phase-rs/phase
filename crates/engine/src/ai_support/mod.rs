@@ -19,7 +19,8 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind, PendingMulliganAction, WaitingFor,
+    AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind,
+    PendingMulliganAction, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -1586,8 +1587,29 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         _ => (state, None),
     };
 
-    let actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
+    let mut actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
         .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe));
+
+    // This preference-setting action is intentionally excluded from AI candidate
+    // generation: it changes future prompt behavior rather than making a tactical
+    // game decision. It remains a legal player action, however, and must be present
+    // in the engine snapshot so a queued UI choice is not discarded as stale.
+    if matches!(
+        &state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            may_trigger_key: Some(_),
+            ..
+        }
+    ) {
+        actions.extend([
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Accept,
+            },
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Decline,
+            },
+        ]);
+    }
 
     // Build spell costs map. The frontend display layer needs the
     // engine-effective cost (after Affinity / ReduceCost / commander tax / etc.)
@@ -2920,6 +2942,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2959,6 +2982,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2989,6 +3013,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,

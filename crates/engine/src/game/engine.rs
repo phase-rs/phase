@@ -6397,13 +6397,12 @@ fn apply_action(
         // CR 702.139a: Pre-game companion reveal
         (
             WaitingFor::CompanionReveal { player, .. },
-            GameAction::DeclareCompanion { card_index },
-        ) => super::companion::handle_declare_companion(state, *player, card_index, &mut events),
+            GameAction::DeclareCompanion { choice },
+        ) => super::companion::handle_declare_companion(state, *player, choice, &mut events)
+            .map_err(EngineError::InvalidAction)?,
         // CR 702.139a: Special action — pay {3} to put companion into hand (see rule 116.2g).
         (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
-            state.lands_tapped_for_mana.remove(player);
-            super::companion::handle_companion_to_hand(state, *player, &mut events)
-                .map_err(EngineError::InvalidAction)?
+            super::companion::handle_companion_to_hand(state, *player, &mut events)?
         }
         // CR 722.3c / CR 601.2: Prepare (Strixhaven) — cast a copy of the
         // prepared face through the normal spell-casting pipeline (costs,
