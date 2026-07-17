@@ -309,7 +309,7 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
     // choose such a target.
     for keyword in &object.keywords {
         if let Keyword::Ward(ward) = keyword {
-            if !can_pay_ward_cost(ctx, ward) {
+            if !can_pay_ward_cost(ctx, ward, object) {
                 return Some(GateDecision::Reject);
             }
             break;
