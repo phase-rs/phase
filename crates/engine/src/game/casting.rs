@@ -14,8 +14,8 @@ use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
     GameState, ManaAbilityCostParent, ManaAbilityResume, NextSpellModifier, PayCostKind,
-    PendingCast, PendingCostMoveResume, SneakPlacement, SpellCastRecord, SpellCostSource,
-    StackEntry, StackEntryKind, TargetSelectionSlot, WaitingFor,
+    PendingCast, PendingCostMoveResume, SneakPlacement, SpellCostSource, StackEntry,
+    StackEntryKind, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -604,26 +604,6 @@ fn restriction_scope_matches_player(
             source_controller.is_some_and(|controller| controller != caster)
         }
     }
-}
-
-/// CR 601.2a + CR 202.3d: Build the spell-record projection used by prohibition
-/// filters. Routes through the shared `restrictions::spell_cast_record_for`
-/// authority so a fused split spell is projected with the COMBINED mana value /
-/// colors of both halves (CR 702.102b). `fused` requests that combined projection
-/// for a pre-payment fused split spell whose `fused_split_spell` marker is not yet
-/// set (the prohibition seam passes the `variant_override == Some(Fuse)` hint).
-/// `CastingVariant::Normal` is the historical placeholder for these live per-spell
-/// filters (they do not consult the variant).
-fn spell_record_for_restrictions_for(
-    spell_obj: &super::game_object::GameObject,
-    fused: bool,
-) -> SpellCastRecord {
-    super::restrictions::spell_cast_record_for(
-        spell_obj,
-        spell_obj.zone,
-        crate::types::game_state::CastingVariant::Normal,
-        fused,
-    )
 }
 
 fn is_blocked_by_cast_only_from_zones(
