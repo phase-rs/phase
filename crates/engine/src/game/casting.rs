@@ -713,8 +713,6 @@ fn is_blocked_by_cant_cast_spells_for(
         return true;
     }
 
-    let spell_record = spell_obj.map(|obj| spell_record_for_restrictions_for(obj, fused));
-
     state.restrictions.iter().any(|restriction| {
         let GameRestriction::ProhibitActivity {
             source,
@@ -744,12 +742,12 @@ fn is_blocked_by_cant_cast_spells_for(
         // CR 101.2: Once scope matches, filter-matching spells are prohibited.
         caster_affected
             && match spell_filter {
-                Some(filter) => spell_record.as_ref().is_some_and(|record| {
-                    super::filter::spell_record_matches_filter(
-                        record,
-                        filter,
-                        source_controller.unwrap_or(caster),
-                        &state.all_creature_types,
+                Some(filter) => spell_obj.is_some_and(|spell_obj| {
+                    let Some(source_obj) = state.objects.get(source) else {
+                        return false;
+                    };
+                    cant_cast_filter_matches_for(
+                        state, spell_obj, filter, source_obj, caster, fused,
                     )
                 }),
                 None => true,
