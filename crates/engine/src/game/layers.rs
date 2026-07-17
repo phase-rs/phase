@@ -5734,7 +5734,7 @@ fn apply_continuous_effect_filtered(
             // single-index retains above.
             ContinuousModification::RetainAllOtherAbilitiesFromSource => {
                 if let Some((abilities, triggers, statics, keywords)) =
-                    retained_other_abilities.clone()
+                    retained_other_abilities.as_ref()
                 {
                     let obj_abilities = Arc::make_mut(&mut obj.abilities);
                     for ability in abilities.iter() {
@@ -5753,8 +5753,8 @@ fn apply_continuous_effect_filtered(
                         }
                     }
                     for keyword in keywords {
-                        if !obj.keywords.contains(&keyword) {
-                            obj.keywords.push(keyword);
+                        if !obj.keywords.contains(keyword) {
+                            obj.keywords.push(keyword.clone());
                         }
                     }
                 }
