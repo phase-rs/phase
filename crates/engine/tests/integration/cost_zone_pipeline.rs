@@ -1148,6 +1148,350 @@ fn collect_evidence_and_unless_bounce_costs_complete_synchronously_without_repla
     assert!(bounce_runner.state().pending_cost_move_resume.is_none());
 }
 
+/// CR 702.21a + CR 701.21 + CR 616.1: A ward payment selecting multiple
+/// permanents must leave its unsacrificed suffix parked while each selected
+/// sacrifice waits on a competing graveyard replacement choice.
+#[test]
+fn ward_multi_sacrifice_payment_reparks_each_replacement_before_effect_resolved() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Ward Multi-Sacrifice Effect Source", 1, 1)
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Ward Multi-Sacrifice Redirect", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Ward Multi-Sacrifice Redirect", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        player: P0,
+        permanents: vec![first, second],
+        pending_effect: Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        )),
+        remaining: 1,
+        min_total_power: Some(2),
+    };
+
+    let initial = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("the first selected ward sacrifice reaches its replacement choice");
+    assert!(matches!(
+        initial.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert!(
+        !initial.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { source_id, .. } if *source_id == source
+        )),
+        "the ward tail must not resolve before the first replacement choice"
+    );
+
+    let after_first = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the first replacement resumes only the second selected ward sacrifice");
+    assert!(matches!(
+        after_first.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_ne!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert!(
+        !after_first.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { source_id, .. } if *source_id == source
+        )),
+        "the tail remains parked when the resumed suffix pauses again"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the second replacement completes the parked ward suffix");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_ne!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+
+    let events = initial
+        .events
+        .iter()
+        .chain(after_first.events.iter())
+        .chain(completed.events.iter());
+    for object_id in [first, second] {
+        assert_eq!(
+            events
+                .clone()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PermanentSacrificed { object_id: sacrificed, .. }
+                        if *sacrificed == object_id
+                ))
+                .count(),
+            1,
+            "each selected permanent is sacrificed exactly once"
+        );
+    }
+    assert_eq!(
+        events
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved { source_id, .. } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the ward payment tail resolves exactly once after every selected sacrifice settles"
+    );
+}
+
+/// CR 702.21a + CR 701.21 + CR 616.1: A sequential ward payment must not
+/// surface its next sacrifice prompt until the current replacement choice has
+/// settled.
+#[test]
+fn ward_sequential_sacrifice_payment_reprompts_only_after_replacement_resolves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Ward Sequential Effect Source", 1, 1)
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Ward Sequential Redirect", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Ward Sequential Sacrifice", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        player: P0,
+        permanents: vec![first, second],
+        pending_effect: Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        )),
+        remaining: 2,
+        min_total_power: None,
+    };
+
+    let initial = runner
+        .act(GameAction::SelectCards { cards: vec![first] })
+        .expect("the first sequential ward sacrifice reaches its replacement choice");
+    assert!(matches!(
+        initial.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        !initial.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { source_id, .. } if *source_id == source
+        )),
+        "neither the next ward prompt nor the tail may overwrite the replacement pause"
+    );
+
+    let reprompt = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the completed first sacrifice reconstructs the next ward choice");
+    let WaitingFor::WardSacrificeChoice {
+        player,
+        permanents,
+        remaining,
+        ..
+    } = &reprompt.waiting_for
+    else {
+        panic!(
+            "the sequential ward suffix must prompt only after replacement resolution, got {:?}",
+            reprompt.waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*remaining, 1);
+    assert_eq!(permanents, &vec![second]);
+    assert!(
+        !reprompt.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { source_id, .. } if *source_id == source
+        )),
+        "the tail waits for the final sequential sacrifice"
+    );
+
+    let completed = runner
+        .act(GameAction::SelectCards {
+            cards: vec![second],
+        })
+        .expect("the final ward sacrifice resolves synchronously");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    let events = initial
+        .events
+        .iter()
+        .chain(reprompt.events.iter())
+        .chain(completed.events.iter());
+    for object_id in [first, second] {
+        assert_eq!(
+            events
+                .clone()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PermanentSacrificed { object_id: sacrificed, .. }
+                        if *sacrificed == object_id
+                ))
+                .count(),
+            1,
+            "each sequential ward sacrifice occurs exactly once"
+        );
+    }
+    assert_eq!(
+        events
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved { source_id, .. } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the final sequential sacrifice reaches the ward tail exactly once"
+    );
+}
+
+/// CR 702.21a + CR 701.21: Ward sacrifice payments without a replacement
+/// choice retain the existing synchronous aggregate and sequential behavior.
+#[test]
+fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
+    let mut aggregate_scenario = GameScenario::new();
+    aggregate_scenario.at_phase(Phase::PreCombatMain);
+    let aggregate_source = aggregate_scenario
+        .add_creature(P0, "Synchronous Aggregate Ward Source", 1, 1)
+        .id();
+    let aggregate_first = aggregate_scenario
+        .add_creature(P0, "Synchronous Aggregate Ward First", 1, 1)
+        .id();
+    let aggregate_second = aggregate_scenario
+        .add_creature(P0, "Synchronous Aggregate Ward Second", 1, 1)
+        .id();
+    let mut aggregate_runner = aggregate_scenario.build();
+    aggregate_runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        player: P0,
+        permanents: vec![aggregate_first, aggregate_second],
+        pending_effect: Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            aggregate_source,
+            P0,
+        )),
+        remaining: 1,
+        min_total_power: Some(2),
+    };
+    let aggregate = aggregate_runner
+        .act(GameAction::SelectCards {
+            cards: vec![aggregate_first, aggregate_second],
+        })
+        .expect("aggregate ward payment completes synchronously");
+    assert!(matches!(aggregate.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(
+        aggregate
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved { source_id, .. } if *source_id == aggregate_source
+            ))
+            .count(),
+        1
+    );
+
+    let mut sequential_scenario = GameScenario::new();
+    sequential_scenario.at_phase(Phase::PreCombatMain);
+    let sequential_source = sequential_scenario
+        .add_creature(P0, "Synchronous Sequential Ward Source", 1, 1)
+        .id();
+    let sequential_first = sequential_scenario
+        .add_creature(P0, "Synchronous Sequential Ward First", 1, 1)
+        .id();
+    let sequential_second = sequential_scenario
+        .add_creature(P0, "Synchronous Sequential Ward Second", 1, 1)
+        .id();
+    let mut sequential_runner = sequential_scenario.build();
+    sequential_runner.state_mut().waiting_for = WaitingFor::WardSacrificeChoice {
+        player: P0,
+        permanents: vec![sequential_first, sequential_second],
+        pending_effect: Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            sequential_source,
+            P0,
+        )),
+        remaining: 2,
+        min_total_power: None,
+    };
+    let first = sequential_runner
+        .act(GameAction::SelectCards {
+            cards: vec![sequential_first],
+        })
+        .expect("first sequential ward payment completes synchronously");
+    assert!(matches!(
+        first.waiting_for,
+        WaitingFor::WardSacrificeChoice {
+            remaining: 1,
+            ref permanents,
+            ..
+        } if permanents == &vec![sequential_second]
+    ));
+    assert!(
+        !first.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { source_id, .. } if *source_id == sequential_source
+        )),
+        "the sequential branch keeps the final ward tail behind its second prompt"
+    );
+    let final_payment = sequential_runner
+        .act(GameAction::SelectCards {
+            cards: vec![sequential_second],
+        })
+        .expect("second sequential ward payment completes the tail");
+    assert!(matches!(
+        final_payment.waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        first
+            .events
+            .iter()
+            .chain(final_payment.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved { source_id, .. } if *source_id == sequential_source
+            ))
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn village_rites_sacrifice_cost_pauses_for_competing_graveyard_replacements() {
     const VILLAGE_RITES: &str =
