@@ -3626,6 +3626,15 @@ fn parse_excluded_player_anchor(i: &str) -> OracleResult<'_, PlayerFilter> {
 }
 
 pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
+    // CR 701.9a + CR 608.2c: Reserve only the exact Kroxa/Strongarm
+    // mandatory-FILTERED decline-tail grammar for its dedicated dispatcher.
+    // A broad `who didn't` reservation also captures unrelated relative clauses
+    // (for example, sacrifice and choose), changing their parser routes even
+    // though this dispatcher intentionally supports discard only.
+    if strip_each_scope_who_didnt_verb_filter_this_way_subject(text).is_some() {
+        return (None, text.to_string());
+    }
+
     let lower = text.to_lowercase();
     let scope_rest = nom_on_lower(text, &lower, |i| {
         alt((
@@ -3804,17 +3813,6 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         // for readability, not correctness — but `who does` is listed AFTER the
         // longer `who doesn't`/`who does not` tags to mirror the grammar.
         tag("who does"),
-        // CR 701.9a + CR 608.2c: Reserve the relative-clause shape "who
-        // didn't" / "who did not" for the Kroxa-class subject-only
-        // mandatory-FILTERED decline-tail dispatcher
-        // (`strip_each_scope_who_didnt_verb_filter_this_way_subject` in
-        // `parse_effect_clause_inner`). Without this guard, `each opponent `
-        // would strip here and leave `who didn't discard a nonland card this
-        // way loses 3 life` orphaned — misparsed as an ordinary imperative
-        // clause with no gate, so every opponent loses the life regardless of
-        // what they discarded (issue #6007).
-        tag("who didn't"),
-        tag("who did not"),
         // CR 119.3 + CR 701.55a: "each opponent who lost N or more life this
         // turn faces a villainous choice" is a restricted chooser phrase, not
         // a normal per-player imperative. Preserve the full subject so the
