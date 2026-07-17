@@ -1,6 +1,8 @@
 use super::*;
 use crate::parser::oracle_effect::parse_effect_chain;
-use crate::types::ability::{CountScope, CounterAdjustment, DoorLockOp};
+use crate::types::ability::{
+    AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
+};
 use crate::types::counter::{CounterMatch, CounterType};
 
 /// CR 122.1 + CR 608.2d + CR 702.62b (Clockspinning): the whole card parses
@@ -3832,6 +3834,74 @@ fn kicker_and_or_line_sets_two_kicker_costs() {
         }
         other => panic!("expected two-cost Kicker, got {other:?}"),
     }
+}
+
+#[test]
+fn kicker_etb_intervening_if_is_gated_at_trigger_time() {
+    let parsed = parse(
+        "Kicker {B} and/or {R}\n\
+         When ~ enters, if it was kicked, it deals 2 damage to any target.\n\
+         When ~ enters, if it was kicked twice, it deals 2 damage to any target.",
+        "Archangel of Wrath",
+        &[],
+        &["Creature"],
+        &["Angel"],
+    );
+
+    assert_eq!(parsed.triggers.len(), 2);
+    for (trigger, min_count) in parsed.triggers.iter().zip([1, 2]) {
+        assert!(matches!(
+            &trigger.condition,
+            Some(TriggerCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::Kicker,
+                variant: None,
+                kicker_cost: None,
+                min_count: actual,
+                ..
+            }) if *actual == min_count
+        ));
+        assert!(trigger
+            .execute
+            .as_ref()
+            .is_some_and(|ability| ability.condition.is_none()));
+    }
+}
+
+#[test]
+fn bargained_etb_intervening_if_is_gated_at_trigger_time() {
+    let parsed = parse(
+        "Bargain\nWhen ~ enters, if it was bargained, add four mana in any combination of colors.",
+        "Realm-Scorcher Hellkite",
+        &[Keyword::Bargain],
+        &["Creature"],
+        &["Dragon"],
+    );
+
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    assert!(matches!(
+        trigger.condition,
+        Some(TriggerCondition::AdditionalCostPaid {
+            source: AdditionalCostPaymentSource::NonKicker,
+            origin: Some(AdditionalCostOrigin::Bargain),
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+            ..
+        })
+    ));
+    assert_eq!(
+        serde_json::to_value(&trigger.condition).unwrap(),
+        serde_json::json!({
+            "type": "AdditionalCostPaid",
+            "source": "NonKicker",
+            "origin": "Bargain",
+        })
+    );
+    assert!(trigger
+        .execute
+        .as_ref()
+        .is_some_and(|ability| ability.condition.is_none()));
 }
 
 #[test]

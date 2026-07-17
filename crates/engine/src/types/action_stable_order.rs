@@ -747,8 +747,8 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
-        GameAction::DeclareCompanion { card_index: a0 } => {
-            let GameAction::DeclareCompanion { card_index: b0 } = b else {
+        GameAction::DeclareCompanion { choice: a0 } => {
+            let GameAction::DeclareCompanion { choice: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
             cmp_val(a0, b0)

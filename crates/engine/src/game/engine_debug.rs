@@ -81,6 +81,7 @@ pub fn apply_debug_action(
                 }
             }
 
+            // allow-raw-zone: debug-only object deletion forces state, not a CR zone-change event (CR 400.1).
             zones::remove_from_zone(state, object_id, zone, owner);
             state.objects.remove(&object_id);
             crate::game::layers::mark_layers_full(state);

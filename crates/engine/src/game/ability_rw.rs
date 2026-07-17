@@ -2335,6 +2335,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -2595,6 +2596,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -2724,6 +2726,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
@@ -3313,6 +3316,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
@@ -4135,6 +4139,12 @@ fn rw_effect(
         Effect::Surveil { count, target: _ } => {
             let mut p = ext_write(StateKind::HandLibrary);
             p.merge(rw_quantity_expr(count));
+            (p, None)
+        }
+        Effect::ArrangePlanarDeckTop { count, keep_on_top } => {
+            let mut p = ext_write(StateKind::Other);
+            p.merge(rw_quantity_expr(count));
+            p.merge(rw_quantity_expr(keep_on_top));
             (p, None)
         }
         Effect::Shuffle { target: _ } => (ext_write(StateKind::HandLibrary), None),

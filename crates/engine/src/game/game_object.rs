@@ -110,7 +110,7 @@ pub struct PrototypeFormState {
 /// treatment as other command-zone leaders. Stored as a typed marker to avoid
 /// proliferating bare role booleans on `GameObject`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SignatureSpellState;
+pub struct SignatureSpellState {}
 
 /// CR 702.148a-b + CR 612: Cleave form marker — `Some(_)` while this object's
 /// cleave text-changing effect is live (the spell was cast for its cleave cost
@@ -1347,7 +1347,7 @@ impl GameObject {
 
     /// Oathbreaker RC: mark this command-zone object as a signature spell.
     pub fn mark_signature_spell(&mut self) {
-        self.signature_spell = Some(SignatureSpellState);
+        self.signature_spell = Some(SignatureSpellState {});
     }
 
     /// CR 903 + Oathbreaker RC: command-zone cards that use commander tax and

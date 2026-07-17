@@ -229,6 +229,11 @@
       "remove": "Supprimer le sort signature",
       "mustBeInstantOrSorcery": "Le sort signature doit être un éphémère ou un rituel",
       "outsideColorIdentity": "{{name}} : hors de l'identité de couleur du Briseur de serment"
+    },
+    "companion": {
+      "heading": "Compagnon",
+      "noCompanion": "Aucun compagnon sélectionné",
+      "remove": "Retirer le compagnon"
     }
   },
   "manaCurve": {

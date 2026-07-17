@@ -7,6 +7,7 @@ import {
   detectAndParseDeck,
   deriveImportedDeckName,
   repairParsedDeck,
+  assignOathbreakerSlots,
   resolveCommander,
   expandParsedDeck,
   parsedDeckHasCards,
@@ -17,6 +18,28 @@ vi.mock('../engineRuntime', () => ({
 }));
 
 describe('deckParser', () => {
+  it('moves the selected Oathbreaker and signature spell into their special slots', () => {
+    const result = assignOathbreakerSlots(
+      {
+        main: [
+          { count: 1, name: 'Daretti, Ingenious Iconoclast' },
+          { count: 2, name: 'Scheming Symmetry' },
+          { count: 1, name: 'Mountain' },
+        ],
+        sideboard: [],
+      },
+      'Daretti, Ingenious Iconoclast',
+      'Scheming Symmetry',
+    );
+
+    expect(result.commander).toEqual(['Daretti, Ingenious Iconoclast']);
+    expect(result.signature_spell).toEqual(['Scheming Symmetry']);
+    expect(result.main).toEqual([
+      { count: 1, name: 'Scheming Symmetry' },
+      { count: 1, name: 'Mountain' },
+    ]);
+  });
+
   it('parses simple deck: "4 Lightning Bolt" -> { count: 4, name: "Lightning Bolt" }', () => {
     const result = parseDeckFile('4 Lightning Bolt');
     expect(result.main).toEqual([{ count: 4, name: 'Lightning Bolt' }]);

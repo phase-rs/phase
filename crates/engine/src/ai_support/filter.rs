@@ -796,6 +796,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasSingleTarget
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 715.2: Adventure identity reads the stored alternate face, which
+        // is not part of the candidate fingerprint; memoizing it is unsound.
+        | FilterProp::HasAdventure
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::NameMatchesAnyPermanent { .. }

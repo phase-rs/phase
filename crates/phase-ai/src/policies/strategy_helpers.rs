@@ -11,7 +11,7 @@ use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
 use crate::config::PolicyPenalties;
-use crate::eval::{evaluate_creature, threat_level};
+use crate::eval::{evaluate_creature, opponent_battlefield_creature_threat_value};
 
 use super::context::PolicyContext;
 
@@ -76,22 +76,11 @@ pub(crate) fn best_proactive_cast_score(ctx: &PolicyContext<'_>) -> f64 {
 }
 
 pub(crate) fn visible_opponent_creature_value(state: &GameState, ai_player: PlayerId) -> f64 {
-    let opponents = players::opponents(state, ai_player);
     state
         .battlefield
         .iter()
         .filter_map(|object_id| {
-            let object = state.objects.get(object_id)?;
-            if opponents.contains(&object.controller)
-                && object.card_types.core_types.contains(&CoreType::Creature)
-            {
-                Some(
-                    evaluate_creature(state, *object_id)
-                        * (threat_level(state, ai_player, object.controller) + 0.5),
-                )
-            } else {
-                None
-            }
+            opponent_battlefield_creature_threat_value(state, ai_player, *object_id)
         })
         .fold(0.0, f64::max)
 }
@@ -100,23 +89,14 @@ pub(crate) fn visible_opponent_creature_value(state: &GameState, ai_player: Play
 /// Use this instead of `visible_opponent_creature_value` when evaluating whether
 /// pre-combat removal "opens combat lanes" — tapped creatures can't block.
 pub(crate) fn untapped_opponent_blocker_value(state: &GameState, ai_player: PlayerId) -> f64 {
-    let opponents = players::opponents(state, ai_player);
     state
         .battlefield
         .iter()
         .filter_map(|object_id| {
             let object = state.objects.get(object_id)?;
-            if opponents.contains(&object.controller)
-                && object.card_types.core_types.contains(&CoreType::Creature)
-                && !object.tapped
-            {
-                Some(
-                    evaluate_creature(state, *object_id)
-                        * (threat_level(state, ai_player, object.controller) + 0.5),
-                )
-            } else {
-                None
-            }
+            (!object.tapped)
+                .then(|| opponent_battlefield_creature_threat_value(state, ai_player, *object_id))
+                .flatten()
         })
         .fold(0.0, f64::max)
 }
@@ -130,23 +110,14 @@ pub(crate) fn targetable_threat_value(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> f64 {
-    let opponents = players::opponents(state, ai_player);
     let ctx = FilterContext::from_source(state, source_id);
     state
         .battlefield
         .iter()
         .filter_map(|&id| {
-            let object = state.objects.get(&id)?;
-            if opponents.contains(&object.controller)
-                && object.card_types.core_types.contains(&CoreType::Creature)
-                && matches_target_filter(state, id, filter, &ctx)
-            {
-                let creature_value = evaluate_creature(state, id);
-                let threat_weight = threat_level(state, ai_player, object.controller) + 0.5;
-                Some(creature_value * threat_weight)
-            } else {
-                None
-            }
+            matches_target_filter(state, id, filter, &ctx)
+                .then(|| opponent_battlefield_creature_threat_value(state, ai_player, id))
+                .flatten()
         })
         .fold(0.0, f64::max)
 }

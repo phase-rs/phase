@@ -5942,6 +5942,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
@@ -6262,6 +6263,8 @@ pub(super) fn parse_followup_continuation_ast(
             let choice_optional = alt((
                 tag::<_, _, OracleError<'_>>("you may choose "),
                 tag("may choose "),
+                tag("you may exile "),
+                tag("may exile "),
             ))
             .parse(lower.as_str())
             .is_ok();

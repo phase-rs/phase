@@ -3,10 +3,10 @@ use std::collections::HashSet;
 use crate::game::life_costs::{can_pay_life_cost, pay_life_as_cost};
 use crate::game::quantity::resolve_quantity;
 use crate::game::targeting::resolve_effect_player_ref;
-use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
+use crate::types::ability::{Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -76,11 +76,11 @@ pub struct TopdeckChoice<'a> {
     pub chosen_to_topdeck: &'a [ObjectId],
 }
 
-pub fn handle_topdeck_choice(
+pub(crate) fn handle_topdeck_choice(
     state: &mut GameState,
     choice: TopdeckChoice<'_>,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<BatchMoveResult, EffectError> {
     if choice.chosen_to_topdeck.len() > choice.count {
         return Err(EffectError::InvalidParam(
             "too many cards selected".to_string(),
@@ -111,21 +111,59 @@ pub fn handle_topdeck_choice(
         ));
     }
 
-    for object_id in choice.chosen_to_topdeck.iter().rev() {
-        zones::move_to_library_at_index(state, *object_id, Some(0), events);
-    }
-    for _ in 0..payment_count {
-        if pay_life_as_cost(state, choice.player, choice.life_payment, events).is_unpayable() {
-            return Err(EffectError::InvalidParam("life payment failed".to_string()));
-        }
+    let requests = choice
+        .chosen_to_topdeck
+        .iter()
+        .rev()
+        .map(|&object_id| {
+            ZoneMoveRequest::effect(object_id, Zone::Library, choice.source_id)
+                .at_library_position(LibraryPosition::Top)
+        })
+        .collect();
+    Ok(zone_pipeline::move_objects_simultaneously_then(
+        state,
+        requests,
+        Some(BatchCompletion::DrawnThisTurnTopdeckComplete {
+            player: choice.player,
+            life_payment: choice.life_payment,
+            payment_count,
+            topdecked_count: choice.chosen_to_topdeck.len(),
+            source_id: choice.source_id,
+        }),
+        events,
+    ))
+}
+
+/// CR 608.2c + CR 614.1 + CR 616.1: Complete the pay-or-topdeck instruction
+/// only after every selected Library placement has settled. The pre-batch
+/// affordability check makes an unpayable payment here an internal
+/// inconsistency; preserve the legacy event-free failure shape in release
+/// builds while asserting it in debug builds.
+pub(crate) fn complete_topdeck_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    life_payment: u32,
+    payment_count: usize,
+    topdecked_count: usize,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    let payment_failed = (0..payment_count)
+        .any(|_| pay_life_as_cost(state, player, life_payment, events).is_unpayable());
+    debug_assert!(
+        !payment_failed,
+        "pre-validated drawn-this-turn life payment became unpayable after Library delivery"
+    );
+    if payment_failed {
+        return;
     }
 
+    state.last_effect_count = Some(topdecked_count as i32);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseDrawnThisTurnPayOrTopdeck,
-        source_id: choice.source_id,
+        source_id,
         subject: None,
     });
-    Ok(())
 }
 
 fn eligible_drawn_hand_cards(state: &GameState, player: PlayerId) -> Vec<ObjectId> {

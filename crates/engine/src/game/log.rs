@@ -23,13 +23,31 @@ pub fn resolve_log_entries(events: &[GameEvent], state: &GameState) -> Vec<GameL
 
 /// Returns true for events that should be excluded from log output.
 /// Covers hidden-information leaks and low-signal stack bookkeeping.
-fn should_exclude_event(event: &GameEvent, _state: &GameState) -> bool {
+fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
     match event {
-        // Individual card draws from library leak card identity — CardsDrawn summary suffices
+        // Library-origin moves and mulligan/tuck moves from hand to library
+        // expose hidden card identity. Public discard/moves remain loggable.
         GameEvent::ZoneChanged {
             from: Some(crate::types::zones::Zone::Library),
             ..
+        }
+        | GameEvent::ZoneChanged {
+            from: Some(crate::types::zones::Zone::Hand),
+            to: crate::types::zones::Zone::Library,
+            ..
         } => true,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(crate::types::zones::Zone::Hand),
+            to: crate::types::zones::Zone::Exile,
+            ..
+        } if state
+            .objects
+            .get(object_id)
+            .is_some_and(|obj| obj.face_down) =>
+        {
+            true
+        }
         // CardDrawn also reveals which specific card was drawn
         GameEvent::CardDrawn { .. } => true,
         // StackPushed/StackResolved are low-signal bookkeeping —
@@ -1255,19 +1273,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" revoked debug actions from "),
             player_seg(state, *player_id),
         ],
-        GameEvent::Foretold {
-            player_id,
-            object_id,
-        } => vec![
-            player_seg(state, *player_id),
-            text(" foretold "),
-            card_seg(state, *object_id),
-        ],
+        GameEvent::Foretold { player_id, .. } => {
+            vec![player_seg(state, *player_id), text(" foretold a card")]
+        }
         // CR 702.143d: an effect made an exiled card foretold (no foretelling
         // player — the card itself became foretold).
-        GameEvent::BecameForetold { object_id } => {
-            vec![card_seg(state, *object_id), text(" becomes foretold")]
-        }
+        GameEvent::BecameForetold { .. } => vec![text("An exiled card becomes foretold")],
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is
@@ -1311,6 +1322,100 @@ mod tests {
             has_card_name,
             "Expected CardName segment with 'Lightning Bolt'"
         );
+    }
+
+    #[test]
+    fn public_log_hides_hand_to_library_but_keeps_public_discard() {
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let mulligan = create_object(
+            &mut state,
+            CardId(98),
+            PlayerId(1),
+            "Secret Mulligan Card".to_string(),
+            Zone::Library,
+        );
+        let discarded = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(1),
+            "Public Discard".to_string(),
+            Zone::Graveyard,
+        );
+        let mut mulligan_record =
+            ZoneChangeRecord::test_minimal(mulligan, Some(Zone::Hand), Zone::Library);
+        mulligan_record.name = "Secret Mulligan Card".to_string();
+        let mut discard_record =
+            ZoneChangeRecord::test_minimal(discarded, Some(Zone::Hand), Zone::Graveyard);
+        discard_record.name = "Public Discard".to_string();
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: mulligan,
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record: Box::new(mulligan_record),
+            },
+            GameEvent::ZoneChanged {
+                object_id: discarded,
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record: Box::new(discard_record),
+            },
+        ];
+
+        let entries = resolve_log_entries(&events, &state);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].segments.iter().any(
+            |segment| matches!(segment, LogSegment::CardName { name, .. } if name == "Public Discard")
+        ));
+        assert!(entries.iter().all(|entry| entry.segments.iter().all(
+            |segment| !matches!(segment, LogSegment::CardName { name, .. } if name == "Secret Mulligan Card")
+        )));
+    }
+
+    #[test]
+    fn public_log_hides_foretold_card_name_and_hand_to_exile_record() {
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let foretold = create_object(
+            &mut state,
+            CardId(704),
+            PlayerId(1),
+            "Secret Foretell".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&foretold).unwrap();
+        obj.foretold = true;
+        obj.face_down = true;
+        let mut record = ZoneChangeRecord::test_minimal(foretold, Some(Zone::Hand), Zone::Exile);
+        record.name = "Secret Foretell".to_string();
+        record.owner = PlayerId(1);
+        let entries = resolve_log_entries(
+            &[
+                GameEvent::ZoneChanged {
+                    object_id: foretold,
+                    from: Some(Zone::Hand),
+                    to: Zone::Exile,
+                    record: Box::new(record),
+                },
+                GameEvent::Foretold {
+                    player_id: PlayerId(1),
+                    object_id: foretold,
+                },
+            ],
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            entries[0].segments.as_slice(),
+            [LogSegment::PlayerName { player_id, .. }, LogSegment::Text(text)]
+                if *player_id == PlayerId(1) && text == " foretold a card"
+        ));
     }
 
     #[test]

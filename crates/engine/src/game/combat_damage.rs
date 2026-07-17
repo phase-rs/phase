@@ -110,19 +110,16 @@ pub fn resolve_combat_damage(
         return None;
     }
 
-    let has_first_or_double = combat.attackers.iter().any(|a| {
-        state
-            .objects
-            .get(&a.object_id)
-            .map(|o| o.has_keyword(&Keyword::FirstStrike) || o.has_keyword(&Keyword::DoubleStrike))
-            .unwrap_or(false)
-    }) || combat.blocker_to_attacker.keys().any(|blocker_id| {
-        state
-            .objects
-            .get(blocker_id)
-            .map(|o| o.has_keyword(&Keyword::FirstStrike) || o.has_keyword(&Keyword::DoubleStrike))
-            .unwrap_or(false)
-    });
+    let first_strike_participants = combat
+        .first_strike_participants
+        .clone()
+        .unwrap_or_else(|| combat_first_strike_participants(state, &combat));
+    if combat.first_strike_participants.is_none() {
+        if let Some(current) = state.combat.as_mut() {
+            current.first_strike_participants = Some(first_strike_participants.clone());
+        }
+    }
+    let has_first_or_double = !first_strike_participants.is_empty();
 
     // --- First strike sub-step ---
     if has_first_or_double && !combat.first_strike_done {
@@ -229,6 +226,80 @@ enum SubStep {
     Regular,
 }
 
+fn combat_first_strike_participants(
+    state: &GameState,
+    combat: &CombatState,
+) -> std::collections::HashSet<ObjectId> {
+    combat
+        .attackers
+        .iter()
+        .map(|attacker| attacker.object_id)
+        .chain(combat.blocker_to_attacker.keys().copied())
+        .filter(|object_id| {
+            state.objects.get(object_id).is_some_and(|object| {
+                object.has_keyword(&Keyword::FirstStrike)
+                    || object.has_keyword(&Keyword::DoubleStrike)
+            })
+        })
+        .collect()
+}
+
+fn deals_in_substep(
+    obj: &GameObject,
+    sub_step: SubStep,
+    first_strike_participants: &std::collections::HashSet<ObjectId>,
+) -> bool {
+    match sub_step {
+        SubStep::FirstStrike => first_strike_participants.contains(&obj.id),
+        SubStep::Regular => {
+            !first_strike_participants.contains(&obj.id) || obj.has_keyword(&Keyword::DoubleStrike)
+        }
+    }
+}
+
+/// Whether a combatant will assign nonzero damage in the pending combat-damage
+/// substep under the engine's current first/double-strike state.
+///
+/// CR 510.4 + CR 702.7b: after the first-strike substep, first-strike-only
+/// creatures do not participate in the regular substep, while double-strike
+/// creatures do. This is the shared query for consumers that must reason about
+/// the next damage event without duplicating combat-substep selection.
+pub fn participates_in_pending_combat_damage_substep(
+    state: &GameState,
+    object_id: ObjectId,
+) -> bool {
+    let Some(combat) = state.combat.as_ref() else {
+        return false;
+    };
+    if combat.regular_damage_done
+        || (!combat
+            .attackers
+            .iter()
+            .any(|attacker| attacker.object_id == object_id)
+            && !combat.blocker_to_attacker.contains_key(&object_id))
+    {
+        return false;
+    }
+    let Some(object) = state
+        .objects
+        .get(&object_id)
+        .filter(|object| object.zone == crate::types::zones::Zone::Battlefield)
+    else {
+        return false;
+    };
+    let first_strike_participants = combat
+        .first_strike_participants
+        .clone()
+        .unwrap_or_else(|| combat_first_strike_participants(state, combat));
+    let sub_step = if !first_strike_participants.is_empty() && !combat.first_strike_done {
+        SubStep::FirstStrike
+    } else {
+        SubStep::Regular
+    };
+    deals_in_substep(object, sub_step, &first_strike_participants)
+        && combat_damage_amount(object) > 0
+}
+
 /// Drain pending_damage from CombatState, resetting it to empty.
 fn take_pending_damage(state: &mut GameState) -> Vec<(ObjectId, DamageAssignment)> {
     state
@@ -244,7 +315,10 @@ fn take_pending_damage(state: &mut GameState) -> Vec<(ObjectId, DamageAssignment
 fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Option<WaitingFor> {
     let combat = state.combat.as_ref()?.clone();
     let start_index = combat.damage_step_index.unwrap_or(0);
-    let first_strike_was_done = combat.first_strike_done;
+    let first_strike_participants = combat
+        .first_strike_participants
+        .as_ref()
+        .expect("combat damage participant snapshot is initialized before assignment");
 
     // --- Attackers ---
     for (i, attacker_info) in combat.attackers.iter().enumerate().skip(start_index) {
@@ -253,24 +327,8 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
             _ => continue,
         };
 
-        // Sub-step filter
-        match sub_step {
-            SubStep::FirstStrike => {
-                if !obj.has_keyword(&Keyword::FirstStrike)
-                    && !obj.has_keyword(&Keyword::DoubleStrike)
-                {
-                    continue;
-                }
-            }
-            SubStep::Regular => {
-                // Skip FirstStrike-only creatures that already dealt in first-strike step
-                if first_strike_was_done
-                    && obj.has_keyword(&Keyword::FirstStrike)
-                    && !obj.has_keyword(&Keyword::DoubleStrike)
-                {
-                    continue;
-                }
-            }
+        if !deals_in_substep(obj, sub_step, first_strike_participants) {
+            continue;
         }
 
         let power = combat_damage_amount(obj);
@@ -439,22 +497,8 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
             _ => continue,
         };
 
-        match sub_step {
-            SubStep::FirstStrike => {
-                if !obj.has_keyword(&Keyword::FirstStrike)
-                    && !obj.has_keyword(&Keyword::DoubleStrike)
-                {
-                    continue;
-                }
-            }
-            SubStep::Regular => {
-                if first_strike_was_done
-                    && obj.has_keyword(&Keyword::FirstStrike)
-                    && !obj.has_keyword(&Keyword::DoubleStrike)
-                {
-                    continue;
-                }
-            }
+        if !deals_in_substep(obj, sub_step, first_strike_participants) {
+            continue;
         }
 
         let power = combat_damage_amount(obj);
@@ -1635,6 +1679,43 @@ mod tests {
 
         // 3 + 3 = 6 damage to player
         assert_eq!(state.players[1].life, 14);
+    }
+
+    #[test]
+    fn regular_substep_uses_first_step_keyword_snapshot() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Knight", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 3);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+        let snapshot = combat_first_strike_participants(&state, state.combat.as_ref().unwrap());
+        assert!(snapshot.contains(&attacker));
+        assert!(!snapshot.contains(&blocker));
+
+        let combat = state.combat.as_mut().unwrap();
+        combat.first_strike_participants = Some(snapshot);
+        combat.first_strike_done = true;
+        state.objects.get_mut(&attacker).unwrap().keywords.clear();
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+
+        assert!(
+            !participates_in_pending_combat_damage_substep(&state, attacker),
+            "losing first strike does not grant a second damage assignment"
+        );
+        assert!(
+            participates_in_pending_combat_damage_substep(&state, blocker),
+            "gaining first strike does not remove a normal combatant from regular damage"
+        );
     }
 
     #[test]
