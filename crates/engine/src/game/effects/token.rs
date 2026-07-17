@@ -129,6 +129,7 @@ fn materialize_predefined_token_payload(
         }
     }
     if let Some(spec) = role_spec {
+        // CR 111.10k: A Monster Role (like every predefined Role) has enchant creature.
         materialized
             .keywords
             .push(Keyword::Enchant(TargetFilter::Typed(
@@ -4911,6 +4912,7 @@ mod tests {
             "Monster Role must enter attached to Mishra's Foundry"
         );
         assert!(
+            // allow-raw-authority: the test verifies the exact intrinsic Enchant filter, which the keyword-kind authority cannot inspect
             state.objects[&role].keywords.iter().any(|keyword| matches!(
                 keyword,
                 Keyword::Enchant(TargetFilter::Typed(filter))

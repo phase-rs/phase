@@ -67,7 +67,9 @@ fn goddric_conditional_flying_is_not_a_printed_keyword() {
     card.keywords = Some(vec!["Flying".to_string(), "Haste".to_string()]);
 
     let face = parse_face(&card);
+    // allow-raw-authority: this asserts the synthesized CardFace's printed keywords, not a live object's effective keywords
     assert!(face.keywords.contains(&Keyword::Haste));
+    // allow-raw-authority: this asserts the synthesized CardFace's printed keywords, not a live object's effective keywords
     assert!(!face.keywords.contains(&Keyword::Flying));
     let celebration = face
         .static_abilities
