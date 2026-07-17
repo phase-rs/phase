@@ -3242,6 +3242,125 @@ mod tests {
         }
     }
 
+    /// CR 608.2c: Liliana, the Necromancer's -7 chooses up to two creature
+    /// cards from graveyards while the ability resolves. Its real parser output
+    /// has no fixed origin, but the singleton graveyard constraint is `InZone`,
+    /// so the resolver must offer creature cards from either player's graveyard
+    /// and exclude battlefield and noncreature decoys.
+    #[test]
+    fn liliana_the_necromancer_minus_seven_resolves_graveyard_choice() {
+        use crate::parser::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "[+1]: Target player loses 2 life.\n\
+             [−1]: Return target creature card from your graveyard to your hand.\n\
+             [−7]: Destroy up to two target creatures. Put up to two creature cards from graveyards onto the battlefield under your control.",
+            "Liliana, the Necromancer",
+            &[],
+            &["Planeswalker".to_string()],
+            &["Liliana".to_string()],
+        );
+        let put_clause = parsed.abilities[2]
+            .sub_ability
+            .as_ref()
+            .expect("Liliana's -7 must retain its graveyard-return clause");
+        assert_eq!(
+            put_clause.target_choice_timing,
+            TargetChoiceTiming::Resolution
+        );
+        assert_eq!(
+            put_clause.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+        );
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = put_clause.effect.as_ref()
+        else {
+            panic!("Liliana's -7 return clause must be ChangeZone");
+        };
+        assert_eq!(*origin, None);
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(target.extract_zones(), vec![Zone::Graveyard]);
+        assert_eq!(target.extract_in_zone(), Some(Zone::Graveyard));
+        assert!(matches!(
+            target,
+            TargetFilter::Typed(TypedFilter { properties, .. })
+                if properties.contains(&FilterProp::InZone { zone: Zone::Graveyard })
+        ));
+
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let graveyard_creatures = [
+            scenario
+                .add_creature_to_graveyard(PlayerId(0), "Graveyard Creature A", 2, 2)
+                .id(),
+            scenario
+                .add_creature_to_graveyard(PlayerId(0), "Graveyard Creature B", 2, 2)
+                .id(),
+            scenario
+                .add_creature_to_graveyard(PlayerId(1), "Graveyard Creature C", 2, 2)
+                .id(),
+        ];
+        let graveyard_noncreature = scenario
+            .add_spell_to_graveyard(PlayerId(0), "Graveyard Instant", true)
+            .id();
+        let battlefield_creature = scenario
+            .add_creature(PlayerId(1), "Battlefield Creature", 2, 2)
+            .id();
+        let mut state = scenario.state;
+
+        let ability = crate::game::ability_utils::build_resolved_from_def(
+            put_clause,
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let offered = match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                zone: Zone::Graveyard,
+                destination: Some(Zone::Battlefield),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 2);
+                assert_eq!(*min_count, 0);
+                cards.clone()
+            }
+            other => panic!("expected Liliana's graveyard EffectZoneChoice, got {other:?}"),
+        };
+        assert_eq!(offered.len(), 3);
+        assert!(graveyard_creatures.iter().all(|id| offered.contains(id)));
+        assert!(!offered.contains(&graveyard_noncreature));
+        assert!(!offered.contains(&battlefield_creature));
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![graveyard_creatures[0], graveyard_creatures[2]],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.objects[&graveyard_creatures[0]].zone,
+            Zone::Battlefield
+        );
+        assert_eq!(
+            state.objects[&graveyard_creatures[2]].zone,
+            Zone::Battlefield
+        );
+        assert_eq!(state.objects[&graveyard_creatures[1]].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&graveyard_noncreature].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&battlefield_creature].zone, Zone::Battlefield);
+    }
+
     #[test]
     fn change_zone_resolves_triggering_source_from_zone_change_event() {
         let mut state = GameState::new_two_player(42);
