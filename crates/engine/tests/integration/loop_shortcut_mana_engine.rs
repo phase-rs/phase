@@ -348,7 +348,8 @@ fn arm_disenchant(rig: &mut Rig, player: PlayerId, db: &CardDatabase) -> (Object
 }
 
 /// T-INT-a ⭐ — INTERRUPTIBILITY, UNDEFUSED: P1 HOLDS a real response (Disenchant) but PASSES ⇒
-/// the shortcut is GRANTED (offer surfaces). The untap is ON the stack (CR 605.3b), so P1 has a
+/// the shortcut is GRANTED (offer surfaces). The untap is ON the stack (CR 602.2a; the mana beat is
+/// off-stack per CR 605.3b), so P1 has a
 /// genuine response window; passing it lets the loop settle and offer. Matched with T-INT-b: P1's
 /// pass-vs-respond is the SOLE delta and FLIPS the outcome.
 #[test]
@@ -376,7 +377,8 @@ fn mana_engine_interruptibility_undefused_opponent_passes_grants() {
     );
 }
 
-/// T-INT-b ⭐ — INTERRUPTIBILITY, DEFUSED: P1 RESPONDS to the untap (on the stack, CR 605.3b) by
+/// T-INT-b ⭐ — INTERRUPTIBILITY, DEFUSED: P1 RESPONDS to the untap (on the stack, CR 602.2a; the
+/// mana beat is off-stack per CR 605.3b) by
 /// casting Disenchant on Basalt. Basalt is destroyed, the untap resolves against nothing, and at
 /// the settle the drive's per-step `ObjectId` re-find fails (Basalt gone) ⇒ NO offer beyond the
 /// stack. The ONLY delta vs T-INT-a is P1's respond-vs-pass, and the outcome FLIPS (offer → no

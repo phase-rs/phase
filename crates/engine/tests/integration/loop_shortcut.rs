@@ -26,7 +26,7 @@ use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, WaitingFor, YieldTarget,
+    CastPaymentMode, GameState, LoopDetectionMode, StackEntryKind, WaitingFor, YieldTarget,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -3096,6 +3096,226 @@ fn object_growth_interruptibility_defused_opponent_responds_no_grant() {
         !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
         "DEFUSED (P1 responds): affinity is gone ⇒ the driven recast can't afford {{4}}{{G}} via \
          convoke ⇒ NO grant beyond the current stack, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// As [`setup_2p_vito_optional`], but ALSO arms P1 with a held Murder (the defuse for the CR 732.2a
+/// Vito-drain interruptibility pair) and captures the Bloodthirsty Conqueror + Murder ids.
+///
+/// Sanguine Bond is a REDUNDANT drainer: the drain loop is Vito+Conqueror OR Sanguine+Conqueror
+/// (either targeted drainer feeds the single closer). Bloodthirsty Conqueror is the SINGLE closer
+/// ("Whenever an opponent loses life, you gain that much life") — Murder→Conqueror breaks the loop
+/// regardless of the redundant Sanguine (drop-probe-confirmed by the spike). Both drainers still
+/// fire per P0 lifegain, so the per-window life decrement is 2 (Vito's 1 + Sanguine's 1).
+fn setup_2p_vito_optional_with_murder(
+    mode: LoopDetectionMode,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_creature_from_oracle(P0, "Vito, Thorn of the Dusk Rose", 1, 4, VITO);
+    scenario.add_creature_from_oracle(P0, "Sanguine Bond", 2, 2, SANGUINE_BOND);
+    let conqueror = scenario
+        .add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 3, 4, BLOODTHIRSTY_CONQUEROR)
+        .id();
+    // The red land + Bolt make the loop OPTIONAL (so it OFFERS instead of auto-crowning); keep it.
+    scenario.add_basic_land(P1, ManaColor::Red);
+    scenario.add_bolt_to_hand(P1);
+    let murder = arm_murder(&mut scenario, P1);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = mode;
+    (runner, kickoff, conqueror, murder)
+}
+
+/// T-Vito-INT-a ⭐ — INTERRUPTIBILITY, UNDEFUSED: P1 HOLDS a real Murder but PASSES ⇒ the CR 732.2a
+/// Vito-drain shortcut is GRANTED. The kickoff resolves, the Vito/Sanguine drains fan out through
+/// genuine APNAP priority windows (P1 auto-passes, CR 601.2i/117.3c), the loop settles, and the
+/// shortcut is OFFERED to P0. Matched with the defused twin: P1's pass-vs-respond is the SOLE delta
+/// and FLIPS the outcome. Reach-guards prove the defuse was genuinely held (Murder still in hand,
+/// closer still on the battlefield, P1 alive-positive).
+#[test]
+fn vito_interruptibility_undefused_opponent_passes_grants() {
+    let (mut runner, kickoff, conqueror, murder) =
+        setup_2p_vito_optional_with_murder(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 2000);
+
+    let WaitingFor::LoopShortcut {
+        proposer,
+        certificate,
+        ..
+    } = wf
+    else {
+        panic!("UNDEFUSED (P1 passes): the optional 2p Vito drain must OFFER a LoopShortcut, got {wf:?}");
+    };
+    assert_eq!(proposer, P0, "P0 has priority and proposes the shortcut");
+    // The Vito drain's deciding win is lethal (the drain kills P1), not an inert Advantage loop.
+    assert_eq!(
+        certificate.win_kind,
+        WinKind::LethalDamage,
+        "the Vito drain offer's deciding win_kind is LethalDamage"
+    );
+    assert!(
+        !certificate.mandatory,
+        "the loop is OPTIONAL (P1 holds real answers)"
+    );
+    // Reach-guards: the defuse was genuinely HELD (Murder still in hand, not spent) and the single
+    // closer survived — so the offer is not vacuous on a spent defuse / broken loop.
+    assert_eq!(
+        runner.state().objects[&murder].zone,
+        engine::types::zones::Zone::Hand,
+        "P1's Murder is still in hand (held, not cast)"
+    );
+    assert_eq!(
+        runner.state().objects[&conqueror].zone,
+        engine::types::zones::Zone::Battlefield,
+        "Bloodthirsty Conqueror (the single closer) survives when P1 passes"
+    );
+    assert!(
+        life(&runner, P1) > 0 && !is_eliminated(&runner, P1),
+        "the offer fires EARLY with P1 alive-positive, life = {}",
+        life(&runner, P1)
+    );
+}
+
+/// T-Vito-INT-b ⭐ — INTERRUPTIBILITY, DEFUSED: P1 RESPONDS at the first pre-offer priority window
+/// that has the Vito/Sanguine drains on the stack (CR 603.3b) by casting Murder on Bloodthirsty
+/// Conqueror. The single closer is destroyed; the 2 in-flight drains then resolve (P1 loses EXACTLY
+/// 2, no Conqueror re-gain) and the stack empties ⇒ NO grant beyond the current stack (CR 732.2a).
+/// The ONLY delta vs the undefused twin is P1's respond-vs-pass, and the outcome FLIPS (offer → no
+/// offer). Non-vacuity reach-guards: the response LANDED (Conqueror → graveyard), the defuse was
+/// spent (Murder left P1's hand), and P1 lost EXACTLY 2 — the precise decrement proves the 2 drains
+/// fired before the closer-removal break (so no-offer is the break, not an upstream fizzle).
+#[test]
+fn vito_interruptibility_defused_opponent_responds_no_grant() {
+    let (mut runner, kickoff, conqueror, murder) =
+        setup_2p_vito_optional_with_murder(LoopDetectionMode::Interactive);
+    let initial_p1_life = life(&runner, P1);
+    let murder_card = runner.state().objects[&murder].card_id;
+
+    // Commit the kickoff to the stack WITHOUT resolving — P0 retains priority with it on the stack.
+    runner.cast(kickoff).commit();
+
+    // STEP to the FIRST Priority{P1} window whose stack carries a Vito/Sanguine drain trigger
+    // (CR 603.3b: the drains sit on the stack after the kickoff resolves, giving P1 a genuine
+    // pre-offer response window). Do NOT auto-pass P1 there. Before that window the only stack
+    // entry is the kickoff Spell (no TriggeredAbility), so this precisely selects the drain window.
+    let mut reached = false;
+    for _ in 0..80 {
+        let (wf, drain_on_stack) = {
+            let st = runner.state();
+            (
+                st.waiting_for.clone(),
+                st.stack
+                    .iter()
+                    .any(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. })),
+            )
+        };
+        match wf {
+            WaitingFor::Priority { player } if player == P1 && drain_on_stack => {
+                reached = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to advance toward the drain window");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("P0 orders its two simultaneous drain triggers");
+            }
+            other => panic!("unexpected state before the drain window: {other:?}"),
+        }
+    }
+    assert!(
+        reached,
+        "must reach a Priority{{P1}} window with a drain trigger on the stack; got {:?}",
+        runner.state().waiting_for
+    );
+    // Reach-guard: at the response window P1 has NOT yet lost life (drains unresolved) and the
+    // closer is still live — the loss below is caused by the in-flight drains, not a prior cycle.
+    assert_eq!(
+        life(&runner, P1),
+        initial_p1_life,
+        "P1 has not lost life yet at the response window (drains still on the stack)"
+    );
+
+    // P1 RESPONDS: Murder destroys the single closer (Bloodthirsty Conqueror) in response to the
+    // drains. The reducer surfaces a `TargetSelection` (the action's `targets` is not consumed),
+    // answered in the settle loop below.
+    runner
+        .act(GameAction::CastSpell {
+            object_id: murder,
+            card_id: murder_card,
+            targets: vec![conqueror],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 may cast Murder in response (instant speed)");
+
+    // Settle: Murder resolves (destroys Conqueror), then the 2 drains resolve (P1 -2, no re-gain),
+    // then the stack empties. No new triggers fire (the closer is gone) ⇒ no offer.
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::LoopShortcut { .. } => break,
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(conqueror)],
+                    })
+                    .expect("Murder targets Bloodthirsty Conqueror (a legal creature)");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                let _ = runner.act(GameAction::OrderTriggers { order });
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            _ => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Reach-guards (non-vacuity): the response LANDED (closer destroyed), the defuse was spent, and
+    // the 2 in-flight drains resolved — the EXACT decrement proves the break happened after the
+    // drains fired (not an upstream fizzle) and that the closer removal stopped the re-gain.
+    assert_eq!(
+        runner.state().objects[&conqueror].zone,
+        engine::types::zones::Zone::Graveyard,
+        "reach-guard: P1's Murder destroyed the closer (Conqueror → graveyard)"
+    );
+    assert_ne!(
+        runner.state().objects[&murder].zone,
+        engine::types::zones::Zone::Hand,
+        "reach-guard: the defuse was spent (Murder left P1's hand)"
+    );
+    assert_eq!(
+        life(&runner, P1),
+        initial_p1_life - 2,
+        "reach-guard: the 2 in-flight drains resolved (P1 lost EXACTLY 2, no Conqueror re-gain), \
+         life = {}",
+        life(&runner, P1)
+    );
+    // Terminal is NOT a LoopShortcut and IS a plain empty-stack Priority (the break, not a fizzle).
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "DEFUSED (P1 responds Murder→Conqueror): the single closer is gone ⇒ the drains resolve \
+         once and the loop is broken ⇒ NO grant beyond the current stack, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "terminal is a plain empty-stack Priority, got {:?}",
         runner.state().waiting_for
     );
 }
