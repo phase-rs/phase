@@ -153,7 +153,17 @@ pub(crate) fn run_post_action_pipeline_from(
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             triggers::collect_triggers_into_deferred(state, &exile_return_events);
         } else {
-            triggers::process_triggers(state, &exile_return_events);
+            let outcome = triggers::process_triggers_with_delayed_events(
+                state,
+                &exile_return_events,
+                &exile_return_events,
+                events,
+            );
+            if let Some(waiting_for) = outcome.prompt {
+                state.waiting_for = waiting_for.clone();
+                state.consumed_before_priority_trigger_events.clear();
+                return Ok(waiting_for);
+            }
         }
     }
 
