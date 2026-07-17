@@ -381,6 +381,8 @@ pub(crate) fn submit_selection(
     Ok(true)
 }
 
+/// CR 101.4: Collect simultaneous optional choices in APNAP order before the
+/// accepted searches begin.
 fn advance_acceptance(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -562,6 +564,8 @@ fn prepare_scoped_group(
     advance_selection(state, events)
 }
 
+/// CR 101.4: Collect simultaneous search choices in APNAP order before the
+/// selected cards move together.
 fn advance_selection(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -637,6 +641,8 @@ fn advance_selection(
     Ok(())
 }
 
+/// CR 701.23a + CR 400.7: A prepared search candidate must still be a matching
+/// card in the searched zone and the same object incarnation when chosen.
 fn prepared_candidate_is_live(
     state: &GameState,
     choice: &crate::types::game_state::PreparedScopedLibrarySearchChoice,
@@ -759,6 +765,7 @@ fn deliver_collected_cards(
     // CR 701.23e + CR 101.4: no earlier APNAP participant reveals their found
     // card while later participants are still choosing. Publish the accumulated
     // terminal survivors together at the shared-delivery boundary.
+    state.last_revealed_ids.clear();
     for (searcher, identities) in pending_reveals {
         let card_ids: Vec<_> = identities
             .iter()
@@ -1154,6 +1161,77 @@ mod tests {
         assert!(cards
             .iter()
             .all(|object_id| state.objects[object_id].zone == Zone::Hand));
+        assert_eq!(state.last_revealed_ids, cards);
+    }
+
+    #[test]
+    fn successive_scoped_reveal_batches_replace_last_revealed_context() {
+        use crate::types::game_state::FrozenScopedSearchFoundDisposition;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use crate::types::proposed_event::SearchFoundDisposition;
+
+        let (mut state, search, first_cards) = three_player_scoped_search(true);
+        let pending_for = |state: &GameState, ability: ResolvedAbility, cards: &[ObjectId]| {
+            let selected: Vec<_> = cards
+                .iter()
+                .enumerate()
+                .map(|(index, card)| {
+                    (
+                        PlayerId(index as u8),
+                        ObjectIncarnationRef::from_object(&state.objects[card]),
+                    )
+                })
+                .collect();
+            PendingScopedLibrarySearch {
+                ability: Box::new(ability),
+                phase: ScopedLibrarySearchPhase::CollectSelections {
+                    prepared_choices: Vec::new(),
+                    next_selection_index: 0,
+                    current_player: None,
+                    selections: selected
+                        .iter()
+                        .map(|(player, identity)| (*player, vec![*identity]))
+                        .collect(),
+                    frozen_dispositions: selected
+                        .iter()
+                        .map(|(searcher, identity)| FrozenScopedSearchFoundDisposition {
+                            searcher: *searcher,
+                            identity: *identity,
+                            disposition: SearchFoundDisposition::Original,
+                        })
+                        .collect(),
+                    pending_reveals: selected
+                        .iter()
+                        .map(|(player, identity)| (*player, vec![*identity]))
+                        .collect(),
+                },
+                after_scope: None,
+            }
+        };
+
+        state.pending_scoped_library_search =
+            Some(pending_for(&state, search.clone(), &first_cards));
+        deliver_collected_cards(&mut state, &mut Vec::new()).unwrap();
+        assert_eq!(state.last_revealed_ids, first_cards);
+
+        let second_cards: Vec<_> = (0..3)
+            .map(|index| {
+                create_object(
+                    &mut state,
+                    CardId(70 + index as u64),
+                    PlayerId(index),
+                    format!("Second P{index} library card"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        state.pending_scoped_library_search = Some(pending_for(&state, search, &second_cards));
+        deliver_collected_cards(&mut state, &mut Vec::new()).unwrap();
+
+        assert_eq!(state.last_revealed_ids, second_cards);
+        assert!(first_cards
+            .iter()
+            .all(|card| !state.last_revealed_ids.contains(card)));
     }
 
     #[test]

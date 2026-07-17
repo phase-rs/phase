@@ -1865,6 +1865,8 @@ pub struct FrozenScopedSearchFoundDisposition {
 /// The owner/zone/exact-incarnation facts learned during one effective hidden-zone
 /// search. Construction is validated so serialized provenance cannot claim that a
 /// card from one player's hidden zone was learned while searching another player.
+/// CR 400.7: Exact incarnations prevent search knowledge from carrying across a
+/// zone change to the new object that card becomes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ActiveLibrarySearch {
     searcher: PlayerId,
@@ -1984,6 +1986,8 @@ pub enum ActiveSearchDecisionAuthority {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// CR 723.5: While one player controls another, the controller makes the
+/// controlled player's choices and decisions.
 pub struct ActiveSearchDecisionControl {
     pub searcher: PlayerId,
     /// Owner of the zones this search instruction examines. This protocol
