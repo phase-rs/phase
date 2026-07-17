@@ -162,6 +162,7 @@ pub(crate) fn parse_except_clause<'a>(
 ///   - `<subject pronoun> has this ability`
 ///     → RetainPrintedTriggerFromSource or RetainPrintedAbilityFromSource
 ///     (when ctx provides the trigger or activated-ability index)
+///   - `<subject pronoun> has ~'s other abilities`              → RetainAllOtherAbilitiesFromSource
 ///   - `it's a(n) {core_type} in addition to its other types`  → AddType
 ///   - `it's a(n) {subtype} in addition to its other types`    → AddSubtype
 ///   - `is a(n) {core_type|subtype} in addition to its other types`
@@ -185,6 +186,9 @@ pub(crate) fn parse_except_body<'a>(
     }
     if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
         return Some((rest, mods));
+    }
+    if let Some((rest, modification)) = parse_has_source_other_abilities(input) {
+        return Some((rest, vec![modification]));
     }
     if let Some((rest, modification)) = parse_has_this_ability(input, ctx) {
         return Some((rest, vec![modification]));
@@ -711,6 +715,36 @@ fn append_color_and_type_modifications(
         });
     }
     mods.extend(type_mods);
+}
+
+/// CR 707.9a: "<subject pronoun> has ~'s other abilities" — the source's
+/// entire OTHER ability surface (activated abilities, triggers, statics,
+/// keywords) becomes part of the copy's copiable values, unbounded by a
+/// single indexed ability (Sakashima of a Thousand Faces: "except it has
+/// Sakashima's other abilities" — normalized to "it has ~'s other
+/// abilities" by `normalize_card_name_refs`).
+///
+/// Distinct from `parse_has_this_ability`, which retains exactly ONE
+/// indexed ability (the one containing the BecomeCopy effect) and requires
+/// `ctx.current_trigger_index`/`current_ability_index` to be set. This arm
+/// needs no such index — the retained set is "everything else the source
+/// has printed" — so it works for the replacement-form clone (Sakashima's
+/// `AsPermanentEnters` framing), which parses with `ParseContext::default()`.
+///
+/// Subject pronouns accepted: `he`, `she`, `it` (and `they` for plural).
+fn parse_has_source_other_abilities(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("he has ~'s other abilities"),
+        tag("she has ~'s other abilities"),
+        tag("it has ~'s other abilities"),
+        tag("they have ~'s other abilities"),
+    ))
+    .parse(input)
+    .ok()?;
+    Some((
+        rest,
+        ContinuousModification::RetainAllOtherAbilitiesFromSource,
+    ))
 }
 
 /// CR 707.9a: "<subject pronoun> has this ability" — emit a retain modification

@@ -93,13 +93,21 @@ export function DeckBuilder({
     handleSetCommander,
     isCommanderEligible,
     handleRemoveCommander,
+    signatureSpellCandidates,
+    companionCandidateNames,
+    handleSetSignatureSpell,
+    handleRemoveSignatureSpell,
+    handleSetCompanion,
+    handleRemoveCompanion,
   } = useDeckBuilder({ format, onFormatChange, initialDeckName, searchFilters });
   const { t } = useTranslation("deck-builder");
 
   // Deck-first: the main canvas shows the deck unless a search is active, in
   // which case it shows the results grid (cleared via "Back to deck").
   const searchActive = hasSearchCriteria(searchFilters);
-  const deckCount = deck.main.reduce((sum, e) => sum + e.count, 0) + commanders.length;
+  const deckCount = deck.main.reduce((sum, e) => sum + e.count, 0)
+    + commanders.length
+    + (deck.signature_spell?.length ?? 0);
 
   // Filters are an inline sidebar (≥820px) / overlay sheet (below 820px), shown on
   // demand so the deck canvas owns the space by default. The 820px breakpoint
@@ -467,6 +475,14 @@ export function DeckBuilder({
                 isCommanderEligible={isCommanderEligible}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
+                signatureSpell={deck.signature_spell?.[0]}
+                signatureSpellCandidates={signatureSpellCandidates}
+                onSetSignatureSpell={handleSetSignatureSpell}
+                onRemoveSignatureSpell={handleRemoveSignatureSpell}
+                companion={deck.companion}
+                companionCandidates={companionCandidateNames}
+                onSetCompanion={handleSetCompanion}
+                onRemoveCompanion={handleRemoveCompanion}
                 onCardHover={onCardHover}
                 formatValidationReasons={compatibility?.selected_format_reasons}
               />

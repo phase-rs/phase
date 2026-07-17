@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::legality::{LegalityFormat, LegalityStatus};
 use crate::database::CardDatabase;
+use crate::game::companion::{companion_starting_deck, is_eligible_companion};
+use crate::game::deck_loading::DeckEntry;
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 use crate::types::card_type::{CoreType, Supertype};
@@ -20,6 +22,9 @@ pub struct DeckCompatibilityRequest {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    /// Commander-family companion outside the 100-card deck.
+    #[serde(default)]
+    pub companion: Vec<String>,
     #[serde(default)]
     pub planar_deck: Vec<String>,
     #[serde(default)]
@@ -37,6 +42,82 @@ pub struct DeckCompatibilityRequest {
     pub player_count: usize,
     #[serde(default)]
     pub summary_only: bool,
+}
+
+/// Engine-authored deck-builder state for selecting an Oathbreaker's signature
+/// spell. The frontend renders this policy but never derives the candidate list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "data")]
+pub enum SignatureSpellSelectionPolicy {
+    None,
+    Required { candidates: Vec<String> },
+}
+
+/// Returns the legal main-deck cards that may be moved into Oathbreaker's
+/// signature-spell slot. Selection itself remains validated by
+/// `evaluate_oathbreaker`; this is the engine-owned presentation policy.
+pub fn signature_spell_selection_policy(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+) -> SignatureSpellSelectionPolicy {
+    if request.selected_format != Some(GameFormat::Oathbreaker) {
+        return SignatureSpellSelectionPolicy::None;
+    }
+
+    let commander_identity = request.commander.first().and_then(|name| {
+        db.get_face_by_name(resolve_card_name(db, name))
+            .filter(|face| face.is_oathbreaker)
+            .map(card_color_identity)
+    });
+    let candidates = commander_identity.map_or_else(Vec::new, |identity| {
+        request
+            .main_deck
+            .iter()
+            .filter_map(|name| {
+                let face = db.get_face_by_name(resolve_card_name(db, name))?;
+                (is_instant_or_sorcery(face)
+                    && card_color_identity(face)
+                        .iter()
+                        .all(|color| identity.contains(color)))
+                .then(|| face.name.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    });
+
+    SignatureSpellSelectionPolicy::Required { candidates }
+}
+
+/// Returns eligible Commander-family companion cards that can be moved from
+/// the main deck into the dedicated companion slot. Candidate evaluation uses
+/// the same typed predicate as pregame reveal validation.
+pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityRequest) -> Vec<String> {
+    let Some(format) = request
+        .selected_format
+        .filter(|format| format.uses_commander())
+    else {
+        return Vec::new();
+    };
+
+    request
+        .main_deck
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            let face = db.get_face_by_name(resolve_card_name(db, name))?;
+            let mut remaining_main = request.main_deck.clone();
+            remaining_main.remove(index);
+            let companion = DeckEntry::from_resolved_face(db, face, 1);
+            let main = deck_entries_for_names(db, &remaining_main);
+            let commanders = deck_entries_for_names(db, &request.commander);
+            let starting = companion_starting_deck(&main, &commanders, format);
+            is_eligible_companion(&companion, &starting, &commanders, format)
+                .then(|| face.name.clone())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn default_player_count() -> usize {
@@ -264,6 +345,7 @@ pub fn validate_name_deck_for_format_with_sig(
         commander,
         &[],
         &[],
+        &[],
         signature_spell,
         selected_format,
         selected_match_type,
@@ -277,6 +359,7 @@ pub fn validate_name_deck_for_format_full(
     main_deck: &[String],
     sideboard: &[String],
     commander: &[String],
+    companion: &[String],
     planar_deck: &[String],
     scheme_deck: &[String],
     signature_spell: &[String],
@@ -288,6 +371,7 @@ pub fn validate_name_deck_for_format_full(
         main_deck: main_deck.to_vec(),
         sideboard: sideboard.to_vec(),
         commander: commander.to_vec(),
+        companion: companion.to_vec(),
         planar_deck: planar_deck.to_vec(),
         scheme_deck: scheme_deck.to_vec(),
         signature_spell: signature_spell.to_vec(),
@@ -371,7 +455,7 @@ fn evaluate_constructed(
 
     let mut illegal_cards = BTreeSet::new();
     let mut restricted_canonical: HashSet<String> = HashSet::new();
-    for name in all_deck_cards(request) {
+    for name in construction_deck_cards(request) {
         if unknown_cards.contains(name) {
             continue;
         }
@@ -640,6 +724,7 @@ fn evaluate_commander(
         LegalityFormat::Commander,
         "Commander",
         CommanderVariantRules::commander(),
+        GameFormat::Commander,
     )
 }
 
@@ -691,6 +776,61 @@ fn request_without_sideboard(request: &DeckCompatibilityRequest) -> DeckCompatib
     }
 }
 
+fn deck_entries_for_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
+    let mut entries: Vec<DeckEntry> = Vec::new();
+    for name in names {
+        let resolved = resolve_card_name(db, name);
+        let Some(face) = db.get_face_by_name(resolved) else {
+            continue;
+        };
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| entry.card.name.eq_ignore_ascii_case(&face.name))
+        {
+            entry.count += 1;
+        } else {
+            entries.push(DeckEntry::from_resolved_face(db, face, 1));
+        }
+    }
+    entries
+}
+
+/// CR 702.139a/b + CR 903.11a: a Commander-family companion is one external
+/// card, has Companion, satisfies the starting-deck condition (including
+/// commanders), and is legal to bring in under Commander color/name limits.
+fn validate_commander_companion(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    format: GameFormat,
+    reasons: &mut Vec<String>,
+) {
+    if request.companion.is_empty() {
+        return;
+    }
+    if request.companion.len() != 1 {
+        reasons.push(format!(
+            "{} decks may register exactly one companion (found {})",
+            format.label(),
+            request.companion.len()
+        ));
+        return;
+    }
+
+    let companion_name = &request.companion[0];
+    let Some(face) = db.get_face_by_name(resolve_card_name(db, companion_name)) else {
+        return;
+    };
+    let companion = DeckEntry::from_resolved_face(db, face, 1);
+    let main = deck_entries_for_names(db, &request.main_deck);
+    let commanders = deck_entries_for_names(db, &request.commander);
+    let starting = companion_starting_deck(&main, &commanders, format);
+    if !is_eligible_companion(&companion, &starting, &commanders, format) {
+        reasons.push(format!(
+            "{companion_name}: not a legal companion for this starting deck"
+        ));
+    }
+}
+
 /// Shared commander-variant validator. Commander, Duel Commander, and Pauper
 /// Commander all use 100-card-singleton deck shape with a command zone; only
 /// the legality table, commander eligibility, and display label differ.
@@ -703,6 +843,7 @@ fn evaluate_commander_with_format(
     legality_format: LegalityFormat,
     format_label: &str,
     rules: CommanderVariantRules,
+    game_format: GameFormat,
 ) -> CompatibilityCheck {
     // CR 903.5e: the sideboard is dropped at game load for Commander-style
     // formats. Re-scope the request so singleton, color-identity, and legality
@@ -853,6 +994,8 @@ fn evaluate_commander_with_format(
         ));
     }
 
+    validate_commander_companion(db, request, game_format, &mut reasons);
+
     CompatibilityCheck {
         compatible: reasons.is_empty(),
         reasons,
@@ -887,6 +1030,7 @@ fn evaluate_brawl(
     unknown_cards: &BTreeSet<String>,
     legality_format: LegalityFormat,
     format_label: &str,
+    game_format: GameFormat,
 ) -> CompatibilityCheck {
     // CR 903.5e (Brawl variant): drop the sideboard slot before shape /
     // singleton / identity checks — it is not part of the loaded deck.
@@ -917,6 +1061,8 @@ fn evaluate_brawl(
             }
         }
     }
+
+    validate_commander_companion(db, request, game_format, &mut reasons);
 
     // CR 903.5e (via Brawl variant): Brawl formats do not start the game with
     // a sideboard. Extra entries in the submitted list are silently ignored at
@@ -1728,6 +1874,27 @@ fn evaluate_selected_format_summary(
         return (None, Vec::new(), BTreeSet::new());
     };
 
+    if !format.uses_commander() && !request.companion.is_empty() {
+        return (
+            Some(false),
+            vec![format!(
+                "{} does not use a dedicated companion slot",
+                format.label()
+            )],
+            BTreeSet::new(),
+        );
+    }
+    if format != GameFormat::Oathbreaker && !request.signature_spell.is_empty() {
+        return (
+            Some(false),
+            vec![format!(
+                "{} does not use a signature spell slot",
+                format.label()
+            )],
+            BTreeSet::new(),
+        );
+    }
+
     let result = match format {
         GameFormat::Standard => quick_constructed_check(
             db,
@@ -1757,6 +1924,7 @@ fn evaluate_selected_format_summary(
             "Commander",
             CommanderVariantRules::commander(),
             100,
+            GameFormat::Commander,
         ),
         GameFormat::PauperCommander | GameFormat::DuelCommander => quick_commander_check(
             db,
@@ -1769,6 +1937,7 @@ fn evaluate_selected_format_summary(
                 _ => unreachable!("commander variant branch only handles PDH and Duel"),
             },
             100,
+            format,
         ),
         GameFormat::TinyLeaders => quick_tiny_leaders_check(db, request),
         GameFormat::Oathbreaker => quick_oathbreaker_check(db, request),
@@ -1780,6 +1949,7 @@ fn evaluate_selected_format_summary(
             request,
             format.legality_format().unwrap(),
             format.label(),
+            format,
         ),
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
             QuickCheckResult::compatible()
@@ -1851,7 +2021,7 @@ fn quick_constructed_check(
 
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut restricted = HashSet::new();
-    for name in all_deck_cards(request) {
+    for name in construction_deck_cards(request) {
         let resolved = resolve_card_name(db, name);
         if db.get_face_by_name(resolved).is_none() {
             return QuickCheckResult::unknown(name);
@@ -1901,6 +2071,7 @@ fn quick_commander_check(
     format_label: &str,
     rules: CommanderVariantRules,
     expected_total: usize,
+    game_format: GameFormat,
 ) -> QuickCheckResult {
     if request.commander.is_empty() || request.commander.len() > 2 {
         return QuickCheckResult::incompatible(format!(
@@ -1915,6 +2086,20 @@ fn quick_commander_check(
     // loaded deck.
     let stripped = request_without_sideboard(request);
     let request = &stripped;
+
+    if let Some(unknown_companion) = request
+        .companion
+        .iter()
+        .find(|name| db.get_face_by_name(resolve_card_name(db, name)).is_none())
+    {
+        return QuickCheckResult::unknown(unknown_companion);
+    }
+
+    let mut companion_reasons = Vec::new();
+    validate_commander_companion(db, request, game_format, &mut companion_reasons);
+    if let Some(reason) = companion_reasons.into_iter().next() {
+        return QuickCheckResult::incompatible(reason);
+    }
 
     let represented_in_main = request
         .commander
@@ -1957,7 +2142,7 @@ fn quick_commander_check(
     }
 
     let mut counts: HashMap<String, u32> = HashMap::new();
-    for name in all_deck_cards(request) {
+    for name in construction_deck_cards(request) {
         let resolved = resolve_card_name(db, name);
         let Some(face) = db.get_face_by_name(resolved) else {
             return QuickCheckResult::unknown(name);
@@ -2002,6 +2187,27 @@ fn quick_commander_check(
         }
     }
 
+    // CR 702.139b: A companion is outside the Commander starting deck. Check
+    // its format legality separately without contributing to the starting
+    // deck's size or singleton count.
+    for name in &request.companion {
+        let resolved = resolve_card_name(db, name);
+        match db.legality_status(resolved, legality_format) {
+            Some(status) if status.is_legal() => {}
+            Some(status) => {
+                return QuickCheckResult::incompatible(format!(
+                    "Not {format_label} legal: {name} ({})",
+                    status_label(status)
+                ));
+            }
+            None => {
+                return QuickCheckResult::incompatible(format!(
+                    "Not {format_label} legal: {name} (not legal in {format_label})"
+                ));
+            }
+        }
+    }
+
     if let Some(reason) = copy_limit_violations(db, &counts, 1).into_iter().next() {
         return QuickCheckResult::incompatible(format!("Singleton violations: {reason}"));
     }
@@ -2014,6 +2220,7 @@ fn quick_brawl_check(
     request: &DeckCompatibilityRequest,
     legality_format: LegalityFormat,
     format_label: &str,
+    game_format: GameFormat,
 ) -> QuickCheckResult {
     if request.commander.len() != 1 {
         return QuickCheckResult::incompatible(format!(
@@ -2043,6 +2250,7 @@ fn quick_brawl_check(
             skip_commander_legality: false,
         },
         60,
+        game_format,
     )
 }
 
@@ -2057,6 +2265,25 @@ fn evaluate_selected_format(
     let Some(format) = request.selected_format else {
         return (None, Vec::new());
     };
+
+    if !format.uses_commander() && !request.companion.is_empty() {
+        return (
+            Some(false),
+            vec![format!(
+                "{} does not use a dedicated companion slot",
+                format.label()
+            )],
+        );
+    }
+    if format != GameFormat::Oathbreaker && !request.signature_spell.is_empty() {
+        return (
+            Some(false),
+            vec![format!(
+                "{} does not use a signature spell slot",
+                format.label()
+            )],
+        );
+    }
 
     let mut reasons = Vec::new();
     let mut compatible = match format {
@@ -2109,6 +2336,7 @@ fn evaluate_selected_format(
                     GameFormat::DuelCommander => CommanderVariantRules::duel_commander(),
                     _ => unreachable!("commander variant branch only handles PDH and Duel"),
                 },
+                format,
             );
             if !check.compatible {
                 reasons.extend(check.reasons);
@@ -2122,6 +2350,7 @@ fn evaluate_selected_format(
                 unknown_cards,
                 format.legality_format().unwrap(),
                 format.label(),
+                format,
             );
             if !check.compatible {
                 reasons.extend(check.reasons);
@@ -2398,7 +2627,7 @@ fn combined_copy_counts(
     request: &DeckCompatibilityRequest,
 ) -> HashMap<String, u32> {
     let mut counts: HashMap<String, u32> = HashMap::new();
-    for name in all_deck_cards(request) {
+    for name in construction_deck_cards(request) {
         let canonical = canonical_deck_count_key(db, name);
         *counts.entry(canonical).or_insert(0) += 1;
     }
@@ -2514,7 +2743,21 @@ fn resolve_card_name<'a>(db: &CardDatabase, name: &'a str) -> &'a str {
     name
 }
 
+/// Every card reference, including dedicated companion. Use this for card-data
+/// lookup, coverage, and legality reporting; use `construction_deck_cards`
+/// for ordinary deck-size and copy calculations.
 fn all_deck_cards(request: &DeckCompatibilityRequest) -> impl Iterator<Item = &str> {
+    request
+        .main_deck
+        .iter()
+        .chain(request.sideboard.iter())
+        .chain(request.commander.iter())
+        .chain(request.signature_spell.iter())
+        .chain(request.companion.iter())
+        .map(String::as_str)
+}
+
+fn construction_deck_cards(request: &DeckCompatibilityRequest) -> impl Iterator<Item = &str> {
     request
         .main_deck
         .iter()
@@ -3188,6 +3431,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck,
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3235,6 +3479,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck,
             signature_spell: Vec::new(),
@@ -3548,6 +3793,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3574,6 +3820,7 @@ mod tests {
             main_deck: deck,
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3652,6 +3899,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3675,6 +3923,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3701,6 +3950,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3712,6 +3962,86 @@ mod tests {
 
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
+    }
+
+    #[test]
+    fn dedicated_companion_rejection_matches_full_and_summary_validation() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 99),
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: vec!["Legal Standard".to_string()],
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Commander),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+        };
+
+        let full = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(full.selected_format_compatible, Some(false));
+        assert!(full
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason.contains("not a legal companion")));
+
+        let summary = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                summary_only: true,
+                ..request
+            },
+        );
+        assert_eq!(summary.selected_format_compatible, Some(false));
+        assert!(summary
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason.contains("not a legal companion")));
+    }
+
+    #[test]
+    fn banned_dedicated_companion_matches_full_and_summary_validation() {
+        let mut db_json: Value = serde_json::from_str(&test_db_json()).unwrap();
+        db_json["commander banned"]["keywords"] = serde_json::json!([
+            { "Companion": { "type": "Singleton" } }
+        ]);
+        let db = CardDatabase::from_json_str(&db_json.to_string()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 99),
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: vec!["Commander Banned".to_string()],
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Commander),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+        };
+
+        let full = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(full.selected_format_compatible, Some(false));
+        assert!(full
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason.contains("Commander Banned (banned)")));
+
+        let summary = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                summary_only: true,
+                ..request
+            },
+        );
+        assert_eq!(summary.selected_format_compatible, Some(false));
+        assert!(summary
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason.contains("Commander Banned (banned)")));
     }
 
     #[test]
@@ -3728,6 +4058,7 @@ mod tests {
             // to the singleton count below.
             sideboard: vec!["Legal Standard".to_string()],
             commander: vec!["Legal Standard".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3758,6 +4089,7 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3790,6 +4122,7 @@ mod tests {
             main_deck: vec!["Mystery Card".to_string()],
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3817,6 +4150,7 @@ mod tests {
             main_deck: expand("Legal Standard", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3890,6 +4224,7 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["PDH Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -3964,6 +4299,7 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Rare Creature".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4037,6 +4373,7 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Uncommon Sorcery".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4065,6 +4402,7 @@ mod tests {
                 "Partner Commander".to_string(),
                 "Legal Commander".to_string(),
             ],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4090,6 +4428,7 @@ mod tests {
             main_deck: Vec::new(),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4121,6 +4460,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4133,6 +4473,7 @@ mod tests {
             main_deck: expand("Legal Standard", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4170,6 +4511,7 @@ mod tests {
             main_deck: legal_60_main("Pioneer Only"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4189,6 +4531,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4210,6 +4553,7 @@ mod tests {
             main_deck: legal_60_main("Premodern Banned"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4235,6 +4579,7 @@ mod tests {
             main_deck: legal_60_main("Pioneer Only"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4261,6 +4606,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4280,6 +4626,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4301,6 +4648,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4336,6 +4684,7 @@ mod tests {
             main_deck: expand("Pioneer Only", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4361,6 +4710,7 @@ mod tests {
             main_deck: expand("Legal Standard", 30),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4392,6 +4742,7 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4411,6 +4762,7 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legendary Planeswalker".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4430,6 +4782,7 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4456,6 +4809,7 @@ mod tests {
                 "Legal Commander".to_string(),
                 "Partner Commander".to_string(),
             ],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4479,6 +4833,7 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4502,6 +4857,7 @@ mod tests {
             main_deck: expand("Plains", 49),
             sideboard: expand("Plains", 10),
             commander: vec!["White Tiny Leader".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4541,6 +4897,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["White Tiny Leader".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4570,6 +4927,7 @@ mod tests {
             main_deck: expand("Plains", 49),
             sideboard: Vec::new(),
             commander: vec!["Ajani, Nacatl Pariah".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -4599,6 +4957,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5001,6 +5360,7 @@ mod tests {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5033,6 +5393,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: vec![],
             commander: vec![],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5045,12 +5406,51 @@ mod tests {
     }
 
     #[test]
+    fn non_oathbreaker_signature_spell_is_rejected_by_full_and_summary_validation() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: legal_60_main("Legal Standard"),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: vec!["Legal Standard".to_string()],
+            selected_format: Some(GameFormat::Modern),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+        };
+
+        let full = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(full.selected_format_compatible, Some(false));
+        assert!(full
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason == "Modern does not use a signature spell slot"));
+
+        let summary = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                summary_only: true,
+                ..request
+            },
+        );
+        assert_eq!(summary.selected_format_compatible, Some(false));
+        assert!(summary
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason == "Modern does not use a signature spell slot"));
+    }
+
+    #[test]
     fn validate_ffa_accepts_any_deck() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         let request = DeckCompatibilityRequest {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5069,6 +5469,7 @@ mod tests {
             main_deck: expand("Red Card", 58),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: vec!["Big Spell".to_string()],
@@ -5102,6 +5503,7 @@ mod tests {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5122,6 +5524,7 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: expand("Plains", 15),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5146,6 +5549,7 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5172,6 +5576,7 @@ mod tests {
             main_deck: main,
             sideboard: expand("Legal Standard", 2),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5196,6 +5601,7 @@ mod tests {
             main_deck: expand("Plains", 60),
             sideboard: expand("Plains", 15),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5220,6 +5626,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5272,6 +5679,7 @@ mod tests {
             main_deck: expand("Relentless Rats", 60),
             sideboard: expand("Relentless Rats", 15),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5297,6 +5705,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5323,6 +5732,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5386,6 +5796,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5448,6 +5859,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5475,6 +5887,7 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: vec!["Plains".to_string()],
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5502,6 +5915,7 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5525,6 +5939,7 @@ mod tests {
             main_deck: expand("Plains", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5555,6 +5970,7 @@ mod tests {
             main_deck: vec!["Legal Standard".to_string(); 99],
             sideboard: vec![],
             commander: vec!["Test Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5658,6 +6074,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5683,6 +6100,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5708,6 +6126,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5737,6 +6156,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5797,6 +6217,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5826,6 +6247,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
@@ -5860,6 +6282,7 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            companion: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),

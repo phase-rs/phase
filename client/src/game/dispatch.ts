@@ -82,6 +82,13 @@ let isAnimating = false;
 const pendingQueue: PendingWork[] = [];
 
 /**
+ * Identifies the game state for which the current dispatch pipeline is valid.
+ * Restoring a saved game replaces the engine state wholesale, so work queued
+ * for the old state must neither run nor release a newer dispatch's mutex.
+ */
+let dispatchGeneration = 0;
+
+/**
  * The local action currently being processed (set while inside processAction),
  * paired with the seat and WaitingFor object it was issued against. Used with
  * pendingQueue to deduplicate rapid double-clicks.
@@ -95,6 +102,32 @@ let inFlightLocalAction: {
   actor: number;
   waitingFor: WaitingFor | null;
 } | null = null;
+
+function isCurrentDispatchGeneration(generation: number): boolean {
+  return generation === dispatchGeneration;
+}
+
+/** Discard dispatch work that belongs to the game state being replaced. */
+function abandonDispatchesForStateRestore(): void {
+  dispatchGeneration += 1;
+  inFlightLocalAction = null;
+  isAnimating = false;
+  while (pendingQueue.length > 0) {
+    pendingQueue.shift()!.resolve();
+  }
+}
+
+function releaseDispatchMutex(generation: number): void {
+  if (!isCurrentDispatchGeneration(generation)) return;
+
+  if (pendingQueue.length > 0) {
+    processQueue(generation).catch(() => {
+      if (isCurrentDispatchGeneration(generation)) isAnimating = false;
+    });
+  } else {
+    isAnimating = false;
+  }
+}
 
 /** Structural equality for GameAction — action objects are small plain JSON. */
 function actionsEqual(a: GameAction, b: GameAction): boolean {
@@ -189,7 +222,11 @@ function showActionError(action: GameAction, err: unknown): void {
   });
 }
 
-async function processAction(action: GameAction, actor: number): Promise<void> {
+async function processAction(
+  action: GameAction,
+  actor: number,
+  generation: number,
+): Promise<void> {
   const { adapter, gameState } = useGameStore.getState();
   if (!adapter || !gameState) {
     debugLog("processAction called with no adapter or gameState");
@@ -226,6 +263,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   try {
     result = await adapter.submitAction(action, actor);
   } catch (err) {
+    if (!isCurrentDispatchGeneration(generation)) return;
     // Stale click after a priority/turn shift: the engine's actor-auth guard
     // correctly rejected it. Nothing changed engine-side, so drop it as a
     // no-op instead of letting a benign race escape as an unhandled rejection.
@@ -254,6 +292,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     if (!isStateLost(err)) throw err;
     debugLog(`processAction: STATE_LOST on ${action.type}; attempting rehydrate`, "warn");
     const recovered = await attemptStateRehydrate();
+    if (!isCurrentDispatchGeneration(generation)) return;
     if (!recovered) {
       notifyEngineLost("submitAction");
       throw err;
@@ -267,6 +306,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     try {
       result = await adapter.submitAction(action, actor);
     } catch (retryErr) {
+      if (!isCurrentDispatchGeneration(generation)) return;
       // Prefer the captured panic message over the bare retry tag — that's
       // the "diagnostic: submitAction-retry" the user reported, which told
       // them nothing actionable.
@@ -278,6 +318,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       throw retryErr;
     }
   }
+  if (!isCurrentDispatchGeneration(generation)) return;
   const events: GameEvent[] = result.events;
 
   // 3b. Fetch the state AND its legal actions as ONE atomic snapshot, and persist
@@ -300,6 +341,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   try {
     snapshotResult = await adapter.getSnapshot();
   } catch (err) {
+    if (!isCurrentDispatchGeneration(generation)) return;
     if (isEnginePanic(err)) {
       await routePanic("getSnapshot-panic", err.panic);
       throw err;
@@ -311,6 +353,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     if (!isStateLost(err)) throw err;
     debugLog("processAction: STATE_LOST on getSnapshot; attempting rehydrate", "warn");
     const recovered = await attemptStateRehydrate();
+    if (!isCurrentDispatchGeneration(generation)) return;
     if (!recovered) {
       notifyEngineLost("getSnapshot");
       throw err;
@@ -318,6 +361,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     try {
       snapshotResult = await adapter.getSnapshot();
     } catch (retryErr) {
+      if (!isCurrentDispatchGeneration(generation)) return;
       if (isEnginePanic(retryErr)) {
         notifyEngineLost("getSnapshot-retry-panic", retryErr.panic);
       } else {
@@ -326,6 +370,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
       throw retryErr;
     }
   }
+  if (!isCurrentDispatchGeneration(generation)) return;
   const newState = snapshotResult.state;
   const { gameId } = useGameStore.getState();
   if (gameId) void saveAuthoritativeGame(gameId, adapter, newState);
@@ -418,6 +463,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   // The commit is revision-gated, so if a newer commit landed mid-animation
   // (a `gameStore.dispatch` from a modal, a remote update, an AI-loop advance),
   // THIS older pair is dropped rather than clobbering it.
+  if (!isCurrentDispatchGeneration(generation)) return;
   const store = useGameStore.getState();
   const stateHistory = shouldSaveHistory
     ? [...store.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
@@ -442,8 +488,8 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   }
 }
 
-async function processQueue(): Promise<void> {
-  while (pendingQueue.length > 0) {
+async function processQueue(generation: number): Promise<void> {
+  while (isCurrentDispatchGeneration(generation) && pendingQueue.length > 0) {
     const next = pendingQueue.shift()!;
     try {
       if (next.kind === "local") {
@@ -454,15 +500,19 @@ async function processQueue(): Promise<void> {
         }
         inFlightLocalAction = { action: next.action, actor: next.actor, waitingFor: next.waitingFor };
         try {
-          await processAction(next.action, next.actor);
+          await processAction(next.action, next.actor, generation);
         } finally {
-          inFlightLocalAction = null;
+          if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
         }
       } else {
-        await processRemoteUpdateInner(next.snapshot, next.events, next.logEntries);
+        await processRemoteUpdateInner(next.snapshot, next.events, next.logEntries, generation);
       }
       next.resolve();
     } catch (err) {
+      if (!isCurrentDispatchGeneration(generation)) {
+        next.resolve();
+        return;
+      }
       debugLog(`processQueue error (${next.kind}): ${err instanceof Error ? err.message : String(err)}`);
       if (next.kind === "local") {
         showActionError(next.action, err);
@@ -489,7 +539,7 @@ async function processQueue(): Promise<void> {
       }
     }
   }
-  isAnimating = false;
+  if (isCurrentDispatchGeneration(generation)) isAnimating = false;
 }
 
 /**
@@ -562,21 +612,19 @@ export async function dispatchAction(
     });
   }
 
+  const generation = dispatchGeneration;
   isAnimating = true;
   inFlightLocalAction = { action: submittedAction, actor, waitingFor: currentWaitingFor };
   try {
-    await processAction(submittedAction, actor);
+    await processAction(submittedAction, actor, generation);
   } catch (e) {
+    if (!isCurrentDispatchGeneration(generation)) return;
     debugLog(`dispatch error for ${submittedAction.type}: ${e instanceof Error ? e.message : String(e)}`);
     showActionError(submittedAction, e);
     throw e;
   } finally {
-    inFlightLocalAction = null;
-    if (pendingQueue.length > 0) {
-      processQueue().catch(() => { isAnimating = false; });
-    } else {
-      isAnimating = false;
-    }
+    if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
+    releaseDispatchMutex(generation);
   }
 }
 
@@ -587,7 +635,9 @@ async function processRemoteUpdateInner(
   snapshot: EngineSnapshot,
   events: GameEvent[],
   logEntries: GameLogEntry[] = [],
+  generation: number,
 ): Promise<void> {
+  if (!isCurrentDispatchGeneration(generation)) return;
   const state = snapshot.state;
 
   // 1. Capture positions before updating state (for lookups during animation)
@@ -636,6 +686,7 @@ async function processRemoteUpdateInner(
   // 5. Commit the pair after animations complete — revision-gated, so a remote
   //    update that was superseded while its animation played is dropped rather
   //    than clobbering the newer state.
+  if (!isCurrentDispatchGeneration(generation)) return;
   useGameStore.getState().commitEngineSnapshot(snapshot, { events, logEntries });
 
   // 6. Play victory/defeat stinger on GameOver
@@ -667,15 +718,12 @@ export async function processRemoteUpdate(
     });
   }
 
+  const generation = dispatchGeneration;
   isAnimating = true;
   try {
-    await processRemoteUpdateInner(snapshot, events, logEntries);
+    await processRemoteUpdateInner(snapshot, events, logEntries, generation);
   } finally {
-    if (pendingQueue.length > 0) {
-      processQueue().catch(() => { isAnimating = false; });
-    } else {
-      isAnimating = false;
-    }
+    releaseDispatchMutex(generation);
   }
 }
 
@@ -690,6 +738,7 @@ export async function restoreGameState(
   const { adapter, gameId } = useGameStore.getState();
   if (!adapter) return "No adapter available";
 
+  abandonDispatchesForStateRestore();
   try {
     await adapter.restoreState(state);
   } catch (err) {

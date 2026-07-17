@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -676,6 +676,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::SearchChoice {
         player,
+        library_owner,
         ref cards,
         count,
         reveal,
@@ -688,6 +689,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::SearchChoice {
                 player,
+                library_owner,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 count,
                 reveal,
@@ -1074,9 +1076,27 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             pool.registered_sideboard = Arc::new(Vec::new());
             pool.current_main = Arc::new(Vec::new());
             pool.current_sideboard = Arc::new(Vec::new());
+            pool.registered_companion = Arc::new(Vec::new());
+            pool.current_companion = Arc::new(Vec::new());
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+        }
+    }
+
+    // CR 702.139a: A companion is outside the game and stays private until
+    // its owner reveals it. The offer is therefore visible only to the owner
+    // (or an authorized turn controller); the public player.companion field is
+    // populated only after the reveal action succeeds.
+    if let WaitingFor::CompanionReveal { player, .. } = &state.waiting_for {
+        if !can_view_private_for_player(*player) {
+            if let WaitingFor::CompanionReveal {
+                eligible_companions,
+                ..
+            } = &mut filtered.waiting_for
+            {
+                eligible_companions.clear();
+            }
         }
     }
 
@@ -1149,19 +1169,43 @@ fn viewer_has_private_access_to_player(
 /// filtered `GameState`. Unlike the state snapshot, this array was broadcast
 /// verbatim to every seat and spectator — leaking hidden library information
 /// through `GameEvent::CardDrawn` (specific `object_id`) and
-/// `GameEvent::ZoneChanged` records emitted on library → hand moves (the
-/// `ZoneChangeRecord` embeds the full card name and type line). The structured
-/// game log already excludes these events; this closes the same hole on the
-/// raw event channel clients also consume.
+/// `GameEvent::ZoneChanged` records emitted on library → hand or hand → library
+/// moves (the `ZoneChangeRecord` embeds the full card name and type line).
+/// The structured game log already excludes these events; this closes the same
+/// hole on the raw event channel clients also consume.
 pub fn filter_events_for_viewer(
     events: &[GameEvent],
     state: &GameState,
     viewer: PlayerId,
 ) -> Vec<GameEvent> {
+    let spectator = !state.players.iter().any(|player| player.id == viewer);
     events
         .iter()
         .filter(|event| event_visible_to_viewer(event, state, viewer))
-        .cloned()
+        .map(|event| match event {
+            // `CardId` is assigned from the pre-shuffle object sequence when a
+            // deck loads. An opponent can use it to recover hidden deck order,
+            // including the identity of a face-down spell; only the public
+            // stack-object reference is safe to retain here.
+            GameEvent::SpellCast {
+                controller,
+                object_id,
+                ..
+            } if !viewer_has_private_access_to_player(state, viewer, *controller)
+                && (spectator
+                    || state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|obj| obj.face_down)) =>
+            {
+                GameEvent::SpellCast {
+                    card_id: CardId(0),
+                    controller: *controller,
+                    object_id: *object_id,
+                }
+            }
+            other => other.clone(),
+        })
         .collect()
 }
 
@@ -1187,6 +1231,32 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
             record,
             &can_view_private_for_player,
         ),
+        // CR 400.2: A mulligan moves cards from one hidden zone to another.
+        // The record contains the original hand identity, so only the owner
+        // or a viewer with private-zone authority may receive it.
+        GameEvent::ZoneChanged {
+            from: Some(Zone::Hand),
+            to: Zone::Library,
+            record,
+            ..
+        } => can_view_private_for_player(record.owner),
+        // CR 702.143a: foretell exiles a hand card face down. The zone-change
+        // record snapshots its real name, so it is visible only to a viewer
+        // who may look at that face-down exiled card.
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Hand),
+            to: Zone::Exile,
+            ..
+        } => state.objects.get(object_id).is_none_or(|obj| {
+            !obj.face_down
+                || face_down_exile_visible_to_viewer(
+                    state,
+                    *object_id,
+                    obj,
+                    &can_view_private_for_player,
+                )
+        }),
         _ => true,
     }
 }
@@ -1497,6 +1567,7 @@ mod tests {
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
@@ -1645,6 +1716,7 @@ mod tests {
         let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
         state.pending_search_found_batch = Some(PendingSearchFoundBatch {
             searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
             remaining: vec![ObjectId(101)],
             survivors: vec![ObjectId(102)],
             continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
@@ -1715,6 +1787,59 @@ mod tests {
         let controller =
             filter_events_for_viewer(std::slice::from_ref(&event), &state, PlayerId(0));
         assert_eq!(controller, vec![event]);
+    }
+
+    #[test]
+    fn filters_opponent_mulligan_hand_to_library_events() {
+        let state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let opponent = PlayerId(0);
+
+        let mut mulligan = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(98),
+            Some(Zone::Hand),
+            Zone::Library,
+        );
+        mulligan.name = "Secret Mulligan Card".to_string();
+        mulligan.owner = owner;
+        let mut discard = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(99),
+            Some(Zone::Hand),
+            Zone::Graveyard,
+        );
+        discard.name = "Public Discard".to_string();
+        discard.owner = owner;
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(98),
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record: Box::new(mulligan),
+            },
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(99),
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record: Box::new(discard),
+            },
+        ];
+
+        assert_eq!(filter_events_for_viewer(&events, &state, owner), events);
+        let visible = filter_events_for_viewer(&events, &state, opponent);
+        assert_eq!(visible.len(), 1);
+        assert!(matches!(
+            &visible[0],
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record,
+                ..
+            } if record.name == "Public Discard"
+        ));
+        assert_eq!(
+            filter_events_for_viewer(&events, &state, PlayerId(u8::MAX)),
+            visible
+        );
     }
 
     #[test]
@@ -1856,6 +1981,125 @@ mod tests {
             assert_eq!(record.name, "Cascade Card");
         } else {
             panic!("expected ZoneChanged");
+        }
+    }
+
+    #[test]
+    fn opponent_spell_cast_hides_stable_card_id_but_keeps_public_stack_reference() {
+        let mut state = GameState::new_two_player(42);
+        let face_down_spell = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(1),
+            "Secret Morph".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&face_down_spell).unwrap().face_down = true;
+        let own_spell = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Known Spell".to_string(),
+            Zone::Stack,
+        );
+        let opponent_face_up_spell = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(1),
+            "Known Opponent Spell".to_string(),
+            Zone::Stack,
+        );
+        let events = vec![
+            GameEvent::SpellCast {
+                card_id: CardId(701),
+                controller: PlayerId(1),
+                object_id: face_down_spell,
+            },
+            GameEvent::SpellCast {
+                card_id: CardId(702),
+                controller: PlayerId(0),
+                object_id: own_spell,
+            },
+            GameEvent::SpellCast {
+                card_id: CardId(703),
+                controller: PlayerId(1),
+                object_id: opponent_face_up_spell,
+            },
+        ];
+
+        let viewer = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert!(matches!(
+            viewer.as_slice(),
+            [
+                GameEvent::SpellCast {
+                    card_id: CardId(0),
+                    controller: PlayerId(1),
+                    object_id,
+                },
+                GameEvent::SpellCast {
+                    card_id: CardId(702),
+                    controller: PlayerId(0),
+                    ..
+                },
+                GameEvent::SpellCast {
+                    card_id: CardId(703),
+                    controller: PlayerId(1),
+                    object_id: face_up_object_id,
+                },
+            ] if *object_id == face_down_spell && *face_up_object_id == opponent_face_up_spell
+        ));
+
+        let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
+        assert!(spectator.iter().all(|event| matches!(
+            event,
+            GameEvent::SpellCast {
+                card_id: CardId(0),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn foretold_hand_to_exile_zone_change_is_hidden_from_opponent_and_spectator() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let foretold = create_object(
+            &mut state,
+            CardId(704),
+            owner,
+            "Secret Foretell".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&foretold).unwrap();
+        obj.foretold = true;
+        obj.face_down = true;
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            foretold,
+            Some(Zone::Hand),
+            Zone::Exile,
+        );
+        record.name = "Secret Foretell".to_string();
+        record.owner = owner;
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: foretold,
+                from: Some(Zone::Hand),
+                to: Zone::Exile,
+                record: Box::new(record),
+            },
+            GameEvent::Foretold {
+                player_id: owner,
+                object_id: foretold,
+            },
+        ];
+
+        assert_eq!(filter_events_for_viewer(&events, &state, owner), events);
+        for viewer in [PlayerId(0), PlayerId(u8::MAX)] {
+            let visible = filter_events_for_viewer(&events, &state, viewer);
+            assert!(matches!(
+                visible.as_slice(),
+                [GameEvent::Foretold { object_id, .. }] if *object_id == foretold
+            ));
         }
     }
 
@@ -2044,6 +2288,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,
@@ -2108,6 +2353,7 @@ mod tests {
         });
         state.waiting_for = WaitingFor::SearchChoice {
             player: p1,
+            library_owner: None,
             cards: vec![p1_candidate],
             count: 1,
             reveal: false,
@@ -2455,6 +2701,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,

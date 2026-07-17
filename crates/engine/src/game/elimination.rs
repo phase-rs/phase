@@ -499,8 +499,9 @@ fn do_eliminate(
     // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
     // `pending_replacement` guard.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
-    // CR 800.4a + CR 616.1: SearchFound owns an outer per-card batch, and a
-    // replacement-selected zone move may own a nested batch completion. The
+    // CR 800.4a: Tear down choices and continuations owned by the leaving player.
+    // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
+    // selected zone move may own a nested batch completion. The
     // inner pause can be either replacement ordering or another zone-delivery
     // choice, so this teardown is keyed to the batch plus its latched chooser,
     // independently of `pending_replacement`.
@@ -768,6 +769,7 @@ mod tests {
     ) -> crate::types::game_state::PendingSearchFoundBatch {
         crate::types::game_state::PendingSearchFoundBatch {
             searcher,
+            library_owner: Some(searcher),
             remaining: vec![object_id],
             survivors: Vec::new(),
             continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
@@ -788,7 +790,10 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             library_placement: None,
             completion: Some(
-                crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery { object_id },
+                crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                    object_id,
+                    grant: None,
+                },
             ),
             replacement_applied: HashSet::new(),
         }
@@ -1369,7 +1374,8 @@ mod tests {
                         pending.completion,
                         Some(
                             crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
-                                object_id
+                                object_id,
+                                grant: None,
                             }
                         ) if object_id == parked_found
                     )

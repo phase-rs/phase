@@ -9,10 +9,10 @@
 //! in `planar_deck` (front = top).
 //!
 //! This module is the runtime score-lever: it owns planeswalking
-//! ([`planeswalk`]), the planar die ([`roll_planar_die`]), chaos resolution
-//! ([`chaos_ensues`]), the phenomenon encounter entry point ([`encounter`]),
-//! and the phenomenon-leaves-stack state-based planeswalk
-//! ([`check_phenomenon_planeswalk_sba`]).
+//! ([`planeswalk`], [`resolve_planeswalk_via_replacements`]), the planar die
+//! ([`roll_planar_die`]), chaos resolution ([`chaos_ensues`]), the phenomenon
+//! encounter entry point ([`encounter`]), and the phenomenon-leaves-stack
+//! state-based planeswalk ([`check_phenomenon_planeswalk_sba`]).
 //!
 //! Trigger collection is NOT performed here. Like every other event-emitting
 //! subsystem (e.g. dungeon completion in `sba::check_dungeon_completion`), these
@@ -36,7 +36,10 @@ use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::AppliedReplacementKey;
 use crate::types::zones::Zone;
+
+pub use crate::types::proposed_event::PlaneswalkCause;
 
 /// CR 901.9d / CR 706.7: The face the planar die landed on. The planar die is
 /// symbolic (CR 901.3a: one Planeswalker face, one chaos face, four blank
@@ -419,38 +422,36 @@ pub fn chaos_ensues(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
 /// CR 312.5: "When you encounter [this phenomenon]" means "When you move this
 /// card off a planar deck and turn it face up." Encountering a phenomenon is the
-/// planeswalk that turns it face up; this entry point performs that planeswalk,
-/// which emits the `Planeswalked { to }` event the encounter trigger
-/// (`Planeswalked { role: To }`) matches.
+/// planeswalk that turns it face up; this entry point routes that planeswalk
+/// through the replacement pipeline (CR 614.1a), then emits the `Planeswalked
+/// { to }` event the encounter trigger matches on completion.
 pub fn encounter(state: &mut GameState, player_id: PlayerId, events: &mut Vec<GameEvent>) {
-    // CR 312.5: encountering a phenomenon IS this planeswalk — it is the
-    // turn-based/effect-driven planeswalk that turns the phenomenon face up, NOT
-    // the CR 901.8 "planeswalking ability" triggered by rolling the Planeswalker
-    // symbol. So it planeswalks directly (inline), never through the stack.
-    planeswalk(state, player_id, events);
+    let _ = resolve_planeswalk_via_replacements(
+        state,
+        player_id,
+        PlaneswalkCause::RulesProcess,
+        HashSet::new(),
+        events,
+    );
 }
 
 /// CR 704.6f / CR 312.7: If a phenomenon card is face up in the command zone and
 /// it isn't the source of a triggered ability that has triggered but not yet
 /// left the stack, its controller planeswalks. This is a state-based action.
 ///
-/// Modeled on `sba::check_dungeon_completion`: scan the stack for any entry
-/// whose `source_id` is the phenomenon; if none, planeswalk and record that an
-/// action was performed (so the SBA fixpoint loop re-checks).
+/// Returns [`Some(PlaneswalkResolution::Deferred)`] when a replacement pauses
+/// mid-planeswalk (Susan Foreman arrange); the SBA fixpoint loop must yield until
+/// the pause resolves.
 pub fn check_phenomenon_planeswalk_sba(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
-) {
-    let Some(controller) = state.planar_controller else {
-        return;
-    };
+) -> Option<PlaneswalkResolution> {
+    let controller = state.planar_controller?;
     if !active_is_phenomenon(state) {
-        return;
+        return None;
     }
-    let Some(phenomenon_id) = active_plane(state) else {
-        return;
-    };
+    let phenomenon_id = active_plane(state)?;
     // CR 704.6f: do not planeswalk while the phenomenon's own triggered ability
     // is still on the stack.
     let has_ability_on_stack = state
@@ -458,13 +459,22 @@ pub fn check_phenomenon_planeswalk_sba(
         .iter()
         .any(|entry| entry.source_id == phenomenon_id);
     if has_ability_on_stack {
-        return;
+        return None;
     }
-    // CR 704.6f: this is a state-based action, NOT the CR 901.8 "planeswalking
-    // ability" triggered by the planar die. It planeswalks directly (inline),
-    // never through the stack.
-    planeswalk(state, controller, events);
-    *any_performed = true;
+    let resolution = resolve_planeswalk_via_replacements(
+        state,
+        controller,
+        PlaneswalkCause::RulesProcess,
+        HashSet::new(),
+        events,
+    );
+    match resolution {
+        PlaneswalkResolution::Completed => {
+            *any_performed = true;
+        }
+        PlaneswalkResolution::Deferred => {}
+    }
+    Some(resolution)
 }
 
 /// Sentinel base for the synthetic source ObjectId of the CR 901.8
@@ -494,10 +504,82 @@ pub fn planar_ability_sentinel_id(player: PlayerId) -> ObjectId {
 /// namespace blocks.
 const PLANAR_ABILITY_SENTINEL_BLOCK: u64 = 0x1_0000_0000;
 
+/// Outcome of routing a planeswalk through the replacement pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaneswalkResolution {
+    /// The planeswalk completed (zone rotation and/or inline substitute drain).
+    Completed,
+    /// Replacement paused for player input (Susan arrange, CR 616 choice).
+    Deferred,
+}
+
+/// CR 701.31 + CR 614.1a: Single authority for every replaceable planeswalk.
+/// Performs zone rotation on `Execute`, drains substitutes on `Prevented`, and
+/// parks CR 616 choices on `NeedsChoice`.
+pub fn resolve_planeswalk_via_replacements(
+    state: &mut GameState,
+    player_id: PlayerId,
+    cause: PlaneswalkCause,
+    applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> PlaneswalkResolution {
+    use crate::game::replacement::{self, ReplacementResult};
+
+    match planeswalk_through_replacements(state, player_id, cause, applied, events) {
+        ReplacementResult::Execute(_) => PlaneswalkResolution::Completed,
+        ReplacementResult::Prevented => {
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                PlaneswalkResolution::Completed
+            } else {
+                PlaneswalkResolution::Deferred
+            }
+        }
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            PlaneswalkResolution::Deferred
+        }
+    }
+}
+
+/// CR 701.31 + CR 614.1a: Route a planeswalk through the replacement pipeline.
+/// On `Execute`, performs the zone rotation. On `Prevented`, drains any stashed
+/// substitute exactly once (Fixed Point chaos ensues, Susan Foreman arrange chain).
+pub fn planeswalk_through_replacements(
+    state: &mut GameState,
+    player_id: PlayerId,
+    cause: PlaneswalkCause,
+    applied: HashSet<AppliedReplacementKey>,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::replacement::ReplacementResult {
+    use crate::game::replacement::{self, ReplacementResult};
+    use crate::types::proposed_event::ProposedEvent;
+
+    let proposed = ProposedEvent::planeswalk_with_applied(player_id, cause, applied);
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(ProposedEvent::Planeswalk { player_id, .. }) => {
+            planeswalk(state, player_id, events);
+            ReplacementResult::Execute(ProposedEvent::planeswalk_with_applied(
+                player_id,
+                cause,
+                HashSet::new(),
+            ))
+        }
+        ReplacementResult::Execute(other) => ReplacementResult::Execute(other),
+        ReplacementResult::Prevented => {
+            if state.has_post_replacement_drain() {
+                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    state, None, None, None, events,
+                );
+            }
+            ReplacementResult::Prevented
+        }
+        ReplacementResult::NeedsChoice(player) => ReplacementResult::NeedsChoice(player),
+    }
+}
+
 /// CR 901.8 / CR 901.9c: true when `id` is a synthetic planeswalking-ability
-/// sentinel (`PLANAR_ABILITY_SENTINEL_BASE + player.0`). Identifies planeswalks
-/// caused by rolling the planar die's Planeswalker symbol — the only planeswalk
-/// cause routed through the replacement pipeline (Fixed Point in Time).
+/// sentinel (`PLANAR_ABILITY_SENTINEL_BASE + player.0`). Used to tag planar-die
+/// `Effect::Planeswalk` resolutions with [`PlaneswalkCause::PlanarDie`].
 pub fn is_planar_ability_source(id: ObjectId) -> bool {
     id.0 >= PLANAR_ABILITY_SENTINEL_BASE
         && id.0 < PLANAR_ABILITY_SENTINEL_BASE + PLANAR_ABILITY_SENTINEL_BLOCK

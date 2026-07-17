@@ -6,7 +6,8 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoMayChoice, GameState, PendingContinuation, WaitingFor,
+    ActionResult, AutoMayChoice, GameState, PendingContinuation, PendingCostMoveResume, WaitingFor,
+    WardSacrificePaymentResume,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -23,7 +24,7 @@ use super::engine::{
 };
 use super::engine_priority;
 use super::mana_abilities;
-use super::zones;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 pub(super) fn handle_optional_effect_choice(
     state: &mut GameState,
@@ -1595,6 +1596,109 @@ fn selected_sacrifice_total_power(state: &GameState, chosen: &[ObjectId]) -> i32
         .sum()
 }
 
+/// CR 702.21a + CR 701.21 + CR 616.1: Persist the exact unpaid ward payment
+/// work while the current sacrifice waits for a replacement choice. Preserve a
+/// delivery-tail prompt when it owns the action; otherwise expose the live
+/// replacement ordering choice.
+fn pause_ward_sacrifice_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_effect: Box<ResolvedAbility>,
+    resume: WardSacrificePaymentResume,
+    choice_player: PlayerId,
+) -> WaitingFor {
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
+        player,
+        pending_effect,
+        resume,
+    });
+    if state.pending_replacement.is_some() {
+        costs::pause_cost_payment_for_replacement_choice(state, choice_player);
+    }
+    state.waiting_for.clone()
+}
+
+/// CR 702.21a: Finish the ward payment only after every required sacrifice has
+/// settled, then allow the normal resolution-continuation tail to advance once.
+fn finish_ward_sacrifice_payment(
+    state: &mut GameState,
+    pending_effect: ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&pending_effect.effect),
+        source_id: pending_effect.source_id,
+        subject: None,
+    });
+
+    set_active_priority(state);
+    resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 702.21a + CR 701.21 + CR 614.1 + CR 616.1: Resume only the ward
+/// sacrifice work that followed the sacrifice completed by the replacement
+/// action. This is reached exclusively through the typed cost-move dispatcher.
+pub(super) fn resume_ward_sacrifice_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::WardSacrificePayment {
+        player,
+        pending_effect,
+        resume,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("ward sacrifice payment resume requires its typed continuation")
+    };
+
+    match resume {
+        WardSacrificePaymentResume::MultiSacrifice { remaining } => {
+            for (index, id) in remaining.iter().enumerate() {
+                match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
+                    crate::game::sacrifice::SacrificeOutcome::Complete => {}
+                    crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
+                        choice_player,
+                    ) => {
+                        return Ok(pause_ward_sacrifice_payment(
+                            state,
+                            player,
+                            pending_effect,
+                            WardSacrificePaymentResume::MultiSacrifice {
+                                remaining: remaining[index + 1..].to_vec(),
+                            },
+                            choice_player,
+                        ));
+                    }
+                }
+            }
+            finish_ward_sacrifice_payment(state, *pending_effect, events)
+        }
+        WardSacrificePaymentResume::Sequential {
+            permanents,
+            sacrificed,
+            remaining,
+        } => {
+            if remaining > 1 {
+                let eligible = permanents
+                    .into_iter()
+                    .filter(|&id| id != sacrificed && state.objects.contains_key(&id))
+                    .collect();
+                state.waiting_for = WaitingFor::WardSacrificeChoice {
+                    player,
+                    permanents: eligible,
+                    pending_effect,
+                    remaining: remaining - 1,
+                    min_total_power: None,
+                };
+                Ok(state.waiting_for.clone())
+            } else {
+                finish_ward_sacrifice_payment(state, *pending_effect, events)
+            }
+        }
+    }
+}
+
 pub(super) fn handle_ward_sacrifice_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -1636,8 +1740,21 @@ pub(super) fn handle_ward_sacrifice_choice(
                 "Selected permanents' total power must be at least {threshold}"
             )));
         }
-        for id in &chosen {
-            crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)?;
+        for (index, id) in chosen.iter().enumerate() {
+            match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
+                crate::game::sacrifice::SacrificeOutcome::Complete => {}
+                crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                    return Ok(pause_ward_sacrifice_payment(
+                        state,
+                        player,
+                        pending_effect,
+                        WardSacrificePaymentResume::MultiSacrifice {
+                            remaining: chosen[index + 1..].to_vec(),
+                        },
+                        choice_player,
+                    ));
+                }
+            }
         }
     } else {
         if chosen.len() != 1 || !permanents.contains(&chosen[0]) {
@@ -1653,7 +1770,22 @@ pub(super) fn handle_ward_sacrifice_choice(
         // group; the `handle_sacrifice_for_cost` co-departed stamp does not apply here.
         // A co-departing observer therefore under-observes. Closing this would batch all
         // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
-        crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)?;
+        match crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)? {
+            crate::game::sacrifice::SacrificeOutcome::Complete => {}
+            crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                return Ok(pause_ward_sacrifice_payment(
+                    state,
+                    player,
+                    pending_effect,
+                    WardSacrificePaymentResume::Sequential {
+                        permanents,
+                        sacrificed: chosen[0],
+                        remaining,
+                    },
+                    choice_player,
+                ));
+            }
+        }
 
         // If more sacrifices remain, re-prompt with updated eligible permanents
         if remaining > 1 {
@@ -1672,15 +1804,7 @@ pub(super) fn handle_ward_sacrifice_choice(
         }
     }
 
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&pending_effect.effect),
-        source_id: pending_effect.source_id,
-        subject: None,
-    });
-
-    set_active_priority(state);
-    resume_pending_continuation_if_priority(state, events)?;
-    Ok(state.waiting_for.clone())
+    finish_ward_sacrifice_payment(state, *pending_effect, events)
 }
 
 /// CR 118.12: Handle player's selection of a permanent to return to hand as unless cost.
@@ -1708,12 +1832,52 @@ pub(super) fn handle_unless_bounce_choice(
         ));
     }
 
-    zones::move_to_zone(state, chosen[0], Zone::Hand, events);
+    let moved = chosen[0];
+    match zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::cost(moved, Zone::Hand, pending_effect.source_id),
+        events,
+    ) {
+        ZoneMoveResult::Done => finish_unless_bounce_payment(
+            state,
+            player,
+            moved,
+            permanents,
+            pending_effect,
+            remaining,
+            events,
+        ),
+        ZoneMoveResult::NeedsChoice(_) => {
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::UnlessBouncePayment {
+                player,
+                moved,
+                permanents,
+                pending_effect,
+                remaining,
+            });
+            Ok(state.waiting_for.clone())
+        }
+        ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            unreachable!("an unless return-to-hand cost cannot require an Aura attachment")
+        }
+    }
+}
 
+/// CR 118.11 + CR 118.12 + CR 616.1: Complete the paid unless-return tail
+/// after the replacement-aware cost move was delivered or fully substituted.
+fn finish_unless_bounce_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    moved: ObjectId,
+    permanents: Vec<ObjectId>,
+    pending_effect: Box<ResolvedAbility>,
+    remaining: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     if remaining > 1 {
         let eligible: Vec<ObjectId> = permanents
             .into_iter()
-            .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
+            .filter(|&id| id != moved && state.objects.contains_key(&id))
             .collect();
         state.waiting_for = WaitingFor::UnlessBounceChoice {
             player,
@@ -1733,6 +1897,34 @@ pub(super) fn handle_unless_bounce_choice(
     set_active_priority(state);
     resume_pending_continuation_if_priority(state, events)?;
     Ok(state.waiting_for.clone())
+}
+
+/// CR 118.11 + CR 118.12 + CR 616.1: Resume the typed unless-return cost
+/// root after its selected permanent's replacement event settles.
+pub(super) fn resume_unless_bounce_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::UnlessBouncePayment {
+        player,
+        moved,
+        permanents,
+        pending_effect,
+        remaining,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("unless bounce cost-move resume requires its typed continuation")
+    };
+
+    finish_unless_bounce_payment(
+        state,
+        player,
+        moved,
+        permanents,
+        pending_effect,
+        remaining,
+        events,
+    )
 }
 
 fn set_active_priority(state: &mut GameState) {
