@@ -40,14 +40,15 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction, AttachmentKind,
-    AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
-    DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
-    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality,
-    StaticCondition, TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCostOrigin,
+    AdditionalCostPaymentSource, AggregateFunction, AttachmentKind, AttackersDeclaredCountSubject,
+    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
+    ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter, DestinationConstraint,
+    DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint, ParsedCondition,
+    PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
+    TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -4748,6 +4749,21 @@ fn extract_if_condition_with_card_name(
     // --- Source-referential patterns (cannot be StaticConditions) ---
     // These require trigger-source context that StaticCondition can't express.
 
+    // CR 603.4 + CR 702.33d-f + CR 702.166a: an ETB "if it was kicked
+    // [twice]" or "if it was bargained" clause is an
+    // intervening-if, so an unpaid trigger must never be put on the stack or
+    // ask for targets. The effect parser's resolution-time condition is too
+    // late for this shape.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_additional_cost_intervening_if)
+    {
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, before.len(), clause_len),
+            Some(condition),
+        );
+    }
+
     // CR 603.4 + CR 601.2: "if you didn't cast it from your hand/graveyard/exile"
     // — negated zone-specific cast check (Chainer, Nightmare Adept; Phage the
     // Untouchable). The entering object must NOT have been cast from the named
@@ -6610,6 +6626,35 @@ fn parse_cast_using_variant_intervening_if(input: &str) -> OracleResult<'_, Trig
     Ok((
         input,
         TriggerCondition::CastVariantPaidPersistent { variant },
+    ))
+}
+
+fn parse_additional_cost_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (input, _) = tag("if ").parse(input)?;
+    let (input, source) = alt((
+        value(
+            AdditionalCostPaymentSource::Kicker,
+            alt((tag("it was kicked"), tag("~ was kicked"))),
+        ),
+        value(
+            AdditionalCostPaymentSource::NonKicker,
+            alt((tag("it was bargained"), tag("~ was bargained"))),
+        ),
+    ))
+    .parse(input)?;
+    let (input, min_count) =
+        alt((value(2, tag(" twice")), value(1, peek(tag(","))))).parse(input)?;
+    Ok((
+        input,
+        TriggerCondition::AdditionalCostPaid {
+            source,
+            origin: matches!(source, AdditionalCostPaymentSource::NonKicker)
+                .then_some(AdditionalCostOrigin::Bargain),
+            origin_ordinal: None,
+            variant: None,
+            kicker_cost: None,
+            min_count,
+        },
     ))
 }
 

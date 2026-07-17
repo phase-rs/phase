@@ -8,7 +8,8 @@ use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
-    OutsideGameChoiceSource, PayableResource, PendingContinuation, WaitingFor,
+    OutsideGameChoiceSource, PayableResource, PendingContinuation,
+    PendingPlayerScopeSacrificeCompletion, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -584,6 +585,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
         WaitingFor::MeldPairChoice { .. }
             | WaitingFor::MeldAttackTargetChoice { .. }
             | WaitingFor::ScryChoice { .. }
+            | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
@@ -718,6 +720,20 @@ fn route_rest_partition_then(
     crate::game::zone_pipeline::move_objects_simultaneously_then(
         state, requests, completion, events,
     )
+}
+
+fn validate_exact_keep_on_top_selection(
+    selection: &[ObjectId],
+    looked_at: &[ObjectId],
+    keep_on_top: usize,
+) -> Result<(), EngineError> {
+    validate_keep_on_top_selection(selection, looked_at)?;
+    if selection.len() != keep_on_top {
+        return Err(EngineError::InvalidAction(format!(
+            "keep-on-top selection must contain exactly {keep_on_top} cards"
+        )));
+    }
+    Ok(())
 }
 
 /// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
@@ -1168,17 +1184,43 @@ pub(super) fn handle_resolution_choice(
                 .iter_mut()
                 .find(|candidate| candidate.id == player)
                 .expect("player exists");
+            // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
             player_state.library.retain(|id| !all_cards.contains(id));
             for (index, &card_id) in top_cards.iter().enumerate() {
+                // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
                 player_state.library.insert(index, card_id);
             }
             for &card_id in &bottom_cards {
+                // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
                 player_state.library.push_back(card_id);
             }
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`
             // static must be re-evaluated — self-gated so it's a no-op otherwise.
             crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::ArrangePlanarDeckTopChoice {
+                player,
+                cards,
+                keep_on_top,
+            },
+            GameAction::SelectCards { cards: top_cards },
+        ) => {
+            validate_exact_keep_on_top_selection(&top_cards, &cards, keep_on_top)?;
+            let bottom_cards: Vec<_> = cards
+                .iter()
+                .filter(|id| !top_cards.contains(id))
+                .copied()
+                .collect();
+            state.planar_deck.retain(|id| !cards.contains(id));
+            for (index, &card_id) in top_cards.iter().enumerate() {
+                state.planar_deck.insert(index, card_id);
+            }
+            for card_id in bottom_cards {
+                state.planar_deck.push_back(card_id);
+            }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
@@ -1970,8 +2012,28 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::TopOrBottomChoice { player, object_id },
             GameAction::ChooseTopOrBottom { top },
         ) => {
-            zones::move_to_library_position(state, object_id, top, events);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            // CR 614.1 + CR 616.1: The chosen object's Library delivery is
+            // an effect-owned zone event, so a `Moved` replacement must settle
+            // before its chained resolution tail drains. This legacy waiter does
+            // not retain the original ability source; preserve its prior
+            // self-anchored attribution for the pipeline request.
+            let position = if top {
+                LibraryPosition::Top
+            } else {
+                LibraryPosition::Bottom
+            };
+            crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                vec![crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    object_id,
+                    Zone::Library,
+                    object_id,
+                )
+                .at_library_position(position)],
+                Some(crate::types::game_state::BatchCompletion::TopOrBottomComplete { player }),
+                events,
+            );
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         // CR 107.1c + CR 107.14: Commit the chosen amount for a "pay any amount
         // of X" prompt. Deducts the resource, emits the matching resource event,
@@ -2189,6 +2251,7 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseTopOrBottom { top },
         ) => {
+            // allow-raw-zone: clash reveal/return keeps the card in its library (CR 701.30a + CR 701.20b).
             zones::move_to_library_position(state, card, top, events);
             if let Some(((next_player, next_card), rest)) = remaining.split_first() {
                 state.waiting_for = WaitingFor::ClashCardPlacement {
@@ -2543,13 +2606,16 @@ pub(super) fn handle_resolution_choice(
                         .iter_mut()
                         .find(|candidate| candidate.id == library_owner)
                         .expect("player exists");
+                    // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                     player_state.library.retain(|id| !cards.contains(id));
                     for (index, &card_id) in kept.iter().enumerate() {
+                        // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                         player_state.library.insert(index, card_id);
                     }
                     match rest_destination {
                         Some(Zone::Library) => {
                             for &obj_id in &unkept {
+                                // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                                 player_state.library.push_back(obj_id);
                             }
                             None
@@ -2614,76 +2680,123 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             if let Some(kept_zone) = kept_destination {
-                for &obj_id in &kept {
-                    if kept_zone == Zone::Battlefield {
-                        // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield
-                        // entries through the zone-change pipeline so the delivery
-                        // tail seeds intrinsic enters-with counters and applies the
-                        // CR 614.1 tap-state. The previous manual `obj.tapped` is
-                        // dropped (the tail does it from the seeded EntryMods).
-                        // CR 400.7: attribute the entry to the dig's source when
-                        // known; otherwise the moved object anchors itself (the
-                        // pre-pipeline raw move recorded no source).
-                        let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
-                            obj_id,
-                            Zone::Battlefield,
-                            dig_source_id.unwrap_or(obj_id),
-                        );
-                        req.mods.enter_tapped =
-                            crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
-                        match crate::game::zone_pipeline::move_object(state, req, events) {
-                            crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                            // CR 303.4f / CR 616.1: the kept card's battlefield
-                            // entry paused on an as-enters choice (aura host pick /
-                            // replacement ordering). The pause is already parked;
-                            // defer the rest-pile move + tracked-set publish +
-                            // continuation wiring onto the batch tail so the drain
-                            // runs it once the entry resolves — otherwise the
-                            // unkept cards strand in the library (they were not yet
-                            // moved). The drain fires on both the replacement-choice
-                            // resume and the aura-attachment resume.
-                            //
-                            // SCOPING (multi-kept limitation, pre-existing,
-                            // strictly no-worse-than-before): this `return` exits
-                            // the `for &obj_id in &kept` loop, so if kept card #1
-                            // pauses, kept #2+ are NOT moved to the battlefield —
-                            // they remain in the library. The deferred completion
-                            // only finishes the rest-pile (unkept) move and the
-                            // tracked-set publish; it does not resume the kept
-                            // loop. The old raw-`move_to_zone` path had the same
-                            // ceiling (it could not pause and resume a kept tail
-                            // either), so this is no regression. WRINKLE:
-                            // `publish_tracked_set: Some(kept.clone())` publishes
-                            // ALL kept cards, including the unmoved #2+, so a
-                            // downstream sub-ability keyed off the tracked set can
-                            // be wired to cards still in the library on this paused
-                            // path. Acceptable today because no supported dig card
-                            // both keeps 2+ cards to the battlefield AND surfaces an
-                            // as-enters pause on the first; revisit if such a card
-                            // is added (the fix is a kept-loop continuation, not a
-                            // single completion).
-                            crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
-                            | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                                crate::game::zone_pipeline::defer_completion_on_pause(
-                                    state,
-                                    crate::types::game_state::BatchCompletion::RevealRestPile {
-                                        player,
-                                        source_id: dig_source_id,
-                                        rest_cards: unkept.clone(),
-                                        rest_destination: rest_destination
-                                            .unwrap_or(Zone::Graveyard),
-                                        clear_markers: Vec::new(),
-                                        publish_tracked_set: Some(kept.clone()),
-                                        emit_reveal_until_resolved: None,
-                                    },
-                                );
-                                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                                    state.waiting_for.clone(),
-                                ));
-                            }
-                        }
+                if kept_zone != Zone::Battlefield {
+                    // CR 614.1 + CR 616.1 + CR 608.2c: Kept cards leaving the
+                    // library are effect-owned zone events. Their destination
+                    // delivery, rest-pile routing, tracked-set publication, and
+                    // continuation drain are one typed batch tail so none can
+                    // run before every kept card has settled.
+                    let publish_set = if kept.is_empty() {
+                        Vec::new()
+                    } else if state.pending_continuation.as_ref().is_some_and(|cont| {
+                        dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                    }) {
+                        unkept.clone()
                     } else {
-                        zones::move_to_zone(state, obj_id, kept_zone, events);
+                        kept.clone()
+                    };
+                    let defer_rest_routing =
+                        state.pending_continuation.as_ref().is_some_and(|cont| {
+                            dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                        });
+                    let reqs = kept
+                        .iter()
+                        .map(|&obj_id| {
+                            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                                obj_id,
+                                kept_zone,
+                                dig_source_id.unwrap_or(obj_id),
+                            )
+                        })
+                        .collect();
+                    crate::game::zone_pipeline::move_objects_simultaneously_then(
+                        state,
+                        reqs,
+                        Some(
+                            crate::types::game_state::BatchCompletion::DigKeptDeliveryComplete {
+                                player,
+                                source_id: dig_source_id,
+                                rest_cards: if defer_rest_routing {
+                                    Vec::new()
+                                } else {
+                                    unkept
+                                },
+                                rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                publish_tracked_set: publish_set,
+                                continuation_targets: kept.clone(),
+                            },
+                        ),
+                        events,
+                    );
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+                for &obj_id in &kept {
+                    // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield
+                    // entries through the zone-change pipeline so the delivery
+                    // tail seeds intrinsic enters-with counters and applies the
+                    // CR 614.1 tap-state. The previous manual `obj.tapped` is
+                    // dropped (the tail does it from the seeded EntryMods).
+                    // CR 400.7: attribute the entry to the dig's source when
+                    // known; otherwise the moved object anchors itself (the
+                    // pre-pipeline raw move recorded no source).
+                    let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                        obj_id,
+                        Zone::Battlefield,
+                        dig_source_id.unwrap_or(obj_id),
+                    );
+                    req.mods.enter_tapped =
+                        crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+                    match crate::game::zone_pipeline::move_object(state, req, events) {
+                        crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                        // CR 303.4f / CR 616.1: the kept card's battlefield
+                        // entry paused on an as-enters choice (aura host pick /
+                        // replacement ordering). The pause is already parked;
+                        // defer the rest-pile move + tracked-set publish +
+                        // continuation wiring onto the batch tail so the drain
+                        // runs it once the entry resolves — otherwise the
+                        // unkept cards strand in the library (they were not yet
+                        // moved). The drain fires on both the replacement-choice
+                        // resume and the aura-attachment resume.
+                        //
+                        // SCOPING (multi-kept limitation, pre-existing,
+                        // strictly no-worse-than-before): this `return` exits
+                        // the `for &obj_id in &kept` loop, so if kept card #1
+                        // pauses, kept #2+ are NOT moved to the battlefield —
+                        // they remain in the library. The deferred completion
+                        // only finishes the rest-pile (unkept) move and the
+                        // tracked-set publish; it does not resume the kept
+                        // loop. The old raw-`move_to_zone` path had the same
+                        // ceiling (it could not pause and resume a kept tail
+                        // either), so this is no regression. WRINKLE:
+                        // `publish_tracked_set: Some(kept.clone())` publishes
+                        // ALL kept cards, including the unmoved #2+, so a
+                        // downstream sub-ability keyed off the tracked set can
+                        // be wired to cards still in the library on this paused
+                        // path. Acceptable today because no supported dig card
+                        // both keeps 2+ cards to the battlefield AND surfaces an
+                        // as-enters pause on the first; revisit if such a card
+                        // is added (the fix is a kept-loop continuation, not a
+                        // single completion).
+                        crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                        | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            crate::game::zone_pipeline::defer_completion_on_pause(
+                                state,
+                                crate::types::game_state::BatchCompletion::RevealRestPile {
+                                    player,
+                                    source_id: dig_source_id,
+                                    rest_cards: unkept.clone(),
+                                    rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                    clear_markers: Vec::new(),
+                                    publish_tracked_set: Some(kept.clone()),
+                                    emit_reveal_until_resolved: None,
+                                },
+                            );
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     }
                 }
             }
@@ -3328,9 +3441,16 @@ pub(super) fn handle_resolution_choice(
             // the per-player path (Sanar, Portent of Calamity). The continuation
             // ("from among them" / "put the rest …") reads that tracked set.
             if state.pending_per_category_zone_choice.is_some() {
-                effects::choose_from_zone::drain_pending_per_category_zone_choice(
+                match effects::choose_from_zone::drain_pending_per_category_zone_choice(
                     state, &chosen, events,
-                );
+                ) {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
                 super::engine::resume_pending_continuation_if_priority(state, events)
                     .expect("a settled zone choice must resume its continuation");
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3855,7 +3975,13 @@ pub(super) fn handle_resolution_choice(
                         "Selected card not in eligible set".to_string(),
                     ));
                 }
-                if state.objects.get(card_id).map(|obj| obj.zone) != Some(zone) {
+                let current_zone = state.objects.get(card_id).map(|obj| obj.zone);
+                // `PutAtLibraryPosition` permits either Hand or Library source
+                // cards. Partition them by current zone at delivery time.
+                let is_put_at_library_position_member =
+                    matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+                        && matches!(current_zone, Some(Zone::Hand | Zone::Library));
+                if current_zone != Some(zone) && !is_put_at_library_position_member {
                     return Err(EngineError::InvalidAction(format!(
                         "Selected card is no longer in {:?}",
                         zone
@@ -3975,26 +4101,47 @@ pub(super) fn handle_resolution_choice(
             let events_before_effect = events.len();
             match effect_kind {
                 EffectKind::Sacrifice => {
-                    for &card_id in &chosen {
-                        match super::sacrifice::sacrifice_permanent(state, card_id, player, events)
-                        {
-                            Ok(super::sacrifice::SacrificeOutcome::Complete) => {}
-                            Ok(super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
-                                choice_player,
-                            )) => {
-                                state.waiting_for =
-                                    super::replacement::replacement_choice_waiting_for(
-                                        choice_player,
-                                        state,
-                                    );
-                                return Ok(action_result_outcome(
-                                    events,
-                                    state.waiting_for.clone(),
-                                ));
+                    let completion = PendingPlayerScopeSacrificeCompletion {
+                        effect_kind: Some(EffectKind::Sacrifice),
+                        publish_fresh_tracked_set: state.pending_continuation.is_some(),
+                        propagate_parent_context: true,
+                        ..Default::default()
+                    };
+                    match effects::perform_collected_player_scope_sacrifices_with_completion(
+                        state,
+                        source_id,
+                        player,
+                        vec![(player, chosen.clone())],
+                        completion,
+                        events,
+                    )
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                    {
+                        effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
+                            unreachable!(
+                                "collected effect-zone sacrifices never prompt a new player"
+                            )
+                        }
+                        effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+                            return Ok(action_result_outcome(events, state.waiting_for.clone()));
+                        }
+                        effects::PendingPlayerScopeSacrificeOutcome::Completed {
+                            events_before_sacrifice,
+                            events_after_sacrifice,
+                        } => {
+                            set_priority(state, player);
+                            resume_with_error_propagation(state, events)?;
+                            if let Some(outcome) = batch_or_drain_observer_triggers(
+                                state,
+                                events,
+                                events_before_sacrifice,
+                                events_after_sacrifice,
+                            ) {
+                                return Ok(outcome);
                             }
-                            Err(error) => {
-                                return Err(EngineError::InvalidAction(error.to_string()));
-                            }
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
                         }
                     }
                 }
@@ -4182,24 +4329,78 @@ pub(super) fn handle_resolution_choice(
                 // selection order (first chosen = top). Expressive Iteration's
                 // tracked-set bottom step chains an exile `ParentTarget` tail —
                 // detect that continuation shape to honor bottom placement.
-                EffectKind::PutAtLibraryPosition => match library_position {
-                    Some(LibraryPosition::Bottom) => {
-                        for &card_id in &chosen {
-                            super::zones::move_to_library_position(state, card_id, false, events);
+                EffectKind::PutAtLibraryPosition => {
+                    let library_position = match library_position {
+                        Some(LibraryPosition::Bottom) => LibraryPosition::Bottom,
+                        Some(LibraryPosition::NthFromTop { n }) => {
+                            LibraryPosition::NthFromTop { n }
+                        }
+                        _ => LibraryPosition::Top,
+                    };
+                    let library_origin: Vec<ObjectId> = chosen
+                        .iter()
+                        .copied()
+                        .filter(|card_id| {
+                            state
+                                .objects
+                                .get(card_id)
+                                .is_some_and(|object| object.zone == Zone::Library)
+                        })
+                        .collect();
+                    let non_library_order = effect_zone_non_library_delivery_order(
+                        state,
+                        &chosen,
+                        &library_origin,
+                        &library_position,
+                    );
+
+                    if non_library_order.is_empty() {
+                        move_library_origin_cards_in_selection_order(
+                            state,
+                            &chosen,
+                            &library_position,
+                            events,
+                        );
+                    } else {
+                        // The selected EffectZoneChoice is now consumed. Clear it
+                        // before the pipeline may park a CR 616.1 prompt; otherwise
+                        // `park_waiting_for` intentionally preserves the stale
+                        // choice for Devour's nested-choice path.
+                        state.waiting_for = WaitingFor::Priority { player };
+                        let requests = non_library_order
+                            .into_iter()
+                            .map(|card_id| {
+                                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                                    card_id,
+                                    Zone::Library,
+                                    source_id,
+                                )
+                                .at_library_position(library_position.clone())
+                            })
+                            .collect();
+                        let completion =
+                            crate::types::game_state::BatchCompletion::EffectZonePutAtLibraryPositionComplete {
+                                player,
+                                source_id,
+                                chosen: chosen.clone(),
+                                library_origin,
+                                library_position,
+                            };
+                        match crate::game::zone_pipeline::move_objects_simultaneously_then(
+                            state,
+                            requests,
+                            Some(completion),
+                            events,
+                        ) {
+                            crate::game::zone_pipeline::BatchMoveResult::Done
+                            | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                         }
                     }
-                    Some(LibraryPosition::NthFromTop { n }) => {
-                        let index = Some(n.saturating_sub(1) as usize);
-                        for &card_id in &chosen {
-                            super::zones::move_to_library_at_index(state, card_id, index, events);
-                        }
-                    }
-                    _ => {
-                        for &card_id in chosen.iter().rev() {
-                            super::zones::move_to_library_at_index(state, card_id, Some(0), events);
-                        }
-                    }
-                },
+                }
                 // CR 608.2d + CR 301.5b: Resolution-time Equipment pick for
                 // deferred optional attach (Nahiri, the Lithomancer +2).
                 EffectKind::Attach => {
@@ -4245,13 +4446,22 @@ pub(super) fn handle_resolution_choice(
                             ));
                         }
                     } else {
-                        effects::cast_from_zone::grant_lingering_permissions(
-                            &mut *state,
-                            &ability,
-                            &chosen,
-                            events,
-                        )
-                        .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                        let permission_grant =
+                            effects::cast_from_zone::grant_lingering_permissions(
+                                &mut *state,
+                                &ability,
+                                &chosen,
+                                events,
+                            )
+                            .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                        if matches!(
+                            permission_grant,
+                            effects::cast_from_zone::LingeringPermissionGrantResult::NeedsChoice
+                        ) {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     }
                 }
                 // CR 701.68a: Place `count_param` -1/-1 counters on the creature
@@ -4558,7 +4768,7 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            effects::drawn_this_turn_choice::handle_topdeck_choice(
+            match effects::drawn_this_turn_choice::handle_topdeck_choice(
                 state,
                 effects::drawn_this_turn_choice::TopdeckChoice {
                     player,
@@ -4571,11 +4781,18 @@ pub(super) fn handle_resolution_choice(
                 },
                 events,
             )
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+            {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+            }
             // Issue #423 audit: `handle_topdeck_choice` moves cards between the
             // hand and the top of the library — never off the battlefield — so
             // it produces no dies-triggers and needs no collection here.
-            state.last_effect_count = Some(chosen.len() as i32);
             set_priority(state, player);
             resume_with_error_propagation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -5185,7 +5402,8 @@ pub(super) fn handle_resolution_choice(
                     source_id,
                     source_controller,
                     events,
-                );
+                )
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
             } else if let Err(e) = effects::choose_and_sacrifice_rest::advance_to_next_player(
                 state,
                 &categories,
@@ -5656,6 +5874,237 @@ fn pop_first_pile_result(
     (first, completed)
 }
 
+fn effect_zone_library_placement_order(
+    chosen: &[ObjectId],
+    library_position: &LibraryPosition,
+) -> Vec<ObjectId> {
+    match library_position {
+        LibraryPosition::Top => chosen.iter().rev().copied().collect(),
+        LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => chosen.to_vec(),
+        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+            unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+        }
+    }
+}
+
+/// CR 401.4: Deliver Hand-origin cards in the order whose resulting relative
+/// order matches the raw mixed-source placement. The later Library-only replay
+/// can change their interleaving with library cards, but never their own order.
+fn effect_zone_non_library_delivery_order(
+    state: &GameState,
+    chosen: &[ObjectId],
+    library_origin: &[ObjectId],
+    library_position: &LibraryPosition,
+) -> Vec<ObjectId> {
+    let mut owners = Vec::new();
+    for &card_id in chosen {
+        let owner = state.objects[&card_id].owner;
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+
+    let mut delivery_order = Vec::new();
+    for owner in owners {
+        let library = state
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .expect("library owner exists")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        let desired = replay_effect_zone_library_placement(
+            state,
+            owner,
+            library,
+            chosen,
+            chosen,
+            library_position,
+        );
+        let non_library: Vec<_> = desired
+            .into_iter()
+            .filter(|card_id| chosen.contains(card_id) && !library_origin.contains(card_id))
+            .collect();
+        match library_position {
+            LibraryPosition::Top | LibraryPosition::NthFromTop { .. } => {
+                delivery_order.extend(non_library.into_iter().rev());
+            }
+            LibraryPosition::Bottom => delivery_order.extend(non_library),
+            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+                unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+            }
+        }
+    }
+    delivery_order
+}
+
+fn replay_effect_zone_library_placement(
+    state: &GameState,
+    owner: crate::types::player::PlayerId,
+    mut library: Vec<ObjectId>,
+    chosen: &[ObjectId],
+    placed: &[ObjectId],
+    library_position: &LibraryPosition,
+) -> Vec<ObjectId> {
+    for card_id in effect_zone_library_placement_order(chosen, library_position) {
+        if state.objects[&card_id].owner != owner || !placed.contains(&card_id) {
+            continue;
+        }
+        library.retain(|id| *id != card_id);
+        match library_position {
+            LibraryPosition::Top => library.insert(0, card_id),
+            LibraryPosition::Bottom => library.push(card_id),
+            LibraryPosition::NthFromTop { n } => {
+                let index = (n.saturating_sub(1) as usize).min(library.len());
+                library.insert(index, card_id);
+            }
+            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+                unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+            }
+        }
+    }
+    library
+}
+
+fn move_library_origin_cards_in_selection_order(
+    state: &mut GameState,
+    chosen: &[ObjectId],
+    library_position: &LibraryPosition,
+    events: &mut Vec<GameEvent>,
+) {
+    match library_position {
+        LibraryPosition::Bottom => {
+            for &card_id in chosen {
+                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+                zones::move_to_library_position(state, card_id, false, events);
+            }
+        }
+        LibraryPosition::Top | LibraryPosition::NthFromTop { .. } => {
+            let index = match library_position {
+                LibraryPosition::Top => Some(0),
+                LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                _ => unreachable!("matched library position"),
+            };
+            let placement_order = effect_zone_library_placement_order(chosen, library_position);
+            for card_id in placement_order {
+                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+                zones::move_to_library_at_index(state, card_id, index, events);
+            }
+        }
+        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+            unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+        }
+    }
+}
+
+/// CR 401.4 + CR 608.2c: Preserve the raw arm's selected-card interleaving
+/// after the Hand-origin delivery batch has settled. Reconstruct each affected
+/// library without the newly delivered cards, replay the original placement
+/// order using only cards that actually landed in a library, then reposition
+/// just the cards that began there into the resulting slots.
+fn reposition_library_origins_after_batch_delivery(
+    state: &mut GameState,
+    chosen: &[ObjectId],
+    library_origin: &[ObjectId],
+    library_position: &LibraryPosition,
+    events: &mut Vec<GameEvent>,
+) {
+    let library_placed: Vec<_> = chosen
+        .iter()
+        .copied()
+        .filter(|card_id| {
+            state
+                .objects
+                .get(card_id)
+                .is_some_and(|object| object.zone == Zone::Library)
+        })
+        .collect();
+    let mut owners = Vec::new();
+    for &card_id in library_origin {
+        let owner = state.objects[&card_id].owner;
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+
+    for owner in owners {
+        let library = state
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .expect("library owner exists")
+            .library
+            .iter()
+            .copied()
+            .filter(|id| library_origin.contains(id) || !chosen.contains(id))
+            .collect();
+        let desired = replay_effect_zone_library_placement(
+            state,
+            owner,
+            library,
+            chosen,
+            &library_placed,
+            library_position,
+        );
+        for (index, &card_id) in desired.iter().enumerate().rev() {
+            if library_origin.contains(&card_id) {
+                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+                zones::move_to_library_at_index(state, card_id, Some(index), events);
+            }
+        }
+    }
+}
+
+fn finish_effect_zone_put_at_library_position(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    chosen: Vec<ObjectId>,
+    library_origin: Vec<ObjectId>,
+    library_position: LibraryPosition,
+    events: &mut Vec<GameEvent>,
+) {
+    reposition_library_origins_after_batch_delivery(
+        state,
+        &chosen,
+        &library_origin,
+        &library_position,
+        events,
+    );
+    if state.pending_continuation.is_some() {
+        let tracked = if matches!(library_position, LibraryPosition::Bottom) {
+            state
+                .chain_tracked_set_id
+                .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| !chosen.contains(id))
+                .filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| object.zone == Zone::Library)
+                })
+                .collect()
+        } else {
+            chosen.clone()
+        };
+        let tracked_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(tracked_id, tracked);
+        state.chain_tracked_set_id = Some(tracked_id);
+    }
+    state.last_effect_count = Some(chosen.len() as i32);
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::PutAtLibraryPosition,
+        source_id,
+        subject: None,
+    });
+    finish_with_continuation(state, player, events);
+}
+
 fn finish_with_continuation(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -5682,6 +6131,32 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::CastFromZoneExileDeliveryComplete {
+            ability,
+            in_place_ids,
+            exile_delivery_ids,
+        } => effects::cast_from_zone::complete_lingering_permissions_after_exile_delivery(
+            state,
+            &ability,
+            &in_place_ids,
+            &exile_delivery_ids,
+            events,
+        ),
+        BatchCompletion::CascadeExileLoopComplete {
+            controller,
+            source_id,
+            source_mv,
+            exiled_misses,
+            current_card,
+        } => effects::cascade::complete_exile_loop_step(
+            state,
+            controller,
+            source_id,
+            source_mv,
+            exiled_misses,
+            current_card,
+            events,
+        ),
         BatchCompletion::CascadeBottomComplete {
             controller,
             source_id,
@@ -5791,6 +6266,101 @@ pub(crate) fn run_batch_completion(
                 source_id,
                 subject: None,
             });
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::TopOrBottomComplete { player } => {
+            finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::EffectZonePutAtLibraryPositionComplete {
+            player,
+            source_id,
+            chosen,
+            library_origin,
+            library_position,
+        } => {
+            finish_effect_zone_put_at_library_position(
+                state,
+                player,
+                source_id,
+                chosen,
+                library_origin,
+                library_position,
+                events,
+            );
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::DigKeptDeliveryComplete {
+            player,
+            source_id,
+            rest_cards,
+            rest_destination,
+            publish_tracked_set,
+            continuation_targets,
+        } => {
+            if !rest_cards.is_empty() {
+                match route_rest_partition(state, &rest_cards, rest_destination, source_id, events)
+                {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        crate::game::zone_pipeline::defer_completion_on_pause(
+                            state,
+                            BatchCompletion::DigKeptDeliveryComplete {
+                                player,
+                                source_id,
+                                rest_cards: Vec::new(),
+                                rest_destination,
+                                publish_tracked_set,
+                                continuation_targets,
+                            },
+                        );
+                        return crate::game::zone_pipeline::BatchMoveResult::NeedsChoice;
+                    }
+                }
+            }
+            effects::publish_fresh_tracked_set(state, publish_tracked_set);
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.targets = continuation_targets
+                    .iter()
+                    .map(|&id| TargetRef::Object(id))
+                    .collect();
+                cont.chain.context.optional_effect_performed = !continuation_targets.is_empty();
+            }
+            finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::ForEachCategoryExileComplete {
+            ability,
+            pool,
+            remaining_member_filters,
+            chosen,
+        } => {
+            effects::choose_from_zone::complete_per_category_exile(
+                state,
+                ability,
+                pool,
+                remaining_member_filters,
+                chosen,
+                events,
+            );
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::DrawnThisTurnTopdeckComplete {
+            player,
+            life_payment,
+            payment_count,
+            topdecked_count,
+            source_id,
+        } => {
+            effects::drawn_this_turn_choice::complete_topdeck_choice(
+                state,
+                player,
+                life_payment,
+                payment_count,
+                topdecked_count,
+                source_id,
+                events,
+            );
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::SurveilKeepOnTop { player, top_cards } => {
@@ -7869,5 +8439,125 @@ mod tests {
                 .is_empty(),
             "transient land/nonland kind choices should not render source labels"
         );
+    }
+
+    fn insert_planar_deck_plane(
+        state: &mut GameState,
+        card_id: u32,
+        name: &str,
+        controller: PlayerId,
+    ) -> ObjectId {
+        use crate::game::game_object::GameObject;
+        use crate::types::card_type::{CardType, CoreType};
+
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut obj = GameObject::new(
+            id,
+            CardId(u64::from(card_id)),
+            controller,
+            name.to_string(),
+            Zone::Command,
+        );
+        let mut card_type = CardType::default();
+        card_type.core_types.push(CoreType::Plane);
+        obj.card_types = card_type;
+        obj.face_down = true;
+        state.objects.insert(id, obj);
+        id
+    }
+
+    fn setup_planechase_two_deep(state: &mut GameState) -> (ObjectId, ObjectId, ObjectId) {
+        use crate::types::format::FormatConfig;
+
+        let controller = PlayerId(0);
+        state.format_config = FormatConfig::planechase();
+        let active = insert_planar_deck_plane(state, 1, "Active Plane", controller);
+        if let Some(obj) = state.objects.get_mut(&active) {
+            obj.face_down = false;
+        }
+        state.command_zone.push_back(active);
+        let deck_top = insert_planar_deck_plane(state, 2, "Deck Top", controller);
+        let deck_second = insert_planar_deck_plane(state, 3, "Deck Second", controller);
+        state.planar_deck.push_back(deck_top);
+        state.planar_deck.push_back(deck_second);
+        state.planar_controller = Some(controller);
+        (active, deck_top, deck_second)
+    }
+
+    #[test]
+    fn arrange_planar_deck_top_choice_reorders_deck() {
+        use crate::game::planechase::active_plane;
+
+        let mut state = GameState::new_two_player(11);
+        let (active, deck_top, deck_second) = setup_planechase_two_deep(&mut state);
+        state.waiting_for = WaitingFor::ArrangePlanarDeckTopChoice {
+            player: PlayerId(0),
+            cards: vec![deck_top, deck_second],
+            keep_on_top: 1,
+        };
+
+        let waiting_for = state.waiting_for.clone();
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SelectCards {
+                cards: vec![deck_second],
+            },
+            &mut events,
+        )
+        .expect("arrange choice resolves");
+
+        assert_eq!(state.planar_deck.front(), Some(&deck_second));
+        assert_eq!(active_plane(&state), Some(active));
+    }
+
+    #[test]
+    fn arrange_planar_deck_top_choice_drains_stashed_planeswalk() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::planechase::active_plane;
+
+        let mut state = GameState::new_two_player(13);
+        let (_active, deck_top, deck_second) = setup_planechase_two_deep(&mut state);
+
+        let execute = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ArrangePlanarDeckTop {
+                count: QuantityExpr::Fixed { value: 2 },
+                keep_on_top: QuantityExpr::Fixed { value: 1 },
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Planeswalk,
+        ));
+        let resolved = build_resolved_from_def(&execute, ObjectId(100), PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ArrangePlanarDeckTopChoice { .. }
+        ));
+        assert!(matches!(
+            state.pending_continuation.as_ref().unwrap().chain.effect,
+            Effect::Planeswalk
+        ));
+
+        let waiting_for = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SelectCards {
+                cards: vec![deck_second],
+            },
+            &mut events,
+        )
+        .expect("arrange + planeswalk resolves");
+
+        assert_eq!(active_plane(&state), Some(deck_second));
+        assert!(state.planar_deck.contains(&deck_top));
     }
 }

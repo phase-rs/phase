@@ -894,6 +894,149 @@ pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
         .collect()
 }
 
+/// CR 702.85c + CR 105.2: Parse a spell-cast keyword grant whose granted
+/// keyword(s) are QUOTED — "<subject> spells you cast [from <zone>] [with mana
+/// value N or greater] have \"<K0>[, <K1>...]\"" — into one `CastWithKeyword`
+/// static per listed keyword. Repeats are preserved (Zhulodok, Void Gorger's
+/// "Cascade, cascade" yields two `Cascade` grants; the runtime fires one Cascade
+/// trigger per granted keyword instance, CR 702.85a). The subject filter is
+/// parsed by the single authority [`super::keyword_grant::parse_spells_have_keyword`],
+/// re-invoked per keyword with a reconstructed unquoted grant so every subject
+/// qualifier (type, from-zone, mana-value) stays consistent with the
+/// single-keyword path. A leading color-quality prefix — which that handler
+/// cannot see once "spells" is consumed — is peeled here and folded into each
+/// grant's affected filter, keeping a "colorless spells" grant colorless-scoped.
+///
+/// Declines unless the grant is quoted AND every listed token is a keyword the
+/// single handler accepts, so quoted non-keyword grants (a granted triggered
+/// ability) and ordinary unquoted single-keyword grants fall through to their
+/// own handlers.
+fn parse_spells_have_quoted_keyword_list(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+
+    // Split "<subject>" from the quoted keyword list at the grant verb + opening
+    // quote. Requiring the opening quote scopes this handler to the quoted-grant
+    // class and leaves unquoted single-keyword grants to `parse_spells_have_keyword`.
+    // `scan_preceded` yields the post-match remainder (the keyword list), unlike
+    // `scan_split_at_phrase` which returns the slice still starting at the match.
+    // It scans at word boundaries and trims leading whitespace, so the grant-verb
+    // tags carry no leading space; `subject` is trimmed to drop the trailing one.
+    let (subject, _grant_verb, after_quote) = nom_primitives::scan_preceded(&lower, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("have \""),
+            tag("has \""),
+            tag("gain \""),
+            tag("gains \""),
+        ))
+        .parse(i)
+    })?;
+    let subject = subject.trim();
+
+    // The keyword list runs up to the closing quote; consume the quote with a
+    // combinator, after which only an optional trailing period may follow.
+    let (after_close, inner) = take_until::<_, _, OracleError<'_>>("\"")
+        .parse(after_quote)
+        .ok()?;
+    let (residue, _) = tag::<_, _, OracleError<'_>>("\"").parse(after_close).ok()?;
+    if !residue.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    // Split the quoted list into keyword names, validating each is a keyword
+    // (`parse_keyword_name`) so a quoted *ability* grant declines here.
+    let inner = inner.trim().trim_end_matches('.').trim();
+    let (list_rest, keyword_names) = separated_list1(
+        alt((
+            tag::<_, _, OracleError<'_>>(", and "),
+            tag(", "),
+            tag(" and "),
+        )),
+        nom_primitives::parse_keyword_name,
+    )
+    .parse(inner)
+    .ok()?;
+    if !list_rest.trim().is_empty() || keyword_names.is_empty() {
+        return None;
+    }
+
+    // Peel an optional leading color-quality qualifier (CR 105.2). The delegated
+    // subject parser only sees the text before "spells you cast", so a bare
+    // "colorless"/"monocolored"/"multicolored" prefix would otherwise be dropped.
+    let (subject_no_color, color_prop) = peel_color_quality_prefix(subject);
+
+    // Delegate the subject-filter parse per keyword by re-forming an unquoted
+    // single-keyword grant. Declines the whole line if any token isn't accepted.
+    let mut defs = Vec::with_capacity(keyword_names.len());
+    for name in keyword_names {
+        let reconstructed = format!("{subject_no_color} have {name}");
+        let tp = TextPair::new(&reconstructed, &reconstructed);
+        let mut def = super::keyword_grant::parse_spells_have_keyword(&tp, &reconstructed)?;
+        if let Some(prop) = color_prop.clone() {
+            if let Some(affected) = def.affected.take() {
+                def = def.affected(add_property(affected, prop));
+            }
+        }
+        // Preserve the full printed line as the static's description.
+        def = def.description(text.to_string());
+        defs.push(def);
+    }
+
+    // CR 113.2c: A quoted list may REPEAT a keyword ("Cascade, cascade" —
+    // CR 702.85c), but only for keywords whose duplicate cast-time instances the
+    // runtime actually preserves and consumes (`Keyword::cast_merge_preserves_
+    // instances` — the same authority `casting.rs::requires_per_instance_keyword`
+    // gates the merge on). A duplicate of any other keyword that reaches here (e.g.
+    // "Exalted, exalted" — Exalted is in KEYWORDS and functions separately by rule
+    // but its cast-grant count is unconsumed) would emit two grants that
+    // `merge_spell_keyword` coalesces by kind, silently under-counting. Decline the
+    // whole line rather than over-claim a grammar the runtime cannot realize.
+    let mut seen: Vec<&Keyword> = Vec::new();
+    for def in &defs {
+        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+            continue;
+        };
+        if seen.contains(&keyword) && !keyword.cast_merge_preserves_instances() {
+            return None;
+        }
+        seen.push(keyword);
+    }
+
+    Some(defs)
+}
+
+/// Peel a leading color-quality qualifier ("colorless"/"monocolored"/
+/// "multicolored") from a lowercase subject, returning the remainder and the
+/// matching `FilterProp::ColorCount` (CR 105.2). Mirrors the color-quality
+/// prefixes `oracle_target` recognizes before a type word.
+fn peel_color_quality_prefix(subject: &str) -> (&str, Option<FilterProp>) {
+    alt((
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+            tag::<_, _, OracleError<'_>>("colorless "),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            },
+            tag("monocolored "),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            },
+            tag("multicolored "),
+        ),
+    ))
+    .parse(subject)
+    .map(|(rest, prop)| (rest, Some(prop)))
+    .unwrap_or((subject, None))
+}
+
 /// CR 611.3 + CR 613.1: Split a static line into its sentence segments, then
 /// parse each as an independent continuous static. Returns `Some(defs)` only
 /// when the line splits into 2+ segments and EVERY segment yields at least one
@@ -1514,6 +1657,19 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // only the first keyword and drops the "if it's <color>" qualifier — the observed
     // bug (the whole static vanished, so the card did nothing).
     if let Some(defs) = parse_color_conditional_keyword_grants(&stripped) {
+        return defs;
+    }
+
+    // CR 702.85a + CR 702.85c + CR 613.1: "<subject> spells you cast [...] have
+    // "<K0>[, <K1>...]"" — a spell-cast keyword grant whose granted keyword(s)
+    // are QUOTED and may repeat (Zhulodok, Void Gorger: "... have 'Cascade,
+    // cascade.'"). The single unquoted keyword grant is owned by
+    // `parse_spells_have_keyword`; this sibling expands the quoted list into one
+    // `CastWithKeyword` static per listed keyword — repeats included, since
+    // granted-keyword multiplicity is meaningful (the runtime fires one Cascade
+    // trigger per granted instance). Mirrors the exiled-object / color-conditional
+    // grant handlers above (one static per listed keyword).
+    if let Some(defs) = parse_spells_have_quoted_keyword_list(&stripped) {
         return defs;
     }
 

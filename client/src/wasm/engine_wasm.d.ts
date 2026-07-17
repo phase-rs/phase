@@ -57,6 +57,11 @@ export function clear_replay_playback(): void;
 export function commanderPartnerCandidates(first_commander: string, candidates: any): any;
 
 /**
+ * Returns legal Commander-family companion candidates from the main deck.
+ */
+export function companionCandidates(request: any): any;
+
+/**
  * Create a default 2-player game state.
  */
 export function create_initial_state(): any;
@@ -413,6 +418,11 @@ export function set_multiplayer_mode(enabled: boolean): void;
 export function sideboardPolicyForFormat(format: any): any;
 
 /**
+ * Returns the engine-authored Oathbreaker signature-spell selection policy.
+ */
+export function signatureSpellSelectionPolicy(request: any): any;
+
+/**
  * Submit a game action on behalf of `actor` and return the ActionResult
  * (events + waiting_for).
  *
@@ -444,6 +454,7 @@ export interface InitOutput {
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
+    readonly companionCandidates: (a: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
@@ -479,6 +490,7 @@ export interface InitOutput {
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
+    readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;

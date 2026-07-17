@@ -676,6 +676,7 @@ impl EventObjectSnapshot {
             | FilterProp::ManaCostIn { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::Foretold
+            | FilterProp::HasAdventure
             | FilterProp::AttachedToSource
             | FilterProp::AttachedToRecipient
             | FilterProp::Unpaired

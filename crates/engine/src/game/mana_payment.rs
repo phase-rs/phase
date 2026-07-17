@@ -568,6 +568,37 @@ fn is_phyrexian_requirement(req: &ShardRequirement) -> bool {
     )
 }
 
+/// CR 107.4f + CR 601.2h: Build the mana demand for auto-tapping after the
+/// player has chosen mana or life for each Phyrexian-shaped shard. A shard
+/// paid with life must not cause an otherwise-unused mana source to tap.
+pub(super) fn mana_cost_for_phyrexian_choices(
+    cost: &ManaCost,
+    choices: &[ShardChoice],
+    life_colors: crate::types::mana::LifePaymentColors,
+) -> ManaCost {
+    let ManaCost::Cost { shards, generic } = cost else {
+        return cost.clone();
+    };
+    let mut choice_index = 0usize;
+    let shards = shards
+        .iter()
+        .copied()
+        .filter(|shard| {
+            let requirement = effective_shard_requirement(shard_to_mana_type(*shard), life_colors);
+            if !is_phyrexian_requirement(&requirement) {
+                return true;
+            }
+            let keep = !matches!(choices.get(choice_index), Some(ShardChoice::PayLife));
+            choice_index += 1;
+            keep
+        })
+        .collect();
+    ManaCost::Cost {
+        shards,
+        generic: *generic,
+    }
+}
+
 /// CR 107.4f + CR 118.3: Order shard indices so every non-Phyrexian shard is
 /// resolved before any Phyrexian-shape shard, mirroring `can_pay_for_spell`'s
 /// deferral. Deciding a Phyrexian shard against the pool *after* strict
@@ -1464,10 +1495,11 @@ pub fn compute_phyrexian_shards(
     let mut sim = pool.clone();
     let mut results = Vec::new();
     let mut preferred_hybrid_colors: Vec<(ManaType, ManaType, ManaType)> = Vec::new();
-    // CR 107.4f + CR 118.3 + CR 119.8: Mana preference within the dry-run matches
-    // `pay_cost_with_demand_and_choices`' auto-decision. `life_budget` tracks how many
-    // life payments remain unspent — once exhausted, subsequent shards report `ManaOnly`
-    // (or `LifeOnly`/unpayable would have failed `can_pay_for_spell` upstream).
+    // CR 107.4f + CR 118.3 + CR 119.8: Strict shards and forced Phyrexian
+    // payments consume the simulated resources. A ManaOrLife shard must leave
+    // both resources uncommitted: another identical shard may legally take the
+    // contested mana while this one pays life. Aggregate route feasibility is
+    // checked when the complete choice vector is generated and submitted.
     let mut life_budget = max_life_payments;
 
     // CR 107.4f + CR 118.3: Resolve non-Phyrexian shards first (consuming their
@@ -1520,15 +1552,13 @@ pub fn compute_phyrexian_shards(
                     color: mana_type_to_color_fallback(color),
                     options,
                 });
-                // Simulated commit: prefer mana path for later shard availability;
-                // if mana is unavailable or would starve generic, consume life budget.
-                if effective_mana {
+                if matches!(options, ShardOptions::ManaOnly) {
                     let _ = if any_color {
                         spend_any_for_required_colors(&mut sim, &[color], spell, None, &[])
                     } else {
                         spend_eligible(&mut sim, color, spell, &[])
                     };
-                } else {
+                } else if matches!(options, ShardOptions::LifeOnly) {
                     life_budget = life_budget.saturating_sub(1);
                 }
             }
@@ -1586,7 +1616,7 @@ pub fn compute_phyrexian_shards(
                     color: mana_type_to_color_fallback(a),
                     options,
                 });
-                if effective_mana {
+                if matches!(options, ShardOptions::ManaOnly) {
                     let _ = if any_color {
                         spend_any_for_required_colors(&mut sim, &[a, b], spell, None, &[])
                     } else {
@@ -1602,7 +1632,7 @@ pub fn compute_phyrexian_shards(
                         );
                         spend_eligible(&mut sim, color, spell, &[])
                     };
-                } else {
+                } else if matches!(options, ShardOptions::LifeOnly) {
                     life_budget = life_budget.saturating_sub(1);
                 }
             }
@@ -1642,7 +1672,7 @@ pub fn compute_phyrexian_shards(
                     color: mana_type_to_color_fallback(color),
                     options,
                 });
-                if effective_mana {
+                if matches!(options, ShardOptions::ManaOnly) {
                     // Mirror `pay_cost_with_demand_and_choices`'s preference:
                     // prefer 1 colored, then atomic 2-generic fallback.
                     if any_color {
@@ -1655,7 +1685,7 @@ pub fn compute_phyrexian_shards(
                             sim = backup;
                         }
                     }
-                } else {
+                } else if matches!(options, ShardOptions::LifeOnly) {
                     life_budget = life_budget.saturating_sub(1);
                 }
             }

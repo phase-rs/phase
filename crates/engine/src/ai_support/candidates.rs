@@ -15,9 +15,9 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, ConvokeMode, CounterCostChoice, CounterMoveChoice,
-    CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind, PendingMulliganAction,
-    TargetSelectionSlot, WaitingFor,
+    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CounterCostChoice,
+    CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind,
+    PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -1044,6 +1044,11 @@ pub fn candidate_actions_broad_with_probe(
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
+        WaitingFor::ArrangePlanarDeckTopChoice {
+            player,
+            cards,
+            keep_on_top,
+        } => select_cards_variants(*player, cards, Some(*keep_on_top)),
         // CR 119.7 + CR 119.8: every enumerated redistribution option is legal by
         // construction (the resolver filtered CR 119.7/119.8), so each is a
         // candidate submission.
@@ -1868,38 +1873,46 @@ pub fn candidate_actions_broad_with_probe(
             }));
             actions
         }
-        // CR 107.4f + CR 601.2f: AI picks per-shard Phyrexian payment.
-        // Heuristic (life threshold): with life > 6, the AI prefers 2-life per shard for
-        // tempo (keep mana for other plays); with life <= 6, the AI preserves life.
-        // Shards with only one viable option use that option.
+        // CR 107.4f + CR 601.2f: Every mana-or-life vector is a distinct
+        // payment route. Generate all structurally available combinations so
+        // the legality filter can retain every fully payable route.
         WaitingFor::PhyrexianPayment { player, shards, .. } => {
             use crate::types::game_state::{ShardChoice, ShardOptions};
-            let life = state
-                .players
-                .iter()
-                .find(|p| p.id == *player)
-                .map(|p| p.life)
-                .unwrap_or(0);
-            let prefer_life = life > 6;
-            let choices: Vec<ShardChoice> = shards
-                .iter()
-                .map(|shard| match shard.options {
-                    ShardOptions::ManaOnly => ShardChoice::PayMana,
-                    ShardOptions::LifeOnly => ShardChoice::PayLife,
-                    ShardOptions::ManaOrLife => {
-                        if prefer_life {
-                            ShardChoice::PayLife
-                        } else {
-                            ShardChoice::PayMana
-                        }
+            let mut routes = vec![Vec::with_capacity(shards.len())];
+            for shard in shards {
+                match shard.options {
+                    ShardOptions::ManaOnly => {
+                        routes
+                            .iter_mut()
+                            .for_each(|route| route.push(ShardChoice::PayMana));
                     }
+                    ShardOptions::LifeOnly => {
+                        routes
+                            .iter_mut()
+                            .for_each(|route| route.push(ShardChoice::PayLife));
+                    }
+                    ShardOptions::ManaOrLife => {
+                        let mut mana_routes = routes.clone();
+                        routes
+                            .iter_mut()
+                            .for_each(|route| route.push(ShardChoice::PayLife));
+                        mana_routes
+                            .iter_mut()
+                            .for_each(|route| route.push(ShardChoice::PayMana));
+                        routes.extend(mana_routes);
+                    }
+                }
+            }
+            routes
+                .into_iter()
+                .map(|choices| {
+                    candidate(
+                        GameAction::SubmitPhyrexianChoices { choices },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
                 })
-                .collect();
-            vec![candidate(
-                GameAction::SubmitPhyrexianChoices { choices },
-                TacticalClass::Selection,
-                Some(*player),
-            )]
+                .collect()
         }
         // CR 601.2b: Defiler cycle — accept or decline life payment for mana reduction.
         WaitingFor::DefilerPayment { player, .. } => vec![
@@ -1916,7 +1929,8 @@ pub fn candidate_actions_broad_with_probe(
         ],
         // CR 118.3 + CR 601.2b + CR 605.3b: AI selects objects to pay a cost.
         // Single-object RemoveCounter chooses one source per candidate;
-        // from-among RemoveCounter and Sacrifice honor the [min, max] range;
+        // from-among RemoveCounter, Sacrifice, and optional zone-exile costs
+        // honor the [min, max] range;
         // every other kind selects exactly `count` objects.
         WaitingFor::PayCost {
             player,
@@ -1957,7 +1971,7 @@ pub fn candidate_actions_broad_with_probe(
         ),
         WaitingFor::PayCost {
             player,
-            kind: PayCostKind::Sacrifice,
+            kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
             choices,
             count,
             min_count,
@@ -2510,11 +2524,10 @@ pub fn candidate_actions_broad_with_probe(
         } => {
             let mut actions: Vec<CandidateAction> = eligible_companions
                 .iter()
-                .enumerate()
-                .map(|(i, _)| {
+                .map(|choice| {
                     candidate(
                         GameAction::DeclareCompanion {
-                            card_index: Some(i),
+                            choice: CompanionDeclaration::Reveal(choice.clone()),
                         },
                         TacticalClass::Selection,
                         Some(*player),
@@ -2523,7 +2536,9 @@ pub fn candidate_actions_broad_with_probe(
                 .collect();
             // Always offer the option to decline
             actions.push(candidate(
-                GameAction::DeclareCompanion { card_index: None },
+                GameAction::DeclareCompanion {
+                    choice: CompanionDeclaration::Decline,
+                },
                 TacticalClass::Selection,
                 Some(*player),
             ));
@@ -3267,7 +3282,10 @@ pub(crate) fn priority_actions_with_probe(
                         bf.layout_kind == Some(LayoutKind::Modal)
                             && bf.card_types.core_types.contains(&CoreType::Land)
                     });
-                if is_playable_land {
+                // CR 305.1: Don't offer a land whose specific card is denied by
+                // a `PlayLands` restriction (Conjurer's Ban) — mirrors the
+                // blanket `CantPlayLand` gate above, but per-object.
+                if is_playable_land && !casting::is_blocked_by_cant_play_lands(state, player, obj) {
                     actions.push(candidate(
                         GameAction::PlayLand {
                             object_id: obj_id,
@@ -3282,14 +3300,16 @@ pub(crate) fn priority_actions_with_probe(
         // CR 604.2 + CR 305.1: Lands playable from graveyard via static permission
         for (obj_id, _source) in casting::graveyard_lands_playable_by_permission(state, player) {
             if let Some(obj) = state.objects.get(&obj_id) {
-                actions.push(candidate(
-                    GameAction::PlayLand {
-                        object_id: obj_id,
-                        card_id: obj.card_id,
-                    },
-                    TacticalClass::Land,
-                    Some(player),
-                ));
+                if !casting::is_blocked_by_cant_play_lands(state, player, obj) {
+                    actions.push(candidate(
+                        GameAction::PlayLand {
+                            object_id: obj_id,
+                            card_id: obj.card_id,
+                        },
+                        TacticalClass::Land,
+                        Some(player),
+                    ));
+                }
             }
         }
         // CR 401.5 + CR 305.1: Land on top of library playable via
@@ -3299,26 +3319,30 @@ pub(crate) fn priority_actions_with_probe(
             casting::top_of_library_land_playable_by_permission(state, player)
         {
             if let Some(obj) = state.objects.get(&top_id) {
-                actions.push(candidate(
-                    GameAction::PlayLand {
-                        object_id: top_id,
-                        card_id: obj.card_id,
-                    },
-                    TacticalClass::Land,
-                    Some(player),
-                ));
+                if !casting::is_blocked_by_cant_play_lands(state, player, obj) {
+                    actions.push(candidate(
+                        GameAction::PlayLand {
+                            object_id: top_id,
+                            card_id: obj.card_id,
+                        },
+                        TacticalClass::Land,
+                        Some(player),
+                    ));
+                }
             }
         }
         for (obj_id, _source) in casting::exile_lands_playable_by_permission(state, player) {
             if let Some(obj) = state.objects.get(&obj_id) {
-                actions.push(candidate(
-                    GameAction::PlayLand {
-                        object_id: obj_id,
-                        card_id: obj.card_id,
-                    },
-                    TacticalClass::Land,
-                    Some(player),
-                ));
+                if !casting::is_blocked_by_cant_play_lands(state, player, obj) {
+                    actions.push(candidate(
+                        GameAction::PlayLand {
+                            object_id: obj_id,
+                            card_id: obj.card_id,
+                        },
+                        TacticalClass::Land,
+                        Some(player),
+                    ));
+                }
             }
         }
     }

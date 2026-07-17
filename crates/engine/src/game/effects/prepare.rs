@@ -253,6 +253,7 @@ fn synthesize_prepared_copy_object(
 
     let mut copy_obj = src_clone;
     copy_obj.id = copy_id;
+    // allow-raw-zone: prepared spell-copy birth in exile has no from-zone event (CR 707.12).
     copy_obj.zone = Zone::Exile;
     copy_obj.controller = controller;
     copy_obj.owner = controller;

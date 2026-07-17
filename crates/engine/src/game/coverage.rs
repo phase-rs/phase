@@ -1019,6 +1019,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             // CR 608.2c: "chosen this way" / a member of the resolution-chain set.
             FilterProp::InTrackedSet { .. } => parts.push("chosen this way".into()),
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasAdventure => parts.push("with an Adventure".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
@@ -3558,6 +3559,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
@@ -4203,6 +4205,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedAbilityFromSource {
             source_ability_index,
         } => format!("retain printed ability {source_ability_index}"),
+        ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+            "retain source's other abilities".into()
+        }
         ContinuousModification::AddSupertype { supertype } => {
             format!("add supertype {supertype}")
         }

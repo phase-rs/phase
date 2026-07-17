@@ -1381,9 +1381,10 @@ fn fixed_point_does_not_replace_direct_planeswalk() {
     );
 }
 
-/// C (card-instruction planeswalk NOT replaced): resolving `Effect::Planeswalk`
-/// with a real (non-sentinel) source is a CR 701.31c ability-instructed
-/// planeswalk, not the planar-die one — it rotates and never triggers chaos.
+/// C (card-instruction planeswalk NOT replaced by Fixed Point): resolving
+/// `Effect::Planeswalk` with a real (non-sentinel) source routes through the
+/// replacement pipeline, but Fixed Point's planar-die-only scope does not
+/// match — the plane rotates and no chaos ensues.
 #[test]
 fn fixed_point_does_not_replace_card_instruction_planeswalk() {
     let mut state = GameState::new_two_player(7);
@@ -1412,7 +1413,7 @@ fn fixed_point_does_not_replace_card_instruction_planeswalk() {
     assert_eq!(
         active_plane(&state),
         Some(next_id),
-        "CR 701.31c: an ability-instructed planeswalk is never replaced"
+        "ability-instructed planeswalk executes after replacement consult"
     );
     assert_eq!(
         count_chaos_ensued(&events),

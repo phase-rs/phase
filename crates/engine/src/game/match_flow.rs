@@ -52,6 +52,42 @@ fn entries_to_count_map(entries: &[DeckEntry]) -> HashMap<String, u32> {
     map
 }
 
+/// Restores the single companion promoted from a normal-format sideboard to
+/// the editable current partition before a BetweenGames sideboard submission.
+/// Registered sideboards remain immutable: legal post-board swaps are kept in
+/// `current_main`/`current_sideboard` and only the revealed companion copy is
+/// returned (CR 400.11a).
+fn restore_revealed_sideboard_companions(state: &mut GameState) {
+    if state.format_config.format.uses_commander() {
+        return;
+    }
+
+    for pool in &mut state.deck_pools {
+        let Some(companion) = state
+            .players
+            .iter()
+            .find(|player| player.id == pool.player)
+            .and_then(|player| player.companion.as_ref())
+        else {
+            continue;
+        };
+        let name = &companion.card.card.name;
+        if !pool
+            .registered_sideboard
+            .iter()
+            .any(|entry| entry.card.name == *name)
+        {
+            continue;
+        }
+        let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
+        if let Some(entry) = sideboard.iter_mut().find(|entry| entry.card.name == *name) {
+            entry.count += 1;
+        } else {
+            sideboard.push(companion.card.clone());
+        }
+    }
+}
+
 fn counts_to_entries(
     counts: &[DeckCardCount],
     card_faces: &HashMap<String, crate::types::card::CardFace>,
@@ -79,6 +115,7 @@ fn build_card_face_map(pool: &PlayerDeckPool) -> HashMap<String, crate::types::c
         .iter()
         .chain(pool.registered_sideboard.iter())
         .chain(pool.registered_commander.iter())
+        .chain(pool.registered_companion.iter())
     {
         faces
             .entry(entry.card.name.clone())
@@ -114,6 +151,9 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             main_deck: (*p.current_main).clone(),
             sideboard: (*p.current_sideboard).clone(),
             commander: (*p.current_commander).clone(),
+            // Dedicated companions are rebuilt from their registered external
+            // slot, never from the consumed current offer.
+            companion: (*p.registered_companion).clone(),
             attraction_deck: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: (*p.registered_scheme_deck).clone(),
@@ -134,6 +174,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             main_deck: (*p0.current_main).clone(),
             sideboard: (*p0.current_sideboard).clone(),
             commander: (*p0.current_commander).clone(),
+            companion: (*p0.registered_companion).clone(),
             attraction_deck: Vec::new(),
             planar_deck: (*p0.registered_planar_deck).clone(),
             scheme_deck: (*p0.registered_scheme_deck).clone(),
@@ -146,6 +187,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             main_deck: (*p1.current_main).clone(),
             sideboard: (*p1.current_sideboard).clone(),
             commander: (*p1.current_commander).clone(),
+            companion: (*p1.registered_companion).clone(),
             attraction_deck: Vec::new(),
             planar_deck: Vec::new(),
             scheme_deck: (*p1.registered_scheme_deck).clone(),
@@ -209,6 +251,7 @@ pub fn handle_game_over_transition(state: &mut GameState) {
     state.match_phase = MatchPhase::BetweenGames;
     state.game_number = state.game_number.saturating_add(1);
     state.sideboard_submitted.clear();
+    restore_revealed_sideboard_companions(state);
     state.next_game_chooser = if let Some(archenemy) = archenemy {
         Some(archenemy)
     } else {

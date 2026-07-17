@@ -163,7 +163,7 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Blitz(c) => Keyword::Blitz(pure_mana(c, "Rule::Blitz", path)?),
         Rule::Dash(c) => Keyword::Dash(pure_mana(c, "Rule::Dash", path)?),
         Rule::Disturb(c) => Keyword::Disturb(pure_mana(c, "Rule::Disturb", path)?),
-        Rule::Disguise(c) => Keyword::Disguise(pure_mana(c, "Rule::Disguise", path)?),
+        Rule::Disguise(c) => Keyword::Disguise(pure_mana(c, "Rule::Disguise", path)?.into()),
         Rule::Echo(c) => Keyword::Echo(engine::types::keywords::EchoCost::Mana(pure_mana(
             c,
             "Rule::Echo",

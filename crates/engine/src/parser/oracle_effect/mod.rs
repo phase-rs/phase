@@ -47,20 +47,21 @@ use lower::{
     rebind_decline_body_recipient, rebind_subject_only_body_recipient,
     scan_until_next_same_source_exile_invalidation, split_difference_repeat_suffix,
     strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
-    strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
-    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
-    strip_leading_duration, strip_leading_quantifier, strip_leading_return_destination_ext,
-    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
-    strip_repeat_count_suffix, strip_return_destination_ext,
-    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
-    try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_each_scope_who_didnt_verb_filter_this_way_subject, strip_each_scope_who_does_subject,
+    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
+    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_quantifier,
+    strip_leading_return_destination_ext, strip_leading_sequence_connector,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
+    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
+    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
+    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
 pub(crate) use self::token::try_parse_token;
 
 use crate::parser::oracle_nom::error::{oracle_err, OracleError};
+use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 #[cfg(test)]
 use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
@@ -3353,36 +3354,52 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
     })
 }
 
+/// CR 611.2a + CR 514.2: shared optional leading duration-prefix combinator for
+/// temporary-restriction effect clauses — "until your next turn, " / "until end
+/// of turn, " / "this turn, ". Returns the text with a recognized prefix
+/// consumed (unconsumed if none matched), a placeholder `RestrictionExpiry`
+/// (overridden from `ability.duration` at `AddRestriction` resolution — see
+/// `game/effects/add_restriction.rs::fill_runtime_fields`), and the `Duration`
+/// to publish on the ability. Shared by `try_parse_cant_cast_spells_effect`,
+/// `try_parse_passive_cant_be_cast_effect`, and
+/// `try_parse_passive_cant_be_played_land_effect` — the same three-way prefix
+/// grammar governs every temporary-restriction effect clause regardless of
+/// which activity axis (cast / activate / play-land) follows it.
+fn strip_temporary_restriction_duration_prefix(
+    tp: TextPair<'_>,
+) -> (TextPair<'_>, RestrictionExpiry, Option<Duration>) {
+    if let Some(((expiry, duration), rest_orig)) = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value(
+                (
+                    RestrictionExpiry::EndOfTurn,
+                    Some(Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    }),
+                ),
+                tag("until your next turn, "),
+            ),
+            value(
+                (RestrictionExpiry::EndOfTurn, Some(Duration::UntilEndOfTurn)),
+                tag("until end of turn, "),
+            ),
+            value((RestrictionExpiry::EndOfTurn, None), tag("this turn, ")),
+        ))
+        .parse(input)
+    }) {
+        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+        (TextPair::new(rest_orig, rest_lower), expiry, duration)
+    } else {
+        (tp, RestrictionExpiry::EndOfTurn, None)
+    }
+}
+
 /// CR 101.2: "Your opponents can't cast spells this turn" / "Players can't cast spells this turn."
 /// Handles blanket "can't cast spells" prohibitions from instant/sorcery effects (e.g., Silence).
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
 /// specific "can't cast spells from anywhere other than" variant).
 fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    let (scope_tp, expiry, duration) = if let Some(((expiry, duration), rest_orig)) =
-        nom_on_lower(tp.original, tp.lower, |input| {
-            alt((
-                value(
-                    (
-                        RestrictionExpiry::EndOfTurn,
-                        Some(Duration::UntilNextTurnOf {
-                            player: PlayerScope::Controller,
-                        }),
-                    ),
-                    tag("until your next turn, "),
-                ),
-                value(
-                    (RestrictionExpiry::EndOfTurn, Some(Duration::UntilEndOfTurn)),
-                    tag("until end of turn, "),
-                ),
-                value((RestrictionExpiry::EndOfTurn, None), tag("this turn, ")),
-            ))
-            .parse(input)
-        }) {
-        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        (TextPair::new(rest_orig, rest_lower), expiry, duration)
-    } else {
-        (tp, RestrictionExpiry::EndOfTurn, None)
-    };
+    let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
 
     let (affected_players, rest_orig) = nom_on_lower(scope_tp.original, scope_tp.lower, |input| {
         alt((
@@ -3512,6 +3529,180 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
                 affected_players,
                 expiry,
                 activity: ProhibitedActivity::CastSpells { spell_filter },
+            },
+        },
+        duration,
+        sub_ability,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// Nom-idiomatic combinator replacement for `str::strip_suffix` (forbidden
+/// for parsing dispatch by the parser-combinator gate — see
+/// `oracle_nom/PATTERNS.md` §2a): requires `input` to end EXACTLY with
+/// `suffix`, returning the text before it. Fails if the suffix is absent or
+/// if anything follows it (`take_until` + `tag` alone would accept trailing
+/// content after the first match; the explicit `is_empty` check anchors to
+/// the true end, matching `strip_suffix`'s semantics). Shared by every
+/// "`<subject>` can't be cast/played" suffix-strip in this module.
+fn strip_required_suffix<'a>(input: &'a str, suffix: &str) -> Option<&'a str> {
+    let (rest, before) = terminated(take_until::<_, _, OracleError<'_>>(suffix), tag(suffix))
+        .parse(input)
+        .ok()?;
+    rest.is_empty().then_some(before)
+}
+
+/// CR 101.2 + CR 201.2: Shared passive-voice "`<subject>` can't be played"
+/// SUBJECT filter parser for the land-play axis (CR 305.1) — `<subject>` may
+/// be "[type] lands" or "lands with the chosen name". `before_played` is the
+/// text with the trailing " can't be played" suffix already stripped. Land-
+/// play sibling of `oracle_static::restriction::parse_passive_cant_be_cast_spell_filter`
+/// (the CR 601.2a casting axis) — no mana-value/X-in-cost sub-patterns here,
+/// since those are card-casting concepts (CR 107, CR 202) with no CR 305
+/// land-play analog.
+fn parse_passive_cant_be_played_land_filter(before_played: &str) -> Option<TargetFilter> {
+    // --- "Lands with the chosen name can't be played" (passive voice) ---
+    // CR 101.2 + CR 201.2: mirrors the cast-axis "spells with the chosen name"
+    // arm (Meddling Mage class) — Conjurer's Ban is the land-play twin.
+    if let Ok((rest, ())) = value(
+        (),
+        tag::<_, _, OracleError<'_>>("lands with the chosen name"),
+    )
+    .parse(before_played)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::HasChosenName);
+        }
+    }
+
+    // Require " lands" (or the singular "land") at the end of the subject.
+    let type_text = strip_required_suffix(before_played, " lands")
+        .or_else(|| strip_required_suffix(before_played, " land"))?;
+
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    match &filter {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => {}
+        _ => return None,
+    }
+    Some(filter)
+}
+
+/// CR 305.1 + CR 116.2a: "`<subject>` can't be played" — the land-play
+/// PASSIVE-voice sibling of [`try_parse_cant_cast_spells_effect`]'s active
+/// voice, and the effect-layer (temporary, spell-sourced) sibling of
+/// `oracle_static::restriction`'s land-play statics. Wraps
+/// [`parse_passive_cant_be_played_land_filter`] in the shared duration prefix
+/// and `Effect::AddRestriction` shell. Standalone-usable (any future card
+/// printed as just "Lands with `<X>` can't be played."), and also the target
+/// [`try_parse_passive_cant_be_cast_effect`] composes into via its own
+/// "and lands …" tail.
+fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
+    let trimmed_lower = scope_tp.lower.trim_end_matches('.');
+    let before_played = strip_required_suffix(trimmed_lower, " can't be played")?;
+    let land_filter = parse_passive_cant_be_played_land_filter(before_played)?;
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::AllPlayers,
+                expiry,
+                activity: ProhibitedActivity::PlayLands {
+                    land_filter: Some(land_filter),
+                },
+            },
+        },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// CR 101.2: "`<subject>` can't be cast" — the PASSIVE-voice, card-scoped
+/// sibling of [`try_parse_cant_cast_spells_effect`]'s active, player-scoped
+/// form ("Your opponents can't cast spells..."). Mirrors why the static layer
+/// has both `parse_cant_cast_type_spells` (active) and
+/// `parse_passive_cant_be_cast` (passive) in `oracle_static::restriction` —
+/// same split, applied at the effect (temporary, spell-sourced) layer, which
+/// had neither before this.
+///
+/// Also composes the CR 305.1 land-play compound (Conjurer's Ban: "spells with
+/// the chosen name can't be cast AND lands with the chosen name can't be
+/// played") — a genuine compound of two INDEPENDENT subject+predicate pairs
+/// under one shared leading duration, structurally analogous to the
+/// compound-SUBJECT statics elsewhere in this codebase (#5219/#5406): a
+/// narrow single-clause dispatcher generalized via delegation to the same
+/// per-axis subject-filter parser the land-play sibling
+/// ([`try_parse_passive_cant_be_played_land_effect`]) independently exposes,
+/// rather than re-implemented inline. The land sub-ability's `duration` is set
+/// explicitly from the parent's (not re-derived from a second duration
+/// prefix, since the compound's `" and "` tail carries none of its own) —
+/// `AddRestriction` resolution (`game/effects/add_restriction.rs::fill_runtime_fields`)
+/// reads `ability.duration` per sub-ability independently, so an unset child
+/// duration would silently fall back to the parse-time `EndOfTurn` placeholder
+/// instead of "until your next turn".
+fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
+
+    // A compound land-play tail ("... can't be cast and lands ... can't be
+    // played") must be split off BEFORE the spell clause's own suffix-strip,
+    // so the spell half never sees the land clause's text.
+    let (spell_tp, land_tail_tp) = match scope_tp.split_around(" and ") {
+        Some((spell_half, land_half)) => (spell_half, Some(land_half)),
+        None => (scope_tp, None),
+    };
+
+    let before_cant =
+        strip_required_suffix(spell_tp.lower.trim_end_matches('.'), " can't be cast")?;
+    let spell_filter = parse_passive_cant_be_cast_spell_filter(before_cant)?;
+
+    let sub_ability = match land_tail_tp {
+        None => None,
+        Some(land_tp) => {
+            let land_before_played =
+                strip_required_suffix(land_tp.lower.trim_end_matches('.'), " can't be played")?;
+            let land_filter = parse_passive_cant_be_played_land_filter(land_before_played)?;
+            let mut land_ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        source: ObjectId(0),
+                        affected_players: RestrictionPlayerScope::AllPlayers,
+                        expiry: expiry.clone(),
+                        activity: ProhibitedActivity::PlayLands {
+                            land_filter: Some(land_filter),
+                        },
+                    },
+                },
+            );
+            if let Some(d) = duration.clone() {
+                land_ability = land_ability.duration(d);
+            }
+            Some(Box::new(land_ability))
+        }
+    };
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::AllPlayers,
+                expiry,
+                activity: ProhibitedActivity::CastSpells {
+                    spell_filter: Some(spell_filter),
+                },
             },
         },
         duration,
@@ -7691,6 +7882,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 101.2 + CR 305.1: "Spells with the chosen name can't be cast[ and
+    // lands with the chosen name can't be played]" — the PASSIVE-voice, card-
+    // scoped sibling of the active-voice check above (Conjurer's Ban). Must run
+    // AFTER the active-voice form, whose explicit scope tags never match this
+    // subject-first construction.
+    if let Some(clause) = try_parse_passive_cant_be_cast_effect(tp) {
+        return clause;
+    }
+
     // CR 611.2a: shared-duration exile-play grant + play-from-zone prohibition
     // ("Until your next turn, players may play cards they exiled this way, and
     // they can't play cards from their hand" — Memory Vessel). Compound first —
@@ -7704,6 +7904,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // CR 116.2a + CR 305.1: "[scope] can't play cards from [zone]" prohibition
     // (Shaman's Trance's graveyard clause, Memory Vessel's hand sub-clause).
     if let Some(clause) = try_parse_cant_play_from_zone(tp) {
+        return clause;
+    }
+
+    // CR 305.1: "Lands with the chosen name can't be played" — the standalone,
+    // filter-scoped land-play sibling of the zone-scoped check above. Reached
+    // directly only when the compound cast+land-play form above didn't apply
+    // (e.g. a hypothetical card printing just this half on its own); the
+    // compound form is handled inline by `try_parse_passive_cant_be_cast_effect`.
+    if let Some(clause) = try_parse_passive_cant_be_played_land_effect(tp) {
         return clause;
     }
 
@@ -21975,7 +22184,7 @@ fn trailing_bare_article_only(input: &str) -> bool {
         all_consuming(terminated(take_until::<_, _, E>(" a"), tag(" a"))),
     )))
     .parse(input.trim())
-    .is_ok()
+    .is_ok_and(|(_, article)| article.is_some())
 }
 
 /// Merge the pre-`from it` card phrase with the plain trailing restriction
@@ -27139,6 +27348,41 @@ pub(crate) fn parse_effect_chain_ir(
                 let condition = AbilityCondition::And {
                     conditions: vec![
                         AbilityCondition::effect_performed(),
+                        AbilityCondition::ScopedPlayerMatches { filter: scope },
+                    ],
+                };
+                (body, Some(condition), DeclineDispatch::SubjectOnly)
+            } else if let Some((scope, filter, body)) =
+                strip_each_scope_who_didnt_verb_filter_this_way_subject(&text)
+            {
+                // CR 701.9a + CR 608.2c + CR 109.5: subject-only mandatory-FILTERED
+                // decline-tail (Kroxa, Titan of Death's Hunger: "each opponent
+                // discards a card, then each opponent who didn't discard a nonland
+                // card this way loses 3 life."). Unlike the `who can't` arm (whether
+                // the action happened at all), this gates on WHAT moved:
+                // `Not { ZoneChangedThisWay { filter } }` reads `last_zone_changed_ids`
+                // from the just-completed per-iteration discard/sacrifice/exile, so an
+                // opponent with an empty hand (who discarded nothing) still satisfies
+                // "didn't discard a nonland card" — matching the printed ruling.
+                //
+                // The `ScopedPlayerMatches { filter: scope }` conjunct mirrors the
+                // `who can't` / `who does` arms' cross-scope fix; a no-op for Kroxa
+                // (both clauses scope `Opponent`) but uniformly safe for the class.
+                //
+                // Do NOT stamp `player_scope`: the body inherits the parent's
+                // per-player iteration via `sub_ability` attachment, so
+                // `ZoneChangedThisWay` reads THIS iteration's own zone change, not a
+                // detached whole-chain aggregate.
+                if let Some(prev) = builder.last_mut() {
+                    if prev.boundary == Some(ClauseBoundary::Sentence) {
+                        prev.boundary = Some(ClauseBoundary::Then);
+                    }
+                }
+                let condition = AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::Not {
+                            condition: Box::new(AbilityCondition::ZoneChangedThisWay { filter }),
+                        },
                         AbilityCondition::ScopedPlayerMatches { filter: scope },
                     ],
                 };
