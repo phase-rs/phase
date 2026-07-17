@@ -50,7 +50,7 @@ const mocks = vi.hoisted(() => {
   }));
   const checkDeckCompatibility = vi.fn(async () => ({
     selected_format_compatible: true,
-    selected_format_reasons: [],
+    selected_format_reasons: [] as string[],
   }));
   // Local monotonic stamp — the hoisted factory runs before imports, so it
   // can't call the adapter module's `nextSnapshotSeq`. Only ordering matters

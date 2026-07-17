@@ -274,7 +274,7 @@ describe("DeckBuilder", () => {
     const props = {
       onFormatChange: vi.fn(),
       initialDeckName: "Oath Deck",
-      searchFilters: { text: "", colors: [], type: "", sets: [], browseFormat: "all" },
+      searchFilters: { text: "", colors: [], type: "", sets: [], browseFormat: "all" as const },
       onSearchFiltersChange: vi.fn(),
       onResetSearch: vi.fn(),
     };

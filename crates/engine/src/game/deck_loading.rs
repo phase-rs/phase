@@ -710,9 +710,11 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             .unwrap_or_default()
     };
     let signature_spell_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        (state.format_config.format == crate::types::format::GameFormat::Oathbreaker)
-            .then(|| submitted.to_vec())
-            .unwrap_or_default()
+        if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
+            submitted.to_vec()
+        } else {
+            Vec::new()
+        }
     };
 
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
