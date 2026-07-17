@@ -28,7 +28,6 @@ crates/engine/src/game/deck_loading.rs	create_scheme_deck_card	exempt	1
 crates/engine/src/game/effects/cast_copy_of_card.rs	cast_one_copy	exempt	1
 crates/engine/src/game/effects/copy_spell.rs	resolve	exempt	1
 crates/engine/src/game/effects/epic.rs	resolve	exempt	1
-crates/engine/src/game/effects/explore.rs	resolve_explore_effect	mover	1
 crates/engine/src/game/effects/paradigm.rs	cast_paradigm_copy	exempt	1
 crates/engine/src/game/effects/prepare.rs	synthesize_prepared_copy_object	exempt	1
 crates/engine/src/game/effects/return_as_aura.rs	resolve	mover	1

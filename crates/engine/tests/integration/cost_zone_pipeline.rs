@@ -9946,3 +9946,172 @@ fn cloak_tracked_exile_delivery_stays_synchronous_and_cloaks_every_member() {
         "the synchronous cloak tail resolves exactly once"
     );
 }
+
+/// W-169 (red first): a revealed explore land's replaceable Library→Hand move
+/// must settle before the Explore trigger event or a chained continuation runs.
+#[test]
+fn explore_land_redirect_pauses_before_explore_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let explorer = scenario
+        .add_creature(P0, "Explore Redirect Source", 1, 1)
+        .id();
+    let land = scenario.add_card_to_library_top(P0, "Explore Redirect Land");
+    for (name, destination) in [
+        ("Explore Hand To Graveyard", Zone::Graveyard),
+        ("Explore Hand To Exile", Zone::Exile),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, destination));
+    }
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&land)
+        .expect("revealed land exists")
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let mut ability = ResolvedAbility::new(Effect::Explore, vec![], explorer, P0);
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        explorer,
+        P0,
+    )));
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("explore reaches its replacement-safe land delivery");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&land].zone, Zone::Library);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Explore,
+                source_id,
+                ..
+            } if *source_id == explorer
+        )),
+        "the explore tail must not precede the replacement choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected redirect settles the explore land delivery");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&land].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Explore,
+                    source_id,
+                    ..
+                } if *source_id == explorer
+            ))
+            .count(),
+        1,
+        "a redirected land still completes exactly one explore"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::GainLife,
+                    source_id,
+                    ..
+                } if *source_id == explorer
+            ))
+            .count(),
+        1,
+        "the chained continuation runs exactly once after the explore tail"
+    );
+}
+
+/// W-169-REG: without a redirect, an explore land remains synchronous while the
+/// nonland branch keeps its existing counter-then-choice behavior.
+#[test]
+fn explore_land_delivery_stays_synchronous_and_nonland_path_is_unchanged() {
+    let mut land_scenario = GameScenario::new();
+    land_scenario.at_phase(Phase::PreCombatMain);
+    let land_explorer = land_scenario
+        .add_creature(P0, "Synchronous Explore Land Source", 1, 1)
+        .id();
+    let land = land_scenario.add_card_to_library_top(P0, "Synchronous Explore Land");
+    let mut land_runner = land_scenario.build();
+    land_runner
+        .state_mut()
+        .objects
+        .get_mut(&land)
+        .expect("revealed land exists")
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let land_ability = ResolvedAbility::new(Effect::Explore, vec![], land_explorer, P0);
+    let mut land_events = Vec::new();
+    resolve_ability_chain(land_runner.state_mut(), &land_ability, &mut land_events, 0)
+        .expect("unredirected land explore resolves synchronously");
+
+    assert!(matches!(
+        land_runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(land_runner.state().objects[&land].zone, Zone::Hand);
+    assert!(
+        !land_runner.state().objects[&land_explorer]
+            .counters
+            .contains_key(&CounterType::Plus1Plus1),
+        "a land explore does not add a +1/+1 counter"
+    );
+
+    let mut nonland_scenario = GameScenario::new();
+    nonland_scenario.at_phase(Phase::PreCombatMain);
+    let nonland_explorer = nonland_scenario
+        .add_creature(P0, "Synchronous Explore Nonland Source", 1, 1)
+        .id();
+    let nonland = nonland_scenario
+        .add_spell_to_library_top(P0, "Synchronous Explore Nonland", true)
+        .id();
+    let mut nonland_runner = nonland_scenario.build();
+    let nonland_ability = ResolvedAbility::new(Effect::Explore, vec![], nonland_explorer, P0);
+    let mut nonland_events = Vec::new();
+    resolve_ability_chain(
+        nonland_runner.state_mut(),
+        &nonland_ability,
+        &mut nonland_events,
+        0,
+    )
+    .expect("nonland explore keeps its counter-then-choice path");
+
+    assert_eq!(
+        nonland_runner.state().objects[&nonland_explorer].counters[&CounterType::Plus1Plus1],
+        1
+    );
+    assert!(matches!(
+        nonland_runner.state().waiting_for,
+        WaitingFor::DigChoice { ref cards, .. } if cards == &vec![nonland]
+    ));
+}
