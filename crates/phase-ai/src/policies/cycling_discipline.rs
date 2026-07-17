@@ -19,13 +19,6 @@ use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, Tacti
 use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 
-/// One card-equivalent of patience removes Cycling's generic activation edge.
-const CYCLING_PATIENCE_PENALTY: f64 = -1.0;
-
-/// A sole land that the deck plan still needs carries an additional tempo and
-/// development cost, but remains finite for decisive cycling payoffs.
-const NEEDED_LAND_PENALTY: f64 = -2.0;
-
 pub struct CyclingDisciplinePolicy;
 
 impl TacticalPolicy for CyclingDisciplinePolicy {
@@ -43,7 +36,7 @@ impl TacticalPolicy for CyclingDisciplinePolicy {
         _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        Some(1.0)
+        Some(1.0) // activation-constant: the Cycling tag self-gates this universal policy
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
@@ -57,12 +50,12 @@ impl TacticalPolicy for CyclingDisciplinePolicy {
 
         if source_is_sole_needed_land(ctx) {
             PolicyVerdict::strong(
-                NEEDED_LAND_PENALTY,
+                ctx.penalties().cycling_needed_land_penalty,
                 PolicyReason::new("cycling_discipline_needed_land"),
             )
         } else {
             PolicyVerdict::preference(
-                CYCLING_PATIENCE_PENALTY,
+                ctx.penalties().cycling_patience_penalty,
                 PolicyReason::new("cycling_discipline_patience"),
             )
         }
@@ -90,6 +83,7 @@ fn source_is_sole_needed_land(ctx: &PolicyContext<'_>) -> bool {
         .iter()
         .filter_map(|id| ctx.state.objects.get(id))
         .filter(|object| object.card_types.core_types.contains(&CoreType::Land))
+        .take(2)
         .count();
     if lands_in_hand != 1 {
         return false;
@@ -229,21 +223,30 @@ mod tests {
         context
     }
 
-    fn cycling_verdict(
+    fn cycling_verdict_with_config(
         state: &GameState,
         source_id: ObjectId,
         plan: Option<PlanSnapshot>,
+        config: &AiConfig,
     ) -> PolicyVerdict {
         let candidate = candidate(source_id);
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
             candidates: vec![candidate.clone()],
         };
-        let config = AiConfig::default();
-        let context = ai_context(&config, plan);
+        let context = ai_context(config, plan);
         CyclingDisciplinePolicy.verdict(&policy_context(
-            state, &candidate, &decision, &config, &context,
+            state, &candidate, &decision, config, &context,
         ))
+    }
+
+    fn cycling_verdict(
+        state: &GameState,
+        source_id: ObjectId,
+        plan: Option<PlanSnapshot>,
+    ) -> PolicyVerdict {
+        let config = AiConfig::default();
+        cycling_verdict_with_config(state, source_id, plan, &config)
     }
 
     fn self_cost_verdict(state: &GameState, source_id: ObjectId) -> PolicyVerdict {
@@ -285,7 +288,28 @@ mod tests {
         assert_score(
             cycling_verdict(&state, cycler, None),
             "cycling_discipline_patience",
-            CYCLING_PATIENCE_PENALTY,
+            AiConfig::default()
+                .policy_penalties
+                .cycling_patience_penalty,
+        );
+    }
+
+    #[test]
+    fn cycling_patience_uses_configured_penalty() {
+        let mut state = GameState::new_two_player(42);
+        let cycler = add_cycler(
+            &mut state,
+            "Cycler",
+            CoreType::Creature,
+            Keyword::Cycling(CyclingCost::Mana(ManaCost::generic(2))),
+        );
+        let mut config = AiConfig::default();
+        config.policy_penalties.cycling_patience_penalty = -1.25;
+
+        assert_score(
+            cycling_verdict_with_config(&state, cycler, None, &config),
+            "cycling_discipline_patience",
+            -1.25,
         );
     }
 
@@ -305,14 +329,18 @@ mod tests {
         assert_score(
             cycling_verdict(&state, cycler, Some(baseline_plan())),
             "cycling_discipline_needed_land",
-            NEEDED_LAND_PENALTY,
+            AiConfig::default()
+                .policy_penalties
+                .cycling_needed_land_penalty,
         );
 
         add_land(&mut state, Zone::Hand);
         assert_score(
             cycling_verdict(&state, cycler, Some(baseline_plan())),
             "cycling_discipline_patience",
-            CYCLING_PATIENCE_PENALTY,
+            AiConfig::default()
+                .policy_penalties
+                .cycling_patience_penalty,
         );
     }
 
@@ -332,7 +360,9 @@ mod tests {
         assert_score(
             cycling_verdict(&state, cycler, Some(baseline_plan())),
             "cycling_discipline_patience",
-            CYCLING_PATIENCE_PENALTY,
+            AiConfig::default()
+                .policy_penalties
+                .cycling_patience_penalty,
         );
     }
 
@@ -455,7 +485,7 @@ mod tests {
         assert_score(
             CyclingDisciplinePolicy.verdict(&ctx),
             "cycling_discipline_patience",
-            CYCLING_PATIENCE_PENALTY,
+            config.policy_penalties.cycling_patience_penalty,
         );
         assert_score(
             SelfCostValuePolicy.verdict(&ctx),
