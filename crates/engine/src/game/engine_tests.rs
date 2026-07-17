@@ -3412,6 +3412,97 @@ fn apply_play_land_rejects_under_cant_play_lands_chosen_name_filter() {
     );
 }
 
+/// CR 305.1 + CR 116.2a + CR 601.2a + CR 201.2: Conjurer's Ban, driven through
+/// the REAL cast → resolve pipeline (`GameScenario`/`GameRunner`), not direct
+/// `GameState`/`GameRestriction` construction like the sibling test above.
+/// Proves `Effect::Choose` actually binds the chosen name onto the resolving
+/// sorcery's own source object, that `Effect::AddRestriction`'s sub_ability
+/// chain (`CastSpells` → `PlayLands`) is actually installed by real
+/// resolution (not hand-assembled), and that `handle_play_land`'s new gate —
+/// and the pre-existing `CastSpells` cast-prohibition gate, for the same
+/// resolved restriction — both see it, all after the sorcery has resolved
+/// into the graveyard. This test fails if either the `PlayLands` sub-ability
+/// or its production gate is reverted.
+#[test]
+fn conjurers_ban_full_cast_resolve_blocks_named_land_and_spell() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::actions::CastPaymentMode;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Verbatim Oracle text (Scryfall).
+    let oracle = "Choose a card name. Until your next turn, spells with the chosen \
+                  name can't be cast and lands with the chosen name can't be played.\n\
+                  Draw a card.";
+    let ban = scenario
+        .add_spell_to_hand_from_oracle(P0, "Conjurer's Ban", false, oracle)
+        .id();
+
+    let forest_land = scenario.add_land_to_hand(P0, "Forest").id();
+    let island_land = scenario.add_land_to_hand(P0, "Island").id();
+    // A second card sharing the chosen name, but a SPELL this time — exercises
+    // the cast-prohibition half (the already-proven `CastSpells` machinery)
+    // against the exact same resolved restriction, not just the new land half.
+    let forest_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Forest", true, "You gain 1 life.")
+        .id();
+    scenario.with_library_top(P0, &["Library Filler"]);
+
+    let mut runner = scenario.build();
+    runner.state_mut().all_card_names = vec![
+        "Conjurer's Ban".to_string(),
+        "Forest".to_string(),
+        "Island".to_string(),
+    ]
+    .into();
+
+    let forest_land_card_id = runner.state().objects[&forest_land].card_id;
+    let island_card_id = runner.state().objects[&island_land].card_id;
+    let forest_spell_card_id = runner.state().objects[&forest_spell].card_id;
+
+    let outcome = runner.cast(ban).choose_option("Forest").resolve();
+    outcome.assert_hand_drawn(P0, 1);
+    outcome.assert_zone(&[ban], Zone::Graveyard);
+
+    // Land half: the specifically-named land is rejected...
+    let forest_land_result = runner.act(GameAction::PlayLand {
+        object_id: forest_land,
+        card_id: forest_land_card_id,
+    });
+    assert!(
+        forest_land_result.is_err(),
+        "Forest must be rejected while the chosen-name land-play ban is active, \
+         got {forest_land_result:?}"
+    );
+    // ...while a differently-named land remains legal (proves the ban is
+    // filter-scoped, not the blanket `CantPlayLand` static).
+    let island_result = runner.act(GameAction::PlayLand {
+        object_id: island_land,
+        card_id: island_card_id,
+    });
+    assert!(
+        island_result.is_ok(),
+        "Island must remain playable — got {island_result:?}"
+    );
+
+    // Spell half: a spell sharing the chosen name is rejected by the same
+    // resolved restriction (`ProhibitedActivity::CastSpells { HasChosenName }`,
+    // installed by the SAME `Effect::Choose` → `Effect::AddRestriction` chain
+    // as the land half above).
+    let forest_spell_result = runner.act(GameAction::CastSpell {
+        object_id: forest_spell,
+        card_id: forest_spell_card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::default(),
+    });
+    assert!(
+        forest_spell_result.is_err(),
+        "a spell named Forest must be rejected while the chosen-name cast ban \
+         is active, got {forest_spell_result:?}"
+    );
+}
+
 #[test]
 fn new_game_creates_two_player_state() {
     let state = new_game(42);
