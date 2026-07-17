@@ -501,16 +501,6 @@ pub(crate) fn parse_additive_type_clause_modifications(
     if normalized_type_words == "every land type" {
         return Some(vec![ContinuousModification::AddAllLandTypes]);
     }
-    let granted_lower = opt(preceded(
-        alt((tag::<_, _, VE>(" and have "), tag::<_, _, VE>(" and has "))),
-        rest::<_, VE>,
-    ))
-    .parse(after_suffix_lower)
-    .ok()?
-    .1;
-    let granted_original = granted_lower
-        .map(|granted| &clause_original[clause_original.len() - granted.len()..])
-        .map(str::trim);
     // CR 613.1f: route the trailing "and has <X>" conjunct through the shared
     // `parse_continuous_modifications` authority — the same one the sibling
     // `parse_enchanted_is_type` uses for its own trailing clause — rather than the
