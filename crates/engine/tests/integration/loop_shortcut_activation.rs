@@ -129,18 +129,16 @@ fn activate_and_drive(runner: &mut GameRunner, host: ObjectId, ability_index: us
     }
 }
 
-/// P1-1 CORE-honest — real Gond + Intruder Alarm + host: the activation loop CAPTURES and
-/// SUSTAINS at the real-game level (each `{T}` makes an Elf; Intruder Alarm untaps the host so
-/// the next `{T}` is legal), driven entirely through `apply_action`. The CR 732.2a offer is
-/// NOT reached in CORE: the firewall `fire_time_conditions_read_growing_class` over-vetoes
-/// because Intruder Alarm's "untap all creatures" is a `Typed{Creature}` board read
-/// (`scan_target_filter`'s `Typed` arm → `sibling: true`), scanned by the firewall's
-/// CONSERVATIVE trigger-effect-body scan (`resource.rs` scan (1), `ability_definition_reads_
-/// sibling_mutable`). This is the DEFERRED-8 (P3) `Typed` relaxation + a LoopFirewall trigger
-/// scan — both out of CORE scope. MEASURED: temporarily flipping the `Typed` arm to
-/// `sibling: false` makes this exact board OFFER (see the stop-and-return finding / the
-/// `#[ignore]`d twin below). This green test proves the P1 REACH (capture + real sustain);
-/// the offer is honestly blocked/red pending the firewall precision.
+/// P1-1 (P3 landed) — real Gond + Intruder Alarm + host: the activation loop CAPTURES, OFFERS a
+/// CR 732.2a `LoopShortcut`, and (on DECLINE) SUSTAINS at the real-game level (each `{T}` makes an
+/// Elf; Intruder Alarm untaps the host so the next `{T}` is legal), driven entirely through
+/// `apply_action`. Under DEFERRED-8 (P3) the firewall no longer over-vetoes: Intruder Alarm's
+/// "untap all creatures" is a `SetTapState{Typed{Creature}}` effect body, and the CR 732.2a
+/// `Typed`-precision relaxation (the `LoopFirewall` census-vs-relax split in `ability_scan.rs`)
+/// passes it through the promoted `LoopFirewall` trigger-effect-body scan (`resource.rs` block-1,
+/// `ability_definition_reads_sibling_mutable_for_loop`), so this exact board OFFERS. This test owns
+/// the DECLINE→continue→sustain path (the offer is not a dead-end); the twin
+/// `..._offers_shortcut` owns the certificate shape.
 #[test]
 fn activation_loop_gond_intruder_alarm_captures_and_sustains() {
     let Some(db) = shared_card_db() else { return };
@@ -151,7 +149,9 @@ fn activation_loop_gond_intruder_alarm_captures_and_sustains() {
     let idx = token_ability_index(c.runner.state(), c.host)
         .expect("Gond's granted token-creating {T} must be on the host's layer-derived abilities");
 
-    // First activation: the capture ARMS and one Elf enters; Intruder Alarm untaps the host.
+    // First activation: the capture ARMS, one Elf enters, Intruder Alarm untaps the host, and the
+    // CR 732.2a firewall now OFFERS (P3: the Typed-precision relaxation passes Intruder Alarm's
+    // untap-all effect body through the LoopFirewall trigger-effect-body scan).
     activate_and_drive(&mut c.runner, c.host, idx);
     assert!(
         c.runner.state().last_loop_action_context.is_some(),
@@ -166,35 +166,46 @@ fn activation_loop_gond_intruder_alarm_captures_and_sustains() {
         !c.runner.state().objects[&c.host].tapped,
         "Intruder Alarm untapped the host after the Elf ETB (loop is sustainable)"
     );
+    // The offer is now REACHED (was firewall-blocked pre-P3): P0 proposes the shortcut.
+    assert!(
+        matches!(
+            &c.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+        ),
+        "P3: the firewall now OFFERS a CR 732.2a LoopShortcut to the loop's controller"
+    );
 
-    // Second activation succeeds through the real reducer ⇒ the loop SUSTAINS at the game
-    // level (this is exactly what the offer hook's clone-drive replays).
+    // DECLINE the shortcut: the game must CONTINUE (not dead-end) so the loop can be played out by
+    // hand. Decline restores a normal Priority window to the proposer.
+    c.runner
+        .act(GameAction::DeclineShortcut)
+        .expect("the proposer may decline the CR 732.2a shortcut");
+    assert!(
+        matches!(
+            &c.runner.state().waiting_for,
+            WaitingFor::Priority { player } if *player == P0
+        ),
+        "declining restores a normal Priority window to the proposer (the offer is not a dead-end)"
+    );
+
+    // Second activation succeeds through the real reducer AFTER a decline ⇒ the loop SUSTAINS at
+    // the game level (this is exactly what the offer hook's clone-drive replays).
     activate_and_drive(&mut c.runner, c.host, idx);
     assert_eq!(
         elf_count(c.runner.state()),
         2,
-        "the host re-activates ⇒ a second Elf ⇒ the activation loop sustains"
-    );
-
-    // The CR 732.2a offer is firewall-blocked in CORE (see doc comment + finding).
-    assert!(
-        !matches!(
-            c.runner.state().waiting_for,
-            WaitingFor::LoopShortcut { .. }
-        ),
-        "no offer in CORE: the firewall over-vetoes Intruder Alarm's Typed{{Creature}} untap-all \
-         (DEFERRED-8 P3 + LoopFirewall trigger scan). Flip the Typed arm to prove the offer."
+        "the host re-activates after declining ⇒ a second Elf ⇒ the activation loop sustains"
     );
 }
 
-/// P1-1 acceptance TARGET (DEFERRED — flips green when the firewall precision lands). Same real
-/// board asserts the CR 732.2a `LoopShortcut` offer with `unbounded == [TokensCreated]`. Ignored
-/// in CORE because the firewall over-vetoes Intruder Alarm's `Typed{Creature}` untap-all (P3
-/// DEFERRED-8 + a LoopFirewall trigger-effect-body scan; both out of CORE scope). MEASURED to
-/// PASS with the `Typed` arm relaxed to `sibling: false`. Un-`ignore` when the firewall precision
-/// is revived.
+/// P1-1 acceptance TARGET (P3 landed): the same real board asserts the CR 732.2a `LoopShortcut`
+/// offer's CERTIFICATE — `proposer == P0` and `unbounded == [TokensCreated]`. Un-ignored with
+/// DEFERRED-8: the `Typed`-precision relaxation (`ability_scan.rs` `LoopFirewall` split) passes
+/// Intruder Alarm's `SetTapState{Typed{Creature}}` untap-all effect body through the promoted
+/// `LoopFirewall` trigger-effect-body scan, so this exact board OFFERS. Revert-probe: reverting the
+/// `Typed` relaxation (Conservative `sibling:true` for the effect-target) re-vetoes and turns the
+/// `expected a CR 732.2a LoopShortcut offer` arm below RED.
 #[test]
-#[ignore = "P3-load-bearing (DEFERRED-8): firewall over-vetoes Intruder Alarm's Typed{Creature} untap-all; measured to OFFER only with the Typed sibling relaxation"]
 fn activation_loop_gond_intruder_alarm_offers_shortcut() {
     let Some(db) = shared_card_db() else { return };
     let mut c = setup(true, true, LoopDetectionMode::Interactive, db);
@@ -267,11 +278,11 @@ fn activation_loop_without_untapper_does_not_offer() {
         "the token-creating activation must ARM the capture (non-vacuity guard)"
     );
     // SUSTAIN-FAILURE discriminator — the load-bearing negation vs the positive
-    // `captures_and_sustains` (which asserts the host is `!tapped` and sustains to 2 Elves).
-    // Without Intruder Alarm the `{T}` cost leaves the host TAPPED and nothing untaps it, so the
-    // loop cannot sustain a 2nd activation. This flips the SUSTAIN axis, not just the
-    // (in-CORE-shared) no-offer outcome — so the negative is not vacuous even while the firewall
-    // over-vetoes the positive's offer.
+    // `captures_and_sustains` (which asserts the host is `!tapped`, OFFERS, and sustains to 2 Elves
+    // post-P3). Without Intruder Alarm the `{T}` cost leaves the host TAPPED and nothing untaps it,
+    // so the loop cannot sustain a 2nd activation. This flips the SUSTAIN axis: the positive OFFERS
+    // and sustains, this one cannot sustain ⇒ the drive declines ⇒ no offer (a clean, non-vacuous
+    // delta on the untapper lever alone).
     assert!(
         c.runner.state().objects[&c.host].tapped,
         "without the untapper the host stays tapped after activation ⇒ the loop cannot sustain"

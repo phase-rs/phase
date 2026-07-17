@@ -1460,6 +1460,9 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
     for obj in state.objects.values() {
         for active in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
             let def = active.definition;
+            // The trigger CONDITION stays CONSERVATIVE: an intervening-if reads the
+            // triggering EVENT (never a growing-class census in scope), so promoting
+            // it would not help and only widens the Conservative surface.
             if def
                 .condition
                 .as_ref()
@@ -1467,10 +1470,16 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
             {
                 return true;
             }
+            // P3 (DEFERRED-8): the trigger EFFECT BODY is scanned in LoopFirewall mode
+            // (`..._for_loop`), the SAME descending walk block-(2) already applies to
+            // battlefield ability bodies (the walk's verdict depends only on def
+            // content, not provenance). This is what lets Intruder Alarm's `untap all
+            // creatures` (a `SetTapState{Typed{Creature}}` body) relax under the
+            // CR 732.2a `Typed`-precision firewall so the canary can OFFER.
             if def
                 .execute
                 .as_ref()
-                .is_some_and(|a| scan::ability_definition_reads_sibling_mutable(a))
+                .is_some_and(|a| scan::ability_definition_reads_sibling_mutable_for_loop(a))
             {
                 return true;
             }
@@ -4966,6 +4975,139 @@ mod tests {
         assert!(
             !cover(&prior, &current),
             "a grown token with a keyword is not churn-inert ⇒ REJECT"
+        );
+    }
+
+    /// ADV-3 (REQ-1 census-base END-TO-END, cover-level): a battlefield permanent
+    /// present in BOTH frames carries an ability gated on a DELEGATING hole condition
+    /// (`ControllerControlsMatching`) with a NON-`Typed` filter (`TargetFilter::Any`).
+    /// The required-`ctx` census BASE vetoes for ANY filter shape ⇒ firewall fires ⇒
+    /// cover FALSE. Pre-P3 this arm delegated to `scan_target_filter(Any)=NONE` and was
+    /// MISSED (fail-OPEN false COVER); `census_hole_arms_are_load_bearing`
+    /// (ability_scan.rs) proves the arm at the scan level, this proves it REACHES
+    /// `cover` via firewall block-(2). Distinct from `gaeas_cradle_*` / `mana_board_*`
+    /// (self-asserting aggregates, not delegating holes). Reach-guard: the no-observer
+    /// control COVERS, so the observer condition is the sole rejector.
+    #[test]
+    fn object_growth_adv3_delegating_hole_reaches_firewall() {
+        use crate::types::ability::{
+            AbilityCondition, AbilityDefinition, AbilityKind, Effect, TargetFilter,
+        };
+        use std::sync::Arc;
+        // Reach-guard: the SAME inert-token growth with NO observer COVERS.
+        let (prior, current) = og_cover_base();
+        assert!(cover(&prior, &current), "reach-guard: no observer ⇒ COVER");
+        let (mut prior, mut current) = og_cover_base();
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::unimplemented("adv3", "gate"),
+        )
+        .condition(AbilityCondition::ControllerControlsMatching {
+            filter: TargetFilter::Any,
+        });
+        for st in [&mut prior, &mut current] {
+            let obs = inert_token(st, 600, 0, "Gate");
+            st.objects.get_mut(&obs).unwrap().abilities = Arc::new(vec![def.clone()]);
+        }
+        assert!(
+            !cover(&prior, &current),
+            "REQ-1: a non-Typed delegating-hole census read vetoes the firewall (fail-closed)"
+        );
+    }
+
+    /// ADV-5 (RELAXATION — the P3 canary mechanism, cover-level): a battlefield
+    /// permanent present in BOTH frames carries a `SetTapState{Typed Creature, All}`
+    /// effect BODY (Intruder Alarm's `untap all creatures` shape). Under the CR 732.2a
+    /// `Typed`-precision firewall this body RELAXES (SnapshotOrEvent — the pinned
+    /// inert-checkable exception) so pure inert-token growth COVERS ⇒ the detector can
+    /// OFFER. Discriminating control: swapping the body for a CONSERVATIVE sibling
+    /// reader (`Effect::Pump`) VETOES ⇒ cover FALSE. Reverting the `Typed` relaxation
+    /// (Conservative `sibling:true` for the SetTapState target) flips the main
+    /// assertion to FALSE.
+    #[test]
+    fn object_growth_adv5_relaxed_settap_body_covers() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, EffectScope, TapStateChange, TargetFilter,
+            TypedFilter,
+        };
+        use std::sync::Arc;
+        let settap = Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+        let (mut prior, mut current) = og_cover_base();
+        let def = AbilityDefinition::new(AbilityKind::Activated, settap);
+        for st in [&mut prior, &mut current] {
+            let obs = inert_token(st, 600, 0, "Alarm");
+            st.objects.get_mut(&obs).unwrap().abilities = Arc::new(vec![def.clone()]);
+        }
+        assert!(
+            cover(&prior, &current),
+            "a relaxed SetTapState Typed body over inert growth ⇒ COVER (the canary mechanism)"
+        );
+        // Discriminating control: a CONSERVATIVE sibling body vetoes the SAME growth.
+        let (mut prior, mut current) = og_cover_base();
+        let pump = AbilityDefinition::new(AbilityKind::Activated, sibling_reading_effect());
+        for st in [&mut prior, &mut current] {
+            let obs = inert_token(st, 600, 0, "Alarm");
+            st.objects.get_mut(&obs).unwrap().abilities = Arc::new(vec![pump.clone()]);
+        }
+        assert!(
+            !cover(&prior, &current),
+            "control: a CONSERVATIVE (Pump) body vetoes ⇒ the relaxation is load-bearing"
+        );
+    }
+
+    /// ADV-6 (BLOCKER-1 fail-CLOSED non-vacuity, cover-level): a battlefield permanent
+    /// present in BOTH frames carries an `EachSourceDealsDamage{sources:Typed Creature}`
+    /// effect BODY whose `sources` cardinality DRIVES escalating player damage. Its
+    /// effect-target ctx is the census DEFAULT (`EachSourceDealsDamage` ∉ the pinned
+    /// `{SetTapState}` set) ⇒ `sources` reads the growing class ⇒ the firewall VETOES ⇒
+    /// cover FALSE, even over otherwise-inert token growth. `recipient` is the read-free
+    /// `EachController`, so `sources` is the SOLE census read. Discriminating control:
+    /// the SAME shape with a RELAXED `SetTapState{Typed}` body COVERS ⇒ the census
+    /// default for the damage aggregate is the sole rejector. The executed code
+    /// revert-probe (reclassify EachSourceDealsDamage ⇒ SnapshotOrEvent) flips this to a
+    /// WRONG COVER and turns `census_tag_set_is_exactly_enumerated` (guard#3) RED —
+    /// EachSourceDealsDamage would drop from the enumerated 18-member census tag set.
+    #[test]
+    fn object_growth_adv6_each_source_damage_body_vetoes() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, EachDamageRecipient, Effect, EffectScope, QuantityExpr,
+            TapStateChange, TargetFilter, TypedFilter,
+        };
+        use std::sync::Arc;
+        let cannon = Effect::EachSourceDealsDamage {
+            sources: TargetFilter::Typed(TypedFilter::creature()),
+            amount: QuantityExpr::Fixed { value: 1 },
+            recipient: EachDamageRecipient::EachController,
+        };
+        let (mut prior, mut current) = og_cover_base();
+        let def = AbilityDefinition::new(AbilityKind::Activated, cannon);
+        for st in [&mut prior, &mut current] {
+            let obs = inert_token(st, 600, 0, "Cannon");
+            st.objects.get_mut(&obs).unwrap().abilities = Arc::new(vec![def.clone()]);
+        }
+        assert!(
+            !cover(&prior, &current),
+            "EachSourceDealsDamage sources is the census default ⇒ firewall VETOES (BLOCKER-1)"
+        );
+        // Discriminating control: a RELAXED SetTapState body over the SAME growth COVERS.
+        let settap = Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+        let (mut prior, mut current) = og_cover_base();
+        let def = AbilityDefinition::new(AbilityKind::Activated, settap);
+        for st in [&mut prior, &mut current] {
+            let obs = inert_token(st, 600, 0, "Cannon");
+            st.objects.get_mut(&obs).unwrap().abilities = Arc::new(vec![def.clone()]);
+        }
+        assert!(
+            cover(&prior, &current),
+            "control: the RELAXED SetTapState body over the SAME growth COVERS"
         );
     }
 
