@@ -102,7 +102,7 @@ pub fn resolve(
     let needs_reveal_choice = choice_optional || !matches!(card_filter, TargetFilter::None);
 
     if hand.is_empty() {
-        if needs_reveal_choice && ability.sub_ability.is_some() {
+        if choice_optional && ability.sub_ability.is_some() {
             state.waiting_for = WaitingFor::RevealChoice {
                 player: ability.controller,
                 cards: vec![],
@@ -175,7 +175,7 @@ pub fn resolve(
         // `apply_parent_chain_context` at the very next parent->child
         // hand-off — see `GameState::last_parent_target_missing_reason`.
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::RevealHandChoice);
-        if ability.sub_ability.is_some() {
+        if choice_optional && ability.sub_ability.is_some() {
             state.waiting_for = WaitingFor::RevealChoice {
                 player: ability.controller,
                 cards: vec![],
