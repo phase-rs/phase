@@ -10326,3 +10326,179 @@ fn return_as_aura_no_target_stays_synchronous_and_attach_path_is_unchanged() {
         "the unchanged attach path resolves exactly once"
     );
 }
+
+/// W-171 (red first): accepting the CR 903.9a commander return must let competing
+/// Command-destination redirects park their CR 616.1 ordering prompt. The selected
+/// redirect genuinely puts the commander into exile, so the next SBA check correctly
+/// offers one fresh return choice; declining that fresh choice proves the ledger stops
+/// a duplicate prompt for the same exile stay.
+#[test]
+fn commander_zone_return_redirect_pauses_and_reoffers_only_for_fresh_exile_arrival() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature_to_graveyard(P0, "Commander Return Redirect Witness", 2, 2)
+        .id();
+    scenario.with_commander(commander);
+    for name in [
+        "Commander Command To Exile Redirect A",
+        "Commander Command To Exile Redirect B",
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Command, Zone::Exile));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        commander,
+        Zone::Graveyard,
+        &mut setup_events,
+    );
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut setup_events);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CommanderZoneChoice {
+            commander_id,
+            current_zone: Zone::Graveyard,
+            ..
+        } if commander_id == commander
+    ));
+
+    let paused = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting the commander return is valid");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Graveyard,
+        "the commander must remain in its source zone while CR 616.1 is parked"
+    );
+
+    let settled = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the chosen redirect settles the commander return");
+    assert_eq!(runner.state().objects[&commander].zone, Zone::Exile);
+    assert!(matches!(
+        settled.waiting_for,
+        WaitingFor::CommanderZoneChoice {
+            commander_id,
+            current_zone: Zone::Exile,
+            ..
+        } if commander_id == commander
+    ));
+
+    let declined = runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the fresh exile return is valid");
+    assert!(matches!(
+        declined.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&commander].zone, Zone::Exile);
+    assert!(
+        runner
+            .state()
+            .commander_declined_zone_return
+            .contains(&commander),
+        "declining suppresses a duplicate offer while the commander stays in exile"
+    );
+}
+
+/// W-171-REG: the ordinary accept path remains synchronous, and declining keeps
+/// the commander in its zone with the existing same-stay ledger behavior.
+#[test]
+fn commander_zone_return_stays_synchronous_and_decline_is_unchanged() {
+    let mut accept_scenario = GameScenario::new();
+    accept_scenario.at_phase(Phase::PreCombatMain);
+    let accepted_commander = accept_scenario
+        .add_creature_to_graveyard(P0, "Synchronous Commander Return", 2, 2)
+        .id();
+    accept_scenario.with_commander(accepted_commander);
+    let mut accept_runner = accept_scenario.build();
+    accept_runner.state_mut().format_config.command_zone = true;
+    let mut accept_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        accept_runner.state_mut(),
+        accepted_commander,
+        Zone::Graveyard,
+        &mut accept_setup_events,
+    );
+    engine::game::sba::check_state_based_actions(
+        accept_runner.state_mut(),
+        &mut accept_setup_events,
+    );
+
+    let accepted = accept_runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("unredirected commander return is valid");
+    assert!(matches!(
+        accepted.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        accept_runner.state().objects[&accepted_commander].zone,
+        Zone::Command
+    );
+    assert!(accepted.events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Graveyard),
+            to: Zone::Command,
+            ..
+        } if *object_id == accepted_commander
+    )));
+    let mut recheck_events = Vec::new();
+    engine::game::sba::check_state_based_actions(accept_runner.state_mut(), &mut recheck_events);
+    assert!(matches!(
+        accept_runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+
+    let mut decline_scenario = GameScenario::new();
+    decline_scenario.at_phase(Phase::PreCombatMain);
+    let declined_commander = decline_scenario
+        .add_creature_to_graveyard(P0, "Declined Commander Return", 2, 2)
+        .id();
+    decline_scenario.with_commander(declined_commander);
+    let mut decline_runner = decline_scenario.build();
+    decline_runner.state_mut().format_config.command_zone = true;
+    let mut decline_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        decline_runner.state_mut(),
+        declined_commander,
+        Zone::Graveyard,
+        &mut decline_setup_events,
+    );
+    engine::game::sba::check_state_based_actions(
+        decline_runner.state_mut(),
+        &mut decline_setup_events,
+    );
+
+    let declined = decline_runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the commander return is valid");
+    assert!(matches!(
+        declined.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        decline_runner.state().objects[&declined_commander].zone,
+        Zone::Graveyard
+    );
+    assert!(
+        decline_runner
+            .state()
+            .commander_declined_zone_return
+            .contains(&declined_commander),
+        "declining preserves the existing same-stay ledger behavior"
+    );
+}

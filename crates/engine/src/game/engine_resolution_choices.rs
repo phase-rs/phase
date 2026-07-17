@@ -5281,21 +5281,40 @@ pub(super) fn handle_resolution_choice(
             }
         }
         // CR 903.9a: Owner decides whether to return their commander to the command zone.
-        // Accept = move to command zone; Decline = leave in current zone (marked as
-        // declined so SBA doesn't re-ask).
-        // Returning to Priority re-runs SBA, which will find any remaining commanders.
+        // Decline leaves it in its current zone and marks that stay so the SBA
+        // loop does not re-ask; a settled zone change clears that mark for a
+        // fresh arrival.
         (
             WaitingFor::CommanderZoneChoice { commander_id, .. },
             GameAction::DecideOptionalEffect { accept },
         ) => {
             if accept {
-                zones::move_to_zone(state, commander_id, Zone::Command, events);
+                // CR 614.1 + CR 616.1: The owner-elected return is a replaceable
+                // zone change. Preserve a centrally parked replacement prompt
+                // rather than clobbering it with Priority; its generic resume
+                // boundary finishes delivery and returns to priority.
+                let mut request = crate::game::zone_pipeline::ZoneMoveRequest::state_based_action(
+                    commander_id,
+                    Zone::Command,
+                );
+                request.cause = crate::game::zone_pipeline::ZoneChangeCause::CommanderRuleReturn;
+                match crate::game::zone_pipeline::move_object(state, request, events) {
+                    crate::game::zone_pipeline::ZoneMoveResult::Done => {
+                        ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                            player: state.active_player,
+                        })
+                    }
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                    | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                    }
+                }
             } else {
                 state.commander_declined_zone_return.insert(commander_id);
+                ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                    player: state.active_player,
+                })
             }
-            ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
-                player: state.active_player,
-            })
         }
         // CR 310.10 + CR 704.5w + CR 704.5x: controller assigns the battle's new
         // protector. Re-running the SBA fixpoint (via the Priority resumption) will

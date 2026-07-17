@@ -122,9 +122,10 @@ pub fn commander_lethal_headroom(
 /// the last SBA check. Their owner may put them into the command zone. Returns
 /// the first eligible `(ObjectId, PlayerId, Zone)` tuple, or `None`.
 ///
-/// CR 903.9b (hand/library) is also covered here — while the CR models it as a
-/// replacement effect, the SBA approach is functionally equivalent and avoids
-/// deep interception of every `move_to_zone` call site.
+/// CR 903.9b (hand/library) is also covered here as an SBA approximation. This
+/// differs from the CR's replacement effect when the intermediate zone change
+/// is observable; a replacement-model migration remains necessary for full
+/// conformance.
 ///
 /// CR 903.9c (merged/melded commander): when a commander is a component of a
 /// merged or melded permanent that leaves to hand or library, `split_merged_permanent_on_leave`
