@@ -510,6 +510,7 @@ mod tests {
                 kind: CastOfferKind::Discover {
                     hit_card: ObjectId(10),
                     exiled_misses: Vec::new(),
+                    source_id: ObjectId(11),
                     discover_value: 0,
                 },
             },
@@ -527,6 +528,7 @@ mod tests {
             kind: CastOfferKind::Discover {
                 hit_card: ObjectId(10),
                 exiled_misses: Vec::new(),
+                source_id: ObjectId(11),
                 discover_value: 0,
             },
         };

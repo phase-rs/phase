@@ -933,6 +933,13 @@ pub(super) fn handle_replacement_choice(
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_continuation.is_some()
                     || state.pending_change_zone_iteration.is_some())
+                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
+                // owns the unpaid cost suffix.  Do not drain the ordinary
+                // effect rider before that typed root has settled it.
+                && !matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                )
             {
                 // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
                 // continuation and the multi-target ChangeZone iteration that
@@ -996,42 +1003,33 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
-            // CR 601.2h + CR 602.2b + CR 616.1: Resume a cast or activation
-            // cost move after the replacement delivered its current object.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::Cast { .. })
-                )
-            {
-                waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A delivered cost
+            // move resumes through the single typed dispatcher before ordinary
+            // effect continuations. Foretell completed above at its dedicated
+            // delivery boundary and is intentionally ineligible here.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
                     state,
                     events,
-                    Some(replacement_action_event_start),
-                )?;
+                    super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                        action_event_start: replacement_action_event_start,
+                    },
+                )? {
+                    waiting_for = resumed;
+                }
             }
 
-            // CR 614.12a + CR 616.1: Finish the inner forced MayCost moves
-            // before re-entering the optional outer replacement they paid for.
+            // CR 118.12 + CR 605.3b + CR 616.1: The ordinary effect rider may
+            // resume only after the whole typed mana-cost root has either paid
+            // or failed its suffix.  This mirrors the prevention path below.
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::ReplacementMayCost { .. })
-                )
+                && (state.pending_continuation.is_some()
+                    || state.pending_change_zone_iteration.is_some())
             {
-                waiting_for = super::costs::resume_replacement_may_cost_move(state, events)?;
-            }
-
-            // CR 702.143a-c + CR 614.1 + CR 616.1: Finish a foretell special
-            // action after its replacement-aware move is delivered. The
-            // foretell resume stamps the card only if it arrived in exile.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::Foretell { .. })
-                )
-            {
-                waiting_for = super::casting::resume_foretell_cost_move(state, events);
+                effects::drain_pending_continuation(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
             }
 
             // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
@@ -1209,30 +1207,28 @@ pub(super) fn handle_replacement_choice(
             state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
             };
-            if matches!(
+            let resumed_mana_ability_cost = matches!(
                 state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::Cast { .. })
-            ) {
-                return super::casting_costs::resume_interrupted_cost_payment(
-                    state,
-                    events,
-                    Some(replacement_action_event_start),
-                );
-            }
-            if matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::ReplacementMayCost { .. })
-            ) {
-                return super::costs::resume_replacement_may_cost_move(state, events);
-            }
-            // CR 702.143a-c + CR 614.1 + CR 616.1: A fully substituted
-            // foretell move completes the special action without stamping a
-            // card that was not delivered to exile.
-            if matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::Foretell { .. })
-            ) {
-                return Ok(super::casting::resume_foretell_cost_move(state, events));
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+            );
+            if let Some(waiting_for) = super::engine::drain_pending_cost_move_resume(
+                state,
+                events,
+                super::engine::CostMoveDrainBoundary::ReplacementPrevented {
+                    action_event_start: replacement_action_event_start,
+                },
+            )? {
+                // CR 118.12 + CR 605.3b + CR 616.1: A prevented mana cost has
+                // the same rider ordering as a delivered one: its typed root
+                // settles before any ordinary continuation drains.
+                if resumed_mana_ability_cost
+                    && matches!(waiting_for, WaitingFor::Priority { .. })
+                    && (state.pending_continuation.is_some()
+                        || state.pending_change_zone_iteration.is_some())
+                {
+                    effects::drain_pending_continuation(state, events);
+                }
+                return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.

@@ -756,7 +756,8 @@ fn activate_ability_is_meaningful_priority(
     state.objects.get(&source_id).is_some_and(|obj| {
         obj.abilities.get(ability_index).is_some_and(|ability| {
             !mana_abilities::is_mana_ability(ability)
-                || mana_sources::mana_ability_penalty(ability).is_meaningful_priority_activation()
+                || mana_sources::object_mana_ability_penalty(state, source_id, ability)
+                    .is_meaningful_priority_activation()
         })
     })
 }
@@ -2919,6 +2920,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2958,6 +2960,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2988,6 +2991,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,

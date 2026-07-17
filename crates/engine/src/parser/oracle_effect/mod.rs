@@ -15589,7 +15589,20 @@ fn try_parse_multi_target_damage_chain_inner(
     // target phrase's announcing-player override leak into its first recipient.
     ctx.target_chooser = None;
     let lower = text.to_lowercase();
-    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    // CR 608.2c + CR 107.3i: A trailing ", where X is <expr>" is later text that
+    // defines X for the whole instruction (Judgment Bolt); every instance of X
+    // resolves to the same value. Strip it so the bare-damage continuation loop
+    // does not choke on it — mirrors the identical idiom in
+    // try_parse_compound_player_object_damage. The 2nd amount stays
+    // QuantityExpr::Variable("X"); the binding is re-derived and applied at
+    // lowering by compute_sentence_where_x + apply_where_x_ability_expression,
+    // which read the un-stripped ClauseChunk text (a separate path). Fixed
+    // amounts (the primary 5) are untouched — apply_where_x_quantity_expression
+    // only rewrites Variable("X")/CostXPaid leaves.
+    let (stripped, _binding) = strip_trailing_where_x(TextPair::new(text, &lower));
+    let text = stripped.original;
+    let lower = stripped.lower;
+    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
     // Each segment parses through the shared context, so retain the primary
     // segment's announcer before a continuation can overwrite it.
     let primary_target_chooser = ctx.target_chooser.clone();
@@ -17273,41 +17286,50 @@ fn rebind_anaphoric_generic_effect_subject_to_parent(lower: &str, def: &mut Abil
 }
 
 /// CR 115.10a + CR 601.2c: A damage clause whose recipient is a FRESH typed
-/// "creature an opponent controls" / "creature you don't control" target (both
-/// canonicalize to `ControllerRef::Opponent`) declares its own target — it is
-/// not the anaphoric "It" subject that an earlier clause established. Per CR
-/// 601.2c each instance of the word "target" is a separate target, and per CR
-/// 115.10a being affected (the source's power feeding the amount) does not make
-/// that recipient the same object as the boosted creature. Recurses through
+/// target structurally distinct from the anaphoric "It" subject an earlier
+/// clause established — it declares its own recipient, not the boosted/
+/// counter'd object. Two shapes both witness this: (1) "creature an opponent
+/// controls" / "creature you don't control" (canonicalize to
+/// `ControllerRef::Opponent`) — a different player's permanent can never be
+/// the subject's own controller's chosen object; (2) "each other creature" /
+/// "all other creatures" (`FilterProp::Another`) — CR 115.10a: an "other"/
+/// "another" exclusion excludes the referenced object *by definition*, so a
+/// board-sweep recipient (Chandra's Ignition class: "target creature you
+/// control deals damage equal to its power to each other creature") can never
+/// be the same object as "It" either. Per CR 601.2c each instance of the word
+/// "target" is a separate target, and per CR 115.10a being affected (the
+/// source's power feeding the amount) does not make either recipient shape the
+/// same object as the boosted/counter'd creature. Recurses through
 /// `Or`/`And`/`Not` wrappers, mirroring `attach_controller_if_absent` /
-/// `rewrite_filter_controller`. Returns true only for the tight
-/// `Typed { controller: Some(Opponent), .. }` shape; `ParentTarget`/`SelfRef`/
-/// `Any`/`ParentTargetController` etc. are excluded (they are never
-/// Typed-with-Opponent anyway).
-fn target_filter_is_fresh_opponent_typed(filter: &TargetFilter) -> bool {
+/// `rewrite_filter_controller`. `ParentTarget`/`SelfRef`/`Any`/
+/// `ParentTargetController` etc. are excluded (they are never `Typed` anyway).
+fn target_filter_is_distinct_recipient(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::Opponent),
-            ..
-        }) => true,
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(target_filter_is_fresh_opponent_typed)
+        TargetFilter::Typed(tf) => {
+            tf.controller == Some(ControllerRef::Opponent)
+                || tf.properties.contains(&FilterProp::Another)
         }
-        TargetFilter::Not { filter } => target_filter_is_fresh_opponent_typed(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_is_distinct_recipient)
+        }
+        TargetFilter::Not { filter } => target_filter_is_distinct_recipient(filter),
         _ => false,
     }
 }
 
 /// Returns true iff `effect` is a `DealDamage`/`DamageAll` whose recipient is a
-/// fresh opponent-controlled typed target (see
-/// `target_filter_is_fresh_opponent_typed`). Used to DECLINE the blanket
-/// anaphoric parent-rewrite for the "one-sided fight" class (Ambuscade, Clear
-/// Shot, Rabid Gnaw, ...): the recipient is parsed correctly upstream and must
-/// be preserved, not clobbered to `ParentTarget`.
-fn damage_clause_has_fresh_opponent_recipient(effect: &Effect) -> bool {
+/// structurally distinct typed target (see `target_filter_is_distinct_recipient`
+/// — either opponent-controlled or an "other"/"another"-excluded board sweep).
+/// Used to DECLINE the blanket anaphoric parent-rewrite for the "one-sided
+/// fight" class (Ambuscade, Clear Shot, Rabid Gnaw, ...) and the "counter-then-
+/// sweep" class (Nova Flame: "Put X +1/+1 counters on target creature you
+/// control. It deals damage equal to its power to each other creature."): the
+/// recipient is parsed correctly upstream and must be preserved, not clobbered
+/// to `ParentTarget`.
+fn damage_clause_has_distinct_recipient(effect: &Effect) -> bool {
     match effect {
         Effect::DealDamage { target, .. } | Effect::DamageAll { target, .. } => {
-            target_filter_is_fresh_opponent_typed(target)
+            target_filter_is_distinct_recipient(target)
         }
         _ => false,
     }
@@ -17444,11 +17466,19 @@ fn restore_this_way_trigger_anaphor(effect: &mut Effect) {
 /// to `Anaphoric` routes it back through the same runtime fallback. Returns true
 /// (= decline the blanket `replace_target_with_parent`) when handled.
 ///
-/// Covers two recipient shapes: (1) the fresh-opponent recipient — attribute
+/// Covers three recipient shapes: (1) the fresh-opponent recipient — attribute
 /// the damage source to the parent target while preserving the recipient and
 /// the anaphoric amount; (2) the self-reference recipient ("to this
 /// creature"/"to ~", `TargetFilter::SelfRef`, the Karplusan Yeti fight-back
-/// class) — preserve the recipient verbatim with NO source/amount rebind.
+/// class) — preserve the recipient verbatim with NO source/amount rebind;
+/// (3) the "other"/"another"-excluded board-sweep recipient ("to each other
+/// creature", `FilterProp::Another` — the Chandra's Ignition / Nova Flame
+/// class, issue #4960) — same handling as (1): attribute the damage source to
+/// the parent target while preserving the sweep recipient and the anaphoric
+/// amount. Without this, `damage_source` stays `None` (the spell itself), so
+/// the runtime one-sided-fight fallback in `game/quantity.rs` (gated on
+/// `damage_source == Some(Target)`) never fires and `Power{Anaphoric}`
+/// resolves to 0 — Nova Flame with any X dealt no damage.
 fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     // CR 201.5 + CR 608.2c: a self-reference recipient ("to this creature"/"to ~")
     // is the source itself and must be preserved verbatim (fight-back class). No
@@ -17457,13 +17487,14 @@ fn bind_anaphoric_damage_subject_keep_recipient(effect: &mut Effect) -> bool {
     if damage_clause_has_self_ref_recipient(effect) {
         return true;
     }
-    if !damage_clause_has_fresh_opponent_recipient(effect) {
+    if !damage_clause_has_distinct_recipient(effect) {
         return false;
     }
-    // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the fresh-opponent
-    // recipient and attribute damage source to targets[0] (the boosted "It");
-    // leave "its power" as Power{Anaphoric} — the runtime resolves it to that
-    // same source object. Do NOT rebind to Target (that desyncs the export from
+    // CR 115.10a + CR 601.2c + CR 608.2c + CR 120.1: preserve the distinct
+    // recipient (fresh-opponent target OR "other"-excluded board sweep) and
+    // attribute damage source to targets[0] (the boosted/counter'd "It"); leave
+    // "its power" as Power{Anaphoric} — the runtime resolves it to that same
+    // source object. Do NOT rebind to Target (that desyncs the export from
     // the Oracle "its" and reintroduces #699).
     set_damage_clause_source_only(effect, DamageSource::Target);
     // Source → Anaphoric only (the SelfRef-subject "Then it deals..." variant);
@@ -18417,7 +18448,7 @@ fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
 /// (`Controller`), a bare "that player" placeholder (`Player`), or the generic
 /// subject-parser default (`ParentTargetController`). Does not touch effects
 /// that already carry an explicit owner anaphor (`ParentTargetOwner`).
-fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
+fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherits_anchor: bool) {
     if !target_filter_can_target_player(anchor) {
         return;
     }
@@ -18450,13 +18481,22 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
         // player puts the cards in their hand on the bottom of their library …,
         // then draws that many cards" (Teferi's Puzzle Box, #4241; CR 102.1).
         // Mirrors the `Shuffle` arm above (same caster-default set).
+        //
+        // CR 121.1 + CR 601.2c (issue #5998): gated on `draw_inherits_anchor` —
+        // only a subject-less CONJUGATED continuation ("…, then draws …") carries
+        // the earlier player. A bare IMPERATIVE sentence ("Exile target player's
+        // graveyard. Draw a card." — Stone of Erech) is addressed to the ability's
+        // controller, so it must keep its `Controller` default; inheriting the
+        // anchor there both draws for the wrong player and surfaces a second
+        // target slot.
         Effect::Draw { target, .. }
-            if matches!(
-                *target,
-                TargetFilter::Controller
-                    | TargetFilter::Player
-                    | TargetFilter::ParentTargetController
-            ) =>
+            if draw_inherits_anchor
+                && matches!(
+                    *target,
+                    TargetFilter::Controller
+                        | TargetFilter::Player
+                        | TargetFilter::ParentTargetController
+                ) =>
         {
             *target = anchor.clone();
         }
@@ -18469,14 +18509,26 @@ fn apply_anchor_subject_to_clause(
     anchor: &TargetFilter,
     text_lower: &str,
 ) {
+    let draw_inherits_anchor = chunk_continues_anchored_subject(text_lower);
     apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
-    apply_anchor_subject(&mut clause.effect, anchor);
+    apply_anchor_subject(&mut clause.effect, anchor, draw_inherits_anchor);
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
         apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
-        apply_anchor_subject(def.effect.as_mut(), anchor);
+        apply_anchor_subject(def.effect.as_mut(), anchor, draw_inherits_anchor);
         sub = def.sub_ability.as_deref_mut();
     }
+}
+
+/// CR 121.1 + CR 601.2c: True iff `text_lower` is a subject-less CONJUGATED
+/// continuation of the anchored player's instruction ("…, then draws a card")
+/// rather than a bare IMPERATIVE addressed to the ability's controller ("Draw a
+/// card."). A conjugated verb ("draws") is not itself a clause starter but
+/// deconjugates to one, which is exactly the shared grammar distinction
+/// `inherits_carried_targeted_player_subject` uses for the same question.
+fn chunk_continues_anchored_subject(text_lower: &str) -> bool {
+    !sequence::starts_clause_text(text_lower)
+        && sequence::starts_clause_text_or_conjugated(text_lower)
 }
 
 /// CR 608.2c: A subjectless reveal continuation that explicitly says
@@ -18533,6 +18585,17 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         // surfaces a player target slot and `resolve_sacrifice_scope` reads the
         // chosen player at resolution — identical to the "target opponent" path.
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        // CR 508.5 + CR 701.21a: A bare "defending player" subject on an
+        // attack-trigger edict ("Whenever ~ attacks, defending player
+        // sacrifices an artifact of their choice" — Kibo, Uktabi Prince). Like
+        // "target player" this lowers to a unit player filter
+        // (`TargetFilter::DefendingPlayer`) that otherwise fell through to
+        // `None`, dropping the controller scope so the edict defaulted to the
+        // attacking controller. Promoting it to `DefendingPlayer` lets the
+        // Sacrifice injection arm stamp the filter's `controller` and
+        // `resolve_sacrifice_scope` route the sacrifice to the defending player
+        // (resolved from combat state, no target slot) at resolution time.
+        TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
         _ => None,
     }
 }
@@ -30276,6 +30339,150 @@ mod tests;
 /// sub_ability assembly.
 #[cfg(test)]
 mod snapshot_tests;
+
+/// Tests for the trailing ", where X is <expr>" tolerance in the compound
+/// bare-damage chain (Judgment Bolt) — see `try_parse_multi_target_damage_chain_inner`.
+#[cfg(test)]
+mod where_x_damage_chain_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{Effect, QuantityExpr, QuantityRef, TargetFilter};
+
+    fn parse_instant(name: &str, text: &str) -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(text, name, &[], &["Instant".to_string()], &[])
+    }
+
+    /// Judgment Bolt: "deals 5 damage to target creature and X damage to that
+    /// creature's controller, where X is the number of Equipment you control."
+    /// The 2nd damage clause must chain as a `sub_ability` whose amount is the
+    /// dynamic Equipment `ObjectCount`. On main the trailing where-X clause made
+    /// the chain parser bail, so `sub_ability` was `None`; reverting the strip
+    /// restores that `None` and flips this test.
+    #[test]
+    fn judgment_bolt_compound_dynamic_damage_ast() {
+        let parsed = parse_instant(
+            "Judgment Bolt",
+            "Judgment Bolt deals 5 damage to target creature and X damage to that \
+             creature's controller, where X is the number of Equipment you control.",
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "the where-X damage chain must parse cleanly (no swallowed clause), got {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.abilities.len(), 1, "one spell ability");
+        let ability = &parsed.abilities[0];
+        // Primary: fixed 5 to the creature — untouched by the where-X strip.
+        match &*ability.effect {
+            Effect::DealDamage { amount, .. } => {
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 5 })
+            }
+            other => panic!("primary must be DealDamage(5), got {other:?}"),
+        }
+        // 2nd clause: chains only because the where-X tail was stripped.
+        let sub = ability.sub_ability.as_deref().expect(
+            "the 2nd damage clause must chain as a sub_ability — this is None on main \
+             (FLIPs to None if the where-X strip is reverted)",
+        );
+        match &*sub.effect {
+            Effect::DealDamage { amount, target, .. } => {
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { .. }
+                        }
+                    ),
+                    "2nd amount must be the dynamic Equipment ObjectCount, not Fixed: {amount:?}"
+                );
+                // CR 109.4: "that creature's controller".
+                assert_eq!(target, &TargetFilter::ParentTargetController);
+            }
+            other => panic!("2nd clause must be DealDamage, got {other:?}"),
+        }
+    }
+
+    /// Class generalization: any "A to target creature and X to that creature's
+    /// controller, where X is <count>" keeps the 1st amount Fixed while binding
+    /// the 2nd to the dynamic count — proven with a synthetic Artifact card.
+    /// A single-damage line produces NO phantom sub_ability (negative reach-guard,
+    /// paired with a positive "still parses to DealDamage" check so the absence is
+    /// meaningful).
+    #[test]
+    fn compound_dynamic_damage_parameterized_and_single_ast() {
+        let parsed = parse_instant(
+            "Test Bolt",
+            "Test Bolt deals 3 damage to target creature and X damage to that creature's \
+             controller, where X is the number of Artifacts you control.",
+        );
+        let ability = &parsed.abilities[0];
+        assert!(matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("dynamic 2nd clause must chain");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                },
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let single = parse_instant("Test Bolt", "Test Bolt deals 3 damage to target creature.");
+        let single_ability = &single.abilities[0];
+        assert!(
+            matches!(&*single_ability.effect, Effect::DealDamage { .. }),
+            "single-damage line must still parse to a real DealDamage (not Unimplemented), got {:?}",
+            single_ability.effect
+        );
+        assert!(
+            single_ability.sub_ability.is_none(),
+            "a single-damage line must not synthesize a phantom 2nd clause"
+        );
+    }
+
+    /// Reach-guard: a compound damage sibling with NO where-X clause
+    /// (Chandra's Outrage) must be unaffected — both amounts stay Fixed. This
+    /// proves the where-X strip does not corrupt a no-where-x sibling and that
+    /// the where-X binder never rewrites a Fixed amount.
+    #[test]
+    fn chandras_outrage_no_where_x_keeps_both_fixed() {
+        let parsed = parse_instant(
+            "Chandra's Outrage",
+            "Chandra's Outrage deals 4 damage to target creature and 2 damage to that \
+             creature's controller.",
+        );
+        let ability = &parsed.abilities[0];
+        assert!(matches!(
+            &*ability.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                ..
+            }
+        ));
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("the 2nd fixed clause must chain");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+    }
+}
 
 #[test]
 fn issue_2405_broken_bond_optional_land_from_hand() {

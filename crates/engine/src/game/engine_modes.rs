@@ -6,13 +6,12 @@ use crate::types::mana::ManaCost;
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain,
     auto_select_targets_for_ability, begin_target_selection_for_ability, build_chained_resolved,
-    build_target_slots_labelled, cap_distribution_target_slots, flatten_targets_in_chain,
-    random_select_targets_for_ability, record_modal_mode_choices, selected_mode_labels,
-    target_constraints_from_modal, validate_modal_indices,
+    build_target_slots_labelled, cap_distribution_target_slots, random_select_targets_for_ability,
+    record_modal_mode_choices, selected_mode_labels, target_constraints_from_modal,
+    validate_modal_indices,
 };
 use super::engine::EngineError;
 use super::engine_stack;
-use super::restrictions;
 use super::triggers;
 use super::{casting, casting_costs, priority};
 
@@ -240,71 +239,14 @@ fn handle_activated_mode_choice(
         if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
-
-            if let Some(cost) = &ability_cost {
-                let ability_tag = ability_index
-                    .and_then(|index| casting::activation_ability_tag(state, source_id, index));
-                match casting::pay_ability_cost_for_activation(
-                    state,
-                    player,
-                    source_id,
-                    cost,
-                    ability_tag,
-                    events,
-                )? {
-                    casting::PaymentOutcome::Paid => {}
-                    casting::PaymentOutcome::Paused { remaining_cost } => {
-                        let mut pending =
-                            PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-                        pending.activation_cost = remaining_cost;
-                        pending.activation_ability_index = ability_index;
-                        if let Some(pending) = casting_costs::attach_pending_cast_to_cost_move(
-                            state,
-                            Box::new(pending),
-                        ) {
-                            state.pending_cast = Some(pending);
-                        }
-                        return Ok(state.waiting_for.clone());
-                    }
-                    casting::PaymentOutcome::Failed { reason } => {
-                        return Err(EngineError::ActionNotAllowed(reason.reason));
-                    }
-                }
-            }
-            casting::emit_targeting_events(
-                state,
-                &flatten_targets_in_chain(&resolved),
-                source_id,
-                player,
-                events,
-            );
-
-            let entry_id = ObjectId(state.next_object_id);
-            state.next_object_id += 1;
-            // CR 603.4: Stamp the printed-ability index for per-turn resolution
-            // tracking (`AbilityCondition::NthResolutionThisTurn`) before push.
-            let mut resolved_with_idx = resolved;
-            resolved_with_idx.ability_index = ability_index;
-            super::stack::push_to_stack(
-                state,
-                crate::types::game_state::StackEntry {
-                    id: entry_id,
-                    source_id,
-                    controller: player,
-                    kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
-                        source_id,
-                        ability: resolved_with_idx,
-                    },
-                },
-                events,
-            );
-            if let Some(index) = ability_index {
-                restrictions::record_ability_activation(state, source_id, index);
-                // CR 117.1b: Priority permits unbounded activation.
-                // `pending_activations` is a per-priority-window AI-guard —
-                // see `GameState::pending_activations`.
-                state.pending_activations.push((source_id, index));
-            }
+            let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending.activation_cost = ability_cost.clone();
+            pending.activation_ability_index = ability_index;
+            pending.target_constraints = target_constraints;
+            pending.distribute = mode_distribute;
+            casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
+                state, player, pending, events,
+            )
         } else {
             let selection = begin_target_selection_for_ability(
                 state,
@@ -316,96 +258,29 @@ fn handle_activated_mode_choice(
             pending.activation_cost = ability_cost;
             pending.activation_ability_index = ability_index;
             pending.target_constraints = target_constraints;
+            pending.distribute = mode_distribute;
             // CR 601.2c + CR 602.2b: first slot's announcer (controller unless the
             // slot is "of an opponent's choice").
             let initial_player = target_slots
                 .first()
                 .and_then(|slot| slot.chooser)
                 .unwrap_or(player);
-            return Ok(WaitingFor::TargetSelection {
+            Ok(WaitingFor::TargetSelection {
                 player: initial_player,
                 pending_cast: Box::new(pending),
                 target_slots,
                 mode_labels,
                 selection,
-            });
+            })
         }
     } else {
-        if let Some(cost) = &ability_cost {
-            let ability_tag = ability_index
-                .and_then(|index| casting::activation_ability_tag(state, source_id, index));
-            match casting::pay_ability_cost_for_activation(
-                state,
-                player,
-                source_id,
-                cost,
-                ability_tag,
-                events,
-            )? {
-                casting::PaymentOutcome::Paid => {}
-                casting::PaymentOutcome::Paused { remaining_cost } => {
-                    let mut pending =
-                        PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
-                    pending.activation_cost = remaining_cost;
-                    pending.activation_ability_index = ability_index;
-                    if let Some(pending) =
-                        casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
-                    {
-                        state.pending_cast = Some(pending);
-                    }
-                    return Ok(state.waiting_for.clone());
-                }
-                casting::PaymentOutcome::Failed { reason } => {
-                    return Err(EngineError::ActionNotAllowed(reason.reason));
-                }
-            }
-        }
-        let entry_id = ObjectId(state.next_object_id);
-        state.next_object_id += 1;
-        // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking.
-        let mut resolved_with_idx = resolved;
-        resolved_with_idx.ability_index = ability_index;
-        super::stack::push_to_stack(
-            state,
-            crate::types::game_state::StackEntry {
-                id: entry_id,
-                source_id,
-                controller: player,
-                kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
-                    source_id,
-                    ability: resolved_with_idx,
-                },
-            },
-            events,
-        );
-        if let Some(index) = ability_index {
-            restrictions::record_ability_activation(state, source_id, index);
-            // CR 117.1b: Priority permits unbounded activation.
-            // `pending_activations` is a per-priority-window AI-guard —
-            // see `GameState::pending_activations`.
-            state.pending_activations.push((source_id, index));
-        }
+        let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+        pending.activation_cost = ability_cost;
+        pending.activation_ability_index = ability_index;
+        pending.target_constraints = target_constraints;
+        pending.distribute = mode_distribute;
+        casting_costs::finish_activated_ability_at_payment_boundary(state, player, pending, events)
     }
-
-    events.push(GameEvent::AbilityActivated {
-        player_id: player,
-        source_id,
-        // CR 606.2: `ability_index` is `Option<usize>` here; classify via the
-        // source ability cost when an index is present, else `Normal`. Using the
-        // index guard avoids the partial-move of `ability_cost` consumed above.
-        kind: ability_index.map_or(
-            crate::types::events::ActivatedAbilityKind::Normal,
-            |index| super::planeswalker::activated_ability_kind(state, source_id, index),
-        ),
-    });
-    // CR 702.142b: Emit additional event when a boast ability is activated.
-    if let Some(index) = ability_index {
-        super::casting_targets::emit_keyword_ability_event_if_tagged(
-            state, source_id, index, player, events,
-        );
-    }
-    priority::clear_priority_passes(state);
-    Ok(WaitingFor::Priority { player })
 }
 
 struct TriggeredModeChoice {
