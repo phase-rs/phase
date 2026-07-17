@@ -340,21 +340,16 @@ pub(crate) enum OracleNodeIr {
     StriveCost(ManaCost),
 
     // -----------------------------------------------------------------------
-    // UNIT-4 DEBT — pre-lowered escape hatches.
+    // PLAN-05 DEBT — pre-lowered escape hatches.
     //
     // These four variants carry already-assembled engine definitions rather
-    // than IR. They exist for exactly one reason: the five preprocessors
-    // (`parse_saga_chapters`, `parse_attraction_visit_triggers`,
-    // `parse_level_blocks`, `parse_spacecraft_threshold_lines`,
-    // `parse_class_oracle_text`) return lowered engine types and have nowhere
-    // else to go. Converting them is unit 4, whose file set is disjoint from
-    // unit 3's.
+    // than typed IR. Unit 4 wired the preprocessors through the document
+    // builder, but it did not remove these variants; ordinary dispatch also
+    // still emits them. The IR-native `Spell`/`Trigger`/`Static`/`Replacement`
+    // siblings are dead-coded pending Plan 05 U2's document-seam hoist.
     //
-    // Until unit 4 lands, ordinary dispatch ALSO routes through these (unit 3b
-    // converts ordinary dispatch to `Spell`/`Trigger`/`Static`/`Replacement`).
-    //
-    // Removal gate 4 ("grep finds no `PreLowered*`") is satisfied only after
-    // unit 4. Do not add a new producer of these variants.
+    // Plan 05, not unit 4, removes these variants after U2--U4 have made every
+    // producer IR-native. Do not add a new producer of these variants.
     // -----------------------------------------------------------------------
     /// Pre-lowered trigger from a preprocessor. UNIT-4 DEBT.
     PreLoweredTrigger(TriggerDefinition),
@@ -623,7 +618,6 @@ pub(crate) struct OracleDocBuilder {
     /// a new ordinal from here — it reuses the popped item's ORIGINAL span+ordinal
     /// (the key it just freed), which is position-preserving; so this allocator only
     /// ever hands out fresh ordinals to genuinely new emissions.
-    #[allow(dead_code)] // wired by the unit-4 dispatch-loop/preprocessor cutover.
     next_ordinal_by_line: BTreeMap<usize, u32>,
     /// CR 707.9a printed-**trigger** index: the slot the next emitted trigger
     /// occupies.
@@ -704,7 +698,6 @@ impl OracleDocBuilder {
     /// `take_last_spell` re-emit does NOT call this — it reuses the popped item's
     /// ORIGINAL span+ordinal (the freed key), which is position-preserving — so this
     /// allocator only ever advances for genuinely new emissions.
-    #[allow(dead_code)] // wired by the unit-4 dispatch-loop/preprocessor cutover.
     pub(crate) fn next_ordinal_for_line(&mut self, first_line: usize) -> u32 {
         let slot = self.next_ordinal_by_line.entry(first_line).or_insert(0);
         let ordinal = *slot;
@@ -883,7 +876,6 @@ impl OracleDocBuilder {
     /// mirror, which a pop would not revert. Deliberately NOT a `self.items` span
     /// maximum: a preprocessor may emit a higher-line spell before the dispatch loop
     /// emits a lower-line one, and the reader wants the JUST-emitted (loop) spell.
-    #[allow(dead_code)] // used by the dispatch-loop reader in unit 4.
     pub(crate) fn peek_last_spell(&self) -> Option<&AbilityDefinition> {
         let id = *self.spells_emitted.last()?;
         self.items
