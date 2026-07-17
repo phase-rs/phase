@@ -679,7 +679,10 @@ fn exile_return_occurs_before_a_pending_resolution_choice() {
     )
     .unwrap();
 
-    assert!(matches!(waiting_for, WaitingFor::OptionalEffectChoice { .. }));
+    assert!(matches!(
+        waiting_for,
+        WaitingFor::OptionalEffectChoice { .. }
+    ));
     assert!(state.battlefield.contains(&returned_id));
     assert!(!state.exile.contains(&returned_id));
     assert!(state.exile_links.is_empty());
@@ -719,10 +722,16 @@ fn exile_return_occurs_before_a_pending_resolution_choice() {
         false,
     )
     .unwrap();
-    assert!(state.stack.iter().any(|entry| entry.source_id == returned_id));
+    assert!(state
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == returned_id));
     let mut trigger_events = Vec::new();
     crate::game::stack::resolve_top(state, &mut trigger_events);
-    assert!(state.battlefield.iter().any(|id| state.objects[id].name == "Soldier"));
+    assert!(state
+        .battlefield
+        .iter()
+        .any(|id| state.objects[id].name == "Soldier"));
 }
 
 /// CR 400.7 + CR 610.3a + CR 611.2: Full integration test using the real

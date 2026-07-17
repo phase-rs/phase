@@ -2855,7 +2855,12 @@ pub(crate) fn handle_return_to_hand_for_cost(
     let to_return: Vec<_> = chosen
         .iter()
         .copied()
-        .filter(|id| state.objects.get(id).is_some_and(|obj| obj.zone != Zone::Hand))
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone != Zone::Hand)
+        })
         .collect();
     finish_cost_object_moves(
         state,
