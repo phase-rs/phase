@@ -7214,6 +7214,437 @@ fn discover_bottom_batch_pauses_before_its_hit_and_continuation_complete() {
     );
 }
 
+/// W-D1 (red first): a declined Discover's printed hit-to-hand instruction is
+/// a replacement-aware delivery. A Hand redirect must park before the Discover
+/// completion and its chained tail run.
+#[test]
+fn discover_declined_hit_to_hand_redirect_pauses_before_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Discover Hand Redirect Source", 1, 1)
+        .id();
+    let miss = scenario
+        .add_spell_to_library_top(P0, "Discover Hand Redirect Miss", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Discover Hand Redirect Hit", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    for (name, destination) in [
+        ("Discover Hand To Graveyard", Zone::Graveyard),
+        ("Discover Hand To Exile", Zone::Exile),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, destination));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![miss, hit];
+    let mut ability = ResolvedAbility::new(
+        Effect::Discover {
+            mana_value_limit: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    )));
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("Discover reaches its cast offer");
+
+    let paused = runner
+        .act(GameAction::DiscoverChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        })
+        .expect("the synchronous miss batch reaches the replaceable Hand delivery");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+    assert!(
+        !paused.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: engine::types::ability::EffectKind::Discover,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the Discover tail must not run before the Hand redirect choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the chosen Hand redirect resumes the typed completion tail");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(paused.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::Discover,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "Discover completes exactly once after its redirected Hand delivery"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(paused.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::GainLife,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the Discover continuation runs exactly once after its redirected Hand delivery"
+    );
+}
+
+/// W-D3 (red first): a declined Discover can park once while bottoming its
+/// miss, then again while delivering its hit to Hand. The two typed tails must
+/// preserve that order and complete exactly once.
+#[test]
+fn discover_declined_miss_and_hit_redirects_pause_in_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Discover Compound Redirect Source", 1, 1)
+        .id();
+    let miss = scenario
+        .add_spell_to_library_top(P0, "Discover Compound Redirect Miss", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Discover Compound Redirect Hit", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    for (name, destination, redirected_to) in [
+        (
+            "Discover Compound Library To Graveyard",
+            Zone::Library,
+            Zone::Graveyard,
+        ),
+        (
+            "Discover Compound Library To Exile",
+            Zone::Library,
+            Zone::Exile,
+        ),
+        (
+            "Discover Compound Hand To Graveyard",
+            Zone::Hand,
+            Zone::Graveyard,
+        ),
+        ("Discover Compound Hand To Exile", Zone::Hand, Zone::Exile),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(destination, redirected_to));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![miss, hit];
+    let ability = ResolvedAbility::new(
+        Effect::Discover {
+            mana_value_limit: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("Discover reaches its cast offer");
+
+    let miss_paused = runner
+        .act(GameAction::DiscoverChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        })
+        .expect("the miss bottom placement reaches its replacement choice");
+    assert!(matches!(
+        miss_paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+
+    let hand_paused = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the resolved miss reaches the replaceable hit-to-Hand delivery");
+    assert!(matches!(
+        hand_paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+    assert!(
+        !hand_paused.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: engine::types::ability::EffectKind::Discover,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the Discover completion waits for the second replacement choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the redirected Hand delivery completes Discover");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Graveyard);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(miss_paused.events.iter())
+            .chain(hand_paused.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::Discover,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the two sequential replacement pauses run Discover's tail exactly once"
+    );
+}
+
+/// W-D2 (red first): a rejected cast during Discover resolution routes its hit
+/// through the same replacement-aware Hand delivery. Its synchronous miss batch
+/// must propagate that completion pause instead of restoring priority over it.
+#[test]
+fn discover_rejected_cast_hit_to_hand_redirect_pauses_before_priority() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Discover Rejection Redirect Source", 1, 1)
+        .id();
+    let target = scenario
+        .add_creature(P1, "Discover Rejection Target", 1, 1)
+        .id();
+    let miss = scenario
+        .add_spell_to_library_top(P0, "Discover Rejection Miss", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Discover Rejection X Hit", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        })
+        .from_oracle_text("Destroy target creature.")
+        .id();
+    for (name, destination) in [
+        ("Discover Rejection Hand To Graveyard", Zone::Graveyard),
+        ("Discover Rejection Hand To Exile", Zone::Exile),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, destination));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![miss, hit];
+    let ability = ResolvedAbility::new(
+        Effect::Discover {
+            mana_value_limit: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("Discover reaches its cast offer");
+
+    let selecting_target = runner
+        .act(GameAction::DiscoverChoice {
+            choice: engine::types::actions::CastChoice::Cast,
+        })
+        .expect("the legal Discover hit starts its during-resolution cast");
+    assert!(matches!(
+        selecting_target.waiting_for,
+        WaitingFor::TargetSelection { player: P0, .. }
+    ));
+    match &mut runner.state_mut().waiting_for {
+        WaitingFor::TargetSelection { pending_cast, .. } => pending_cast.ability.chosen_x = Some(2),
+        waiting_for => panic!("expected the target-selection cast, got {waiting_for:?}"),
+    }
+
+    let paused = runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("the seeded resulting mana value rejects the Discover cast");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+    assert!(runner.state().stack.iter().all(|entry| entry.id != hit));
+    assert!(
+        !paused.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: engine::types::ability::EffectKind::Discover,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "priority and EffectResolved must wait for the Hand redirect choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the redirected rejected hit completes its priority tail");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(selecting_target.events.iter())
+            .chain(paused.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::Discover,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the rejected cast emits Discover completion exactly once after its Hand delivery"
+    );
+}
+
+/// W-REG: An uninterrupted Discover rejection still sends the hit to Hand and
+/// returns priority synchronously, with the usual single Discover completion.
+#[test]
+fn discover_rejected_cast_without_redirect_stays_synchronous() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Uninterrupted Discover Rejection Source", 1, 1)
+        .id();
+    let target = scenario
+        .add_creature(P1, "Uninterrupted Discover Rejection Target", 1, 1)
+        .id();
+    let miss = scenario
+        .add_spell_to_library_top(P0, "Uninterrupted Discover Rejection Miss", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Uninterrupted Discover Rejection X Hit", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        })
+        .from_oracle_text("Destroy target creature.")
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![miss, hit];
+    let ability = ResolvedAbility::new(
+        Effect::Discover {
+            mana_value_limit: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("Discover reaches its cast offer");
+    runner
+        .act(GameAction::DiscoverChoice {
+            choice: engine::types::actions::CastChoice::Cast,
+        })
+        .expect("the legal Discover hit starts its during-resolution cast");
+    match &mut runner.state_mut().waiting_for {
+        WaitingFor::TargetSelection { pending_cast, .. } => pending_cast.ability.chosen_x = Some(2),
+        waiting_for => panic!("expected the target-selection cast, got {waiting_for:?}"),
+    }
+
+    let completed = runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("the seeded resulting mana value rejects the Discover cast");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: engine::types::ability::EffectKind::Discover,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the uninterrupted rejection retains the existing one-event completion"
+    );
+}
+
 /// W-REG: In the absence of a Library-destination replacement, all three
 /// migrated effect paths finish synchronously with their ordinary ordering and
 /// completion behavior intact.
