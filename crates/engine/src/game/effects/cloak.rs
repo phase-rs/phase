@@ -1,7 +1,9 @@
 use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{BatchCompletion, CloakExileMember, GameState};
+use crate::types::zones::Zone;
 
 /// CR 701.58a: Cloak — put the top card of a player's library onto the
 /// battlefield face down as a 2/2 creature **with ward {2}**. Like manifest
@@ -55,7 +57,7 @@ pub fn resolve(
         Some(TargetFilter::TrackedSet { .. }) => {
             // CR 608.2c: bind the `TrackedSetId(0)` sentinel to the chain's
             // published pile (the same set `Effect::Shuffle` just reordered).
-            let members: Vec<crate::types::identifiers::ObjectId> =
+            let member_ids: Vec<crate::types::identifiers::ObjectId> =
                 match crate::game::targeting::resolve_tracked_set_sentinel(
                     state,
                     TargetFilter::TrackedSet {
@@ -70,60 +72,50 @@ pub fn resolve(
                     _ => Vec::new(),
                 };
 
-            // CR 701.58e: cloak the pile one card at a time, in the shuffled order.
-            for object_id in members {
-                // Capture the departing creature's attachments BEFORE the exile —
-                // `sever_battlefield_attachment_graph_on_exit` clears this list as
-                // part of the zone change.
-                let attachments = state
-                    .objects
-                    .get(&object_id)
-                    .map(|obj| obj.attachments.clone())
-                    .unwrap_or_default();
-
-                // CR 603.6c + CR 122.2: a real Battlefield→Exile move — clears
-                // counters, fires leaves-the-battlefield triggers, and detaches
-                // the creature from any Aura/Equipment (host side).
-                crate::game::zones::move_to_zone(
-                    state,
+            // CR 603.10a: capture attachment identities while the departing
+            // creatures still exist on the battlefield. Zone delivery severs the
+            // live host edge before LTB trigger collection, so the typed tail
+            // needs this pre-event snapshot to clear the former attachment
+            // back-edges after the whole departure batch settles.
+            let members = member_ids
+                .into_iter()
+                .map(|object_id| CloakExileMember {
                     object_id,
-                    crate::types::zones::Zone::Exile,
-                    events,
-                );
+                    attachments: state
+                        .objects
+                        .get(&object_id)
+                        .map(|object| object.attachments.clone())
+                        .unwrap_or_default(),
+                })
+                .collect::<Vec<_>>();
+            let requests = members
+                .iter()
+                .map(|member| {
+                    ZoneMoveRequest::effect(member.object_id, Zone::Exile, ability.source_id)
+                })
+                .collect();
 
-                // CR 400.7 + CR 704.5m/704.5n: the exiled creature became a new
-                // object, and the cloaked card it returns as is yet another new
-                // object. The engine reuses `ObjectId` across zones, so the
-                // attachment side of the graph still points at that reused id —
-                // null each former attachment's back-edge to model "the object I
-                // was attached to ceased to exist" (CR 400.7). Without this, the
-                // reused-id face-down 2/2 that returns below would spuriously
-                // satisfy the attachment-legality re-check and the Aura/Equipment
-                // would never fall off. The post-resolution CR 704.5m SBA then
-                // sends orphaned Auras to the graveyard and unattaches Equipment.
-                for attachment_id in attachments {
-                    if let Some(attachment) = state.objects.get_mut(&attachment_id) {
-                        attachment.attached_to = None;
-                    }
-                }
-
-                // CR 701.58a: manifest the now-exiled card back onto the
-                // battlefield face down as a 2/2 with ward {2}.
-                crate::game::morph::manifest_card(
-                    state,
+            // CR 614.1 + CR 616.1: this is a real effect-owned
+            // Battlefield→Exile batch. Its detach/manifest tail belongs to the
+            // typed completion so it cannot run before a replacement choice, and
+            // it can re-park if an individual face-down entry later needs one.
+            let result = zone_pipeline::move_objects_simultaneously_then(
+                state,
+                requests,
+                Some(BatchCompletion::CloakExileDeliveryComplete {
                     player,
-                    object_id,
-                    ability.source_id,
-                    crate::types::ability::FaceDownProfile::cloaked_2_2(),
-                    None,
-                    events,
-                )
-                .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+                    source_id: ability.source_id,
+                    members,
+                }),
+                events,
+            );
+            if matches!(result, BatchMoveResult::NeedsChoice) {
+                return Ok(());
             }
-            // The detach/exile/return churn changed the attachment graph and P/T;
-            // force a layer recompute so downstream reads settle (mirrors
-            // `sever_battlefield_attachment_graph_on_exit`).
-            crate::game::layers::mark_layers_full(state);
+
+            // The synchronous completion already performed the manifest tail and
+            // emitted `EffectResolved`; do not let the common epilogue duplicate it.
+            return Ok(());
         }
         // (B) An explicit object set forwarded onto `ability.targets` by a parent
         //     `ChooseFromZone` (Vannifar's "cloak a card from your hand"). Those
@@ -173,6 +165,89 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 701.58a + CR 603.10a + CR 614.1 + CR 616.1: Finish the tracked-pile
+/// cloak only after every proposed Battlefield→Exile move settles. A redirect
+/// that leaves a member on the battlefield did not make it leave, so its
+/// attachment edges stay intact. A redirect to any other zone did make it
+/// leave, so the captured attachment back-edges are cleared, but only a member
+/// that actually settled in Exile is manifested face down. This is the engine's
+/// ruling for Expose-style "exile ... then cloak them": a card redirected away
+/// from the exile pile is not re-manifested from a zone it never reached.
+pub(crate) fn complete_tracked_set_exile_delivery(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
+    members: Vec<CloakExileMember>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    for (index, member) in members.iter().enumerate() {
+        let Some(zone) = state
+            .objects
+            .get(&member.object_id)
+            .map(|object| object.zone)
+        else {
+            continue;
+        };
+        if zone == Zone::Battlefield {
+            continue;
+        }
+
+        // CR 400.7 + CR 704.5m/704.5n: preserve the former attachment handling
+        // after the whole departure batch settled. `ObjectId` is reused across
+        // zones, so its former attachments must not point at a new incarnation.
+        for &attachment_id in &member.attachments {
+            if let Some(attachment) = state.objects.get_mut(&attachment_id) {
+                attachment.attached_to = None;
+            }
+        }
+
+        if zone != Zone::Exile {
+            continue;
+        }
+
+        // `manifest_card` is itself the single replacement-aware authority for
+        // the face-down battlefield entry (CR 701.58a); do not consult the zone
+        // pipeline a second time here.
+        let waiting_for_before_entry = state.waiting_for.clone();
+        crate::game::morph::manifest_card(
+            state,
+            player,
+            member.object_id,
+            source_id,
+            crate::types::ability::FaceDownProfile::cloaked_2_2(),
+            None,
+            events,
+        )
+        .expect("a settled Cloak batch member exists for face-down entry");
+
+        if state.waiting_for != waiting_for_before_entry {
+            // CR 614.1 + CR 616.1: An individual manifest entry can park on a
+            // replacement choice. Keep only the unstarted tail in this typed
+            // completion; the current entry is already parked by `manifest_card`.
+            crate::game::zone_pipeline::defer_completion_on_pause(
+                state,
+                BatchCompletion::CloakExileDeliveryComplete {
+                    player,
+                    source_id,
+                    members: members[index + 1..].to_vec(),
+                },
+            );
+            crate::game::layers::mark_layers_full(state);
+            return BatchMoveResult::NeedsChoice;
+        }
+    }
+
+    // The detach/exile/return churn changed the attachment graph and P/T; force
+    // a layer recompute so downstream reads settle (mirrors exit severing).
+    crate::game::layers::mark_layers_full(state);
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Cloak,
+        source_id,
+        subject: None,
+    });
+    BatchMoveResult::Done
 }
 
 #[cfg(test)]
