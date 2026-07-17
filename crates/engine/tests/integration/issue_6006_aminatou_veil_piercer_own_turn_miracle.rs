@@ -13,6 +13,11 @@ use engine::types::phase::Phase;
 
 const AMINATOU: &str = "Each enchantment card in your hand has miracle. Its miracle cost is equal to its mana cost reduced by {4}.";
 
+/// Action budget for a single-turn scenario (draw step through main phase).
+const MAX_ACTIONS_SINGLE_TURN: usize = 400;
+/// Action budget for a scenario spanning an intervening opponent's turn.
+const MAX_ACTIONS_MULTI_TURN: usize = 2000;
+
 fn advance_turn_action(runner: &mut GameRunner) {
     let action = match &runner.state().waiting_for {
         WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. } => GameAction::PassPriority,
@@ -45,7 +50,7 @@ fn aminatou_grant_offers_miracle_on_controllers_own_draw_step() {
         .id();
     let mut runner = scenario.build();
 
-    for _ in 0..400 {
+    for _ in 0..MAX_ACTIONS_SINGLE_TURN {
         match &runner.state().waiting_for {
             WaitingFor::MiracleReveal {
                 player, object_id, ..
@@ -67,7 +72,7 @@ fn aminatou_grant_offers_miracle_on_controllers_own_draw_step() {
         }
     }
 
-    panic!("did not reach a MiracleReveal prompt within 400 actions");
+    panic!("did not reach a MiracleReveal prompt within {MAX_ACTIONS_SINGLE_TURN} actions");
 }
 
 /// CR 702.94a: The grant must keep working on the controller's SECOND own
@@ -95,7 +100,7 @@ fn aminatou_grant_offers_miracle_after_an_intervening_opponent_turn() {
     let mut runner = scenario.build();
 
     let mut seen_miracle_reveal = false;
-    for _ in 0..2000 {
+    for _ in 0..MAX_ACTIONS_MULTI_TURN {
         match &runner.state().waiting_for {
             WaitingFor::MiracleReveal { object_id, .. } if *object_id == miracle_card => {
                 seen_miracle_reveal = true;
