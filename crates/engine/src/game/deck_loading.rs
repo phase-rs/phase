@@ -940,7 +940,7 @@ fn load_player_library(state: &mut GameState, entries: &[DeckEntry], owner: Play
 /// Produces a fresh ID-allocation order for every hidden-order deck before its
 /// usual game-start shuffle. This prevents a public object ID from encoding the
 /// submitted deck-list position once the card is later revealed.
-fn shuffled_entry_faces(state: &mut GameState, entries: &[DeckEntry]) -> Vec<&CardFace> {
+fn shuffled_entry_faces<'a>(state: &mut GameState, entries: &'a [DeckEntry]) -> Vec<&'a CardFace> {
     let mut faces = entries
         .iter()
         .flat_map(|entry| std::iter::repeat_n(&entry.card, entry.count as usize))
