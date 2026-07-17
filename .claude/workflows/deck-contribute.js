@@ -439,15 +439,15 @@ function clusterVerifyPrompt(mechanic, cards) {
     `pass the upstream/main merge-base explicitly. The script's DEFAULT base is the stale fork ` +
     `origin/main, which diffs the whole tree and false-flags pre-existing nom-combinator debt in ` +
     `files this change never touched. Scoped to the correct base it only checks THIS change's lines; ` +
-    `treat a non-zero exit as a failure ONLY if a flagged line is in a file this change modified.\n` +
+    `treat any non-zero exit as a verification failure.\n` +
     `3. If \`tilt get uiresource clippy >/dev/null 2>&1\` succeeds: ` +
-    `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data ; else ` +
-    `cargo clippy-strict && cargo test -p engine && ./scripts/gen-card-data.sh\n` +
+    `./scripts/tilt-wait.sh --timeout 240 clippy test-engine test-ai wasm card-data ; else ` +
+    `cargo clippy-strict && cargo test -p engine && cargo test -p phase-ai && cargo wasm && ./scripts/gen-card-data.sh\n` +
     `   (If this change adds or removes a variant on an engine enum — Effect, TriggerMode, ` +
     `StaticCondition, GameEvent, EffectKind — keep clippy WORKSPACE-wide, never narrowed to ` +
-    `\`-p engine\`, and also run \`cargo test -p phase-ai\`: phase-ai and engine-wasm match these ` +
-    `enums exhaustively, so a \`-p engine\`-only check cannot observe a non-exhaustive-match break ` +
-    `in those crates that fails CI's Rust-lint / WASM-compile jobs.)\n` +
+    `\`-p engine\`; in the Tilt branch, wait for \`test-ai\` and \`wasm\`, and in the no-Tilt fallback ` +
+    `run \`cargo test -p phase-ai\` and \`cargo wasm\`: phase-ai and engine-wasm match these enums ` +
+    `exhaustively, so an engine-only check cannot observe a non-exhaustive-match break in those crates.)\n` +
     `4. cargo coverage — confirm EACH of these cards is now supported:true gap:0; ` +
     `list the ones that are in cardsSupported:\n${cards.map((c) => `- ${c}`).join('\n')}\n` +
     `5. cargo semantic-audit — confirm none of these cards has findings -> ` +
