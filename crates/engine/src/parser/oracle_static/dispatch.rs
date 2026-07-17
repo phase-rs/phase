@@ -3005,7 +3005,10 @@ pub(crate) fn parse_static_line_inner(
                     amount,
                     minimum_mana,
                     dynamic_count,
-                    exemption: if tp.lower.contains("unless they're mana abilities") {
+                    exemption: if nom_primitives::scan_contains(
+                        tp.lower,
+                        "unless they're mana abilities",
+                    ) {
                         ActivationExemption::ManaAbilities
                     } else {
                         ActivationExemption::None

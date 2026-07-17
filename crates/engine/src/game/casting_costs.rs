@@ -11354,7 +11354,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
-    _events: &mut Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
     payment_context: Option<&PaymentContext<'_>>,
     excluded_sources: &HashSet<ObjectId>,
     resume: Option<&ManaAbilityResume>,
@@ -11428,7 +11428,9 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     // CR 605.3b + CR 616.1: A costed mana source can suspend auto-tap on a
     // replacement choice. Preserve that live choice; computing Phyrexian
     // shards here would overwrite its typed payment root.
-    if super::casting::mana_ability_cost_payment_is_paused(state) {
+    if super::casting::mana_ability_cost_payment_is_paused(&preview) {
+        *state = preview;
+        events.extend(preview_events);
         return Some(state.waiting_for.clone());
     }
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline so

@@ -2033,6 +2033,12 @@ pub fn pending_phyrexian_route_is_payable(
         payment_context.as_ref(),
         &excluded_sources,
     );
+    // CR 605.3b + CR 616.1: A costed mana source can pause while a
+    // replacement choice is answered. The route remains potentially payable;
+    // live finalization will surface and resume that choice.
+    if mana_ability_cost_payment_is_paused(&preview) {
+        return true;
+    }
     super::triggers::resolve_tap_mana_triggers_inline(&mut preview, &mut preview_events, 0);
     let hand_demand = mana_payment::compute_hand_color_demand(&preview, player, spell_object);
     let mut pool = preview

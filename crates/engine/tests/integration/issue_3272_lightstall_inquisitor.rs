@@ -141,14 +141,17 @@ fn gobakhan_exiles_only_nonlands_and_raises_the_exiled_spell_cost() {
         unreachable!("matched RevealHand above")
     };
     assert!(*choice_optional);
-    assert!(matches!(
-        card_filter,
-        TargetFilter::Typed(filter)
-            if filter.type_filters.iter().any(|kind| matches!(
-                kind,
-                TypeFilter::Non(inner) if **inner == TypeFilter::Land
-            ))
-    ));
+    assert!(
+        matches!(
+            card_filter,
+            TargetFilter::Typed(filter)
+                if filter.type_filters.iter().any(|kind| matches!(
+                    kind,
+                    TypeFilter::Non(inner) if **inner == TypeFilter::Land
+                ))
+        ),
+        "Gobakhan's exile choice must exclude lands, got {card_filter:?}"
+    );
 
     let (permission, grantee) = find_play_from_exile_grant(execute)
         .expect("Gobakhan must grant the exiled card's owner permission to play it");

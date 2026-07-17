@@ -21975,7 +21975,7 @@ fn trailing_bare_article_only(input: &str) -> bool {
         all_consuming(terminated(take_until::<_, _, E>(" a"), tag(" a"))),
     )))
     .parse(input.trim())
-    .is_ok()
+    .is_ok_and(|(_, article)| article.is_some())
 }
 
 /// Merge the pre-`from it` card phrase with the plain trailing restriction

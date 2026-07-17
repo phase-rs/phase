@@ -965,7 +965,13 @@ fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)>
     // repeated-payment form, "when you pay this cost one or more times".
     let when_you_do =
         nom_condition::match_when_you_do(connector).is_ok_and(|(rest, ())| rest.is_empty());
-    if !when_you_do && connector.trim() != "when you pay this cost one or more times" {
+    let repeated_payment = terminated(
+        tag::<_, _, OracleError<'_>>("when you pay this cost one or more times"),
+        multispace0,
+    )
+    .parse(connector.trim())
+    .is_ok_and(|(rest, _)| rest.is_empty());
+    if !when_you_do && !repeated_payment {
         return None;
     }
 
