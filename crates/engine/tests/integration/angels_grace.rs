@@ -99,6 +99,56 @@ fn angels_grace_blocks_opponent_win_effect() {
     );
 }
 
+/// CR 104.3e + CR 810.8a: an effect-stated loss ("Target player loses the
+/// game" — Door to Nothingness wording) is precluded for the Angel's Grace
+/// caster this turn, while the same effect still eliminates the unprotected
+/// opponent (in-test reach guard proving the effect-loss path is live).
+#[test]
+fn angels_grace_blocks_loss_effects_against_caster() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let grace = add_angels_grace(&mut scenario);
+    let doom_a = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Test Loss Spell A",
+            true,
+            "Target player loses the game.",
+        )
+        .id();
+    let doom_b = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Test Loss Spell B",
+            true,
+            "Target player loses the game.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    cast_angels_grace_as_p1(&mut runner, grace);
+
+    // P0 (active, holding priority post-resolution) aims the loss at the
+    // protected caster: the effect resolves but the loss is precluded.
+    runner.cast(doom_a).target_player(P1).resolve();
+    assert!(
+        !runner.state().players[1].is_eliminated,
+        "Angel's Grace caster must not lose to an effect-stated loss (CR 104.3e)"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+        "game must continue after the blocked loss"
+    );
+
+    // Reach guard: the identical effect against the unprotected P0 eliminates
+    // them, proving the effect-loss path is live this game.
+    runner.cast(doom_b).target_player(P0).resolve();
+    assert!(
+        runner.state().players[0].is_eliminated,
+        "unprotected player must still lose to the effect (reach guard)"
+    );
+}
+
 /// Reach guard for [`angels_grace_blocks_opponent_win_effect`]: without Angel's
 /// Grace the identical win effect ends the game, proving the win path is live
 /// and the blocked outcome above is not vacuous.
