@@ -1882,9 +1882,16 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::You => {
                             source_controller == Some(player_id)
                         }
-                        crate::types::ability::ControllerRef::Opponent => {
-                            source_controller.is_some() && source_controller != Some(player_id)
-                        }
+                        // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a
+                        // multiplayer team game (e.g. Two-Headed Giant) a player's
+                        // opponents are only players NOT on their team, so a naive
+                        // `source_controller != player_id` inequality wrongly treats a
+                        // teammate as an opponent. Route through the team-aware
+                        // authority; in a two-player game `is_opponent` reduces to `!=`.
+                        crate::types::ability::ControllerRef::Opponent => source_controller
+                            .is_some_and(|sc| {
+                                crate::game::players::is_opponent(state, sc, player_id)
+                            }),
                         // CR 109.4: Static abilities have no ability-target context
                         // in which to resolve a target player. Fail closed — the
                         // parser never emits this variant for static filters.
