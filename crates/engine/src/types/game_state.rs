@@ -2421,6 +2421,10 @@ pub struct CloakExileMember {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
+    /// CR 701.44a + CR 701.44b + CR 614.1 + CR 616.1: A revealed explore land's
+    /// proposed Library→Hand delivery settled. The explore completion event is
+    /// deferred so its trigger boundary cannot precede a replacement choice.
+    ExploreLandDeliveryComplete { explorer_id: ObjectId },
     /// CR 701.58a + CR 603.10a + CR 614.1 + CR 616.1: A tracked cloak pile's
     /// Battlefield→Exile batch settled. Keep its pre-departure attachment
     /// snapshots so the tail can detach every actual departure and manifest

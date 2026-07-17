@@ -6131,6 +6131,9 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::ExploreLandDeliveryComplete { explorer_id } => {
+            effects::explore::complete_land_delivery(explorer_id, events)
+        }
         BatchCompletion::CloakExileDeliveryComplete {
             player,
             source_id,
