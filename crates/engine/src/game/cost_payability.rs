@@ -624,10 +624,28 @@ impl AbilityCost {
             AbilityCost::OneOf { costs } => {
                 costs.iter().any(|c| c.is_payable(state, player, source))
             }
-            // CR 601.2b: Waterbend composes a mana cost with a tap-creature option.
-            // Affordability is checked via the standard auto-tap pre-check.
+            // CR 601.2b + CR 701.67a: Waterbend composes a mana cost with a
+            // tap-creature-or-artifact-to-help option (the whole point of the
+            // keyword). The plain auto-tap pre-check (`can_pay_cost_after_auto_tap`)
+            // only considers real mana-producing sources (lands, mana rocks) and
+            // has no notion of Waterbend's own tap-to-help mechanic, so it wrongly
+            // rejected activation whenever the player lacked N generic mana from
+            // real mana sources even with plenty of untapped eligible creatures to
+            // tap (issue #4966) — silently suppressing the ability (and its
+            // effect) before the player ever got a chance to pay via tapping.
+            // `can_feasibly_pay_mana_cost_with_tap_payment_mode` is the existing,
+            // already-correct helper for this (used by the spell-cast "additional
+            // cost: you may waterbend N" path); it falls back to the plain
+            // auto-tap check first, so payment from a mana pool/sources alone is
+            // unaffected.
             AbilityCost::Waterbend { cost } => {
-                super::casting::can_pay_cost_after_auto_tap(state, player, source, cost)
+                super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
+                    state,
+                    player,
+                    source,
+                    cost,
+                    crate::types::game_state::ConvokeMode::Waterbend,
+                )
             }
             // CR 702.49: Ninjutsu requires at least one returnable creature for
             // the variant. Mana affordability is deferred to payment (per CR 601.2g).
