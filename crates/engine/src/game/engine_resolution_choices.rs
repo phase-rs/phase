@@ -5487,6 +5487,9 @@ pub(crate) fn run_batch_completion(
             )
         }
         BatchCompletion::DiscoverDeclinedComplete { player, source_id } => {
+            // CR 701.57a: the declined hit's hand delivery settled (including
+            // any CR 616.1 redirect), so the Discover result and continuation
+            // run exactly once.
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Discover,
                 source_id,
@@ -5515,6 +5518,9 @@ pub(crate) fn run_batch_completion(
             )
         }
         BatchCompletion::ResolutionCastRejectionComplete { player, source_id } => {
+            // CR 608.2g + CR 701.57a: the rejected hit's hand delivery settled
+            // (including any CR 616.1 redirect), so the Discover result and
+            // priority restoration run exactly once.
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Discover,
                 source_id,

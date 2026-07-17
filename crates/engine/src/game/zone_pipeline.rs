@@ -1115,6 +1115,14 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // when `deliver_batch` did NOT re-park, so the completion fires at
                 // most once per batch.
                 if let Some(completion) = completion {
+                    // The parked/settled result is deliberately unused here: the
+                    // drain's callers are state-mediated (engine_replacement
+                    // re-reads `state.waiting_for` after the drain and gates
+                    // every later drain stage on Priority), so a completion that
+                    // parks a new CR 616.1 choice propagates via the parked
+                    // prompt + fresh `pending_batch_deliveries` record, not via
+                    // this return value. Witnessed by the compound double-pause
+                    // test (miss batch redirect, then hit-delivery redirect).
                     let _ = run_batch_completion(state, completion, events);
                 }
             }
