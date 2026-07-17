@@ -800,7 +800,8 @@ fn next_offerable_kicker_option(
     EngineError,
 > {
     loop {
-        let Some((variant, cost, repeatability)) = next_kicker_option(state, player, pending) else {
+        let Some((variant, cost, repeatability)) = next_kicker_option(state, player, pending)
+        else {
             return Ok(None);
         };
         // CR 601.2f + CR 702.33a: a kicker can only be chosen when the

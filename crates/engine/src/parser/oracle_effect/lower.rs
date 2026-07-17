@@ -1,9 +1,9 @@
-use nom::Parser;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
 use nom::sequence::{preceded, terminated};
+use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::super::oracle_nom::duration::{
@@ -21,7 +21,7 @@ use super::super::oracle_target::{
     parse_anaphoric_target_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
     parse_type_phrase_with_ctx,
 };
-use super::super::oracle_util::{TextPair, parse_comparator_prefix, parse_count_expr, strip_after};
+use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -11426,17 +11426,15 @@ mod token_anaphor_rewrite_tests {
     #[test]
     fn generic_effect_rewrites_outer_target_without_inner_affected_rewrite() {
         let mut effect = Effect::GenericEffect {
-            static_abilities: vec![
-                StaticDefinition::continuous()
-                    .affected(TargetFilter::Typed(TypedFilter::creature()))
-                    .modifications(vec![ContinuousModification::GrantStaticAbility {
-                        definition: Box::new(
-                            StaticDefinition::continuous()
-                                .affected(TargetFilter::Typed(TypedFilter::creature()))
-                                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
-                        ),
-                    }]),
-            ],
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(
+                        StaticDefinition::continuous()
+                            .affected(TargetFilter::Typed(TypedFilter::creature()))
+                            .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                    ),
+                }])],
             duration: None,
             target: Some(TargetFilter::ParentTarget),
         };

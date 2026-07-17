@@ -2029,15 +2029,13 @@ fn pending_next_spell_cant_be_countered_stamped_on_stack() {
             source_id: None,
         });
     super::apply_pending_next_spell_stack_grants(&mut state, PlayerId(0), spell_id);
-    assert!(
-        state
-            .objects
-            .get(&spell_id)
-            .unwrap()
-            .static_definitions
-            .iter_all()
-            .any(|sd| sd.mode == StaticMode::CantBeCountered)
-    );
+    assert!(state
+        .objects
+        .get(&spell_id)
+        .unwrap()
+        .static_definitions
+        .iter_all()
+        .any(|sd| sd.mode == StaticMode::CantBeCountered));
     super::consume_pending_next_spell_modifiers(&mut state, PlayerId(0), spell_id);
     assert!(state.pending_next_spell_modifiers.is_empty());
 }
@@ -3192,11 +3190,10 @@ fn spell_meta_includes_supertypes_for_restricted_mana() {
 
     let meta = build_spell_meta(&state, PlayerId(0), commander_id).unwrap();
 
-    assert!(
-        meta.types
-            .iter()
-            .any(|type_name| type_name.eq_ignore_ascii_case("Legendary"))
-    );
+    assert!(meta
+        .types
+        .iter()
+        .any(|type_name| type_name.eq_ignore_ascii_case("Legendary")));
     assert!(ManaRestriction::OnlyForSpellType("Legendary".to_string()).allows_spell(&meta));
 }
 
@@ -10743,13 +10740,11 @@ fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
         properties: vec![FilterProp::Token],
     });
     let effect = Effect::GenericEffect {
-        static_abilities: vec![
-            StaticDefinition::new(reduce_mode.clone())
-                .affected(source_filter)
-                .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: reduce_mode,
-                }]),
-        ],
+        static_abilities: vec![StaticDefinition::new(reduce_mode.clone())
+            .affected(source_filter)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: reduce_mode,
+            }])],
         duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
         target: None,
     };
@@ -11562,10 +11557,10 @@ fn x_cost_accounts_for_pending_cost_reduction_in_max() {
 #[test]
 fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
     use super::super::engine::apply_as_current;
-    use crate::types::StaticDefinition;
     use crate::types::ability::{ControllerRef, QuantityRef, TypeFilter, TypedFilter};
     use crate::types::keywords::Keyword;
     use crate::types::statics::StaticMode;
+    use crate::types::StaticDefinition;
 
     // Build a {X}{B}{B} sorcery + a battlefield static granting
     // Affinity(Creature) to the controller's sorceries, with N creatures.
@@ -20474,14 +20469,12 @@ fn cancel_cast_uses_stamped_convoked_creatures_when_pending_snapshot_is_empty() 
     handle_cancel_cast(&mut state, &pending, &mut Vec::new());
 
     assert!(!state.objects.get(&helper).unwrap().tapped);
-    assert!(
-        state
-            .objects
-            .get(&spell)
-            .unwrap()
-            .convoked_creatures
-            .is_empty()
-    );
+    assert!(state
+        .objects
+        .get(&spell)
+        .unwrap()
+        .convoked_creatures
+        .is_empty());
     assert!(state.players[0].mana_pool.mana.is_empty());
 }
 
@@ -20634,17 +20627,15 @@ fn convoke_payment_offers_and_accepts_colored_creature_payment() {
     ));
 
     let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
-    assert!(
-        grouped
-            .get(&creature)
-            .is_some_and(|actions| actions.iter().any(|action| matches!(
-                action,
-                GameAction::TapForConvoke {
-                    object_id,
-                    mana_type: ManaType::Green
-                } if *object_id == creature
-            )))
-    );
+    assert!(grouped
+        .get(&creature)
+        .is_some_and(|actions| actions.iter().any(|action| matches!(
+            action,
+            GameAction::TapForConvoke {
+                object_id,
+                mana_type: ManaType::Green
+            } if *object_id == creature
+        ))));
     assert!(
         grouped.get(&artifact).is_none_or(|actions| actions
             .iter()
@@ -20985,16 +20976,12 @@ fn emit_targeting_events_own_object_no_crime() {
         PlayerId(0),
         &mut events,
     );
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, GameEvent::BecomesTarget { .. }))
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, GameEvent::CrimeCommitted { .. }))
-    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, GameEvent::BecomesTarget { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::CrimeCommitted { .. })));
 }
 
 #[test]
@@ -22322,21 +22309,15 @@ fn kicker_instead_target_paid_selects_replacement_target_only() {
     };
     assert!(pending_cast.ability.context.additional_cost_paid);
     assert_eq!(target_slots.len(), 1);
-    assert!(
-        !target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(artifact_id))
-    );
-    assert!(
-        target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(creature_id))
-    );
-    assert!(
-        target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(second_creature_id))
-    );
+    assert!(!target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(artifact_id)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(creature_id)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(second_creature_id)));
 }
 
 #[test]
@@ -22380,21 +22361,15 @@ fn kicked_bloodchiefs_thirst_like_spell_targets_three_mv_creature() {
     };
     assert!(pending_cast.ability.context.additional_cost_paid);
     assert_eq!(target_slots.len(), 1);
-    assert!(
-        target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(two_mv_creature))
-    );
-    assert!(
-        target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(three_mv_creature))
-    );
-    assert!(
-        target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(four_mv_creature))
-    );
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(two_mv_creature)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(three_mv_creature)));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(four_mv_creature)));
 }
 
 #[test]
@@ -22931,16 +22906,12 @@ fn modal_x_target_legality_chooses_x_before_targets() {
             ..
         } => {
             assert_eq!(target_slots.len(), 1);
-            assert!(
-                target_slots[0]
-                    .legal_targets
-                    .contains(&TargetRef::Object(creature))
-            );
-            assert!(
-                target_slots[0]
-                    .legal_targets
-                    .contains(&TargetRef::Object(other_creature))
-            );
+            assert!(target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(creature)));
+            assert!(target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(other_creature)));
             // CR 700.2 / CR 601.2c: the deferred-target path must surface the
             // per-mode label for the targeting UI (regression for issue #1543:
             // Kozilek's Command's mode-2 banner went blank after X was chosen
@@ -27395,11 +27366,9 @@ fn graveyard_spell_with_flashback_and_retrace_prompts_for_cast_variant() {
             player, options, ..
         } => {
             assert_eq!(player, PlayerId(0));
-            assert!(
-                options
-                    .iter()
-                    .any(|option| option.variant == CastingVariant::Flashback)
-            );
+            assert!(options
+                .iter()
+                .any(|option| option.variant == CastingVariant::Flashback));
             options
                 .iter()
                 .position(|option| option.variant == CastingVariant::Retrace)
@@ -27407,16 +27376,14 @@ fn graveyard_spell_with_flashback_and_retrace_prompts_for_cast_variant() {
         }
         other => panic!("expected CastingVariantChoice, got {other:?}"),
     };
-    assert!(
-        crate::ai_support::legal_actions(&state)
-            .iter()
-            .any(|action| {
-                matches!(
-                    action,
-                    GameAction::ChooseCastingVariant { index } if *index == retrace_index
-                )
-            })
-    );
+    assert!(crate::ai_support::legal_actions(&state)
+        .iter()
+        .any(|action| {
+            matches!(
+                action,
+                GameAction::ChooseCastingVariant { index } if *index == retrace_index
+            )
+        }));
 
     let result = crate::game::engine::apply_as_current(
         &mut state,
@@ -30489,11 +30456,9 @@ fn phyrexian_multi_shard_all_life_deducts_per_shard() {
     match &result.waiting_for {
         WaitingFor::PhyrexianPayment { shards, .. } => {
             assert_eq!(shards.len(), 2);
-            assert!(
-                shards
-                    .iter()
-                    .all(|s| matches!(s.options, ShardOptions::LifeOnly))
-            );
+            assert!(shards
+                .iter()
+                .all(|s| matches!(s.options, ShardOptions::LifeOnly)));
         }
         other => panic!("expected PhyrexianPayment (two LifeOnly), got {other:?}"),
     }
@@ -30570,8 +30535,8 @@ fn phyrexian_mixed_one_mana_one_life() {
 fn phyrexian_cast_no_pause_when_all_shards_trivial() {
     let mut state = setup_game_at_main_phase();
     state.players[0].life = 1; // Life < 2 → LifeOnly impossible; combined with
-    // an empty pool, cost becomes unpayable but let's
-    // give mana so every shard is ManaOnly.
+                               // an empty pool, cost becomes unpayable but let's
+                               // give mana so every shard is ManaOnly.
     let spell = create_phyrexian_instant_in_hand(
         &mut state,
         PlayerId(0),
@@ -32023,8 +31988,8 @@ mod summoning_sickness_gate {
 mod remove_counter_cost {
     use super::*;
     use crate::types::ability::{
-        CounterCostSelection, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X, TypeFilter,
-        TypedFilter,
+        CounterCostSelection, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        REMOVE_COUNTER_COST_X,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::CounterCostChoice;
@@ -35669,20 +35634,18 @@ mod loyalty_gate {
             let obj = state.objects.get_mut(&eidolon).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.static_definitions = vec![
-                StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                    mode: CostModifyMode::Raise,
-                    keyword: "loyalty".to_string(),
-                    amount: 1,
-                    minimum_mana: None,
-                    dynamic_count: None,
-                    exemption: ActivationExemption::None,
-                    activator: None,
-                })
-                .affected(TargetFilter::Typed(
-                    TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
-                )),
-            ]
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "loyalty".to_string(),
+                amount: 1,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+            ))]
             .into();
         }
 
@@ -35737,8 +35700,8 @@ mod loyalty_gate {
                 let obj = state.objects.get_mut(&eidolon).unwrap();
                 obj.card_types.core_types.push(CoreType::Enchantment);
                 obj.card_types.core_types.push(CoreType::Creature);
-                obj.static_definitions = vec![
-                    StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                obj.static_definitions =
+                    vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
                         mode: CostModifyMode::Raise,
                         keyword: "loyalty".to_string(),
                         amount: 1,
@@ -35750,9 +35713,8 @@ mod loyalty_gate {
                     .affected(TargetFilter::Typed(
                         TypedFilter::new(TypeFilter::Planeswalker)
                             .controller(ControllerRef::Opponent),
-                    )),
-                ]
-                .into();
+                    ))]
+                    .into();
             }
             (state, pw)
         }
@@ -35881,20 +35843,18 @@ mod loyalty_gate {
             let obj = state.objects.get_mut(&eidolon).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.card_types.core_types.push(CoreType::Creature);
-            obj.static_definitions = vec![
-                StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                    mode: CostModifyMode::Raise,
-                    keyword: "loyalty".to_string(),
-                    amount: 1,
-                    minimum_mana: None,
-                    dynamic_count: None,
-                    exemption: ActivationExemption::None,
-                    activator: None,
-                })
-                .affected(TargetFilter::Typed(
-                    TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
-                )),
-            ]
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "loyalty".to_string(),
+                amount: 1,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+            ))]
             .into();
         }
 
@@ -42220,13 +42180,11 @@ fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
         let o = state.objects.get_mut(&goblin).unwrap();
         o.card_types.core_types.push(CoreType::Creature);
     }
-    state.attacker_declarations_this_turn = vec![
-        state
-            .objects
-            .get(&goblin)
-            .unwrap()
-            .snapshot_for_attack_declaration(goblin),
-    ];
+    state.attacker_declarations_this_turn = vec![state
+        .objects
+        .get(&goblin)
+        .unwrap()
+        .snapshot_for_attack_declaration(goblin)];
     let mut def_wrong = make_def();
     apply_cost_reduction(&state, &mut def_wrong, PlayerId(0), src);
     assert_eq!(
@@ -42284,13 +42242,11 @@ fn thaumaton_torpedo_cost_reduction_requires_spacecraft_attacker() {
         o.card_types.core_types.push(CoreType::Artifact);
         o.card_types.subtypes.push("Spacecraft".to_string());
     }
-    state_opp.attacker_declarations_this_turn = vec![
-        state_opp
-            .objects
-            .get(&opp_ship)
-            .unwrap()
-            .snapshot_for_attack_declaration(opp_ship),
-    ];
+    state_opp.attacker_declarations_this_turn = vec![state_opp
+        .objects
+        .get(&opp_ship)
+        .unwrap()
+        .snapshot_for_attack_declaration(opp_ship)];
     let mut def_opp = make_def();
     apply_cost_reduction(&state_opp, &mut def_opp, PlayerId(0), src2);
     assert_eq!(
@@ -42340,22 +42296,20 @@ fn boom_scholar_reduces_other_permanents_exhaust_ability_cost() {
         obj.card_types
             .core_types
             .push(crate::types::card_type::CoreType::Creature);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode: crate::types::statics::CostModifyMode::Reduce,
-                keyword: "exhaust".to_string(),
-                amount: 2,
-                minimum_mana: None,
-                dynamic_count: None,
-                exemption: crate::types::statics::ActivationExemption::None,
-                activator: None,
-            })
-            .affected(TargetFilter::Typed(
-                TypedFilter::permanent()
-                    .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Another]),
-            )),
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: crate::types::statics::CostModifyMode::Reduce,
+            keyword: "exhaust".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::permanent()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Another]),
+        ))]
         .into();
     }
 
@@ -42468,18 +42422,16 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
             .push(crate::types::card_type::CoreType::Artifact);
         obj.chosen_attributes
             .push(ChosenAttribute::CardName("Targeted Source".to_string()));
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode: CostModifyMode::Raise,
-                keyword: "activated".to_string(),
-                amount: 2,
-                minimum_mana: None,
-                dynamic_count: None,
-                exemption: crate::types::statics::ActivationExemption::None,
-                activator: None,
-            })
-            .affected(TargetFilter::HasChosenName),
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Raise,
+            keyword: "activated".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+        })
+        .affected(TargetFilter::HasChosenName)]
         .into();
     }
 
@@ -42596,20 +42548,18 @@ fn eidolon_of_obstruction_taxes_opponent_loyalty_ability() {
         let obj = state.objects.get_mut(&eidolon).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
         obj.card_types.core_types.push(CoreType::Creature);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode: CostModifyMode::Raise,
-                keyword: "loyalty".to_string(),
-                amount: 1,
-                minimum_mana: None,
-                dynamic_count: None,
-                exemption: crate::types::statics::ActivationExemption::None,
-                activator: None,
-            })
-            .affected(TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
-            )),
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Raise,
+            keyword: "loyalty".to_string(),
+            amount: 1,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+        ))]
         .into();
     }
 
@@ -42758,22 +42708,20 @@ fn agatha_dynamic_power_reduces_controlled_creature_ability_cost() {
             .push(crate::types::card_type::CoreType::Creature);
         obj.power = Some(3);
         obj.toughness = Some(1);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode: CostModifyMode::Reduce,
-                keyword: "activated".to_string(),
-                amount: 1,
-                minimum_mana: Some(1),
-                dynamic_count: Some(QuantityRef::Power {
-                    scope: ObjectScope::Source,
-                }),
-                exemption: crate::types::statics::ActivationExemption::None,
-                activator: None,
-            })
-            .affected(TargetFilter::Typed(
-                TypedFilter::creature().controller(ControllerRef::You),
-            )),
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 1,
+            minimum_mana: Some(1),
+            dynamic_count: Some(QuantityRef::Power {
+                scope: ObjectScope::Source,
+            }),
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))]
         .into();
     }
 
@@ -43030,22 +42978,20 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
                 "Agatha of the Vile Cauldron".to_string(),
                 Zone::Battlefield,
             );
-            let statics = vec![
-                StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                    mode: CostModifyMode::Reduce,
-                    keyword: "activated".to_string(),
-                    amount: 1,
-                    minimum_mana: Some(1),
-                    dynamic_count: Some(QuantityRef::Power {
-                        scope: ObjectScope::Source,
-                    }),
-                    exemption: crate::types::statics::ActivationExemption::None,
-                    activator: None,
-                })
-                .affected(TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::You),
-                )),
-            ];
+            let statics = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount: 1,
+                minimum_mana: Some(1),
+                dynamic_count: Some(QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                }),
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))];
             let obj = state.objects.get_mut(&agatha).unwrap();
             obj.card_types
                 .core_types
@@ -43803,18 +43749,16 @@ fn firion_reduces_self_equip_ability_cost() {
             .core_types
             .push(crate::types::card_type::CoreType::Artifact);
         obj.card_types.subtypes.push("Equipment".to_string());
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                mode: CostModifyMode::Reduce,
-                keyword: "equip".to_string(),
-                amount: 2,
-                minimum_mana: None,
-                dynamic_count: None,
-                exemption: crate::types::statics::ActivationExemption::None,
-                activator: None,
-            })
-            .affected(TargetFilter::SelfRef),
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "equip".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+        })
+        .affected(TargetFilter::SelfRef)]
         .into();
     }
 
