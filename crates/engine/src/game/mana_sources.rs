@@ -19,6 +19,7 @@ use crate::types::ability::{
     PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use crate::types::card_type::CoreType;
+use crate::types::card_type::Supertype;
 use crate::types::game_state::{GameState, ProductionOverride};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
@@ -2050,6 +2051,18 @@ fn mana_options_from_production(
         // option set and contributes nothing to mana-source analysis.
         ManaProduction::TriggerEventManaType => Vec::new(),
     }
+}
+
+/// CR 205.4g / CR 106.3 / CR 107.4h: a permanent with the "snow" supertype is a snow
+/// source; mana produced by its abilities is snow mana (spendable for {S}). Reads the
+/// LAYERED (post-CR-613) supertype set on the object, so continuously-granted Snow counts
+/// and continuously-removed Snow does not (CR 205.4b). A missing object / ObjectId(0)
+/// sentinel is not a snow source.
+pub(crate) fn source_is_snow(state: &GameState, source_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| obj.card_types.supertypes.contains(&Supertype::Snow))
 }
 
 pub(crate) fn source_could_produce_two_or_more_colors(
@@ -4621,5 +4634,51 @@ mod tests {
 
         let sources = beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0));
         assert_eq!(sources, vec![dork], "only P0's controlled source is listed");
+    }
+
+    /// CR 205.4b + CR 205.4g: `source_is_snow` reads the LAYERED (post-CR-613)
+    /// supertype set, not the printed base set. A permanent whose Snow supertype
+    /// was continuously granted (base lacks it, layered set contains it) is a
+    /// snow source. This is the discriminating fixture for "reads layered, not
+    /// base": a `base_card_types`-reading implementation would return `false`.
+    #[test]
+    fn source_is_snow_reads_layered_not_base_supertypes() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Continuously-Snowed Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        // Printed (base) supertypes deliberately LACK Snow ...
+        obj.base_card_types = obj.card_types.clone();
+        // ... while the layered result (post-CR-613 continuous grant) HAS Snow.
+        obj.card_types.supertypes.push(Supertype::Snow);
+
+        // Non-vacuity guard: the base set must genuinely lack Snow, so a
+        // base-reading implementation would fail this test.
+        assert!(
+            !obj.base_card_types.supertypes.contains(&Supertype::Snow),
+            "fixture invalid: base supertypes must NOT contain Snow for this to \
+             discriminate layered vs. base reads",
+        );
+        assert!(
+            source_is_snow(&state, id),
+            "a permanent continuously granted the Snow supertype is a snow source \
+             (CR 205.4g); source_is_snow must read the layered supertype set",
+        );
+    }
+
+    /// A missing object / `ObjectId(0)` sentinel is not a snow source.
+    #[test]
+    fn source_is_snow_false_for_missing_object() {
+        let state = GameState::new_two_player(42);
+        assert!(
+            !source_is_snow(&state, ObjectId(0)),
+            "the ObjectId(0) sentinel (and any absent object) is not a snow source",
+        );
     }
 }

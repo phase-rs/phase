@@ -703,6 +703,7 @@ mod skullwinder_chosen_opponent;
 mod slaughter_the_strong_total_power_4380;
 mod slitherwisp_flash_spell_cast_trigger;
 mod sliver_static_grants;
+mod snow_mana_production;
 mod sothera_supervoid_edict_reanimate;
 mod special_action_x_runtime;
 mod specialize_runtime;
