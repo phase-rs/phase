@@ -3937,6 +3937,9 @@ fn bind_search_found_definition(
         return None;
     }
 
+    // CR 611.2b: Bind the "for as long as it remains exiled" permission from
+    // the resolving SearchFound replacement; delivery applies it only if that
+    // duration actually starts.
     let grant = match execute.sub_ability.as_deref() {
         None => None,
         Some(child) => {
