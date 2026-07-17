@@ -367,6 +367,7 @@ FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
 NAMES_SIZE=$(du -h "$NAMES_OUTPUT" | cut -f1)
 # Count entries in the small names array (648K) rather than grepping the 90MB
 # card-data for `"name"` — the latter is slower and overcounts nested keys.
-CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT")
+# tr strips Windows jq's trailing \r, which would otherwise corrupt this summary line.
+CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT" | tr -d '\r')
 echo "Generated $OUTPUT ($FILE_SIZE, ~$CARD_COUNT cards)"
 echo "Generated $NAMES_OUTPUT ($NAMES_SIZE)"
