@@ -283,7 +283,7 @@ describe("DeckBuilder", () => {
 
     const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Oath Deck"));
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: /^(Save|Saved)$/ }));
     await waitFor(() => {
       const persisted = JSON.parse(
         localStorage.getItem(STORAGE_KEY_PREFIX + "Oath Deck") ?? "{}",
@@ -292,7 +292,7 @@ describe("DeckBuilder", () => {
     });
 
     rerender(<DeckBuilder format="Modern" {...props} />);
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: /^(Save|Saved)$/ }));
     await waitFor(() => {
       const persisted = JSON.parse(
         localStorage.getItem(STORAGE_KEY_PREFIX + "Oath Deck") ?? "{}",

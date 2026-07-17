@@ -94,7 +94,7 @@ fn companion_action_auto_taps_three_sources_and_moves_to_hand() {
             && object.name == "Companion Payment Witness"
     }));
     assert!(lands.iter().all(|id| runner.state().objects[id].tapped));
-    assert!(runner.state().lands_tapped_for_mana.get(&P0).is_none());
+    assert!(!runner.state().lands_tapped_for_mana.contains_key(&P0));
     assert!(result.events.iter().any(|event| matches!(
         event,
         GameEvent::CompanionMovedToHand { player, card_name }
@@ -348,7 +348,7 @@ fn paused_companion_payment_resumes_the_locked_cost_and_commits_once() {
         1,
         "resumption must commit the companion move exactly once"
     );
-    assert!(runner.state().lands_tapped_for_mana.get(&P0).is_none());
+    assert!(!runner.state().lands_tapped_for_mana.contains_key(&P0));
     assert_eq!(
         resumed
             .events

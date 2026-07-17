@@ -1557,7 +1557,14 @@ mod tests {
 
         assert_eq!(state.deck_pools[0].current_signature_spell.len(), 1);
         assert_eq!(state.command_zone.len(), 1);
-        assert!(state.objects[&state.command_zone[0]].is_signature_spell());
+        let signature_spell = &state.objects[&state.command_zone[0]];
+        assert!(signature_spell.is_signature_spell());
+        assert_eq!(
+            serde_json::to_value(signature_spell).expect("signature spell must serialize")
+                ["signature_spell"],
+            serde_json::json!({}),
+            "the wire marker must be non-null so clients recognize the signature spell"
+        );
     }
 
     #[test]
