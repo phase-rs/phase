@@ -193,3 +193,61 @@ fn kroxa_three_player_each_opponent_gated_by_their_own_discard() {
         "P2 discarded a nonland card — life loss must NOT fire for P2"
     );
 }
+
+/// Regression guard for the guard-scoping fix at `strip_each_player_subject`'s
+/// "who didn't"/"who did not" reservation: that reservation must only claim
+/// the "discard" verb the Kroxa dispatcher understands, not every verb.
+///
+/// Before the fix, reserving bare "who didn't"/"who did not" (any verb) left
+/// non-discard "who didn't <verb> ... this way, <body>" clauses — e.g. Kynaios
+/// and Tiro of Meletis: "each other player who didn't put a card onto the
+/// battlefield this way draws a card" — with no dispatcher able to claim
+/// them. They fell through to the ordinary imperative parser, which matched
+/// the leftover "put a card onto the battlefield" fragment as a `ChangeZone`
+/// effect and silently dropped the actual "draws a card" action entirely.
+fn add_library_card(state: &mut GameState, card_id: u64, player: PlayerId) -> ObjectId {
+    create_object(
+        state,
+        CardId(card_id),
+        player,
+        "Card".to_string(),
+        Zone::Library,
+    )
+}
+
+fn hand_size(state: &GameState, player: PlayerId) -> usize {
+    state
+        .objects
+        .values()
+        .filter(|obj| obj.zone == Zone::Hand && obj.owner == player)
+        .count()
+}
+
+#[test]
+fn non_discard_who_didnt_clause_still_draws_a_card() {
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Kynaios and Tiro of Meletis".to_string(),
+        Zone::Battlefield,
+    );
+    add_library_card(&mut state, 100, PlayerId(1));
+
+    let text = "each other player who didn't put a card onto the battlefield \
+        this way draws a card.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let ability = build_resolved_from_def(&def, source, PlayerId(0));
+
+    let hand_before = hand_size(&state, PlayerId(1));
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    assert_eq!(
+        hand_size(&state, PlayerId(1)),
+        hand_before + 1,
+        "the non-discard decline-tail clause must still resolve as a Draw, \
+         not be misparsed into a dropped ChangeZone effect"
+    );
+}
