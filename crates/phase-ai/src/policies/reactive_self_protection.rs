@@ -174,7 +174,10 @@ mod tests {
         }
     }
 
-    fn ai_object_with_activated(state: &mut GameState, effect: Effect) -> ObjectId {
+    fn ai_object_with_activated_ability(
+        state: &mut GameState,
+        ability: AbilityDefinition,
+    ) -> ObjectId {
         let id = create_object(
             state,
             CardId(1),
@@ -182,9 +185,15 @@ mod tests {
             "Self-Protector".to_string(),
             Zone::Battlefield,
         );
-        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities)
-            .push(AbilityDefinition::new(AbilityKind::Activated, effect));
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(ability);
         id
+    }
+
+    fn ai_object_with_activated(state: &mut GameState, effect: Effect) -> ObjectId {
+        ai_object_with_activated_ability(
+            state,
+            AbilityDefinition::new(AbilityKind::Activated, effect),
+        )
     }
 
     fn activate_verdict(state: &GameState, source_id: ObjectId) -> PolicyVerdict {
@@ -574,6 +583,58 @@ mod tests {
                 assert_eq!(reason.kind, "reactive_self_protection_no_payoff");
             }
             PolicyVerdict::Score { .. } => panic!("expected reject for no-payoff activation"),
+        }
+    }
+
+    #[test]
+    fn activation_with_valuable_modal_branch_without_threat_fails_open() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        ability.mode_abilities.push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        let id = ai_object_with_activated_ability(&mut state, ability);
+
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { reason, .. } => {
+                assert_eq!(reason.kind, "reactive_self_protection_unmodeled");
+            }
+            PolicyVerdict::Reject { .. } => {
+                panic!("a valuable alternate activation branch must fail open")
+            }
+        }
+    }
+
+    #[test]
+    fn activation_with_valuable_else_branch_without_threat_fails_open() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        ability.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        let id = ai_object_with_activated_ability(&mut state, ability);
+
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { reason, .. } => {
+                assert_eq!(reason.kind, "reactive_self_protection_unmodeled");
+            }
+            PolicyVerdict::Reject { .. } => {
+                panic!("a valuable else activation branch must fail open")
+            }
         }
     }
 

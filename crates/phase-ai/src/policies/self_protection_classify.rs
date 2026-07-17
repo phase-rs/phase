@@ -522,14 +522,27 @@ pub(crate) fn self_protection_effect_payoff(
     }
 }
 
-/// Exact activation payoff when every effect in the chain is a supported
-/// object-scoped self-protection effect. Mixed and unsupported chains fail open.
+/// Exact activation payoff when every effect in the linear primary/sub-ability
+/// chain is a supported object-scoped self-protection effect. Alternate and
+/// unsupported branches fail open because the activation candidate has not yet
+/// selected which branch will resolve.
 pub(crate) fn self_protection_activation_payoff(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
     ability: &AbilityDefinition,
 ) -> Option<bool> {
+    let mut node = Some(ability);
+    while let Some(current) = node {
+        if current.else_ability.is_some()
+            || current.modal.is_some()
+            || !current.mode_abilities.is_empty()
+        {
+            return None;
+        }
+        node = current.sub_ability.as_deref();
+    }
+
     let effects = collect_chain_effects(ability);
     if effects.is_empty()
         || effects
