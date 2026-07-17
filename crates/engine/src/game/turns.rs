@@ -2487,27 +2487,6 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     state.waiting_for = waiting.clone();
                     return waiting;
                 }
-                // CR 603.3b: combat-damage triggers ran inside resolve_combat_damage
-                // (process_combat_damage_triggers -> process_triggers). If 2+ triggers
-                // controlled by the same player fired simultaneously, process_triggers
-                // populated `pending_trigger_order` and set `waiting_for` to the
-                // OrderTriggers prompt. Those triggers sit in `pending_trigger_order`, NOT
-                // on the stack, so the `!state.stack.is_empty()` guard below would advance
-                // past the prompt and strand them forever (the turn-18 hang). Surface the
-                // ordering prompt now, mirroring finish_declare_attackers (engine_combat.rs).
-                // NOTE: a first-strike sub-step OrderTriggers prompt is surfaced earlier,
-                // via the `Some(waiting)` return from resolve_combat_damage above (CR 510.4
-                // Part A in combat_damage.rs); the mandatory regular sub-step is then resumed
-                // by the empty-stack completeness gate in priority.rs. This guard handles the
-                // regular-step case, where resolve_combat_damage returns None but set
-                // `waiting_for` to the OrderTriggers prompt internally.
-                if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-                    return state.waiting_for.clone();
-                }
-                // CR 704.3 / CR 800.4: SBAs may have ended the game during combat damage.
-                if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-                    return state.waiting_for.clone();
-                }
                 // CR 603.3b + issue #1350: deferred triggers collapsed during
                 // elimination must drain before advancing past combat damage.
                 if !state.deferred_triggers.is_empty() || state.pending_trigger.is_some() {
@@ -4427,6 +4406,86 @@ mod tests {
         assert!(
             state.objects[&host].tapped,
             "Blossombind's enchanted creature must stay tapped at the untap step"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == host)
+            }),
+            "skipped untap must not emit PermanentUntapped"
+        );
+    }
+
+    /// CR 502.3 + CR 701.26b: Frozen in Ice (issue #5801) — "Enchanted
+    /// creature loses all abilities and can't become untapped." must drive
+    /// the production untap step exactly like Blossombind's bare untap
+    /// prohibition: the loses-all-abilities clause is a same-turn drawback,
+    /// not an exception to the untap lock, since the aura's own text (not a
+    /// granted ability) is what installs the replacement. Parses the real
+    /// compound line, pulls the Untap-prevention replacement out of the
+    /// cross-layer split, and installs it on the attached Aura — mirroring
+    /// `execute_untap_honors_blossombind_cant_become_untapped`. Reverting
+    /// `try_split_and_cant_become_untapped` (or its dispatch wiring) makes the
+    /// untap-step `replace_event` return `Execute`, the creature untaps, and
+    /// this assertion fails.
+    #[test]
+    fn execute_untap_honors_frozen_in_ice_cant_become_untapped() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Locked Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.tapped = true;
+        }
+
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Frozen in Ice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let parsed = crate::parser::parse_oracle_text(
+                "Enchant creature\nWhen this Aura enters, tap enchanted creature.\nEnchanted creature loses all abilities and can't become untapped.",
+                "Frozen in Ice",
+                &[],
+                &["Enchantment".to_string()],
+                &["Aura".to_string()],
+            );
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .any(|def| def.event == ReplacementEvent::Untap),
+                "Frozen in Ice's untap prohibition must parse to an Untap-prevention replacement"
+            );
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.replacement_definitions = parsed.replacements.into();
+        }
+        attach_to(&mut state, aura, host);
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        assert!(
+            state.objects[&host].tapped,
+            "Frozen in Ice's enchanted creature must stay tapped at the untap step"
         );
         assert!(
             !events.iter().any(|event| {

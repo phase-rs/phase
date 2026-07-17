@@ -7,6 +7,7 @@ import {
   listFolders,
   loadSavedDeck,
   loadSavedDeckBracket,
+  loadSavedDeckFormat,
   migrateDeckMeta,
   renameFolder,
   saveSavedDeckBracket,
@@ -23,6 +24,77 @@ beforeEach(() => {
 });
 
 describe("saved-deck bracket sidecar", () => {
+  it("reads the persisted deck format without projecting deck data", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Oathbreaker Deck",
+      JSON.stringify({ main: [], sideboard: [], format: "Oathbreaker" }),
+    );
+
+    expect(loadSavedDeckFormat("Oathbreaker Deck")).toBe("Oathbreaker");
+    expect(loadSavedDeckFormat("Missing Deck")).toBeUndefined();
+  });
+
+  it.each(["Commander", "Brawl"] as const)(
+    "keeps a dedicated companion and removes one stale sideboard copy for %s reads",
+    (format) => {
+      const raw = JSON.stringify({
+        main: [{ count: 1, name: "Sol Ring" }],
+        sideboard: [{ count: 2, name: "Lurrus of the Dream-Den" }],
+        commander: ["Alela, Artful Provocateur"],
+        companion: "Lurrus of the Dream-Den",
+        format,
+      });
+      localStorage.setItem(STORAGE_KEY_PREFIX + "Legacy Commander", raw);
+
+      const loaded = loadSavedDeck("Legacy Commander");
+
+      expect(loaded?.companion).toBe("Lurrus of the Dream-Den");
+      expect(loaded?.sideboard).toEqual([{ count: 1, name: "Lurrus of the Dream-Den" }]);
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Legacy Commander")).toBe(raw);
+    },
+  );
+
+  it("materializes a traditional companion in the sideboard and clears its dedicated slot", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Legacy Modern",
+      JSON.stringify({
+        main: [{ count: 1, name: "Sol Ring" }],
+        sideboard: [],
+        companion: "Lurrus of the Dream-Den",
+        format: "Modern",
+      }),
+    );
+
+    const loaded = loadSavedDeck("Legacy Modern");
+
+    expect(loaded?.companion).toBeUndefined();
+    expect(loaded?.sideboard).toEqual([{ count: 1, name: "Lurrus of the Dream-Den" }]);
+  });
+
+  it("keeps signature spells only for Oathbreaker saved-deck reads", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Modern Signature",
+      JSON.stringify({
+        main: [{ count: 1, name: "Lightning Bolt" }],
+        sideboard: [],
+        signature_spell: ["Lightning Bolt"],
+        format: "Modern",
+      }),
+    );
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Oathbreaker Signature",
+      JSON.stringify({
+        main: [{ count: 1, name: "Lightning Bolt" }],
+        sideboard: [],
+        signature_spell: ["Lightning Bolt"],
+        format: "Oathbreaker",
+      }),
+    );
+
+    expect(loadSavedDeck("Modern Signature")?.signature_spell).toBeUndefined();
+    expect(loadSavedDeck("Oathbreaker Signature")?.signature_spell).toEqual(["Lightning Bolt"]);
+  });
+
   it("preserves sticker sheets when loading and expanding a saved deck", () => {
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Sticker Deck",

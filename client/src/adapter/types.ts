@@ -949,6 +949,8 @@ export interface GameObject {
    */
   phase_status?: PhaseStatus;
   is_commander?: boolean;
+  /** Oathbreaker RC: this command-zone card is the player's signature spell. */
+  signature_spell?: Record<string, never> | null;
   commander_tax?: number;
   /**
    * Stable identity of the printed card this object was instantiated from.
@@ -996,6 +998,19 @@ export interface CompanionInfo {
   card: { card: CardFacePartial; count: number };
   used: boolean;
 }
+
+export type CompanionChoiceSource =
+  | { type: "Sideboard"; data: { index: number } }
+  | { type: "Dedicated" };
+
+export interface CompanionRevealChoice {
+  name: string;
+  source: CompanionChoiceSource;
+}
+
+export type CompanionDeclaration =
+  | { type: "Reveal"; data: CompanionRevealChoice }
+  | { type: "Decline" };
 
 // ── Player ───────────────────────────────────────────────────────────────
 
@@ -1195,6 +1210,11 @@ export interface PendingCast {
 export interface TargetSelectionSlot {
   legal_targets: TargetRef[];
   optional?: boolean;
+  // CR 601.2c: the player who announces (chooses the target for) this slot.
+  // Absent (serde-omitted) when the controller is the announcer — the default.
+  // Set only for slots whose Oracle text routes the choice to another player
+  // ("of an opponent's choice", e.g. Volcanic Offering). Display-only.
+  chooser?: number;
 }
 
 export interface TargetSelectionProgress {
@@ -1305,10 +1325,10 @@ export type CastOfferKind =
   | {
       type: "GraveyardPaidCast";
       hit_card: ObjectId;
-      // Mirrors the engine `ManaSpendPermission` enum (single fieldless variant,
-      // serialized as a bare string). Not consumed by the modal — the paid-cast
+      // Mirrors the engine `ManaSpendPermission` enum (fieldless variants,
+      // serialized as bare strings). Not consumed by the modal — the paid-cast
       // copy is fixed — but carried to mirror the serialized shape.
-      mana_spend_permission?: "AnyTypeOrColor";
+      mana_spend_permission?: "AnyTypeOrColor" | "AnyColor";
       cast_transformed?: boolean;
     }
   | {
@@ -1470,7 +1490,7 @@ export type WaitingFor =
   | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "PopulateChoice"; data: { player: PlayerId; source_id: ObjectId; valid_tokens: ObjectId[] } }
-  | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
+  | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: CompanionRevealChoice[] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
   | { type: "CommanderZoneChoice"; data: { player: PlayerId; commander_id: ObjectId; current_zone: string } }
   | { type: "BattleProtectorChoice"; data: { player: PlayerId; battle_id: ObjectId; candidates: PlayerId[] } }
@@ -1523,6 +1543,7 @@ export type WaitingFor =
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
+  | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
   | { type: "VoteChoice"; data: {
       player: PlayerId;
@@ -1942,7 +1963,7 @@ export type GameAction =
   | { type: "ChooseExert"; data: { exert: boolean } }
   | { type: "ChooseEnlist"; data: { target: ObjectId | null } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
-  | { type: "DeclareCompanion"; data: { card_index: number | null } }
+  | { type: "DeclareCompanion"; data: { choice: CompanionDeclaration } }
   | { type: "CompanionToHand" }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "GraveyardPaidCastChoice"; data: { choice: CastChoice } }
@@ -1956,6 +1977,7 @@ export type GameAction =
   | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "ChoosePileOpponent"; data: { opponent: PlayerId } }
+  | { type: "ChooseAnnouncingOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
   | {

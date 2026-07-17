@@ -232,6 +232,26 @@ export async function commanderPartnerCandidates(
   return engine.commanderPartnerCandidates(firstCommander, candidates) as string[];
 }
 
+export type SignatureSpellSelectionPolicy =
+  | { type: "None" }
+  | { type: "Required"; data: { candidates: string[] } };
+
+/** Returns the engine-authored Oathbreaker signature-spell selection policy. */
+export async function signatureSpellSelectionPolicy(
+  request: unknown,
+): Promise<SignatureSpellSelectionPolicy> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.signatureSpellSelectionPolicy(request) as SignatureSpellSelectionPolicy;
+}
+
+/** Returns the engine-approved Commander-family companion candidates. */
+export async function companionCandidates(request: unknown): Promise<string[]> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.companionCandidates(request) as string[];
+}
+
 /**
  * CR 100.2a / CR 903.5b: A card's per-card deck-construction copy-limit override
  * as a discriminated union, or `null` when the default four-of / singleton limit

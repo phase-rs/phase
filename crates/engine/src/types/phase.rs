@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// A turn consists of five phases: beginning, precombat main, combat,
 /// postcombat main, and ending. The beginning, combat, and ending phases
 /// are further broken down into steps.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub enum Phase {
     // --- Beginning phase (CR 501.1): untap, upkeep, draw ---
     /// CR 502: Untap step. No player receives priority (CR 502.4).
@@ -79,7 +81,9 @@ impl Phase {
 /// turns a stop fires, by comparing the stop's owner against the active player.
 ///
 /// CR 102.1: The active player is the player whose turn it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum PhaseStopScope {
     /// Fire on every turn (legacy behavior; the migration default).
     #[default]
@@ -95,7 +99,7 @@ pub enum PhaseStopScope {
 /// Backward compatibility: older persisted/serialized stops were a bare `Phase`
 /// string. `#[serde(from = "PhaseStopCompat")]` accepts both the legacy bare
 /// string (→ `AllTurns`) and the new `{ phase, scope }` object form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(from = "PhaseStopCompat")]
 pub struct PhaseStop {
     pub phase: Phase,

@@ -5,8 +5,8 @@ use crate::types::ability::{
     TargetFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::zones::Zone;
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
+use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
 /// select some to keep per the effect's instructions, rest go elsewhere.
@@ -296,9 +296,25 @@ fn resolve_from_prior_look(
     // cards to rest_dest without any interactive prompt.
     if raw_keep_count == 0 {
         if let Some(dest) = rest_dest {
-            crate::game::engine_resolution_choices::route_rest_partition(
-                state, &cards, dest, events,
-            );
+            match crate::game::engine_resolution_choices::route_rest_partition(
+                state,
+                &cards,
+                dest,
+                Some(ability.source_id),
+                events,
+            ) {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    crate::game::zone_pipeline::defer_completion_on_pause(
+                        state,
+                        BatchCompletion::DigPriorLookRestComplete {
+                            player: ability.controller,
+                            source_id: ability.source_id,
+                        },
+                    );
+                    return Ok(());
+                }
+            }
         }
         state.private_look_ids.clear();
         state.private_look_player = None;
@@ -327,9 +343,25 @@ fn resolve_from_prior_look(
     // rest_dest instead of surfacing an impossible DigChoice prompt.
     if selectable_cards.is_empty() {
         if let Some(dest) = rest_dest {
-            crate::game::engine_resolution_choices::route_rest_partition(
-                state, &cards, dest, events,
-            );
+            match crate::game::engine_resolution_choices::route_rest_partition(
+                state,
+                &cards,
+                dest,
+                Some(ability.source_id),
+                events,
+            ) {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    crate::game::zone_pipeline::defer_completion_on_pause(
+                        state,
+                        BatchCompletion::DigPriorLookRestComplete {
+                            player: ability.controller,
+                            source_id: ability.source_id,
+                        },
+                    );
+                    return Ok(());
+                }
+            }
         }
         state.private_look_ids.clear();
         state.private_look_player = None;
@@ -379,12 +411,10 @@ fn resolve_from_prior_look(
 /// admits no player choice.
 ///
 /// The rest pile is routed first (a deterministic library/zone placement), so a
-/// rare CR 303.4f/616.1 battlefield-entry pause on a kept card cannot strand it.
-/// The kept cards then move through the zone-change pipeline (CR 614.1c — ETB
-/// triggers fire, intrinsic enters-with counters seed). On a kept-card pause the
-/// remaining kept moves and the tracked-set publish are deferred onto a
-/// `RevealRestPile` completion (empty rest pile — already placed), mirroring the
-/// `DigChoice` handler's deferral contract.
+/// replacement-choice pause cannot let the selected delivery or its tracked-set
+/// publication overtake the printed rest instruction. Selected cards then move
+/// as one pipeline batch, with a typed completion that publishes only cards that
+/// actually reached the requested destination after every redirect settles.
 #[allow(clippy::too_many_arguments)]
 fn resolve_mass_put_all(
     state: &mut GameState,
@@ -404,64 +434,74 @@ fn resolve_mass_put_all(
 
     // Route the (deterministic) rest pile first so a kept-card pause cannot
     // strand it. None => bottom of library (CR 701.20a "in a random order").
-    crate::game::engine_resolution_choices::route_rest_partition(
+    match crate::game::engine_resolution_choices::route_rest_partition(
         state,
         &rest,
         rest_destination.unwrap_or(Zone::Library),
+        Some(ability.source_id),
         events,
-    );
-
-    if dest == Zone::Battlefield {
-        // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield entries through
-        // the batch zone-change pipeline so ETB triggers fire, intrinsic
-        // enters-with counters / tap state seed, and any CR 303.4f / CR 616.1
-        // pause preserves the remaining kept tail. CR 400.7: attribute entries
-        // to the Dig's source.
-        let reqs: Vec<_> = selectable
-            .iter()
-            .map(|&obj_id| {
-                let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
-                    obj_id,
-                    Zone::Battlefield,
-                    ability.source_id,
-                );
-                req.mods.enter_tapped =
-                    crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
-                req
-            })
-            .collect();
-        match crate::game::zone_pipeline::move_objects_simultaneously(state, reqs, events) {
-            crate::game::zone_pipeline::BatchMoveResult::Done => {}
-            crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                crate::game::zone_pipeline::defer_completion_on_pause(
-                    state,
-                    crate::types::game_state::BatchCompletion::RevealRestPile {
-                        player: ability.controller,
-                        rest_cards: Vec::new(),
-                        rest_destination: rest_destination.unwrap_or(Zone::Library),
-                        clear_markers: Vec::new(),
-                        publish_tracked_set: Some(selectable.to_vec()),
-                        emit_reveal_until_resolved: None,
-                    },
-                );
-                return;
-            }
-        }
-    } else {
-        for &obj_id in selectable {
-            crate::game::zones::move_to_zone(state, obj_id, dest, events);
+    ) {
+        crate::game::zone_pipeline::BatchMoveResult::Done => move_mass_put_all_selected(
+            state,
+            ability.controller,
+            ability.source_id,
+            selectable.to_vec(),
+            dest,
+            EtbTapState::from_legacy_bool(enter_tapped),
+            events,
+        ),
+        crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+            crate::game::zone_pipeline::defer_completion_on_pause(
+                state,
+                BatchCompletion::DigMassPutAllRestComplete {
+                    player: ability.controller,
+                    source_id: ability.source_id,
+                    selected: selectable.to_vec(),
+                    destination: dest,
+                    enter_tapped: EtbTapState::from_legacy_bool(enter_tapped),
+                },
+            );
         }
     }
+}
 
-    // CR 701.20b + CR 608.2c: publish the kept (revealed) cards as a fresh
-    // tracked set so any downstream sub_ability can route them by type.
-    super::publish_fresh_tracked_set(state, selectable.to_vec());
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
+/// CR 608.2c + CR 614.1 + CR 616.1: Deliver the selected half of a deterministic
+/// mass Dig. The typed batch completion is the single authority for publication
+/// and the parent result, so a replacement pause cannot expose a pre-redirect
+/// selected set to a chained instruction.
+pub(crate) fn move_mass_put_all_selected(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
+    selected: Vec<crate::types::identifiers::ObjectId>,
+    destination: Zone,
+    enter_tapped: EtbTapState,
+    events: &mut Vec<GameEvent>,
+) {
+    let requests = selected
+        .iter()
+        .map(|&object_id| {
+            let mut request = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                object_id,
+                destination,
+                source_id,
+            );
+            request.mods.enter_tapped = enter_tapped;
+            request
+        })
+        .collect();
+    let completion = BatchCompletion::DigMassPutAllComplete {
+        player,
+        source_id,
+        selected,
+        destination,
+    };
+    crate::game::zone_pipeline::move_objects_simultaneously_then(
+        state,
+        requests,
+        Some(completion),
+        events,
+    );
 }
 
 #[cfg(test)]

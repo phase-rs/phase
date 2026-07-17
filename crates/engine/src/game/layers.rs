@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
@@ -94,7 +94,7 @@ fn effect_candidate_ids(
 }
 
 struct PreparedIncrementalFlush {
-    recipient_ids: HashSet<ObjectId>,
+    recipient_ids: BTreeSet<ObjectId>,
     active_effects: Vec<ActiveContinuousEffect>,
 }
 
@@ -2512,7 +2512,7 @@ pub fn flush_layers(state: &mut GameState) {
 
 fn prepare_incremental_flush(
     state: &mut GameState,
-    entered_ids: &HashSet<ObjectId>,
+    entered_ids: &BTreeSet<ObjectId>,
 ) -> Option<PreparedIncrementalFlush> {
     for &id in entered_ids {
         let obj = state.objects.get(&id)?;
@@ -2582,7 +2582,7 @@ fn prepare_incremental_flush(
 #[cfg(test)]
 pub(crate) fn incremental_flush_must_escalate(
     state: &GameState,
-    entered_ids: &HashSet<ObjectId>,
+    entered_ids: &BTreeSet<ObjectId>,
 ) -> bool {
     // Axis 1 — per-entered preconditions.
     for &id in entered_ids {
@@ -2637,7 +2637,7 @@ pub(crate) fn incremental_flush_must_escalate(
 
 fn active_effects_force_incremental_escalation(
     state: &GameState,
-    entered_ids: &HashSet<ObjectId>,
+    entered_ids: &BTreeSet<ObjectId>,
     active_effects: &[ActiveContinuousEffect],
 ) -> bool {
     active_effects.iter().any(|e| {
@@ -2706,7 +2706,7 @@ fn active_effects_force_incremental_escalation(
 /// (invariant 5), so the cached BEFORE truth aligns with the consulted def.
 fn any_active_static_condition_perturbed_by_entry(
     state: &GameState,
-    entered_ids: &HashSet<ObjectId>,
+    entered_ids: &BTreeSet<ObjectId>,
 ) -> bool {
     let mut found = false;
     for_each_static_effect_source(state, |state, obj| {
@@ -2870,8 +2870,8 @@ fn entered_object_blocks_incremental(
 /// continuous static applies to the enchanted permanent, not itself).
 fn incremental_recipient_ids(
     state: &GameState,
-    entered_ids: &HashSet<ObjectId>,
-) -> HashSet<ObjectId> {
+    entered_ids: &BTreeSet<ObjectId>,
+) -> BTreeSet<ObjectId> {
     let mut recipients = entered_ids.clone();
     for &id in entered_ids {
         if let Some(host) = state
@@ -2888,7 +2888,7 @@ fn incremental_recipient_ids(
 
 fn effect_is_restricted_to_incremental_recipients(
     effect: &ActiveContinuousEffect,
-    recipient_ids: &HashSet<ObjectId>,
+    recipient_ids: &BTreeSet<ObjectId>,
 ) -> bool {
     match &effect.affected_filter {
         TargetFilter::SelfRef => recipient_ids.contains(&effect.source_id),
@@ -3977,7 +3977,7 @@ fn apply_combat_assignment_rule_effects(state: &mut GameState) {
 /// object-affecting continuous effects.
 fn apply_combat_assignment_rule_effects_filtered(
     state: &mut GameState,
-    restrict_to: Option<&HashSet<ObjectId>>,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
 ) {
     let mut effects = collect_active_combat_assignment_rule_effects(state);
     effects.sort_by_key(|effect| (effect.timestamp, effect.controller.0, effect.source_id.0));
@@ -4029,7 +4029,10 @@ fn apply_combat_assignment_rule_effects_filtered(
 /// affected objects. This is run AFTER all keyword grants/removals are applied,
 /// so the denial wins regardless of grant timestamp — the rules-correct "can't
 /// have" outcome (a concurrent anthem can't restore a denied keyword).
-fn apply_cant_have_keyword_denials(state: &mut GameState, restrict_to: Option<&HashSet<ObjectId>>) {
+fn apply_cant_have_keyword_denials(
+    state: &mut GameState,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+) {
     // Collect (affected object, denied keyword) pairs under an immutable borrow,
     // then strip — avoids a borrow conflict with the per-object mutation.
     let mut denials: Vec<(ObjectId, Keyword)> = Vec::new();
@@ -4357,6 +4360,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::GrantStaticAbility { .. }
             | ContinuousModification::RetainPrintedTriggerFromSource { .. }
             | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+            | ContinuousModification::RetainAllOtherAbilitiesFromSource
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
@@ -4675,7 +4679,7 @@ fn apply_continuous_effect(
 fn apply_continuous_effect_to(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
-    restrict_to: &HashSet<ObjectId>,
+    restrict_to: &BTreeSet<ObjectId>,
     abilities_suppressed: &mut HashSet<ObjectId>,
     zone_cache: &mut LayerZoneObjectCache,
 ) {
@@ -4841,7 +4845,7 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
 fn apply_continuous_effect_filtered(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
-    restrict_to: Option<&HashSet<ObjectId>>,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
     abilities_suppressed: &mut HashSet<ObjectId>,
     zone_cache: &mut LayerZoneObjectCache,
 ) {
@@ -5076,6 +5080,27 @@ fn apply_continuous_effect_filtered(
             .objects
             .get(&effect.source_id)
             .and_then(|src| src.base_abilities.get(*source_ability_index).cloned())
+    } else {
+        None
+    };
+    // CR 707.9a: Pre-read the source's entire "other abilities" surface —
+    // printed activated abilities, triggers, statics, and keywords — for the
+    // unbounded retain (Sakashima of a Thousand Faces: "except it has ~'s
+    // other abilities"). The ability granting the copy effect is a
+    // `ReplacementDefinition` (or lives outside these four lists), so no
+    // exclusion index is needed, unlike the single-index retains above.
+    let retained_other_abilities = if matches!(
+        effect.modification,
+        ContinuousModification::RetainAllOtherAbilitiesFromSource
+    ) {
+        state.objects.get(&effect.source_id).map(|src| {
+            (
+                src.base_abilities.as_ref().clone(),
+                src.base_trigger_definitions.as_ref().clone(),
+                src.base_static_definitions.as_ref().clone(),
+                src.base_keywords.clone(),
+            )
+        })
     } else {
         None
     };
@@ -5701,6 +5726,39 @@ fn apply_continuous_effect_filtered(
                     }
                 }
             }
+            // CR 707.9a: Retain ALL of the source's other printed abilities on
+            // the copy — activated abilities, triggers, statics, and keywords.
+            // After `CopyValues` overwrote these sets with the copy target's
+            // values, merge the source's own sets back in. Idempotent per-item
+            // (structurally-equal entries collapse into one), mirroring the
+            // single-index retains above.
+            ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+                if let Some((abilities, triggers, statics, keywords)) =
+                    retained_other_abilities.as_ref()
+                {
+                    let obj_abilities = Arc::make_mut(&mut obj.abilities);
+                    for ability in abilities.iter() {
+                        if !obj_abilities.contains(ability) {
+                            obj_abilities.push(ability.clone());
+                        }
+                    }
+                    for trigger in triggers.iter() {
+                        if !obj.trigger_definitions.iter_all().any(|t| t == trigger) {
+                            obj.trigger_definitions.push(trigger.clone());
+                        }
+                    }
+                    for static_def in statics.iter() {
+                        if !obj.static_definitions.iter_all().any(|s| s == static_def) {
+                            obj.static_definitions.push(static_def.clone());
+                        }
+                    }
+                    for keyword in keywords {
+                        if !obj.keywords.contains(keyword) {
+                            obj.keywords.push(keyword.clone());
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -5894,6 +5952,37 @@ pub(crate) fn compute_current_copiable_values(
                     let abilities = Arc::make_mut(&mut values.abilities);
                     if !abilities.iter().any(|a| a == &ability) {
                         abilities.push(ability);
+                    }
+                }
+            }
+            // CR 707.9a: The unbounded "~'s other abilities" retain makes the
+            // source's entire ability/trigger/static/keyword surface part of
+            // the copiable values, so a further copy of this copy (a Clone of
+            // Sakashima-copying-a-Bear, say) still sees them.
+            ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+                if let Some(src) = state.objects.get(&effect.source_id) {
+                    let abilities = Arc::make_mut(&mut values.abilities);
+                    for ability in src.base_abilities.iter() {
+                        if !abilities.contains(ability) {
+                            abilities.push(ability.clone());
+                        }
+                    }
+                    let triggers = Arc::make_mut(&mut values.trigger_definitions);
+                    for trigger in src.base_trigger_definitions.iter() {
+                        if !triggers.contains(trigger) {
+                            triggers.push(trigger.clone());
+                        }
+                    }
+                    let statics = Arc::make_mut(&mut values.static_definitions);
+                    for static_def in src.base_static_definitions.iter() {
+                        if !statics.contains(static_def) {
+                            statics.push(static_def.clone());
+                        }
+                    }
+                    for keyword in &src.base_keywords {
+                        if !values.keywords.contains(keyword) {
+                            values.keywords.push(keyword.clone());
+                        }
                     }
                 }
             }

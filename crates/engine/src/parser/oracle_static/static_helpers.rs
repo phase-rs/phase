@@ -339,7 +339,7 @@ fn strip_cost_mod_during_your_turn_scope(text: &str) -> (&str, Option<StaticCond
     (text, None)
 }
 
-fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
+pub(super) fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
     let (_, stripped) = all_consuming(alt((
         value("", terminated(tag::<_, _, OracleError<'_>>("spells"), eof)),
         value("", terminated(tag("spell"), eof)),

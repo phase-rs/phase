@@ -17,6 +17,9 @@ const HIDDEN_CARD_NAME: &str = "Hidden Card";
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // The replacement-resume cursor is server authority and can retain private
+    // object IDs and last-known snapshots from a cost payment.
+    filtered.pending_cost_move_resume = None;
     let replacement_candidate_source_ids = match &state.waiting_for {
         WaitingFor::ReplacementChoice { candidates, .. } => Some(
             candidates
@@ -673,6 +676,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::SearchChoice {
         player,
+        library_owner,
         ref cards,
         count,
         reveal,
@@ -685,6 +689,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::SearchChoice {
                 player,
+                library_owner,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 count,
                 reveal,
@@ -707,6 +712,33 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             if !can_view_private_for_player(*selector) {
                 *selected = selected.iter().map(|_| ObjectId(0)).collect();
             }
+        }
+    }
+    if let Some(batch) = filtered.pending_search_found_batch.as_mut() {
+        if !can_view_private_for_player(batch.searcher) {
+            batch.remaining = batch.remaining.iter().map(|_| ObjectId(0)).collect();
+            batch.survivors = batch.survivors.iter().map(|_| ObjectId(0)).collect();
+        }
+    }
+    // CR 400.2 + CR 723.4: A nested zone-change replacement can park the
+    // currently found hidden-library card in the batch completion sidecar.
+    // Apply the same searcher/private-access boundary as the owning
+    // `PendingSearchFoundBatch`; filtering mutates only this viewer copy.
+    if state
+        .pending_search_found_batch
+        .as_ref()
+        .is_some_and(|batch| !can_view_private_for_player(batch.searcher))
+    {
+        if let Some(crate::types::game_state::PendingBatchDeliveries {
+            completion:
+                Some(crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                    object_id,
+                    ..
+                }),
+            ..
+        }) = filtered.pending_batch_deliveries.as_mut()
+        {
+            *object_id = ObjectId(0);
         }
     }
 
@@ -1044,9 +1076,27 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             pool.registered_sideboard = Arc::new(Vec::new());
             pool.current_main = Arc::new(Vec::new());
             pool.current_sideboard = Arc::new(Vec::new());
+            pool.registered_companion = Arc::new(Vec::new());
+            pool.current_companion = Arc::new(Vec::new());
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+        }
+    }
+
+    // CR 702.139a: A companion is outside the game and stays private until
+    // its owner reveals it. The offer is therefore visible only to the owner
+    // (or an authorized turn controller); the public player.companion field is
+    // populated only after the reveal action succeeds.
+    if let WaitingFor::CompanionReveal { player, .. } = &state.waiting_for {
+        if !can_view_private_for_player(*player) {
+            if let WaitingFor::CompanionReveal {
+                eligible_companions,
+                ..
+            } = &mut filtered.waiting_for
+            {
+                eligible_companions.clear();
+            }
         }
     }
 
@@ -1421,17 +1471,19 @@ mod tests {
     };
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BeholdCostAction, Effect, ReplacementDefinition,
-        ResolvedAbility, TargetFilter,
+        AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot, Effect,
+        ReplacementDefinition, ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityResume,
-        MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility, PendingCast,
-        PendingManaAbility, PendingScopedLibrarySearch,
+        AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityCostCursor,
+        ManaAbilityCostResolutionMode, ManaAbilityResume, MayTriggerAutoChoiceKey,
+        MayTriggerOrigin, PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion,
+        PendingCostMoveResume, PendingManaAbility, PendingScopedLibrarySearch,
+        PendingSearchFoundBatch,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -1465,6 +1517,7 @@ mod tests {
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
@@ -1486,6 +1539,8 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
             assist_state: crate::types::game_state::AssistState::NotOffered,
             activation_residual: crate::types::game_state::ActivationResidual::None,
+            activation_target_selection:
+                crate::types::game_state::ActivationTargetSelection::Pending,
             alt_cost_grant_source: None,
         })
     }
@@ -1501,6 +1556,7 @@ mod tests {
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
+            cost_move_resume: None,
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -1603,6 +1659,34 @@ mod tests {
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
         assert!(filtered.liminal_entries.is_empty());
         assert!(filtered.pending_liminal_entry_resume.is_none());
+    }
+
+    #[test]
+    fn search_found_batch_is_visible_only_to_searcher() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.pending_search_found_batch = Some(PendingSearchFoundBatch {
+            searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
+            remaining: vec![ObjectId(101)],
+            survivors: vec![ObjectId(102)],
+            continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                split: None,
+            },
+            visibility: crate::types::game_state::SearchFoundVisibility::Private,
+        });
+
+        let searcher_view = filter_state_for_viewer(&state, PlayerId(1));
+        let batch = searcher_view.pending_search_found_batch.unwrap();
+        assert_eq!(batch.remaining, vec![ObjectId(101)]);
+        assert_eq!(batch.survivors, vec![ObjectId(102)]);
+
+        for viewer in [PlayerId(0), PlayerId(2)] {
+            let batch = filter_state_for_viewer(&state, viewer)
+                .pending_search_found_batch
+                .expect("opaque batch remains serialized");
+            assert_eq!(batch.remaining, vec![ObjectId(0)]);
+            assert_eq!(batch.survivors, vec![ObjectId(0)]);
+        }
     }
 
     #[test]
@@ -1982,6 +2066,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,
@@ -2046,6 +2131,7 @@ mod tests {
         });
         state.waiting_for = WaitingFor::SearchChoice {
             player: p1,
+            library_owner: None,
             cards: vec![p1_candidate],
             count: 1,
             reveal: false,
@@ -2393,6 +2479,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,
@@ -3073,6 +3160,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![crate::types::ability::TargetRef::Object(ObjectId(20))],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4127,5 +4215,101 @@ mod tests {
         let controller_attrs = &controller_view.objects[&source].chosen_attributes;
         assert!(controller_attrs.contains(&ChosenAttribute::Number(3)));
         assert!(controller_attrs.contains(&ChosenAttribute::Number(5)));
+    }
+
+    #[test]
+    fn paused_cost_move_resume_is_server_authoritative_for_unauthorized_viewers() {
+        let mut state = GameState::new_two_player(42);
+        state.next_object_id = 70_001;
+        let hidden = create_object(
+            &mut state,
+            CardId(70_001),
+            PlayerId(0),
+            "Paused Cost Secret".to_string(),
+            Zone::Hand,
+        );
+        let mut pending = *dummy_pending_mana_ability(PlayerId(0), ObjectId(70_002));
+        pending.chosen_discards = vec![hidden];
+        pending.chosen_exiled = vec![hidden];
+        pending.cost_paid_object = Some(CostPaidObjectSnapshot {
+            object_id: hidden,
+            lki: state.objects[&hidden].snapshot_for_mana_spent(),
+        });
+        let mana_resume = PendingCostMoveResume::ManaAbilityPayment {
+            pending: Box::new(pending),
+            cursor: ManaAbilityCostCursor {
+                remaining: Vec::new(),
+                resolution_mode: ManaAbilityCostResolutionMode::Interactive,
+                excluded_sources: Vec::new(),
+                sub_cost_demand: None,
+                next_tapper: 0,
+                next_discard: 0,
+                next_exiled: 0,
+                next_sacrificed: 0,
+                selected_exile_remaining: Some(vec![hidden]),
+                selected_sacrifice_remaining: None,
+                deferred_cost_events: Vec::new(),
+                current_action_deferred_start: 0,
+                parent: None,
+            },
+        };
+        let resumes = vec![
+            PendingCostMoveResume::Cast {
+                player: PlayerId(0),
+                pending: Some(dummy_pending_cast(hidden, CardId(70_001), PlayerId(0))),
+                chosen: vec![hidden],
+                paused_at_index: 0,
+                destination: Zone::Exile,
+                completion: PendingCostMoveCompletion::FinishPending,
+            },
+            PendingCostMoveResume::Foretell {
+                player: PlayerId(0),
+                object_id: hidden,
+                cost: ManaCost::generic(1),
+                turn_foretold: 7,
+            },
+            PendingCostMoveResume::DelveManaPayment {
+                player: PlayerId(0),
+                fuel_id: hidden,
+            },
+            mana_resume,
+        ];
+
+        for resume in resumes {
+            state.pending_cost_move_resume = Some(resume);
+            let authoritative_resume = serde_json::to_string(&state.pending_cost_move_resume)
+                .expect("the authoritative cost continuation serializes");
+            assert!(
+                authoritative_resume.contains("70001"),
+                "the authoritative continuation contains the private object ID"
+            );
+            if matches!(
+                &state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+            ) {
+                assert!(
+                    authoritative_resume.contains("Paused Cost Secret"),
+                    "the mana continuation contains the private cost-payment LKI"
+                );
+            }
+
+            let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+            assert!(
+                opponent_view.pending_cost_move_resume.is_none(),
+                "a non-acting opponent must not receive a paused cost continuation"
+            );
+            let wire = serde_json::to_string(&opponent_view)
+                .expect("the filtered multiplayer snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingCostMoveResume\":{\"type\"")
+                    && !wire.contains("\"pending_cost_move_resume\":{\"type\""),
+                "the viewer snapshot must not serialize a paused continuation's IDs or LKI"
+            );
+        }
+
+        assert!(
+            state.pending_cost_move_resume.is_some(),
+            "filtering must not alter the authoritative server continuation"
+        );
     }
 }

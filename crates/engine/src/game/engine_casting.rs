@@ -419,6 +419,7 @@ pub(super) fn handle_harmonize_tap_choice(
         &pending.cost,
         base_cost,
         pending.casting_variant,
+        pending.casting_permission_index,
         pending.cast_timing_permission,
         pending.distribute,
         pending.origin_zone,

@@ -25,6 +25,7 @@
 crates/engine/src/game/combat_damage.rs	fire_combat_prevention_riders	consumer	1
 crates/engine/src/game/combat_damage.rs	fire_combat_prevention_riders	install	1
 crates/engine/src/game/combat_damage.rs	fire_combat_prevention_riders	resolved	1
+crates/engine/src/game/effects/attach.rs	deliver_attach	consumer	1
 crates/engine/src/game/effects/deal_damage.rs	apply_damage_to_target	consumer	1
 crates/engine/src/game/effects/deal_damage.rs	resolve_each_source_deals_damage	consumer	1
 crates/engine/src/game/effects/deal_damage.rs	resolve_each_target_power_damage	consumer	1

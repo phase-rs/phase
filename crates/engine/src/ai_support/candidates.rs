@@ -15,9 +15,9 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, ConvokeMode, CounterCostChoice, CounterMoveChoice,
-    CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind, PendingMulliganAction,
-    TargetSelectionSlot, WaitingFor,
+    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CounterCostChoice,
+    CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind,
+    PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -695,6 +695,20 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::ChooseAnnouncingOpponent {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseAnnouncingOpponent {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::BetweenGamesChoosePlayDraw { player, .. } => vec![
             candidate(
                 GameAction::ChoosePlayDraw { play_first: true },
@@ -775,6 +789,20 @@ pub fn candidate_actions_broad_with_probe(
             candidate_actions_exact(state)
         }
         WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
+        WaitingFor::ChooseAnnouncingOpponent {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseAnnouncingOpponent {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ManaPayment {
             player,
             convoke_mode,
@@ -2482,11 +2510,10 @@ pub fn candidate_actions_broad_with_probe(
         } => {
             let mut actions: Vec<CandidateAction> = eligible_companions
                 .iter()
-                .enumerate()
-                .map(|(i, _)| {
+                .map(|choice| {
                     candidate(
                         GameAction::DeclareCompanion {
-                            card_index: Some(i),
+                            choice: CompanionDeclaration::Reveal(choice.clone()),
                         },
                         TacticalClass::Selection,
                         Some(*player),
@@ -2495,7 +2522,9 @@ pub fn candidate_actions_broad_with_probe(
                 .collect();
             // Always offer the option to decline
             actions.push(candidate(
-                GameAction::DeclareCompanion { card_index: None },
+                GameAction::DeclareCompanion {
+                    choice: CompanionDeclaration::Decline,
+                },
                 TacticalClass::Selection,
                 Some(*player),
             ));
@@ -5699,6 +5728,7 @@ mod tests {
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -6738,6 +6768,7 @@ mod tests {
         // Baseline: no constraint, pool ≤ cap → all C(5,2) = 10 combinations.
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: ids.clone(),
             count: 2,
             reveal: false,
@@ -6760,6 +6791,7 @@ mod tests {
         // which is name-unique (no combo contains two cards sharing a name).
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: ids,
             count: 2,
             reveal: false,
@@ -6821,6 +6853,7 @@ mod tests {
         }
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: ids,
             count: 4,
             reveal: false,

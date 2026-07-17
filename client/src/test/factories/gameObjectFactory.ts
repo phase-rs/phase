@@ -113,6 +113,10 @@ export class GameObjectFactory extends Factory<GameObject> {
       commander_tax: 0,
     });
   }
+
+  signatureSpell() {
+    return this.inCommandZone().params({ signature_spell: {} });
+  }
 }
 
 export const gameObjectFactory = GameObjectFactory.define(({ sequence }): GameObject => ({

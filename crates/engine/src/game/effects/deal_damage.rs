@@ -1545,7 +1545,41 @@ pub fn resolve_all(
 
     // Collect matching object IDs.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = filter::FilterContext::from_ability(ability);
+    //
+    // CR 120.1 + CR 601.2c: When `damage_source` is `Some(Target)`, "other"/
+    // "another"-relative recipient filters (`FilterProp::Another` — "each
+    // OTHER creature") must be evaluated relative to the resolved damage
+    // SOURCE creature, not the ability's nominal source (the spell/permanent
+    // that generated this `DamageAll` effect). Left as `ability.source_id`,
+    // `FilterProp::Another` compares each battlefield candidate against the
+    // spell's own object id — which is never itself a battlefield creature —
+    // so the exclusion never actually fires and the chosen source creature
+    // wrongly deals damage to itself (Chandra's Ignition class: "target
+    // creature you control deals damage ... to each other creature").
+    // Mirrors the damage-source resolution below (used for keyword/
+    // protection purposes); rebinding it here too keeps recipient-set
+    // membership consistent with which object CR 120.1 says the damage is
+    // actually FROM.
+    // Only the resolved damage source's OBJECT identity is overridden here —
+    // `source_controller` is deliberately left as `FilterContext::from_ability`
+    // set it (the ability's own controller). Per `FilterContext`'s own
+    // documented invariant (`filter.rs`), `source_controller` is what
+    // `ControllerRef::You` ("creatures you control") resolves against, and
+    // that pronoun refers to the ABILITY's controller (who cast the spell) —
+    // not to whoever happens to control the resolved damage source (e.g. a
+    // stolen creature dealing the damage). An earlier version of this fix
+    // also overrode `source_controller`, which made "you control" resolve
+    // against the wrong player whenever the resolved source's controller
+    // differs from the caster.
+    let mut ctx = filter::FilterContext::from_ability(ability);
+    if matches!(damage_source, Some(DamageSource::Target)) {
+        if let Some(resolved_source_id) = ability.targets.iter().find_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        }) {
+            ctx.source_id = resolved_source_id;
+        }
+    }
     let matching_objects: Vec<_> = state
         .battlefield
         .iter()
@@ -4228,6 +4262,94 @@ mod tests {
 
         assert_eq!(state.objects[&bear1].damage_marked, 2);
         assert_eq!(state.objects[&bear2].damage_marked, 2);
+    }
+
+    /// #4960 follow-up (maintainer review on PR #5834, second pass): pins the
+    /// FINAL, corrected behavior after an intermediate version of this fix
+    /// was reverted for contradicting `FilterContext`'s own documented
+    /// invariant (`filter.rs`): `source_controller` is what `ControllerRef::
+    /// You` ("creatures you control") resolves against, and that pronoun
+    /// refers to the ABILITY's controller (who cast the spell) — not to
+    /// whoever happens to control the resolved damage source. Only
+    /// `filter_ctx.source_id` (the object identity, for `FilterProp::Another`
+    /// exclusion and similar) is overridden to the resolved damage source;
+    /// `source_controller` is deliberately left untouched.
+    ///
+    /// Two otherwise-identical creature recipients: one controlled by P0 (the
+    /// ability's controller — must match "you control"), one controlled by
+    /// P1 (the resolved damage source's controller, simulating a stolen
+    /// creature dealing the damage — must NOT match "you control", since
+    /// "you" is the caster, not the source).
+    #[test]
+    fn damage_all_controller_matches_recipient_reads_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        // Damage source: controlled by P1, even though the ability itself
+        // (below) has controller P0 — simulating a control change that
+        // happened between the source being targeted and this ability
+        // resolving.
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(1),
+            "Stolen Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient_p0 = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "P0's Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient_p1 = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(1),
+            "P1's Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [source, recipient_p0, recipient_p1] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.base_power = Some(4);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::Another,
+                        FilterProp::ControllerMatches {
+                            player: Box::new(crate::types::ability::PlayerFilter::Controller),
+                        },
+                    ],
+                }),
+                player_filter: None,
+                damage_source: Some(DamageSource::Target),
+            },
+            vec![TargetRef::Object(source)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&recipient_p0].damage_marked, 3,
+            "\"you control\" resolves against the ABILITY's controller (P0), \
+             per FilterContext's documented source_controller invariant"
+        );
+        assert_eq!(
+            state.objects[&recipient_p1].damage_marked, 0,
+            "the resolved damage source's controller (P1) must NOT be used \
+             for \"you control\" — only source_id (object identity) is \
+             overridden to the resolved damage source, not source_controller"
+        );
     }
 
     #[test]

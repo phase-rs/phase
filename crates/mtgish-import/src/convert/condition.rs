@@ -1061,6 +1061,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Player => "Player",
         TargetFilter::AllPlayers => "AllPlayers",
         TargetFilter::Controller => "Controller",
+        TargetFilter::Opponent => "Opponent",
         TargetFilter::OriginalController => "OriginalController",
         TargetFilter::OriginalSource => "OriginalSource",
         TargetFilter::ScopedPlayer => "ScopedPlayer",
