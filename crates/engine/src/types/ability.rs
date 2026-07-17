@@ -17948,11 +17948,19 @@ pub enum ReplacementCondition {
     /// `AbilityCondition::CastVariantPaid`. Evaluated against
     /// `GameObject.cast_variant_paid`. Used by Scarlet Spider (web-slinging).
     CastVariantPaid { variant: CastVariantPaid },
-    /// CR 603.4: "if you cast it from [zone]" — replacement applies only when
-    /// the source object was cast from the specified zone (e.g., Myojin's
-    /// "enters with an indestructible counter on it if you cast it from your
-    /// hand"). Evaluated against `GameObject.cast_from_zone`.
-    CastFromZone { zone: Zone },
+    /// CR 601.2 + CR 603.4: "if you cast it [from [zone]]" — replacement applies
+    /// only when the source object was cast. `zone: Some(z)` narrows to a specific
+    /// origin (e.g., Myojin's "enters with an indestructible counter on it if you
+    /// cast it from your hand"); `zone: None` is the zoneless "if you cast it"
+    /// (Nine-Lives Familiar) — cast from ANY zone, i.e. the object was cast at all
+    /// (a token or put-onto-battlefield entry is NOT cast and fails this gate).
+    /// One `Option<Zone>` parameterization on the CR 601.2 cast-provenance axis
+    /// rather than a separate zoneless-`WasCast` sibling. Evaluated against
+    /// `GameObject.cast_from_zone`.
+    CastFromZone {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<Zone>,
+    },
     /// CR 614.1d + CR 601: Gates a replacement on how the *entering* object
     /// (the event's `affected_object_id`) arrived — NOT the replacement source.
     /// Both halves reference the entering object, which distinguishes this from

@@ -4807,13 +4807,17 @@ fn evaluate_replacement_condition(
             .objects
             .get(&source_id)
             .is_some_and(|o| o.cast_variant_paid == Some((*variant, state.turn_number))),
-        // CR 603.4: "if you cast it from [zone]" — applies only when the source
-        // permanent was cast from the gated zone. Equivalent to CastViaEscape
-        // for arbitrary zones (Hand for Myojin, Exile for foretell-style, etc.).
-        ReplacementCondition::CastFromZone { zone } => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|o| o.cast_from_zone == Some(*zone)),
+        // CR 601.2 + CR 603.4: "if you cast it [from [zone]]" — applies only when
+        // the source permanent was cast. `Some(zone)` narrows to the gated origin
+        // (Hand for Myojin, Exile for foretell-style, etc.); `None` is the
+        // zoneless form (Nine-Lives Familiar) satisfied by a cast from ANY zone,
+        // i.e. `cast_from_zone.is_some()`.
+        ReplacementCondition::CastFromZone { zone } => {
+            state.objects.get(&source_id).is_some_and(|o| match zone {
+                Some(z) => o.cast_from_zone == Some(*z),
+                None => o.cast_from_zone.is_some(),
+            })
+        }
         // CR 614.1d + CR 601: entry-origin gate on the ENTERING object
         // (`affected_object_id`), NOT the replacement source. The physical half
         // delegates to the shared `OriginConstraint::matches_from` predicate.

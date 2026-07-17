@@ -17,7 +17,9 @@ use super::super::oracle_nom::condition::{
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
-use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_word};
+use super::super::oracle_target::{
+    parse_cost_paid_mana_value_reference, parse_target, parse_type_phrase, parse_zone_word,
+};
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
@@ -2665,6 +2667,37 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // NOTE (honest coverage): the LEADING dynamic-RHS surface — "if it has [the
+    // same] mana value [...] the <verb>ed <noun>['s mana value], <body>" (Anchor
+    // to Reality: "...put that card onto the battlefield, then shuffle. If it has
+    // mana value less than the sacrificed permanent's mana value, scry 2.") — is
+    // deliberately NOT wired here. In that surface "it" is the just-searched /
+    // placed card (an object introduced by an earlier instruction, CR 608.2c
+    // Demonstrative), NOT an object target: Anchor declares no object target and
+    // the searched card is never bound to any runtime object scope (search /
+    // change-zone do not populate `effect_context_object`). Binding "it" to
+    // `ObjectScope::Target` here would resolve to nothing (0) and make the scry
+    // gate fire on the wrong comparison, so this class stays honestly RED
+    // (swallowed) until the searched-object runtime binding exists. The suffix
+    // (target-anaphor) surface below is the only one wired.
+
+    // CR 202.3 + CR 608.2k: suffix dynamic RHS — "<effect> if it has [the same]
+    // mana value [...] the <verb>ed <noun>['s mana value]" (Hisoka, Minamo
+    // Sensei: "Counter target spell if it has the same mana value as the
+    // discarded card.").
+    if let Some((before, after)) = tp.rsplit_around(" if ") {
+        if let Ok((rest, condition)) =
+            parse_it_mana_value_vs_cost_paid_object(after.lower.trim_end_matches('.'))
+        {
+            if rest.trim().is_empty() {
+                return (
+                    Some(condition),
+                    before.original.trim_end_matches('.').trim().to_string(),
+                );
+            }
+        }
+    }
+
     // Leading position, past tense: "If its mana value was N or less/greater, [effect]."
     // CR 400.7: past-tense check → use_lki: true (LKI snapshot).
     if let Ok((rest, _)) =
@@ -2844,6 +2877,60 @@ fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, Quantit
     ))
 }
 
+/// CR 202.3 + CR 608.2k: "it has [the same] mana value [as | less than | greater
+/// than] the <verb>ed <noun>['s mana value]" — compares the ability's first
+/// object target's mana value (CR 115.1: "it") to the mana value of the object
+/// paid as a cost / previously referenced (CR 608.2k: `CostPaidObject`). Hisoka,
+/// Minamo Sensei ("Counter target spell if it has the same mana value as the
+/// discarded card") — here "it" anaphors to the countered target spell, so the
+/// LHS is `ObjectScope::Target`. Both operands are typed
+/// `QuantityRef::ObjectManaValue` — no fixed threshold — so a mana-value change
+/// to either object after cost payment is read at resolution.
+///
+/// Only wired for the SUFFIX (target-anaphor) surface. The leading surface where
+/// "it" denotes a just-searched/placed card (Anchor to Reality) is intentionally
+/// left unwired — see the note in `strip_mana_value_conditional` — because that
+/// object has no runtime scope binding and `Target` would be wrong.
+fn parse_it_mana_value_vs_cost_paid_object(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("it has ").parse(input)?;
+    let (rest, comparator) = alt((
+        // "the same mana value as <referent>" — equality surface.
+        value(Comparator::EQ, tag("the same mana value as ")),
+        // "mana value <comparator> <referent>".
+        preceded(
+            tag("mana value "),
+            alt((
+                value(Comparator::LE, tag("less than or equal to ")),
+                value(Comparator::LT, tag("less than ")),
+                value(Comparator::GE, tag("greater than or equal to ")),
+                value(Comparator::GT, tag("greater than ")),
+                value(Comparator::EQ, tag("equal to ")),
+            )),
+        ),
+    ))
+    .parse(rest)?;
+    // CR 608.2k: the RHS referent ("the discarded/sacrificed <noun>") and its
+    // CostPaidObject → QuantityRef mapping come from the single shared authority
+    // `parse_cost_paid_mana_value_reference` (oracle_target). The optional
+    // possessive suffix "'s mana value" (Anchor to Reality: "the sacrificed
+    // permanent's mana value") is consumed locally here — it is a consumption
+    // detail of this surface, not part of the referent→scope mapping.
+    let (rest, rhs_qty) = parse_cost_paid_mana_value_reference(rest)?;
+    let (rest, _) = opt(tag("'s mana value")).parse(rest)?;
+    Ok((
+        rest,
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Ref { qty: rhs_qty },
+        },
+    ))
+}
+
 pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -2856,6 +2943,30 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
             Some(nonbasic_land_lki_condition()),
             text[body_start..].to_string(),
         );
+    }
+
+    // CR 205.4a + CR 400.7: leading past-tense LKI supertype gate on the prior
+    // target — "if that land was <supertype>, <body>" (Feast of Worms: "if that
+    // land was legendary, its controller sacrifices another land of their
+    // choice"). Generalizes the nonbasic arm above to the CR 205.4a supertype
+    // set; `use_lki: true` because the destroyed land is read at last-known
+    // information (CR 400.7 — it is already in the graveyard when the second
+    // sentence resolves).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if that land was ").parse(lower.as_str()) {
+        if let Ok((after_super, supertype)) = parse_supertype_word(rest) {
+            if let Ok((_, _)) = tag::<_, _, OracleError<'_>>(", ").parse(after_super) {
+                let body_start = text.len() - after_super.len() + ", ".len();
+                let condition = AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::default()
+                            .properties(vec![FilterProp::HasSupertype { value: supertype }]),
+                    ),
+                    use_lki: true,
+                    subject_slot: None,
+                };
+                return (Some(condition), text[body_start..].to_string());
+            }
+        }
     }
 
     if let Some((before, after)) = tp.rsplit_around(" if that land was ") {

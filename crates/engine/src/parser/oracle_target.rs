@@ -5210,7 +5210,18 @@ fn parse_mana_value_reference_qty(
     .parse(input)
 }
 
-fn parse_cost_paid_mana_value_reference(
+/// CR 608.2k: single authority mapping the untargeted cost-paid-object referent
+/// "the [discarded|sacrificed] <noun>" to
+/// `QuantityRef::ObjectManaValue { scope: CostPaidObject }`. Shared by the
+/// mana-value referent quantity path (`parse_mana_value_reference_qty`) and the
+/// "it has ... mana value ... the <verb>ed <noun>" condition surface
+/// (`oracle_effect::conditions::parse_it_mana_value_vs_cost_paid_object`), so the
+/// verb/noun enumeration and the CostPaidObject mapping live in one place rather
+/// than being re-hand-rolled per call site. "exiled" is intentionally excluded
+/// here: in the quantity path "the exiled card" already binds effect-exile
+/// (`TrackedSet`) semantics, so exiled is context-dependent and handled by the
+/// context-gated `parse_cost_paid_object_reference` instead.
+pub(crate) fn parse_cost_paid_mana_value_reference(
     input: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
     let (rest, _) = opt(tag("the ")).parse(input)?;

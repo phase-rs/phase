@@ -17,6 +17,7 @@ use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
 };
 use super::quantity as nom_quantity;
+use super::target::parse_self_reference;
 use crate::parser::oracle_target::{
     cast_capable_zones_except, parse_type_phrase, parse_zone_suffix, parse_zone_word,
     peek_zone_boundary,
@@ -345,7 +346,10 @@ fn parse_was_cast_condition(input: &str) -> OracleResult<'_, StaticCondition> {
             |(_, zone)| StaticCondition::WasCast { zone: Some(zone) },
         ),
         // CR 601.2a + CR 400.7: zoneless "was cast" gate (Anti-Venom "if he was
-        // cast"). "they" takes the plural verb "were cast".
+        // cast"). "they" takes the plural verb "were cast". The active-voice
+        // "you cast it"/"you cast them" (Nine-Lives Familiar: "enters with eight
+        // revival counters on it if you cast it") is the same zoneless
+        // cast-provenance gate — the object was cast from anywhere.
         value(
             StaticCondition::WasCast { zone: None },
             alt((
@@ -356,6 +360,8 @@ fn parse_was_cast_condition(input: &str) -> OracleResult<'_, StaticCondition> {
                 tag("he was cast"),
                 tag("she was cast"),
                 tag("they were cast"),
+                tag("you cast it"),
+                tag("you cast them"),
             )),
         ),
     ))
@@ -368,12 +374,58 @@ fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, Stat
         // "was dealt excess damage this turn" wins over the shorter "was dealt
         // damage this turn" prefix in `parse_source_was_dealt_damage_this_turn`.
         parse_subject_was_dealt_excess_damage_this_turn,
+        // CR 120.1 + CR 603.4: amount-first passive form "N or more damage was
+        // dealt to <recipient> this turn" (Burning-Eye Zubera cycle). Prefix is a
+        // number, disjoint from the subject-first arms below.
+        parse_amount_damage_dealt_to_recipient_this_turn,
         parse_player_was_dealt_damage_threshold_this_turn,
         parse_player_dealt_combat_damage_by_source_this_turn,
         parse_source_dealt_damage_this_turn,
         parse_source_was_dealt_damage_this_turn,
     ))
     .parse(input)
+}
+
+/// CR 120.1 + CR 603.4 + CR 603.10a: "N or more [combat] damage was dealt to
+/// <recipient> this turn" — the amount-first passive form gating a dies trigger
+/// on accumulated damage to the triggering object (Burning-Eye Zubera cycle:
+/// "When this creature dies, if 4 or more damage was dealt to it this turn,
+/// ..."). The recipient anaphors ("it"/"~"/"this creature"/"this permanent") all
+/// denote the source that died, so they bind `TargetFilter::SelfRef`; the source
+/// axis is `Any` (damage from any object counts). Distinct word order from
+/// `parse_player_was_dealt_damage_threshold_this_turn` (subject-first), so it is
+/// its own combinator rather than a shared one.
+fn parse_amount_damage_dealt_to_recipient_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, amount) = parse_number(input)?;
+    let (rest, _) = tag(" or more ").parse(rest)?;
+    let (rest, combat) = opt(tag("combat ")).parse(rest)?;
+    let (rest, _) = tag("damage was dealt to ").parse(rest)?;
+    // The recipient anaphor ("it" / "~" / "this creature" / "this permanent" / …)
+    // routes through the shared self-reference authority rather than re-enumerating
+    // a subset inline. CR 201.5: each denotes the ability's own object (`SelfRef`).
+    let (rest, target) = parse_self_reference(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    let damage_kind = if combat.is_some() {
+        DamageKindFilter::CombatOnly
+    } else {
+        DamageKindFilter::Any
+    };
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(target),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind,
+                channel: DamageChannel::Total,
+            },
+            amount,
+        ),
+    ))
 }
 
 /// Wrapper around `parse_type_phrase` that fails (nom error) when the result is
@@ -584,6 +636,19 @@ fn parse_source_dealt_damage_this_turn(input: &str) -> OracleResult<'_, StaticCo
             TargetFilter::Typed(TypedFilter::creature()),
             alt((tag("a creature"), tag("creature"))),
         ),
+        // NOTE: no "it" (dying-object anaphor) arm here. "if <source> dealt damage
+        // to it this turn" on a *dies* trigger (Hawkeye, Avenging Archer) names the
+        // creature that died, which is the trigger event's SOURCE object
+        // (`extract_source_from_event(ZoneChanged)`), NOT its `EventTarget`
+        // (`extract_target_object_from_event`, which yields `Some` only for a
+        // `DamageDealt` event — CR 120.1). Binding "it" to `TargetFilter::EventTarget`
+        // here made the intervening-if silently always-false at runtime (the
+        // ZoneChanged event has no EventTarget, so the damage-record match found
+        // nothing and the gate could never hold). No object-matching `TargetFilter`
+        // resolves the trigger *source* object today (`TriggeringSource` is inert in
+        // `matches_target_filter`), so this dies-object damage look-back stays an
+        // honest RED (swallowed `Condition_If`) until that dying-object recipient
+        // filter is built. See the pinned `hawkeye_*_is_honest_red` tripwire.
     ))
     .parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
@@ -5359,6 +5424,11 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_card_left_your_graveyard_this_turn,
         parse_permanent_put_into_your_hand_from_battlefield_this_turn,
         parse_card_put_into_your_graveyard_from_anywhere_this_turn,
+        // CR 404.1: owner-scoped "your graveyard" form — must precede the
+        // any-graveyard form so "your graveyard" is not left for the
+        // unscoped combinator (their suffixes are disjoint, but keep the
+        // owner-scoped, more-specific one first for clarity).
+        parse_object_put_into_your_graveyard_from_battlefield_this_turn,
         parse_object_put_into_graveyard_from_battlefield_this_turn,
         parse_creature_died_this_turn_conditions,
         // "a nonland permanent left the battlefield this turn" (Revolt variant)
@@ -5628,6 +5698,42 @@ fn parse_your_card_put_into_your_graveyard_from_anywhere_this_turn(
                 from: None,
                 to: Some(Zone::Graveyard),
                 filter: add_owned_with_props(filter, ControllerRef::You, &[FilterProp::NonToken]),
+            },
+            1,
+        ),
+    ))
+}
+
+/// CR 404.1 + CR 400.7 + CR 603.4: "a <type> was put into your graveyard from
+/// the battlefield this turn" — the owner-scoped variant of the any-graveyard
+/// form. A permanent is put into its OWNER's graveyard (CR 404.1), so "your
+/// graveyard" is an OWNERSHIP scope, encoded as `FilterProp::Owned { You }` on
+/// the filter (reads `obj.owner`), never as a controller filter and never on the
+/// zoneless `to` field. Kami of Transience's each-end-step return gate: "if an
+/// enchantment was put into your graveyard from the battlefield this turn".
+/// Mirrors `parse_permanent_put_into_your_hand_from_battlefield_this_turn`.
+fn parse_object_put_into_your_graveyard_from_battlefield_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_article(input)?;
+    let suffix = " was put into your graveyard from the battlefield this turn";
+    let (rest, type_text) = take_until(suffix).parse(rest)?;
+    let (rest, _) = tag(suffix).parse(rest)?;
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: add_owned_with_props(filter, ControllerRef::You, &[]),
             },
             1,
         ),

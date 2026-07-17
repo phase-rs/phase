@@ -111,6 +111,7 @@ mod dragonstorm_forecaster_named_or_tutor;
 mod draw_from_general_post_replacement;
 mod dream_salvage_target_opponent_discards;
 mod dredgers_insight_mill_from_among;
+mod dropped_intervening_if_gating_condition;
 mod druid_of_purification_destroy_chosen_4780;
 mod duskmantle_seer_each_player_reveal;
 mod elemental_spectacle_regression;

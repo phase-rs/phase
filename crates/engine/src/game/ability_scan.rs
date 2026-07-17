@@ -5028,7 +5028,7 @@ mod tests {
         ));
         assert!(!replacement_condition_reads_projected_resource(
             &ReplacementCondition::CastFromZone {
-                zone: crate::types::zones::Zone::Graveyard
+                zone: Some(crate::types::zones::Zone::Graveyard)
             }
         ));
         assert!(!duration_reads_projected_resource(

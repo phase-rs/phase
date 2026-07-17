@@ -4917,7 +4917,7 @@ mod tests {
     /// (issue #2234).
     #[test]
     fn condition_as_long_as_bronze_horse_reports_known_gap_champions_helm_accepted() {
-        use crate::types::ability::{FilterProp, ShieldKind, TypedFilter};
+        use crate::types::ability::{FilterProp, ReplacementCondition, ShieldKind, TypedFilter};
         use crate::types::keywords::Keyword;
         use crate::types::replacements::ReplacementEvent;
         use crate::types::ContinuousModification;
@@ -4947,28 +4947,39 @@ mod tests {
             "expected gated damage-prevention replacement, got {:#?}",
             bronze.replacements
         );
-        // KNOWN GAP, pinned deliberately. Bronze Horse DOES report a swallowed
-        // `Condition_AsLongAs` — and did so in the shipped card data long before this
-        // change (verified against the pre-cutover full-pool export). The assertions
-        // above are why: the "as long as you control another creature" gate survives
-        // only inside `description` (a String), and is never lifted into a typed
-        // condition on the replacement. So the condition really is swallowed and the
-        // detector is right.
-        //
-        // This test previously asserted the OPPOSITE and passed — vacuously. It parses
-        // with an empty MTGJSON keyword list, so the "Trample" line fell through to an
-        // `Effect::Unimplemented`, which tripped the CARD-WIDE Unimplemented gate and
-        // silenced all fourteen detectors on the whole card. The green was the gate,
-        // not the parse. Per-unit suppression scopes that gate to the "Trample" line
-        // alone, so line 1 is now audited and the pre-existing gap is visible.
-        //
-        // Flip this assertion when the "as long as" gate is lifted into a typed
-        // replacement condition; until then it is a tripwire, not an endorsement.
+        // CR 611.3 + CR 614.1d: The "as long as you control another creature" gate is
+        // now LIFTED into a typed replacement condition. The shared
+        // `parse_inner_condition` reads "you control another creature" as
+        // `StaticCondition::IsPresent { Some(creature ∧ Another ∧ You) }`, and the
+        // `replacement_condition_from_static` bridge maps that presence check to
+        // `ReplacementCondition::IfControlsMatching { minimum: 1, .. }` — evaluated
+        // dynamically at each damage event, which is exactly the "as long as"
+        // continuous semantics. The detector therefore no longer reports a swallow.
+        // (This flips the prior deliberate tripwire, per its own instruction: the gate
+        // is no longer description-only.)
         assert!(
-            has_swallowed_detector(&bronze, "Condition_AsLongAs"),
-            "Bronze Horse's as-long-as gate is description-only, never typed: the swallow \
-             is real. Warnings: {:?}",
+            !has_swallowed_detector(&bronze, "Condition_AsLongAs"),
+            "Bronze Horse's as-long-as gate is now typed via IfControlsMatching; the \
+             Condition_AsLongAs swallow must clear. Warnings: {:?}",
             bronze.parse_warnings
+        );
+        assert!(
+            bronze.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && matches!(
+                        &r.condition,
+                        Some(ReplacementCondition::IfControlsMatching { minimum, filter })
+                            if *minimum == 1
+                                && matches!(
+                                    filter,
+                                    TargetFilter::Typed(TypedFilter { properties, .. })
+                                        if properties.contains(&FilterProp::Another)
+                                )
+                    )
+            }),
+            "expected the prevention replacement to carry a typed IfControlsMatching gate \
+             over 'another creature you control', got {:#?}",
+            bronze.replacements
         );
 
         let helm = parse_named(

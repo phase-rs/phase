@@ -4637,6 +4637,44 @@ fn parse_cast_from_zone_intervening_if(input: &str) -> OracleResult<'_, TriggerC
     Ok((rest, scoped_you_cast_from_zone(zone)))
 }
 
+/// CR 601.2 + CR 603.4: "if you cast it from anywhere other than <zone>" —
+/// cast-provenance intervening-if requiring the entering permanent to have been
+/// cast (CR 601.2) but from a zone OTHER than the named one (Alex Wilder,
+/// Runaway: "if you cast it from anywhere other than your hand"). Lowers to the
+/// conjunction of a positive `WasCast` (it was cast at all — a token or
+/// put-onto-battlefield entry fails this conjunct) and the negation of the
+/// zone-scoped cast (`scoped_you_cast_from_zone`), so a hand-cast fails the
+/// second conjunct. Both axes stay separately resolvable rather than collapsing
+/// into a `from_hand: bool`. MUST be registered before the bare "if you cast it"
+/// handler, whose `" from"` guard already declines this phrase but which would
+/// otherwise be a latent shadowing hazard.
+fn parse_cast_from_anywhere_other_than_intervening_if(
+    input: &str,
+) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if you cast it from anywhere other than ").parse(input)?;
+    let (rest, zone) = alt((
+        value(Zone::Hand, tag("your hand")),
+        value(Zone::Graveyard, tag("your graveyard")),
+        value(Zone::Exile, tag("exile")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::WasCast {
+                    zone: None,
+                    controller: None,
+                    owner: None,
+                },
+                TriggerCondition::Not {
+                    condition: Box::new(scoped_you_cast_from_zone(zone)),
+                },
+            ],
+        },
+    ))
+}
+
 /// CR 603.4 + CR 404.1 + CR 205.3: "if you cast it/them and <game-state condition>"
 /// — cast-provenance AND a second conjunct (Ran and Shaw: "if you cast them and
 /// there are three or more Dragon and/or Lesson cards in your graveyard"). The
@@ -4771,6 +4809,21 @@ fn extract_if_condition_with_card_name(
     // from the named zone. MUST precede the zoneless "if you cast it" arm.
     if let Some((before, condition, rest)) =
         scan_preceded(&lower, parse_cast_from_zone_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
+    }
+
+    // CR 601.2 + CR 603.4: "if you cast it from anywhere other than <zone>" —
+    // cast-provenance requiring a non-<zone> cast origin (Alex Wilder, Runaway).
+    // Ordered here alongside the other zone-specific cast-provenance arms and
+    // before the bare "if you cast it" handler.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_cast_from_anywhere_other_than_intervening_if)
     {
         let pos = before.len();
         let clause_len = lower.len() - before.len() - rest.len();
@@ -5267,6 +5320,21 @@ fn extract_if_condition_with_card_name(
                 Some(TriggerCondition::WasType { card_type }),
             );
         }
+    }
+
+    // CR 603.2 + CR 400.7 + CR 303.4: "if an <attachment> you controlled was
+    // attached to it" — attachment-first look-back on the dying object (Dawn
+    // Evangel). Ordered before the subject-first zone-change-object filter
+    // condition ("if it was enchanted") since the two phrasings are disjoint.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_attached_object_died_intervening_if)
+    {
+        let pos = before.len();
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, pos, clause_len),
+            Some(condition),
+        );
     }
 
     if let Some(result) =
@@ -5906,6 +5974,44 @@ fn parse_zone_change_object_token_predicate(input: &str) -> OracleResult<'_, Tri
 fn map_attachment_kind_filter_prop(input: &str) -> OracleResult<'_, FilterProp> {
     let (rest, kinds) = parse_attachment_kind_disjunction(input)?;
     Ok((rest, attachment_kinds_filter_prop(kinds, None)))
+}
+
+/// CR 603.2 + CR 400.7 + CR 303.4: "if an <attachment> [you controlled] was
+/// attached to it" — the attachment-first look-back on the dying object (Dawn
+/// Evangel: "if an Aura you controlled was attached to it"). "it" is the
+/// triggering creature that died; the predicate asks whether that object had an
+/// attachment of the named kind — controlled by you when the possessive scope is
+/// present — at last-known information (CR 603.10a). Reduces to the SAME
+/// `ZoneChangeObjectMatchesFilter` + `HasAttachment` condition the subject-first
+/// "if it was enchanted" look-back produces (via
+/// `map_attachment_kind_filter_prop`), so no new runtime variant is needed — only
+/// the controller scope and the surface word order differ.
+fn parse_attached_object_died_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = alt((tag("if an "), tag("if a "))).parse(input)?;
+    let (rest, kind) = alt((
+        value(AttachmentKind::Aura, tag("aura")),
+        value(AttachmentKind::Equipment, tag("equipment")),
+    ))
+    .parse(rest)?;
+    let (rest, controller) = alt((
+        value(Some(ControllerRef::You), tag(" you controlled")),
+        value(
+            Some(ControllerRef::Opponent),
+            tag(" an opponent controlled"),
+        ),
+        value(None, tag("")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" was attached to it").parse(rest)?;
+    let prop = attachment_kinds_filter_prop(vec![kind], controller);
+    Ok((
+        rest,
+        TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![prop])),
+        },
+    ))
 }
 
 fn try_extract_no_mana_spent_condition(

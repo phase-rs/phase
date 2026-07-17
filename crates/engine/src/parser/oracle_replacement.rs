@@ -3701,7 +3701,7 @@ fn parse_enters_with_counters(
             } else if let Some(cond) = kicker_condition {
                 def = def.condition(cond);
             } else if let Some(zone) = extract_cast_from_zone_suffix(work_text) {
-                def = def.condition(ReplacementCondition::CastFromZone { zone });
+                def = def.condition(ReplacementCondition::CastFromZone { zone: Some(zone) });
             } else if extract_you_attacked_this_turn_suffix(work_text) {
                 def = def.condition(ReplacementCondition::YouAttackedThisTurn);
             } else if extract_cast_using_web_slinging_suffix(work_text) {
@@ -3895,7 +3895,7 @@ fn parse_enters_with_counters(
     } else if let Some(cond) = kicker_condition {
         def = def.condition(cond);
     } else if let Some(zone) = extract_cast_from_zone_suffix(work_text) {
-        def = def.condition(ReplacementCondition::CastFromZone { zone });
+        def = def.condition(ReplacementCondition::CastFromZone { zone: Some(zone) });
     } else if extract_you_attacked_this_turn_suffix(work_text) {
         // CR 207.2c (Raid): "Raid — ~ enters with [counter] on it if you
         // attacked this turn." (Cruel Administrator, Goblin Boarders, etc.)
@@ -4531,6 +4531,25 @@ fn replacement_condition_from_static(condition: StaticCondition) -> Option<Repla
             Some(ReplacementCondition::SourceTappedState { tapped: false })
         }
         StaticCondition::HasMaxSpeed => Some(ReplacementCondition::HasMaxSpeed),
+        // CR 601.2 + CR 614.1c: cast-provenance enters-with gate. "if you cast
+        // it" (zoneless, `zone: None` = cast from anywhere; Nine-Lives Familiar)
+        // and "if it was cast from <zone>" (`zone: Some(z)`; Myojin cycle) share
+        // the one `CastFromZone` `Option<Zone>` parameterization on the CR 601.2
+        // axis.
+        StaticCondition::WasCast { zone } => Some(ReplacementCondition::CastFromZone { zone }),
+        // CR 614.1d + CR 700.9: presence-gated enters-with replacement — "enters
+        // with ... if you control a modified creature" (Heir of the Ancient
+        // Fang). `parse_you_control_a` already injects the controller scope
+        // (`controller: You`) into the filter, which is exactly the shape
+        // `IfControlsMatching` evaluates against its source controller. A filter
+        // with no controller restriction (`None`) maps to a "any player controls"
+        // presence gate, which is still expressible as `IfControlsMatching`.
+        StaticCondition::IsPresent { filter: Some(f) } => {
+            Some(ReplacementCondition::IfControlsMatching {
+                minimum: 1,
+                filter: f,
+            })
+        }
         _ => None,
     }
 }
