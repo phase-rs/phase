@@ -169,6 +169,7 @@ mod hollow_one_cost_reduction;
 mod hunters_insight_combat_draw;
 mod inevitable_betrayal_no_mana_cost;
 mod infantry_shield_mobilize_grant;
+mod inspiring_call_indestructible_grant;
 mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;

@@ -22597,6 +22597,64 @@ fn rewrite_filter_parent_to_tracked_set(filter: &mut TargetFilter) {
     }
 }
 
+/// issue #6065: If `effect` is "draw a card for each `<filter>`" — a `Draw` whose
+/// count is `ObjectCount { filter }` — return that count filter. This is the
+/// antecedent a following "those creatures" grant refers to. Unlike a tracked-set
+/// publisher, `Draw` does not publish the counted objects at resolution (its
+/// `target` is the drawing player), so a `ParentTarget` grant chained after it
+/// must bind directly to this filter rather than to the tracked-set sentinel.
+pub(super) fn draw_object_count_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Draw {
+            count:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            ..
+        } => Some(filter),
+        _ => None,
+    }
+}
+
+/// Re-anchor a `ParentTarget` anaphor in `filter` to `replacement`. Mirrors
+/// `rewrite_filter_parent_to_tracked_set` but binds to a concrete antecedent
+/// filter (issue #6065: "those creatures" → the counted-creature filter).
+fn rewrite_filter_parent_to(filter: &mut TargetFilter, replacement: &TargetFilter) {
+    match filter {
+        TargetFilter::ParentTarget => *filter = replacement.clone(),
+        TargetFilter::Not { filter } => rewrite_filter_parent_to(filter, replacement),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for f in filters {
+                rewrite_filter_parent_to(f, replacement);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CR 603.7 + issue #6065: Re-anchor a "those creatures gain `<keyword>`" grant's
+/// `ParentTarget` to `replacement` — the filter of a preceding "draw a card for
+/// each `<creature filter>`" count (Inspiring Call). Only the grant surface
+/// (`GenericEffect`) is rewritten; the tracked-set path (`PutCounterAll` etc.)
+/// is untouched and keeps producing `TrackedSet(0)`.
+pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &TargetFilter) {
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    {
+        if let Some(target) = target {
+            rewrite_filter_parent_to(target, replacement);
+        }
+        for static_def in static_abilities {
+            if let Some(affected) = &mut static_def.affected {
+                rewrite_filter_parent_to(affected, replacement);
+            }
+        }
+    }
+}
+
 fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     let mut index = 0;
     while index + 1 < defs.len() {
