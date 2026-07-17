@@ -25,7 +25,9 @@ use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, LoopDetectionMode, WaitingFor, YieldTarget};
+use engine::types::game_state::{
+    CastPaymentMode, GameState, LoopDetectionMode, WaitingFor, YieldTarget,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -2909,6 +2911,192 @@ fn object_growth_no_affinity_does_not_offer() {
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "no affinity ⇒ the driven recast can't afford {{4}}{{G}} via convoke ⇒ NO offer, got {:?}",
         outcome.final_waiting_for()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INTERRUPTIBILITY matched pair (combo 2+3): the opponent HOLDS a real Murder.
+// Undefused (opponent passes) ⇒ the CR 732.2a object-growth shortcut is GRANTED.
+// Defused (opponent Murders Witherbloom in response to Sprout Swarm on the
+// stack, CR 601.2i) ⇒ the affinity granter is gone, so the empty-stack hook's
+// clone-drive re-derives the recast WITHOUT affinity, convoke alone can't pay
+// {4}{G} ⇒ NO grant beyond the current stack. The opponent's pass-vs-respond is
+// the SOLE delta and FLIPS the outcome.
+// ---------------------------------------------------------------------------
+
+/// Arm `player` with a real castable Murder ({1}{B}{B}, "Destroy target creature.") backed by 3
+/// Swamps — the held defuse. Returns the Murder's `ObjectId`.
+fn arm_murder(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    for _ in 0..3 {
+        scenario.add_basic_land(player, ManaColor::Black);
+    }
+    let mut murder =
+        scenario.add_spell_to_hand_from_oracle(player, "Murder", true, "Destroy target creature.");
+    murder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 1,
+    });
+    murder.id()
+}
+
+/// As [`sprout_swarm_scenario`], but ALSO arms P1 with a held Murder (the defuse for the CR 732.2a
+/// interruptibility pair). Returns `(runner, sprout, witherbloom, murder, fodder)`.
+///
+/// R3: pinned at `n_fodder = 4`. The defused negative relies on the driven recast being unpayable
+/// once affinity is removed — convoke-only must then pay the full {4}{G} (buyback {3} + base
+/// {1}{G}), i.e. 5 taps, while at most 4 untapped green creatures remain at the recast (one fodder
+/// is tapped for the real cast's convoke, plus the one fresh Saproling). If a future bump made
+/// convoke alone able to pay {4}{G}, the Murder defuse would stop breaking the loop and the defused
+/// test would go vacuous — keep this tied to the `object_growth_no_affinity_does_not_offer` math.
+fn sprout_swarm_scenario_with_murder(
+    n_fodder: usize,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let witherbloom = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Witherbloom, the Balancer",
+            5,
+            5,
+            WITHERBLOOM_AFFINITY_ORACLE,
+        )
+        .id();
+    let mut fodder = Vec::new();
+    for _ in 0..n_fodder {
+        fodder.push(scenario.add_creature(P0, "Saproling", 1, 1).id());
+    }
+    let sprout = {
+        let mut b =
+            scenario.add_spell_to_hand_from_oracle(P0, "Sprout Swarm", true, SPROUT_SWARM_ORACLE);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        b.id()
+    };
+    let murder = arm_murder(&mut scenario, P1);
+    let mut runner = scenario.build();
+    {
+        let st = runner.state_mut();
+        st.loop_detection = LoopDetectionMode::Interactive;
+        for &id in &fodder {
+            st.objects.get_mut(&id).unwrap().color = vec![ManaColor::Green];
+        }
+    }
+    (runner, sprout, witherbloom, murder, fodder)
+}
+
+/// T-object-growth-INT-a ⭐ — INTERRUPTIBILITY, UNDEFUSED: P1 HOLDS a real Murder but PASSES ⇒ the
+/// CR 732.2a object-growth shortcut is GRANTED. Sprout Swarm resolves through a genuine response
+/// window (P1 auto-passes, CR 601.2i/117.3c), the token-growth loop settles, and the shortcut is
+/// OFFERED. Matched with the defused twin: P1's pass-vs-respond is the SOLE delta and FLIPS the
+/// outcome. Reach-guards prove the defuse was genuinely held (Murder still in hand, Witherbloom
+/// still on the battlefield).
+#[test]
+fn object_growth_interruptibility_undefused_opponent_passes_grants() {
+    let (mut runner, sprout, witherbloom, murder, fodder) = sprout_swarm_scenario_with_murder(4);
+    let outcome = runner
+        .cast(sprout)
+        .accept_optional() // pay buyback {3}
+        .convoke_with(&[fodder[0]]) // tap one green Saproling for the {G} pip
+        .commit()
+        .resolve();
+
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+        ),
+        "UNDEFUSED (P1 passes): the object-growth shortcut is OFFERED to P0, got {:?}",
+        outcome.final_waiting_for()
+    );
+    // Reach-guards: the defuse was genuinely HELD (not spent) and the affinity granter survived.
+    assert_eq!(
+        outcome.state().objects[&murder].zone,
+        engine::types::zones::Zone::Hand,
+        "P1's Murder is still in hand (held, not cast) — the offer is not vacuous on a spent defuse"
+    );
+    assert_eq!(
+        outcome.state().objects[&witherbloom].zone,
+        engine::types::zones::Zone::Battlefield,
+        "Witherbloom (the affinity granter) survives when P1 passes"
+    );
+}
+
+/// T-object-growth-INT-b ⭐ — INTERRUPTIBILITY, DEFUSED: P1 RESPONDS to Sprout Swarm (on the stack,
+/// CR 601.2i) by casting Murder on Witherbloom. The affinity granter is destroyed, Sprout resolves
+/// (one Saproling made, buyback → hand), and the empty-stack hook's clone-drive re-derives the
+/// recast WITHOUT affinity ⇒ convoke-only {4}{G} needs 5 taps but ≤4 untapped greens remain ⇒
+/// unpayable ⇒ NO grant beyond the current stack (CR 732.2a). The ONLY delta vs the undefused twin
+/// is P1's respond-vs-pass, and the outcome FLIPS (offer → no offer). This is the exact
+/// `object_growth_no_affinity_does_not_offer` mechanism, reached at RUNTIME by removing affinity
+/// mid-stack instead of omitting the granter from the fixture.
+#[test]
+fn object_growth_interruptibility_defused_opponent_responds_no_grant() {
+    let (mut runner, sprout, witherbloom, murder, fodder) = sprout_swarm_scenario_with_murder(4);
+    let before = saproling_count(runner.state());
+    let murder_card = runner.state().objects[&murder].card_id;
+
+    // Commit Sprout (buyback + convoke) to the stack WITHOUT resolving — leaving P0 priority with
+    // Sprout on the stack. The bare `commit()` temporary is dropped at the `;`, releasing the
+    // borrow so the manual drive can continue.
+    runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder[0]])
+        .commit();
+    // P0 passes ⇒ P1 gets priority with Sprout on the stack (the real response window).
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    // P1 RESPONDS: Murder destroys Witherbloom in response to Sprout. The reducer surfaces a
+    // `TargetSelection` prompt (the action's `targets` field is not consumed), answered below.
+    runner
+        .act(GameAction::CastSpell {
+            object_id: murder,
+            card_id: murder_card,
+            targets: vec![witherbloom],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 may cast Murder in response (instant speed)");
+    // Settle: Murder targets Witherbloom, resolves, destroys it; then Sprout resolves (token +
+    // buyback → hand); then the empty-stack hook drives the clone (no affinity ⇒ unpayable ⇒ no
+    // offer).
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::LoopShortcut { .. } => break,
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(witherbloom)],
+                    })
+                    .expect("Murder targets Witherbloom (a legal creature)");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            _ => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Reach-guards: the response LANDED (Witherbloom gone) and the Sprout cast still RESOLVED (a
+    // real Saproling was made — the no-offer is the recast-unpayable break, not a fizzled cast).
+    assert!(
+        runner.state().objects.get(&witherbloom).map(|o| o.zone)
+            != Some(engine::types::zones::Zone::Battlefield),
+        "reach-guard: P1's Murder destroyed Witherbloom (the response landed)"
+    );
+    assert_eq!(
+        saproling_count(runner.state()),
+        before + 1,
+        "reach-guard: Sprout still resolved and made one Saproling (the cast did not fizzle)"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "DEFUSED (P1 responds): affinity is gone ⇒ the driven recast can't afford {{4}}{{G}} via \
+         convoke ⇒ NO grant beyond the current stack, got {:?}",
+        runner.state().waiting_for
     );
 }
 

@@ -19,13 +19,13 @@ use engine::analysis::resource::ResourceAxis;
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::create_object_from_card_face;
 use engine::game::effects::attach::attach_to;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::{add_to_zone, remove_from_zone};
-use engine::types::ability::Effect;
+use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, LoopDetectionMode, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::game_state::{CastPaymentMode, GameState, LoopDetectionMode, WaitingFor};
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -339,5 +339,180 @@ fn activation_loop_off_mode_is_byte_identical() {
     assert_eq!(
         elves, 1,
         "Off plays the game normally: one Elf from one activation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// INTERRUPTIBILITY matched pair (combo 5): the opponent HOLDS a real Disenchant.
+// Undefused (opponent passes) ⇒ the CR 732.2a shortcut is GRANTED. Defused
+// (opponent Disenchants Intruder Alarm in response to the token-creating {T} on
+// the stack, CR 602.2a) ⇒ the untap-all enabler is gone, the host stays tapped,
+// the clone-drive's 2nd activation is illegal ⇒ NO grant beyond the current
+// stack. The opponent's pass-vs-respond is the SOLE delta and FLIPS the outcome.
+// ---------------------------------------------------------------------------
+
+/// Create `name` in `player`'s hand after build (mirror of `place_on_battlefield` for Hand).
+fn place_in_hand(
+    state: &mut GameState,
+    player: PlayerId,
+    name: &str,
+    db: &CardDatabase,
+) -> ObjectId {
+    let face = db
+        .get_face_by_name(name)
+        .unwrap_or_else(|| panic!("card '{name}' not found in fixture"));
+    let id = create_object_from_card_face(state, face, player);
+    remove_from_zone(state, id, Zone::Library, player);
+    add_to_zone(state, id, Zone::Hand, player);
+    state.objects.get_mut(&id).unwrap().zone = Zone::Hand;
+    id
+}
+
+/// Give `player` enough Plains to cast Disenchant ({1}{W}) and a real Disenchant in hand — the
+/// held defuse. Returns `(disenchant_id, card_id)`.
+fn arm_disenchant(
+    runner: &mut GameRunner,
+    player: PlayerId,
+    db: &CardDatabase,
+) -> (ObjectId, CardId) {
+    place_on_battlefield(runner.state_mut(), player, "Plains", db);
+    place_on_battlefield(runner.state_mut(), player, "Plains", db);
+    let disenchant = place_in_hand(runner.state_mut(), player, "Disenchant", db);
+    let card_id = runner.state().objects[&disenchant].card_id;
+    (disenchant, card_id)
+}
+
+/// Find the (single) Intruder Alarm on the battlefield, whatever seat controls it.
+fn intruder_alarm(state: &GameState) -> Option<ObjectId> {
+    state
+        .objects
+        .values()
+        .find(|o| o.name == "Intruder Alarm" && o.zone == Zone::Battlefield)
+        .map(|o| o.id)
+}
+
+/// P1-INT-a ⭐ — INTERRUPTIBILITY, UNDEFUSED: P1 HOLDS a real Disenchant but PASSES ⇒ the CR
+/// 732.2a shortcut is GRANTED. The token-creating `{T}` is ON the stack (CR 602.2a), so P1 has a
+/// genuine response window; passing it lets the Elf ETB fire Intruder Alarm's untap-all, the host
+/// comes untapped, and the loop settles and OFFERS. Matched with the defused twin: P1's
+/// pass-vs-respond is the SOLE delta and FLIPS the outcome.
+#[test]
+fn activation_interruptibility_undefused_opponent_passes_grants() {
+    let Some(db) = shared_card_db() else { return };
+    let mut c = setup(true, true, LoopDetectionMode::Interactive, db);
+    let (disenchant, _) = arm_disenchant(&mut c.runner, P1, db); // P1 could respond, but here PASSES
+
+    let idx = token_ability_index(c.runner.state(), c.host)
+        .expect("Gond's granted token-creating {T} must be on the host's layer-derived abilities");
+
+    // `activate_and_drive` auto-passes BOTH seats (P1 declines to respond) ⇒ the loop settles.
+    activate_and_drive(&mut c.runner, c.host, idx);
+
+    assert!(
+        matches!(
+            &c.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+        ),
+        "UNDEFUSED (P1 passes): the loop settles and the shortcut is OFFERED to P0, got {:?}",
+        c.runner.state().waiting_for
+    );
+    // Reach-guards: the defuse was genuinely HELD (not spent) and the enabler survived.
+    assert_eq!(
+        c.runner.state().objects[&disenchant].zone,
+        Zone::Hand,
+        "P1's Disenchant is still in hand (held, not cast) — the offer is not vacuous on a spent defuse"
+    );
+    assert!(
+        intruder_alarm(c.runner.state()).is_some(),
+        "Intruder Alarm (the untap-all enabler) survives when P1 passes"
+    );
+    assert!(
+        !c.runner.state().objects[&c.host].tapped,
+        "the untap-all fired after the Elf ETB ⇒ the host is untapped ⇒ the loop is sustainable"
+    );
+}
+
+/// P1-INT-b ⭐ — INTERRUPTIBILITY, DEFUSED: P1 RESPONDS to the token-creating `{T}` (on the stack,
+/// CR 602.2a) by Disenchanting Intruder Alarm. The untap-all enabler is destroyed, the `{T}`
+/// resolves and makes one Elf, but with no Intruder Alarm the Elf ETB does NOT untap the host, so
+/// the host stays tapped from the `{T}` cost ⇒ the clone-drive's 2nd activation is illegal ⇒ NO
+/// grant beyond the current stack (CR 732.2a). The ONLY delta vs the undefused twin is P1's
+/// respond-vs-pass, and the outcome FLIPS (offer → no offer). This is the exact
+/// `activation_loop_without_untapper_does_not_offer` mechanism, reached at RUNTIME by destroying
+/// the enabler mid-stack instead of omitting it from the fixture.
+#[test]
+fn activation_interruptibility_defused_opponent_responds_no_grant() {
+    let Some(db) = shared_card_db() else { return };
+    let mut c = setup(true, true, LoopDetectionMode::Interactive, db);
+    let (disenchant, dis_card) = arm_disenchant(&mut c.runner, P1, db);
+    let alarm = intruder_alarm(c.runner.state()).expect("Intruder Alarm is on the battlefield");
+
+    let idx = token_ability_index(c.runner.state(), c.host)
+        .expect("Gond's granted token-creating {T} must be on the host's layer-derived abilities");
+
+    // P0 activates the token-creating {T} (ON the stack, CR 602.2a).
+    c.runner
+        .act(GameAction::ActivateAbility {
+            source_id: c.host,
+            ability_index: idx,
+        })
+        .expect("the granted {T} activation is legal");
+    // P0 passes ⇒ P1 gets priority with the {T} on the stack (the real response window).
+    c.runner.act(GameAction::PassPriority).expect("P0 passes");
+    // P1 RESPONDS: Disenchant destroys Intruder Alarm in response to the {T}. The reducer surfaces a
+    // `TargetSelection` prompt (the action's `targets` field is not consumed), answered below.
+    c.runner
+        .act(GameAction::CastSpell {
+            object_id: disenchant,
+            card_id: dis_card,
+            targets: vec![alarm],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 may cast Disenchant in response (instant speed)");
+    // Settle: Disenchant targets the Alarm, resolves, destroys it; then the {T} resolves (Elf ETB,
+    // but no Alarm ⇒ no untap-all); then the empty-stack hook drives the clone (host tapped ⇒ no
+    // offer).
+    for _ in 0..60 {
+        match c.runner.state().waiting_for.clone() {
+            WaitingFor::LoopShortcut { .. } => break,
+            WaitingFor::TargetSelection { .. } => {
+                c.runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(alarm)],
+                    })
+                    .expect("Disenchant targets Intruder Alarm (a legal enchantment)");
+            }
+            WaitingFor::Priority { .. } if c.runner.state().stack.is_empty() => break,
+            _ => {
+                if c.runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Reach-guards: the response LANDED (Alarm gone), the {T} still RESOLVED (one Elf made — the
+    // no-offer is the sustain break, not a fizzled activation), and the host is left tapped.
+    assert!(
+        intruder_alarm(c.runner.state()).is_none(),
+        "reach-guard: P1's Disenchant destroyed Intruder Alarm (the response landed)"
+    );
+    assert_eq!(
+        elf_count(c.runner.state()),
+        1,
+        "reach-guard: the {{T}} still resolved and made exactly one Elf (the cast did not fizzle)"
+    );
+    assert!(
+        c.runner.state().objects[&c.host].tapped,
+        "with Intruder Alarm gone nothing untaps the host ⇒ it stays tapped from the {{T}} cost"
+    );
+    assert!(
+        !matches!(
+            c.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "DEFUSED (P1 responds): the untapper is gone ⇒ the clone-drive's 2nd activation is illegal \
+         ⇒ NO grant beyond the current stack, got {:?}",
+        c.runner.state().waiting_for
     );
 }
