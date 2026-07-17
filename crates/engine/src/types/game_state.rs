@@ -1095,6 +1095,21 @@ pub enum LoopAction {
     },
 }
 
+impl LoopAction {
+    /// CR 601.2a / CR 602.2 / CR 605.3a: whether repeating this action is a VOLUNTARY choice the
+    /// controller makes at priority — the precondition for OFFERING a CR 732.2a loop shortcut
+    /// (CR 104.4b: an optional loop). Both current variants are voluntary: casting a spell
+    /// (CR 601.2a "a player first moves that card") and activating an activated ability
+    /// (CR 602.2 / CR 605.3a "a player MAY activate") are player-initiated. Exhaustive (NO
+    /// wildcard) so a future MANDATORY driving variant (e.g. a forced upkeep trigger) is forced
+    /// to declare its optionality at compile time rather than silently defaulting to offerable.
+    pub fn is_voluntarily_repeatable(&self) -> bool {
+        match self {
+            LoopAction::Recast { .. } | LoopAction::Activate { .. } => true,
+        }
+    }
+}
+
 /// CR 601.2a / CR 602.2a: the loop-action snapshot the PR-7 Phase 4d-ii object-growth
 /// detection hook replays. Captured at the driving beat (cast finalization for `Recast`, the
 /// `ActivateAbility` reducer for `Activate`), carried on the loop-detection clone, replayed
@@ -1149,6 +1164,32 @@ impl From<LoopActionContextRepr> for LoopActionContext {
             convoke: r.convoke,
         }
     }
+}
+
+/// Serde deserialize shim for `GameState::last_loop_action_sequence` (P7 v3 rename). Accepts
+/// BOTH the current array shape (`[LoopActionContext, ..]`) AND the pre-P7 single-object shape
+/// (a mid-loop save taken when the field was `Option<LoopActionContext>`, serialized as one
+/// object) — the latter maps to a 1-element vec. `null` / absent (the `#[serde(default)]` path)
+/// maps to an empty vec. Only affects deserialize; the serialized surface is always an array
+/// (`skip_serializing_if = "Vec::is_empty"`). Each element still flows through
+/// `LoopActionContextRepr`, so the even-older flat `RecastContext` element shape migrates too.
+fn deserialize_loop_action_sequence<'de, D>(
+    deserializer: D,
+) -> Result<Vec<LoopActionContext>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SeqOrOne {
+        Seq(Vec<LoopActionContext>),
+        One(Box<LoopActionContext>),
+    }
+    Ok(match Option::<SeqOrOne>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(SeqOrOne::Seq(v)) => v,
+        Some(SeqOrOne::One(c)) => vec![*c],
+    })
 }
 
 /// CR 702.27a: whether a homogeneous recast re-pays the buyback additional cost each iteration.
@@ -12536,25 +12577,29 @@ pub struct GameState {
     /// it would recreate the identity-field loop leak Condition 2 fixes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_source_relatch: Option<ResolutionSourceRelatch>,
-    /// CR 732.2a (PR-7 Phase 4d-ii): snapshot of the most recent loop-driving ACTION — a
-    /// buyback-paid permanent-creating recast (CR 601.2a) or a token-creating activated
-    /// ability (CR 602.2a) — the object-growth loop-shortcut hook replays. Set at the driving
-    /// beat, read at the post-resolution empty-stack `Priority` window. Transient: deliberately
-    /// EXCLUDED from `impl PartialEq for GameState` (a decision context, not durable board
-    /// state) and COMPARED explicitly only in the object-growth cover gates
+    /// CR 732.2a (PR-7 Phase 4d-ii, P7 v3): the ordered SEQUENCE of loop-driving ACTIONS in the
+    /// current loop period — a buyback-paid permanent-creating recast (CR 601.2a) is a 1-element
+    /// sequence; a multi-activation engine (CR 602.2a — e.g. Basalt Monolith's mana beat then its
+    /// separate untap beat) accumulates one element per driving activation. EMPTY = unarmed. Set
+    /// at each driving beat, read at the post-resolution empty-stack `Priority` window. Transient:
+    /// deliberately EXCLUDED from `impl PartialEq for GameState` (a decision context, not durable
+    /// board state) and COMPARED explicitly only in the object-growth cover gates
     /// (`analysis::resource::eq_except_growable` / `loop_states_equal_modulo_resources`,
-    /// fail-closed). `None` in filtered/serialized snapshots (byte-preserving). Two-layer
-    /// back-compat (G2): `#[serde(alias = "last_recast_context")]` migrates the old KEY, and
-    /// `LoopActionContext`'s `#[serde(from = "LoopActionContextRepr")]` migrates the old flat
-    /// `RecastContext` VALUE shape (`from_zone` + `uses_buyback`, no `action`) into
-    /// `action: LoopAction::Recast { .. }` — so a populated pre-rename combo-mode save loads with
-    /// its recast context intact rather than hard-erroring on the missing `action` field.
+    /// fail-closed — `Vec` `PartialEq` is order-sensitive, so a heterogeneous/reordered sequence
+    /// is caught). EMPTY in filtered/serialized snapshots (byte-preserving). Three-layer
+    /// back-compat: `deserialize_loop_action_sequence` accepts the pre-P7 single-object shape (an
+    /// old `Option<LoopActionContext>` value) as a 1-element vec; `#[serde(alias)]` migrates the
+    /// old `last_loop_action_context` / `last_recast_context` KEYS; and `LoopActionContext`'s
+    /// `#[serde(from = "LoopActionContextRepr")]` migrates the even-older flat `RecastContext`
+    /// element shape (`from_zone` + `uses_buyback`, no `action`).
     #[serde(
         default,
         alias = "last_recast_context",
-        skip_serializing_if = "Option::is_none"
+        alias = "last_loop_action_context",
+        deserialize_with = "deserialize_loop_action_sequence",
+        skip_serializing_if = "Vec::is_empty"
     )]
-    pub last_loop_action_context: Option<LoopActionContext>,
+    pub last_loop_action_sequence: Vec<LoopActionContext>,
     /// Transient plural form of `current_trigger_event` for batched triggers.
     /// Event-context filters that can legally compare against a group read this.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -14383,7 +14428,7 @@ impl GameState {
             resolving_stack_entry: None,
             pending_resolution_completion: None,
             resolution_source_relatch: None,
-            last_loop_action_context: None,
+            last_loop_action_sequence: Vec::new(),
             current_trigger_events: Vec::new(),
             last_discover_value: None,
             stack_trigger_event_batches: HashMap::new(),
@@ -15555,13 +15600,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_library_search_delivery: _,
         pending_search_found_batch: _,
         post_replacement_token_substitution_count: _,
-        //   - `last_loop_action_context` (PR-7 Phase 4d-ii object-growth loop-action snapshot):
-        //     EXCLUDED from `impl PartialEq for GameState` (a transient decision context, not
-        //     durable board state), but COMPARED explicitly in `eq_except_growable` /
-        //     `loop_states_equal_modulo_resources` (fail-closed one-sided-safety — its fields
-        //     are loop-INVARIANT across a homogeneous cycle, so COMPARING never suppresses a
-        //     legitimate loop; a heterogeneous cycle is correctly caught and rejected).
-        last_loop_action_context: _,
+        //   - `last_loop_action_sequence` (PR-7 Phase 4d-ii / P7 v3 object-growth loop-action
+        //     sequence): EXCLUDED from `impl PartialEq for GameState` (a transient decision
+        //     context, not durable board state), but COMPARED explicitly in `eq_except_growable` /
+        //     `loop_states_equal_modulo_resources` (fail-closed one-sided-safety — each element is
+        //     loop-INVARIANT across a homogeneous period, so COMPARING never suppresses a
+        //     legitimate loop; a heterogeneous/reordered period is correctly caught and rejected).
+        last_loop_action_sequence: _,
         //   - `resolution_source_relatch` (CR 400.7j self-move re-latch): EXCLUDED-REQUIRED (measured
         //     by ordering trace, not doc-trust). The clear at stack.rs:194 fires at the START of the
         //     NEXT resolution, while `record_loop_detect_sample` fires at the Priority window AFTER

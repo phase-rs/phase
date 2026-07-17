@@ -952,6 +952,7 @@ mod locus_once_per_turn_cap;
 mod loop_counter_growth;
 mod loop_shortcut;
 mod loop_shortcut_activation;
+mod loop_shortcut_mana_engine;
 mod lose_control_this_turn_delayed_trigger;
 mod lost_mine_fungi_cavern_duration_runtime;
 mod lost_mine_storeroom_targeting_runtime;

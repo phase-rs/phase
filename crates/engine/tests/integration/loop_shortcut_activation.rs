@@ -154,7 +154,7 @@ fn activation_loop_gond_intruder_alarm_captures_and_sustains() {
     // untap-all effect body through the LoopFirewall trigger-effect-body scan).
     activate_and_drive(&mut c.runner, c.host, idx);
     assert!(
-        c.runner.state().last_loop_action_context.is_some(),
+        !c.runner.state().last_loop_action_sequence.is_empty(),
         "the token-creating activation ARMS the capture (CR 602.2a Activate)"
     );
     assert_eq!(
@@ -253,7 +253,7 @@ fn activation_loop_without_grant_source_does_not_offer() {
         "no grant ⇒ no activation ⇒ no offer"
     );
     assert!(
-        c.runner.state().last_loop_action_context.is_none(),
+        c.runner.state().last_loop_action_sequence.is_empty(),
         "no activation happened, so nothing was captured"
     );
 }
@@ -274,7 +274,7 @@ fn activation_loop_without_untapper_does_not_offer() {
 
     // Positive reach-guard: the capture ARMED (the input got past the setter — not vacuous).
     assert!(
-        c.runner.state().last_loop_action_context.is_some(),
+        !c.runner.state().last_loop_action_sequence.is_empty(),
         "the token-creating activation must ARM the capture (non-vacuity guard)"
     );
     // SUSTAIN-FAILURE discriminator — the load-bearing negation vs the positive
@@ -317,7 +317,7 @@ fn activation_loop_off_mode_is_byte_identical() {
     activate_and_drive(&mut c.runner, c.host, idx);
 
     assert!(
-        c.runner.state().last_loop_action_context.is_none(),
+        c.runner.state().last_loop_action_sequence.is_empty(),
         "Off (#4603): a token-creating activation must NOT write the capture"
     );
     assert!(

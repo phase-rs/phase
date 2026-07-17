@@ -652,14 +652,15 @@ pub fn loop_states_equal_modulo_resources(a: &GameState, b: &GameState) -> bool 
     // `loop_states_equal`. Compare it analysis-locally (do NOT widen the strict
     // comparator, do NOT zero the field) so a loop that re-activates a loyalty
     // ability (count k -> k+1) compares UNEQUAL and is not falsely certified.
-    // F1 (PR-7 Phase 4d-ii): `last_loop_action_context` is EXCLUDED from `impl PartialEq for
-    // GameState` (`loop_states_equal` never compares it) and NOT cleared by
-    // `project_out_resources`, so compare it explicitly here (fail-closed) — a heterogeneous
-    // recast is caught, a homogeneous loop's invariant context compares equal. `None == None`
-    // for every non-recast loop ⇒ zero regression to existing loop-equality tests.
+    // F1 (PR-7 Phase 4d-ii / P7 v3): `last_loop_action_sequence` is EXCLUDED from `impl PartialEq
+    // for GameState` (`loop_states_equal` never compares it) and NOT cleared by
+    // `project_out_resources`, so compare it explicitly here (fail-closed) — a heterogeneous or
+    // reordered period is caught (order-sensitive `Vec` `PartialEq`), a homogeneous period's
+    // invariant sequence compares equal. `[] == []` for every non-loop-action state ⇒ zero
+    // regression to existing loop-equality tests.
     loop_states_equal(&pa, &pb)
         && loyalty_activation_counts_match(&pa, &pb)
-        && pa.last_loop_action_context == pb.last_loop_action_context
+        && pa.last_loop_action_sequence == pb.last_loop_action_sequence
 }
 
 /// CR 606.3: per-object `loyalty_activations_this_turn` equality across two
@@ -1429,19 +1430,20 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     // detection. (The self-referential incarnation field `resolution_source_relatch` is the
     // opposite case — it VARIES per iteration at the sample beat, so it MUST stay excluded,
     // like a timestamp; see the `_gamestate_partition_is_total` note.)
-    // F1 (PR-7 Phase 4d-ii, ONE-SIDED-SAFETY): compare `last_loop_action_context` here even
-    // though `impl PartialEq for GameState` excludes it. Excluding a decision context whose
-    // fields are loop-INVARIANT (unit-variant ConvokeMode, cross-incarnation-stable CardId,
-    // constant controller/from_zone/uses_buyback across a homogeneous recast) is the
-    // fail-DANGEROUS direction — a HETEROGENEOUS recast (alternating uses_buyback / from_zone)
-    // whose board coincidentally covers would compare EQUAL under exclusion and be falsely
-    // certified an infinite CR 732.2a shortcut. COMPARING catches the differing context and
-    // rejects. It is `None` at every non-recast loop's sample beat, so this never suppresses a
-    // legitimate loop's detection (this IS the sole discriminator — the custom PartialEq omits it).
+    // F1 (PR-7 Phase 4d-ii / P7 v3, ONE-SIDED-SAFETY): compare `last_loop_action_sequence` here
+    // even though `impl PartialEq for GameState` excludes it. Excluding a decision context whose
+    // elements are loop-INVARIANT (unit-variant ConvokeMode, cross-incarnation-stable CardId,
+    // constant controller/from_zone/uses_buyback across a homogeneous period) is the
+    // fail-DANGEROUS direction — a HETEROGENEOUS / reordered sequence (alternating uses_buyback /
+    // from_zone, or a different activation order) whose board coincidentally covers would compare
+    // EQUAL under exclusion and be falsely certified an infinite CR 732.2a shortcut. COMPARING
+    // (order-sensitive `Vec` `PartialEq`) catches the differing sequence and rejects. It is `[]`
+    // at every non-loop-action sample beat, so this never suppresses a legitimate loop's detection
+    // (this IS the sole discriminator — the custom PartialEq omits it).
     a == b
         && a.post_replacement_token_substitution_count
             == b.post_replacement_token_substitution_count
-        && a.last_loop_action_context == b.last_loop_action_context
+        && a.last_loop_action_sequence == b.last_loop_action_sequence
 }
 
 /// §5.3a firewall (BLOCKER-S1 + S5 + MAJOR-A): does ANY live off-stack fire-time
@@ -5941,28 +5943,28 @@ mod tests {
         }
     }
 
-    /// N7 (F1 two-sided `last_loop_action_context` classify — COVER path via `eq_except_growable`).
+    /// N7 (F1 two-sided `last_loop_action_sequence` classify — COVER path via `eq_except_growable`).
     /// (a) two object-cover-equal frames with EQUAL contexts still CERTIFY (no false-negative);
     /// (b) the same frames with a MUTATED context (`uses_buyback` flipped) REJECT (no
     /// false-positive — a heterogeneous recast is caught). Revert-failing: removing the
-    /// `a.last_loop_action_context == b.last_loop_action_context` conjunct in `eq_except_growable` flips
+    /// `a.last_loop_action_sequence == b.last_loop_action_sequence` conjunct in `eq_except_growable` flips
     /// (b) to COVER while (a) stays COVER ⇒ this test's (b) assertion fails. (a) is the paired
     /// positive reach-guard for (b). Non-vacuous: the custom `impl PartialEq for GameState`
     /// EXCLUDES the field, so this conjunct is the SOLE discriminator.
     #[test]
-    fn fodder_cover_last_loop_action_context_two_sided() {
+    fn fodder_cover_last_loop_action_sequence_two_sided() {
         // (a) equal contexts ⇒ still covers.
         let (mut prior, mut current) = fodder_cover_base();
-        prior.last_loop_action_context = Some(recast_ctx(true));
-        current.last_loop_action_context = Some(recast_ctx(true));
+        prior.last_loop_action_sequence = vec![recast_ctx(true)];
+        current.last_loop_action_sequence = vec![recast_ctx(true)];
         assert!(
             fodder_cover(&prior, &current),
-            "(a) equal last_loop_action_context ⇒ object-growth cover still CERTIFIES"
+            "(a) equal last_loop_action_sequence ⇒ object-growth cover still CERTIFIES"
         );
         // (b) mutated context (uses_buyback true→false) ⇒ rejects.
         let (mut p2, mut c2) = fodder_cover_base();
-        p2.last_loop_action_context = Some(recast_ctx(true));
-        c2.last_loop_action_context = Some(recast_ctx(false));
+        p2.last_loop_action_sequence = vec![recast_ctx(true)];
+        c2.last_loop_action_sequence = vec![recast_ctx(false)];
         assert!(
             !fodder_cover(&p2, &c2),
             "(b) a heterogeneous recast (uses_buyback flipped) must REJECT (F1 COMPARED conjunct)"
@@ -5975,22 +5977,22 @@ mod tests {
     /// and `card_id` is a `CardId` (not an `ObjectId`), so a homogeneous loop's contexts are
     /// byte-equal iteration-to-iteration ⇒ COMPARING is safe (no false-negative on a real loop).
     #[test]
-    fn loop_states_equal_last_loop_action_context_two_sided() {
+    fn loop_states_equal_last_loop_action_sequence_two_sided() {
         let mut a = GameState::new_two_player(7);
         inert_token(&mut a, 900, 0, "Engine");
         let mut b = a.clone();
         // (a) equal contexts ⇒ equal.
-        a.last_loop_action_context = Some(recast_ctx(true));
-        b.last_loop_action_context = Some(recast_ctx(true));
+        a.last_loop_action_sequence = vec![recast_ctx(true)];
+        b.last_loop_action_sequence = vec![recast_ctx(true)];
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
-            "equal last_loop_action_context ⇒ loop_states_equal_modulo_resources holds"
+            "equal last_loop_action_sequence ⇒ loop_states_equal_modulo_resources holds"
         );
         // (b) mutated context ⇒ unequal.
-        b.last_loop_action_context = Some(recast_ctx(false));
+        b.last_loop_action_sequence = vec![recast_ctx(false)];
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),
-            "a mutated last_loop_action_context (uses_buyback flipped) ⇒ NOT equal (F1 conjunct)"
+            "a mutated last_loop_action_sequence (uses_buyback flipped) ⇒ NOT equal (F1 conjunct)"
         );
     }
 
@@ -6010,23 +6012,23 @@ mod tests {
     /// `ability_index` — a heterogeneous cycle) must NOT cover. Mirrors the recast two-sided
     /// classify on the `Activate` shape: (a) equal contexts still certify (paired positive
     /// reach-guard); (b) two contexts with different `ability_index` REJECT. Revert-failing:
-    /// removing the `a.last_loop_action_context == b.last_loop_action_context` conjunct in
+    /// removing the `a.last_loop_action_sequence == b.last_loop_action_sequence` conjunct in
     /// `eq_except_growable` flips (b) to COVER. Non-vacuous: `impl PartialEq for GameState`
     /// EXCLUDES the field, so this conjunct is the SOLE discriminator.
     #[test]
     fn fodder_cover_heterogeneous_activation_context_rejects() {
         // (a) equal Activate contexts ⇒ still covers.
         let (mut prior, mut current) = fodder_cover_base();
-        prior.last_loop_action_context = Some(activate_ctx(0));
-        current.last_loop_action_context = Some(activate_ctx(0));
+        prior.last_loop_action_sequence = vec![activate_ctx(0)];
+        current.last_loop_action_sequence = vec![activate_ctx(0)];
         assert!(
             fodder_cover(&prior, &current),
             "(a) equal Activate contexts ⇒ object-growth cover still CERTIFIES"
         );
         // (b) different ability_index (heterogeneous activation) ⇒ rejects.
         let (mut p2, mut c2) = fodder_cover_base();
-        p2.last_loop_action_context = Some(activate_ctx(0));
-        c2.last_loop_action_context = Some(activate_ctx(1));
+        p2.last_loop_action_sequence = vec![activate_ctx(0)];
+        c2.last_loop_action_sequence = vec![activate_ctx(1)];
         assert!(
             !fodder_cover(&p2, &c2),
             "(b) a heterogeneous activation (ability_index 0→1) must REJECT (F1 COMPARED conjunct)"

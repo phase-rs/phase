@@ -693,7 +693,7 @@ fn interactive_shorten_hands_priority_and_breaks_loop() {
 /// (`state.waiting_for = WaitingFor::Priority { .. }`): deleting it leaves `waiting_for ==
 /// LoopShortcut { P0 }` (the reconcile's Priority-gated seams skip a non-Priority state) ⇒ the
 /// `Priority { P0 }` assertion (a) flips to fail. Seam-2 independence is proven by the
-/// object-growth test: deleting `last_loop_action_context = None` fails THAT test while this one is
+/// object-growth test: deleting `last_loop_action_sequence = None` fails THAT test while this one is
 /// unaffected (this fixture captures no recast context).
 #[test]
 fn interactive_optional_drain_decline_restores_priority_no_reoffer() {
@@ -2639,7 +2639,7 @@ fn object_growth_51st_sprout_swarm_covers_and_offers() {
     // Sprout Swarm returned to hand (CR 702.27a buyback) — recastable for the loop.
     assert_eq!(outcome.zone_of(sprout), engine::types::zones::Zone::Hand);
 
-    // N7 CAPTURE-side (live, seam-not-line): the foundation's `fodder_cover_last_loop_action_context_
+    // N7 CAPTURE-side (live, seam-not-line): the foundation's `fodder_cover_last_loop_action_sequence_
     // two_sided` proves the COMPARE (`eq_except_growable`) rejects a heterogeneous context, but
     // it CONSTRUCTS the field by hand — it cannot prove the live capture at
     // `finalize_cast_with_phyrexian_choices` writes DISCRIMINATING values (a wrong-but-constant
@@ -2647,8 +2647,8 @@ fn object_growth_51st_sprout_swarm_covers_and_offers() {
     // holds the real cast's discriminating fields, so a constant/wrong capture fails here.
     let ctx = outcome
         .state()
-        .last_loop_action_context
-        .as_ref()
+        .last_loop_action_sequence
+        .first()
         .expect("buyback + token-creating cast must capture a loop-action context");
     assert_eq!(ctx.controller, P0);
     let engine::types::game_state::LoopAction::Recast {
@@ -2728,7 +2728,7 @@ fn object_growth_51st_materializes_five_saprolings_on_accept() {
     let at_offer = saproling_count(runner.state());
 
     // P0 (LoopShortcut.proposer — inferred submitter) declares a Fixed(5) shortcut; the
-    // template is rederived from `last_loop_action_context`.
+    // template is rederived from `last_loop_action_sequence`.
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(5),
@@ -2770,10 +2770,10 @@ fn object_growth_51st_materializes_five_saprolings_on_accept() {
 /// object-growth routing context, an ordinary action resolves, and the loop is NOT re-offered.
 ///
 /// Non-vacuous, two-seam-independent revert-probe: this offer is gated by
-/// `last_loop_action_context.is_some()` (engine.rs Seam 2), so `last_loop_action_context = None` in
-/// `handle_decline_shortcut` is the SOLE load-bearing suppression here (the ring is empty on
+/// `!last_loop_action_sequence.is_empty()` (engine.rs Seam 2), so `last_loop_action_sequence.clear()`
+/// in `handle_decline_shortcut` is the SOLE load-bearing suppression here (the ring is empty on
 /// this path, so deleting `loop_detect_ring.clear()` has no effect). Deleting
-/// `last_loop_action_context = None` leaves the routing context set ⇒ the post-return reconcile
+/// `last_loop_action_sequence.clear()` leaves the routing sequence set ⇒ the post-return reconcile
 /// re-fires `try_offer_object_growth_shortcut` within this same `apply()` ⇒ the `Priority`
 /// assertion flips back to `LoopShortcut`. (Distinct from the interactive test's probe line ⇒
 /// the two seams are covered independently.)
@@ -2795,7 +2795,7 @@ fn object_growth_sprout_swarm_decline_restores_priority_no_reoffer() {
         runner.state().waiting_for
     );
     assert!(
-        runner.state().last_loop_action_context.is_some(),
+        !runner.state().last_loop_action_sequence.is_empty(),
         "the object-growth offer must have captured a recast context (the Seam-2 gate)"
     );
 
@@ -2830,7 +2830,7 @@ fn object_growth_sprout_swarm_decline_restores_priority_no_reoffer() {
 
     // (a) + (c): ordinary priority restored AND the Seam-2 routing context cleared, so the
     // post-return reconcile does not re-fire `try_offer_object_growth_shortcut`. With
-    // `last_loop_action_context = None` reverted, the intact context re-offers ⇒ this flips to
+    // `last_loop_action_sequence = None` reverted, the intact context re-offers ⇒ this flips to
     // `LoopShortcut`.
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -2842,7 +2842,7 @@ fn object_growth_sprout_swarm_decline_restores_priority_no_reoffer() {
         "the decline result hands priority back"
     );
     assert!(
-        runner.state().last_loop_action_context.is_none(),
+        runner.state().last_loop_action_sequence.is_empty(),
         "the object-growth routing context was cleared on decline (Seam-2 revert-probe line)"
     );
     assert!(runner.state().loop_detect_ring.is_empty());
@@ -2913,7 +2913,7 @@ fn object_growth_no_affinity_does_not_offer() {
 }
 
 /// N3 — no-buyback REJECTS (B3). Sprout Swarm cast WITHOUT paying buyback ⇒ the spell goes to
-/// the graveyard, not hand ⇒ (a) `last_loop_action_context` is never captured (gate requires
+/// the graveyard, not hand ⇒ (a) `last_loop_action_sequence` is never captured (gate requires
 /// `additional_cost_paid`), and (b) even were it captured, the injector's per-cycle re-find
 /// in `ctx.from_zone` (Hand) would abort. Either way: no offer. Revert-failing paired
 /// reach-guard: P1 (buyback paid, card returns to hand) DOES offer.
@@ -2933,8 +2933,8 @@ fn object_growth_no_buyback_does_not_offer() {
         outcome.final_waiting_for()
     );
     assert!(
-        outcome.state().last_loop_action_context.is_none(),
-        "B3: last_loop_action_context must NOT be captured when buyback is unpaid"
+        outcome.state().last_loop_action_sequence.is_empty(),
+        "B3: last_loop_action_sequence must NOT be captured when buyback is unpaid"
     );
     // Reach-guard: confirm the cast actually resolved (a real Saproling was made), so the
     // negative above is not vacuous on an aborted cast.
@@ -2946,7 +2946,7 @@ fn object_growth_no_buyback_does_not_offer() {
 }
 
 /// FIX 1 (#4603 opt-in gate): the RecastContext capture is gated on `loop_detection.samples()`,
-/// so DEFAULT/OFF mode never writes `last_loop_action_context` — keeping the serialized surface
+/// so DEFAULT/OFF mode never writes `last_loop_action_sequence` — keeping the serialized surface
 /// byte-identical to pre-PR-7 (the field is `skip_serializing_if=is_none`). Paired reach-guard:
 /// the SAME buyback + token cast in Interactive (sampling) mode DOES capture `Some(..)`, proving
 /// the OFF assertion is not vacuous on a cast that simply never captures.
@@ -2962,8 +2962,8 @@ fn off_mode_capture_leaves_recast_context_none() {
         .commit()
         .resolve();
     assert!(
-        off.state().last_loop_action_context.is_none(),
-        "OFF (#4603): a buyback+token cast must NOT write last_loop_action_context on the serialized surface"
+        off.state().last_loop_action_sequence.is_empty(),
+        "OFF (#4603): a buyback+token cast must NOT write last_loop_action_sequence on the serialized surface"
     );
 
     // ON/sampling reach-guard: the same cast captures Some(..) (else the OFF assertion is vacuous).
@@ -2975,7 +2975,7 @@ fn off_mode_capture_leaves_recast_context_none() {
         .commit()
         .resolve();
     assert!(
-        on.state().last_loop_action_context.is_some(),
+        !on.state().last_loop_action_sequence.is_empty(),
         "Interactive/sampling: the same buyback+token cast DOES capture the recast context"
     );
 }
@@ -3222,7 +3222,7 @@ fn object_growth_offer_schema_has_live_convoke_taps() {
     );
 
     // The point's slot binds the recast card's CR 400.7 AllCopies identity.
-    let ctx = outcome.state().last_loop_action_context.as_ref().unwrap();
+    let ctx = outcome.state().last_loop_action_sequence.first().unwrap();
     assert_eq!(
         schema.points[0].slot.source,
         YieldTarget::AllCopies {
