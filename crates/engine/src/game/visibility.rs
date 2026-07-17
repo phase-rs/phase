@@ -1158,6 +1158,7 @@ pub fn filter_events_for_viewer(
     state: &GameState,
     viewer: PlayerId,
 ) -> Vec<GameEvent> {
+    let spectator = !state.players.iter().any(|player| player.id == viewer);
     events
         .iter()
         .filter(|event| event_visible_to_viewer(event, state, viewer))
@@ -1171,10 +1172,11 @@ pub fn filter_events_for_viewer(
                 object_id,
                 ..
             } if !viewer_has_private_access_to_player(state, viewer, *controller)
-                && state
-                    .objects
-                    .get(object_id)
-                    .is_some_and(|obj| obj.face_down) =>
+                && (spectator
+                    || state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|obj| obj.face_down)) =>
             {
                 GameEvent::SpellCast {
                     card_id: CardId(0),
