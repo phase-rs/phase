@@ -26618,6 +26618,409 @@ pub mod tests {
         observer
     }
 
+    /// A dies observer deliberately permitted to function both before and after
+    /// it leaves the battlefield. The Phase-0 hostile baselines use this shape
+    /// to exercise the graveyard cache rather than relying on a battlefield-only
+    /// candidate scan.
+    fn add_battlefield_or_graveyard_dies_observer(
+        state: &mut GameState,
+        owner: PlayerId,
+        batched: bool,
+    ) -> ObjectId {
+        let observer = make_creature(state, owner, "Phase-0 observer", 0, 1);
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .trigger_zones(vec![Zone::Battlefield, Zone::Graveyard])
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        trigger.batched = batched;
+        let obj = state.objects.get_mut(&observer).unwrap();
+        obj.trigger_definitions.push(trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        observer
+    }
+
+    /// Phase-0 red baseline for the rejected per-segment-exclusion + final
+    /// co-departed-only prototype. B observes A in the first segment, then B
+    /// leaves in a later segment. A final replay of both segments reaches B from
+    /// the graveyard cache and registers A again because `registered_this_event`
+    /// is per collector invocation. Phase 1 must instead carry membership and
+    /// settle the exact observer once, so B/A is observed exactly once.
+    #[test]
+    fn phase0_segment_exclusion_prototype_would_double_register_early_observer() {
+        let mut state = setup();
+        let observer = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), false);
+        let first_subject = make_creature(&mut state, PlayerId(0), "First subject", 2, 2);
+
+        let mut first_segment = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            first_subject,
+            Zone::Graveyard,
+            &mut first_segment,
+        );
+        let first_count = observer_fire_count(&mut state, &first_segment, observer);
+        assert_eq!(first_count, 1, "B observes A in its live first segment");
+
+        let mut later_segment = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, observer, Zone::Graveyard, &mut later_segment);
+        let mut rejected_final_replay = first_segment;
+        rejected_final_replay.extend(later_segment);
+        let replay_count = observer_fire_count(&mut state, &rejected_final_replay, observer);
+
+        assert_eq!(
+            replay_count, 2,
+            "CURRENT rejected-prototype proof: the final replay revisits B/A from the \
+             off-zone cache as well as B's own departure; Phase 1 must not replay B/A"
+        );
+    }
+
+    /// Phase-0 hostile cache baseline: an early departed observer remains an
+    /// eligible graveyard source while a later segment's subject is collected.
+    /// Phase 1 changes *when* its authority is latched, not this two-event
+    /// result (B observes itself and C exactly once each).
+    #[test]
+    fn phase0_off_zone_cache_observer_sees_later_segment() {
+        let mut state = setup();
+        let observer = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), false);
+        let later_subject = make_creature(&mut state, PlayerId(0), "Later subject", 2, 2);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, observer, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, later_subject, Zone::Graveyard, &mut events);
+
+        assert_eq!(
+            observer_fire_count(&mut state, &events, observer),
+            2,
+            "CURRENT behavior: the graveyard cache visits B before settlement for B and C; \
+             Phase 1 must preserve both exact event-time observations"
+        );
+    }
+
+    /// Phase-0 hostile batched baseline: the collector's per-call batch set is
+    /// intentionally reset today. A surviving source sees the same logical move
+    /// split into two calls twice; a departing self-inclusive source is still
+    /// collected once in the latter call. Phase 1 replaces this with one
+    /// logical-group batched observation per exact definition.
+    #[test]
+    fn phase0_batched_sources_are_per_call_not_logical_group() {
+        let mut state = setup();
+        let survivor = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), true);
+        let departing = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), true);
+        let first_subject = make_creature(&mut state, PlayerId(0), "First batched subject", 2, 2);
+        let later_subject = make_creature(&mut state, PlayerId(0), "Later batched subject", 2, 2);
+
+        let mut first_segment = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            first_subject,
+            Zone::Graveyard,
+            &mut first_segment,
+        );
+        let first = collect_pending_triggers(&mut state, &first_segment);
+
+        let mut later_segment = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            departing,
+            Zone::Graveyard,
+            &mut later_segment,
+        );
+        crate::game::zones::move_to_zone(
+            &mut state,
+            later_subject,
+            Zone::Graveyard,
+            &mut later_segment,
+        );
+        let later = collect_pending_triggers(&mut state, &later_segment);
+
+        let survivor_contexts = first
+            .iter()
+            .chain(later.iter())
+            .filter(|context| context.pending.source_id == survivor)
+            .count();
+        let departing_contexts = later
+            .iter()
+            .filter(|context| context.pending.source_id == departing)
+            .count();
+        assert_eq!(
+            survivor_contexts, 2,
+            "CURRENT per-call duplication for the survivor"
+        );
+        assert_eq!(
+            departing_contexts, 1,
+            "CURRENT self-inclusive source is collected in its departure segment"
+        );
+    }
+
+    /// Phase-0 hostile all-origin baseline. These are both legitimate batched
+    /// occurrences even though the source stays in a nonbattlefield zone and
+    /// the moved subjects originate from mixed zones. Phase 1 must retain all
+    /// origins on both paused carriers instead of deriving a departures-only set.
+    #[test]
+    fn phase0_batched_off_zone_source_preserves_nonbattlefield_and_mixed_origins() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(0xA110),
+            PlayerId(0),
+            "Off-zone batched observer".to_string(),
+            Zone::Graveyard,
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Graveyard)
+            .trigger_zones(vec![Zone::Graveyard])
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        trigger.batched = true;
+        trigger.origin_zones = vec![Zone::Battlefield, Zone::Hand];
+        let source_obj = state.objects.get_mut(&source).unwrap();
+        source_obj.trigger_definitions.push(trigger.clone());
+        std::sync::Arc::make_mut(&mut source_obj.base_trigger_definitions).push(trigger);
+
+        let battlefield_subject =
+            make_creature(&mut state, PlayerId(0), "Battlefield origin", 2, 2);
+        let hand_subject = create_object(
+            &mut state,
+            CardId(0xA111),
+            PlayerId(0),
+            "Hand origin".to_string(),
+            Zone::Hand,
+        );
+        let hand_obj = state.objects.get_mut(&hand_subject).unwrap();
+        hand_obj.card_types.core_types.push(CoreType::Creature);
+        hand_obj.base_card_types = hand_obj.card_types.clone();
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            battlefield_subject,
+            Zone::Graveyard,
+            &mut events,
+        );
+        crate::game::zones::move_to_zone(&mut state, hand_subject, Zone::Graveyard, &mut events);
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let source_contexts: Vec<_> = pending
+            .iter()
+            .filter(|context| context.pending.source_id == source)
+            .collect();
+        assert_eq!(
+            source_contexts.len(),
+            1,
+            "one batched off-zone occurrence is retained"
+        );
+        assert_eq!(
+            source_contexts[0].trigger_events.len(),
+            2,
+            "CURRENT behavior retains battlefield and hand origins; Phase 1 must carry both on either paused carrier"
+        );
+    }
+
+    /// Phase-0 hostile runtime-grant baseline. The recipient's batched trigger
+    /// was granted by a lord that leaves in the same event. The current collector
+    /// preserves this pre-event producer; Phase 1 must retain that one event-time
+    /// occurrence through its explicit grant latch.
+    #[test]
+    fn phase0_departing_runtime_grant_is_not_rediscovered_from_final_live_state() {
+        let mut state = setup();
+        let grantor = make_creature(&mut state, PlayerId(0), "Phase-0 trigger lord", 2, 2);
+        let recipient = make_creature(&mut state, PlayerId(0), "Granted recipient", 2, 2);
+        let victim = make_creature(&mut state, PlayerId(0), "Granted trigger subject", 2, 2);
+        let mut granted_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        granted_trigger.batched = true;
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter::creature()))
+            .modifications(vec![ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted_trigger),
+            }]);
+        let grantor_obj = state.objects.get_mut(&grantor).unwrap();
+        grantor_obj.static_definitions.push(static_def.clone());
+        std::sync::Arc::make_mut(&mut grantor_obj.base_static_definitions).push(static_def);
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&recipient]
+                .trigger_definitions
+                .iter_all()
+                .any(|trigger| trigger.batched),
+            "setup must materialize the grant before the simultaneous departure"
+        );
+
+        let mut events = Vec::new();
+        for object_id in [grantor, recipient, victim] {
+            crate::game::zones::move_to_zone(&mut state, object_id, Zone::Graveyard, &mut events);
+        }
+        crate::game::zones::mark_simultaneous_departures(
+            &mut events,
+            &[grantor, recipient, victim],
+        );
+        let contexts = collect_pending_triggers(&mut state, &events);
+        let recipient_contexts = contexts
+            .iter()
+            .filter(|context| context.pending.source_id == recipient)
+            .count();
+
+        assert_eq!(
+            recipient_contexts, 1,
+            "CURRENT behavior: the departing grant contributes one recipient context; \
+             Phase 1 must retain that event-time occurrence through settlement"
+        );
+    }
+
+    /// A co-departing Hushbringer-class suppressor is absent from the current
+    /// final live-static cache. This pins the current over-trigger so Phase 1
+    /// can replace it with an event-time suppressor latch.
+    #[test]
+    fn phase0_co_departing_suppressor_currently_over_triggers() {
+        let mut state = setup();
+        let suppressor = add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![SuppressedTriggerEvent::Dies],
+        );
+        let victim = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), false);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, victim, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, suppressor, Zone::Graveyard, &mut events);
+        crate::game::zones::mark_simultaneous_departures(&mut events, &[victim, suppressor]);
+
+        assert_eq!(
+            observer_fire_count(&mut state, &events, victim),
+            1,
+            "CURRENT (wrong) outcome: a co-departing suppressor is gone from the final cache; \
+             Phase 1 must latch it and suppress the victim's dies trigger"
+        );
+    }
+
+    /// Real-card Phase-0 baseline — Species Specialist:
+    /// "As this creature enters, choose a creature type. Whenever a creature of
+    /// the chosen type dies, you may draw a card."  The selected type is source
+    /// data, so a co-departure must be matched from the leaving incarnation's
+    /// event-time authority, never by rereading a returned object in Phase 1.
+    #[test]
+    fn phase0_species_specialist_co_departure_uses_current_source_identity() {
+        let mut state = setup();
+        let specialist = make_creature(&mut state, PlayerId(0), "Species Specialist", 2, 3);
+        state
+            .objects
+            .get_mut(&specialist)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CreatureType("Elf".to_string()));
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .trigger_zones(vec![Zone::Battlefield])
+            .valid_card(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![FilterProp::IsChosenCreatureType],
+            }))
+            .optional()
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let specialist_obj = state.objects.get_mut(&specialist).unwrap();
+        specialist_obj.trigger_definitions.push(trigger.clone());
+        std::sync::Arc::make_mut(&mut specialist_obj.base_trigger_definitions).push(trigger);
+
+        let elf = make_creature(&mut state, PlayerId(0), "Co-departing Elf", 2, 2);
+        let elf_obj = state.objects.get_mut(&elf).unwrap();
+        elf_obj.card_types.subtypes.push("Elf".to_string());
+        elf_obj.base_card_types = elf_obj.card_types.clone();
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, specialist, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, elf, Zone::Graveyard, &mut events);
+        crate::game::zones::mark_simultaneous_departures(&mut events, &[specialist, elf]);
+        let specialist_contexts = collect_pending_triggers(&mut state, &events)
+            .into_iter()
+            .filter(|context| context.pending.source_id == specialist)
+            .count();
+
+        assert_eq!(
+            specialist_contexts, 1,
+            "CURRENT (wrong) baseline: this raw-ID/LKI collector sees only one Species \
+             Specialist context; Phase 1 must preserve the exact selected-type source context \
+             and produce one context covering both matching co-departures"
+        );
+    }
+
+    /// Real-card Phase-0 baseline — Elvish Soultiller:
+    /// "When this creature dies, choose a creature type. Shuffle all creature
+    /// cards of that type from your graveyard into your library."  The current
+    /// raw `NamedChoice.source_id` rebinds to a same-ID return and writes the
+    /// answer onto that new object. Phase 1 must carry the departed source
+    /// context instead: the returned Soultiller stays untouched.
+    #[test]
+    fn phase0_elvish_soultiller_choice_same_id_return_mutates_return() {
+        use crate::types::ability::ChoiceType;
+
+        let mut state = setup();
+        let soultiller = make_creature(&mut state, PlayerId(0), "Elvish Soultiller", 5, 4);
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::creature_type(),
+            options: vec!["Elf".to_string()],
+            source_id: Some(soultiller),
+            persist_player: None,
+        };
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, soultiller, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, soultiller, Zone::Battlefield, &mut events);
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: "Elf".to_string(),
+            },
+        )
+        .expect("current raw-ID named choice accepts the answer");
+
+        assert_eq!(
+            state
+                .objects
+                .get(&soultiller)
+                .and_then(|object| object.chosen_creature_type()),
+            Some("Elf"),
+            "CURRENT (wrong) raw-ID outcome: the choice mutates the same-ID return; \
+             Phase 1 must bind it to the departed Soultiller context instead"
+        );
+    }
+
     /// Count how many times `observer`'s trigger fired against `events`.
     fn observer_fire_count(
         state: &mut GameState,
