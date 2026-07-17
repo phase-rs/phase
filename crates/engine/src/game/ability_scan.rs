@@ -4968,7 +4968,10 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::GrantStaticAbility { .. }
         | ContinuousModification::AddKeywordWithDerivedCost { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
-        | ContinuousModification::RetainPrintedAbilityFromSource { .. } => Axes::CONSERVATIVE,
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        // upstream #6009 (Sakashima): copy-layer "retain this object's own abilities"
+        // — same class as the RetainPrinted* siblings (no inner walker) ⇒ fail-closed.
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource => Axes::CONSERVATIVE,
         // read-free (33): static structural mods (name/type/color/anthem/chosen-
         // attribute/copy-time) read no growing aggregate. An anthem `Add/SetPower`
         // applies to a growing class but READS nothing.
@@ -5288,6 +5291,9 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        // upstream #6070 (Susan Foreman): reorders the PLANAR DECK top (Planechase),
+        // not a battlefield population ⇒ not a live-board census (relax).
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -5652,6 +5658,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        // upstream #6070 (Susan Foreman): reorders the PLANAR DECK top (Planechase),
+        // not a battlefield population ⇒ not a live-board census (relax).
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
