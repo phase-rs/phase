@@ -37833,7 +37833,21 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     );
     // The exiled Aura's Enchant correctly RESET to its printed restriction on the
     // exile round-trip (CR 400.7) — refutes the keyword-reset-bug hypothesis.
+    // Off-zone object (Exile), so the existence check must go through the
+    // state-scoped authority rather than a raw `obj.keywords` read.
     assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            aura_id,
+            crate::types::keywords::KeywordKind::Enchant,
+        ),
+        "exiled Aura must still carry an Enchant keyword"
+    );
+    // Existence (off-zone-aware) already confirmed above via
+    // object_has_effective_keyword_kind; this only inspects which Enchant
+    // variant it is, which no public authority exposes as a value.
+    assert!(
+        // allow-raw-authority: structural inspection of the matched Keyword's inner TargetFilter, not a keyword-presence query
         state.objects[&aura_id].keywords.iter().any(|k| matches!(
             k,
             Keyword::Enchant(TargetFilter::Typed(TypedFilter { properties, .. }))
