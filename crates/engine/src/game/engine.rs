@@ -5013,16 +5013,14 @@ fn apply_action(
                     ));
                 }
                 for (choice, shard) in choices.iter().zip(current_shards.iter()) {
-                    match (choice, shard.options) {
-                        (
-                            crate::types::game_state::ShardChoice::PayLife,
-                            crate::types::game_state::ShardOptions::ManaOnly,
-                        ) => {
-                            return Err(EngineError::ActionNotAllowed(
-                                "Cannot pay life for shard — only mana available".to_string(),
-                            ));
-                        }
-                        _ => {}
+                    if let (
+                        crate::types::game_state::ShardChoice::PayLife,
+                        crate::types::game_state::ShardOptions::ManaOnly,
+                    ) = (choice, shard.options)
+                    {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot pay life for shard — only mana available".to_string(),
+                        ));
                     }
                 }
                 if !casting::pending_phyrexian_route_is_payable(

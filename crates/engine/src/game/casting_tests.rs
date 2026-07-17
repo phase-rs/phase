@@ -9959,6 +9959,7 @@ fn gobakhan_play_from_exile_cost_raise_adds_two_generic() {
         obj_id,
         &mut mana_cost,
         None,
+        None,
     );
     assert_eq!(
         mana_cost,

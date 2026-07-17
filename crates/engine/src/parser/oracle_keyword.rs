@@ -3915,14 +3915,13 @@ mod tests {
     fn extract_keyword_line_disguise_with_graveyard_reduction() {
         use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
 
-        let keywords = extract_keyword_line(
+        let keyword = parse_router_keyword_line(
             "Disguise {5}{R}. This cost is reduced by {1} for each instant and sorcery card in your graveyard. (You may cast this card face down for {3} as a 2/2 creature with ward {2}. Turn it face up any time for its disguise cost.)",
-            &["disguise".to_string()],
         )
+        .and_then(|routed| routed.keyword)
         .expect("compound disguise keyword should extract");
-        assert_eq!(keywords.len(), 1);
-        let Keyword::Disguise(DisguiseCost::Reduced { cost, reduction }) = &keywords[0] else {
-            panic!("expected reduced disguise cost, got {keywords:?}");
+        let Keyword::Disguise(DisguiseCost::Reduced { cost, reduction }) = &keyword else {
+            panic!("expected reduced disguise cost, got {keyword:?}");
         };
         assert!(matches!(
             cost,
@@ -3942,10 +3941,10 @@ mod tests {
             } if card_types == &[TypeFilter::Instant, TypeFilter::Sorcery]
         ));
 
-        let serialized = serde_json::to_value(&keywords[0]).expect("serialize reduced disguise");
+        let serialized = serde_json::to_value(&keyword).expect("serialize reduced disguise");
         let round_trip: Keyword =
             serde_json::from_value(serialized).expect("deserialize reduced disguise");
-        assert_eq!(round_trip, keywords[0]);
+        assert_eq!(round_trip, keyword);
         let legacy: Keyword = serde_json::from_value(serde_json::json!({
             "Disguise": {"type": "Cost", "generic": 5, "shards": ["Red"]}
         }))
