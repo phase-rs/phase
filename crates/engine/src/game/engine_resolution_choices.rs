@@ -5418,17 +5418,19 @@ fn finish_with_continuation(
     state.waiting_for.clone()
 }
 
-/// CR 701.25a / manifest dread: run the post-loop cleanup a rest-pile batch
-/// deferred when it paused mid-pile. Called by
+/// CR 701.25a / CR 616.1: Run the post-loop cleanup a rest-pile batch deferred
+/// when it paused mid-pile. Called by
 /// `zone_pipeline::drain_pending_batch_deliveries` the moment the batch tail
 /// empties, so the kept-card placement / reveal-marker cleanup and the
 /// continuation drain happen exactly once — the same effect the synchronous
-/// (never-paused) path runs inline.
+/// (never-paused) path runs inline. The result reports whether this completion
+/// itself parked another replacement-aware delivery, so the enclosing batch
+/// caller cannot overwrite the CR 616.1 choice with a later tail.
 pub(crate) fn run_batch_completion(
     state: &mut GameState,
     completion: crate::types::game_state::BatchCompletion,
     events: &mut Vec<GameEvent>,
-) {
+) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
         BatchCompletion::CascadeBottomComplete {
@@ -5446,6 +5448,7 @@ pub(crate) fn run_batch_completion(
                 source_id,
                 subject: None,
             });
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::DiscoverBottomComplete { source_id } => {
             events.push(GameEvent::EffectResolved {
@@ -5453,6 +5456,7 @@ pub(crate) fn run_batch_completion(
                 source_id,
                 subject: None,
             });
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::DiscoverPlacementComplete { source_id } => {
             events.push(GameEvent::EffectResolved {
@@ -5460,26 +5464,57 @@ pub(crate) fn run_batch_completion(
                 source_id,
                 subject: None,
             });
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::DiscoverDeclined {
             player,
             hit_card,
             source_id,
         } => {
-            zones::move_to_zone(state, hit_card, Zone::Hand, events);
+            // CR 701.57a + CR 614.1: The hit's printed hand delivery is its own
+            // replaceable resolution effect, after the misses reach the library
+            // bottom. Carry only the tail through its batch so a CR 616.1 choice
+            // pauses before the Discover completion/continuation run.
+            crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                vec![crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    hit_card,
+                    Zone::Hand,
+                    source_id,
+                )],
+                Some(BatchCompletion::DiscoverDeclinedComplete { player, source_id }),
+                events,
+            )
+        }
+        BatchCompletion::DiscoverDeclinedComplete { player, source_id } => {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Discover,
                 source_id,
                 subject: None,
             });
             finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::ResolutionCastRejectedToHand {
             player,
             hit_card,
             source_id,
         } => {
-            zones::move_to_zone(state, hit_card, Zone::Hand, events);
+            // CR 608.2g + CR 701.57a + CR 614.1: A rejected Discover cast
+            // returns the hit through the same replaceable effect-owned Hand
+            // delivery. Its priority tail must wait for that delivery to settle.
+            crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                vec![crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    hit_card,
+                    Zone::Hand,
+                    source_id,
+                )],
+                Some(BatchCompletion::ResolutionCastRejectionComplete { player, source_id }),
+                events,
+            )
+        }
+        BatchCompletion::ResolutionCastRejectionComplete { player, source_id } => {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Discover,
                 source_id,
@@ -5487,6 +5522,7 @@ pub(crate) fn run_batch_completion(
             });
             crate::game::priority::clear_priority_passes(state);
             state.waiting_for = WaitingFor::Priority { player };
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::PutOnTopComplete {
             source_id,
@@ -5500,16 +5536,19 @@ pub(crate) fn run_batch_completion(
                 source_id,
                 subject: None,
             });
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::SurveilKeepOnTop { player, top_cards } => {
             surveil_keep_on_top(state, player, &top_cards);
             finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::ManifestDreadCleanup { player, revealed } => {
             for card_id in &revealed {
                 state.revealed_cards.remove(card_id);
             }
             finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         // CR 701.20b: The kept card's battlefield entry paused (aura host pick /
         // replacement ordering). Now that it has resolved, move the unkept rest
@@ -5547,7 +5586,7 @@ pub(crate) fn run_batch_completion(
                                 emit_reveal_until_resolved,
                             },
                         );
-                        return;
+                        return crate::game::zone_pipeline::BatchMoveResult::NeedsChoice;
                     }
                 }
             } else if !rest_cards.is_empty() {
@@ -5565,16 +5604,13 @@ pub(crate) fn run_batch_completion(
                     publish_tracked_set: None,
                     emit_reveal_until_resolved,
                 };
-                match effects::reveal_until::move_rest_then(
+                return effects::reveal_until::move_rest_then(
                     state,
                     &rest_cards,
                     rest_destination,
                     Some(cleanup),
                     events,
-                ) {
-                    crate::game::zone_pipeline::BatchMoveResult::Done
-                    | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => return,
-                }
+                );
             }
             for card_id in &clear_markers {
                 state.revealed_cards.remove(card_id);
@@ -5594,6 +5630,7 @@ pub(crate) fn run_batch_completion(
                 });
             }
             finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::DigMassPutAllRestComplete {
             player,
@@ -5611,6 +5648,7 @@ pub(crate) fn run_batch_completion(
                 enter_tapped,
                 events,
             );
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::DigMassPutAllComplete {
             player: _,
@@ -5641,6 +5679,7 @@ pub(crate) fn run_batch_completion(
             // continuation after this batch completion returns. Do not drain it
             // here, or a synchronous mass Dig could run an outer continuation
             // ahead of its own child instruction.
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::DigPriorLookRestComplete { player, source_id } => {
             state.private_look_ids.clear();
@@ -5651,6 +5690,7 @@ pub(crate) fn run_batch_completion(
                 subject: None,
             });
             finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         // CR 610.3: the exile-until-leaves return pile has fully landed (after a
         // returned creature's as-enters / aura-host pause resolved). Drop the
@@ -5662,6 +5702,7 @@ pub(crate) fn run_batch_completion(
             state
                 .exile_links
                 .retain(|link| !returned_ids.contains(&link.exiled_id));
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         // CR 702.49 + CR 616.1: the ninja's parked battlefield entry resolved —
         // run the deferred post-entry ninjutsu work (cast-variant tag,
@@ -5684,6 +5725,7 @@ pub(crate) fn run_batch_completion(
                 attack_target,
                 events,
             );
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         // CR 701.51 + CR 616.1: the paused Attraction's entry resolved — finish
         // its open bookkeeping, then run the remaining opens of the same
@@ -5701,6 +5743,7 @@ pub(crate) fn run_batch_completion(
                 let _ =
                     crate::game::attractions::open_attractions(state, player, remaining, events);
             }
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::ContraptionAssembleRemainder {
             player,
@@ -5721,6 +5764,7 @@ pub(crate) fn run_batch_completion(
                     events,
                 );
             }
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::ScopedLibrarySearchDelivery {
             player,
@@ -5740,21 +5784,26 @@ pub(crate) fn run_batch_completion(
                 events,
             )
             .expect("scoped library search batch completion must resolve");
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::SearchFoundZoneDelivery { .. } => {
             resume_search_found_after_zone_delivery(state, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::MeldExile { context } => {
             crate::game::meld::finish_meld_exile(state, context, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::MeldEntry {
             context,
             attack_target,
         } => {
             crate::game::meld::finish_meld_delivery(state, context, attack_target, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::MeldRedirect { source_id } => {
             crate::game::meld::finish_deferred_meld_resolution(state, source_id, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
         }
     }
 }

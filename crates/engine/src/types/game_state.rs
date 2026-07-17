@@ -1825,20 +1825,34 @@ pub enum BatchCompletion {
     /// every miss after its cast/hand decision. Its resolution event waits for
     /// that batch.
     DiscoverPlacementComplete { source_id: ObjectId },
-    /// CR 701.57a + CR 616.1: A declined Discover's miss batch settled; keep
-    /// the printed hit-to-hand instruction after the bottom placements without
-    /// routing that separate move through this tranche's library migration.
+    /// CR 701.57a + CR 616.1: A declined Discover's miss batch settled; carry
+    /// the printed hit-to-hand instruction through its own replacement-aware
+    /// delivery before the Discover completion tail.
     DiscoverDeclined {
         player: PlayerId,
         hit_card: ObjectId,
         source_id: ObjectId,
     },
     /// CR 608.2g + CR 701.57a + CR 616.1: A Discover cast rejected at
-    /// finalization waits for the miss batch before its already-existing raw
-    /// hit-to-hand instruction and priority return.
+    /// finalization waits for the miss batch before its replacement-aware
+    /// hit-to-hand delivery and priority tail.
     ResolutionCastRejectedToHand {
         player: PlayerId,
         hit_card: ObjectId,
+        source_id: ObjectId,
+    },
+    /// CR 701.57a + CR 616.1: The declined Discover's replacement-aware
+    /// hit-to-hand delivery settled, so its resolution event and continuation
+    /// may run exactly once.
+    DiscoverDeclinedComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
+    /// CR 608.2g + CR 701.57a + CR 616.1: The rejected Discover hit's
+    /// replacement-aware hand delivery settled, so its resolution event and
+    /// priority restoration may run exactly once.
+    ResolutionCastRejectionComplete {
+        player: PlayerId,
         source_id: ObjectId,
     },
     /// CR 401.4 + CR 616.1: All requested library placements for one
