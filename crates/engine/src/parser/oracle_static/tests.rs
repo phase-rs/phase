@@ -4759,6 +4759,14 @@ fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
     );
 
     use ContinuousModification as CM;
+    // Cardinality regression (not merely `contains`): the trailing
+    // "and has <keyword>" tail has exactly one owner in
+    // `parse_each_compound_subject_type_change`. A prior revision parsed it twice
+    // (the shared additive helper AND a local re-parse), emitting each bare
+    // keyword TWICE. Assert every expected modification appears EXACTLY ONCE so a
+    // regression to double-ownership fails here rather than slipping past a
+    // presence-only `contains` check.
+    let count_of = |target: &CM| def.modifications.iter().filter(|m| *m == target).count();
     for expected in [
         CM::SetPower { value: 4 },
         CM::SetToughness { value: 4 },
@@ -4775,17 +4783,33 @@ fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
             keyword: Keyword::Haste,
         },
     ] {
-        assert!(
-            def.modifications.contains(&expected),
-            "missing {expected:?} in {:?}",
+        assert_eq!(
+            count_of(&expected),
+            1,
+            "{expected:?} must appear exactly once (no double-ownership), got {} in {:?}",
+            count_of(&expected),
             def.modifications
         );
     }
-    assert!(
+    // No stray bare keywords beyond the two the tail lists.
+    assert_eq!(
         def.modifications
             .iter()
-            .any(|m| matches!(m, CM::GrantTrigger { .. })),
-        "the quoted combat-damage trigger must be granted, not silently dropped: {:?}",
+            .filter(|m| matches!(m, CM::AddKeyword { .. }))
+            .count(),
+        2,
+        "exactly two bare keywords (indestructible, haste): {:?}",
+        def.modifications
+    );
+    // The quoted combat-damage trigger is granted exactly once, not silently
+    // dropped and not double-added.
+    assert_eq!(
+        def.modifications
+            .iter()
+            .filter(|m| matches!(m, CM::GrantTrigger { .. }))
+            .count(),
+        1,
+        "the quoted combat-damage trigger must be granted exactly once: {:?}",
         def.modifications
     );
 }
@@ -17005,6 +17029,92 @@ fn additive_type_clause_still_classifies_color_and_subtype() {
     assert!(mods.contains(&ContinuousModification::AddSubtype {
         subtype: "Zombie".to_string()
     }));
+}
+
+// CR 613.1f (Layer 6): a trailing "and has <keyword>" conjunct on an additive
+// type-defining clause composes an `AddKeyword`. A bare keyword was previously
+// routed through the quoted-ability-only `parse_quoted_ability_modifications` and
+// silently dropped; it now uses the shared `parse_continuous_modifications`
+// authority (the same one the sibling `parse_enchanted_is_type` uses).
+#[test]
+fn additive_type_clause_composes_trailing_bare_keyword() {
+    use crate::types::keywords::Keyword;
+    let mods = parse_additive_type_clause_modifications(
+        "is a Wall in addition to its other creature types and has defender",
+    )
+    .expect("additive type clause must parse");
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Wall".to_string()
+        }),
+        "Wall subtype dropped: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Defender
+        }),
+        "trailing 'and has defender' keyword dropped: {mods:?}"
+    );
+}
+
+// The trailing clause is parsed exactly once by `parse_continuous_modifications`.
+// This regression protects the mana-value dynamic P/T form that the previous
+// quoted-only path delegated to `push_base_pt_mana_value_dynamic_modifications`.
+#[test]
+fn additive_type_clause_does_not_duplicate_trailing_dynamic_base_pt() {
+    let mods = parse_additive_type_clause_modifications(
+        "is a Wall in addition to its other creature types and has base power and base toughness each equal to its mana value",
+    )
+    .expect("additive type clause must parse");
+    assert_eq!(
+        mods.iter()
+            .filter(|modification| matches!(
+                modification,
+                ContinuousModification::SetPowerDynamic { .. }
+            ))
+            .count(),
+        1,
+        "trailing P/T clause must produce exactly one power setter: {mods:?}"
+    );
+    assert_eq!(
+        mods.iter()
+            .filter(|modification| matches!(
+                modification,
+                ContinuousModification::SetToughnessDynamic { .. }
+            ))
+            .count(),
+        1,
+        "trailing P/T clause must produce exactly one toughness setter: {mods:?}"
+    );
+}
+
+// Aurification (root-cause #14): "Each creature with a gold counter on it is a
+// Wall in addition to its other creature types and has defender." — the whole
+// static must emit both the Wall subtype AND the defender keyword, so the
+// affected creatures actually can't attack.
+#[test]
+fn aurification_gold_counter_creatures_become_walls_with_defender() {
+    use crate::types::keywords::Keyword;
+    let def = parse_static_line(
+        "Each creature with a gold counter on it is a Wall in addition to its other creature types and has defender.",
+    )
+    .expect("Aurification static must parse");
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSubtype {
+                subtype: "Wall".to_string()
+            }),
+        "Wall subtype dropped: {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Defender
+            }),
+        "defender keyword dropped: {:?}",
+        def.modifications
+    );
 }
 
 #[test]
