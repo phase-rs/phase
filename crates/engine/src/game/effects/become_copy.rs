@@ -1620,6 +1620,79 @@ mod tests {
         );
     }
 
+    /// CR 707.9a (issue #6009): Sakashima of a Thousand Faces — "except it has
+    /// ~'s other abilities" retains the SOURCE's entire other ability surface
+    /// (static abilities + keywords here) on the copy, not just a single
+    /// indexed ability like `RetainPrintedAbilityFromSource`.
+    #[test]
+    fn become_copy_retains_all_other_abilities_from_source() {
+        use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, StaticDefinition, TypedFilter,
+        };
+        use crate::types::keywords::PartnerType;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Target Bear", 2, 2);
+
+        let source = create_creature(&mut state, 2, PlayerId(0), "Sakashima", 3, 1);
+        {
+            let src = state.objects.get_mut(&source).unwrap();
+            src.base_keywords = vec![Keyword::Partner(PartnerType::Generic)];
+            src.base_static_definitions = Arc::new(vec![StaticDefinition::new(
+                StaticMode::LegendRuleDoesntApply,
+            )
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))]);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::RetainAllOtherAbilitiesFromSource,
+                ],
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied = state.objects.get(&source).unwrap();
+        // The copy target's characteristics (name, P/T) are copied normally.
+        assert_eq!(copied.name, "Target Bear");
+        assert_eq!(copied.power, Some(2));
+        assert_eq!(copied.toughness, Some(2));
+        // Sakashima's own other abilities survive the copy.
+        assert!(
+            copied
+                .keywords
+                .contains(&Keyword::Partner(PartnerType::Generic)),
+            "Partner keyword must be retained; got {:?}",
+            copied.keywords
+        );
+        assert!(
+            check_static_ability(
+                &state,
+                StaticMode::LegendRuleDoesntApply,
+                &StaticCheckContext {
+                    target_id: Some(source),
+                    ..Default::default()
+                },
+            ),
+            "LegendRuleDoesntApply static must be retained on the copy"
+        );
+    }
+
     // ── Reset regression: abilities revert when copy ends ─────────────────
     #[test]
     fn abilities_revert_to_empty_when_copy_expires() {

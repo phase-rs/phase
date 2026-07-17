@@ -67,6 +67,11 @@ pub(crate) enum ChosenCreatureTypeStaticScope {
     Creatures,
     EachCreature,
     VehicleCreatures,
+    /// CR 109.2a: a description naming a card plus a zone ("each creature card in
+    /// your graveyard") means a card matching it in that stated zone — so this scope
+    /// selects creature CARDS in the owner's graveyard (CR 400.3 + CR 109.5), never
+    /// permanents on the battlefield (Ashes of the Fallen).
+    GraveyardCreatureCards,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +92,27 @@ impl ChosenCreatureTypeStaticScope {
                 TypedFilter::new(TypeFilter::Subtype("Vehicle".to_string()))
                     .controller(ControllerRef::You),
             ),
+            // CR 109.2a: "each creature card in your graveyard" names a card plus a
+            // zone, so it matches creature CARDS in that stated zone.
+            //
+            // CR 400.3 + CR 109.5: a graveyard is an owner-defined zone — a card only
+            // ever rests in its owner's graveyard — and "your" on a card that has no
+            // controller resolves to its OWNER (CR 109.5). So the subject is scoped by
+            // ownership (`FilterProp::Owned`), NOT `.controller(...)`: off the
+            // battlefield a card has no meaningful controller, and the continuous-effect
+            // matcher (layers.rs) evaluates a Typed filter's `controller` against the
+            // effective-controller field. `Owned` matches `obj.owner` directly, paired
+            // with the `InAnyZone` zone fold to select creature cards in your graveyard.
+            Self::GraveyardCreatureCards => {
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard],
+                    },
+                ]))
+            }
         }
     }
 }
@@ -116,8 +142,12 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
             kind: ChosenSubtypeKind::CreatureType,
         }],
         ChosenCreatureTypeApplication::Replacing => match scope {
+            // The graveyard sibling shares the creature-card subject, so a SET
+            // printing would replace its creature types identically (no such
+            // printing exists today — Ashes of the Fallen is additive).
             ChosenCreatureTypeStaticScope::Creatures
-            | ChosenCreatureTypeStaticScope::EachCreature => {
+            | ChosenCreatureTypeStaticScope::EachCreature
+            | ChosenCreatureTypeStaticScope::GraveyardCreatureCards => {
                 vec![
                     ContinuousModification::RemoveAllSubtypes {
                         set: crate::types::card_type::SubtypeSet::Creature,
@@ -257,6 +287,13 @@ pub(crate) fn parse_chosen_creature_type_static_subject(
         value(
             ("their", ChosenCreatureTypeStaticScope::VehicleCreatures),
             tag("vehicle creatures you control are"),
+        ),
+        // CR 109.2a: the graveyard-scoped sibling names a card plus its zone, and so
+        // reads "has" (a single card) rather than "are", with retention pronoun "its"
+        // (Ashes of the Fallen).
+        value(
+            ("its", ChosenCreatureTypeStaticScope::GraveyardCreatureCards),
+            tag("each creature card in your graveyard has"),
         ),
     ))
     .parse(input)

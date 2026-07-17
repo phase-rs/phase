@@ -2956,7 +2956,7 @@ pub(crate) fn parse_static_line_inner(
     // runtime gate matches `keyword == "loyalty"` against a loyalty ability's cost.
     // Combinator: prefix → subject → " cost {N} " → direction. The subject is
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
-    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword), _)) =
+    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword, exemption), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
             // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
             // this-turn form, which lowers to a `GenericEffect` carrying this same
@@ -2967,6 +2967,10 @@ pub(crate) fn parse_static_line_inner(
             // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
             // ("where X is ~'s power", Agatha).
             let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
+            // CR 605.1a: consume the optional mana-ability carve-out at the
+            // source-scoped grammar boundary, accepting both apostrophe forms.
+            let (i, exemption) =
+                opt(super::shared::parse_mana_ability_exemption_suffix).parse(i)?;
             Ok((
                 i,
                 (
@@ -2976,6 +2980,7 @@ pub(crate) fn parse_static_line_inner(
                     subject.to_string(),
                     dynamic_count,
                     keyword,
+                    exemption,
                 ),
             ))
         })
@@ -3005,7 +3010,11 @@ pub(crate) fn parse_static_line_inner(
                     amount,
                     minimum_mana,
                     dynamic_count,
-                    exemption: ActivationExemption::None,
+                    exemption: if exemption.is_some() {
+                        ActivationExemption::ManaAbilities
+                    } else {
+                        ActivationExemption::None
+                    },
                     // Source-scoped ("Activated/Loyalty abilities of <filter>"):
                     // scope is the `affected` filter below; no activator gate.
                     activator: None,

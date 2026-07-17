@@ -43,7 +43,9 @@ use crate::features::mana_ramp::target_filter_references_land;
 use crate::features::DeckFeatures;
 
 use super::effect_classify::lethal_to_creature;
-use super::self_protection_classify::{any_immediate_threat, is_self_protection_effect};
+use super::self_protection_classify::{
+    any_immediate_threat, is_self_protection_effect, self_protection_effect_payoff,
+};
 use super::strategy_helpers::{sacrifice_cost, targetable_threat_value};
 
 /// A fixed face-damage payoff at or below this value is trivial — a 1- or
@@ -249,7 +251,12 @@ pub(crate) fn effect_is_trivial(
             !(ability_searches_library_for_land(ability) || target_filter_references_land(filter))
         }
         // A self-protection grant is only worth a cost when a threat is live.
-        effect if is_self_protection_effect(effect) => !any_immediate_threat(state, ai_player),
+        effect if is_self_protection_effect(effect) => {
+            match self_protection_effect_payoff(state, ai_player, source_id, effect) {
+                Some(has_payoff) => !has_payoff,
+                None => !any_immediate_threat(state, ai_player),
+            }
+        }
         // No modeled board impact → trivial.
         _ => true,
     }

@@ -52,7 +52,9 @@ pub fn resolve(
     shield.runtime_execute = Some(Box::new(substitute)); // CR 614.6: substitute
     shield.consume_on_apply = false; // CR 614.5: continuous within the window
     shield.valid_player = Some(ReplacementPlayerScope::AnyPlayer); // "a player"
-                                                                   // Duration::UntilNextTurnOf { Controller } → RestrictionExpiry::UntilPlayerNextTurn.
+    shield.planeswalk_scope =
+        Some(crate::types::ability::PlaneswalkReplacementScope::PlanarDieOnly);
+    // Duration::UntilNextTurnOf { Controller } → RestrictionExpiry::UntilPlayerNextTurn.
     shield.expiry = crate::game::effects::add_target_replacement::expiry_from_duration(
         ability.duration.as_ref(),
         ability.controller,
@@ -120,6 +122,11 @@ mod tests {
             shield.valid_player,
             Some(ReplacementPlayerScope::AnyPlayer),
             "\"a player would planeswalk\" is any-player scoped"
+        );
+        assert_eq!(
+            shield.planeswalk_scope,
+            Some(crate::types::ability::PlaneswalkReplacementScope::PlanarDieOnly),
+            "CR 901.9c: Fixed Point matches only planar-die planeswalks"
         );
         // CR 514.2: expiry is armed from the ability's UntilNextTurnOf
         // { Controller } duration so the shared untap-step prune drops it at the

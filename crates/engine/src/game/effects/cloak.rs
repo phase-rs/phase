@@ -250,7 +250,7 @@ mod tests {
     fn disguise_creature(scenario: &mut GameScenario, name: &str) -> ObjectId {
         scenario
             .add_creature(P0, name, 2, 2)
-            .with_keyword(Keyword::Disguise(ManaCost::generic(3)))
+            .with_keyword(Keyword::Disguise(ManaCost::generic(3).into()))
             .id()
     }
 
@@ -386,7 +386,7 @@ mod tests {
         scenario.at_phase(Phase::PreCombatMain);
         let creature = scenario
             .add_creature(P0, "Countered Disguise", 2, 2)
-            .with_keyword(Keyword::Disguise(ManaCost::generic(3)))
+            .with_keyword(Keyword::Disguise(ManaCost::generic(3).into()))
             .with_plus_counters(1)
             .id();
         let spell = scenario

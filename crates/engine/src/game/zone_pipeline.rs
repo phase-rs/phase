@@ -829,13 +829,14 @@ pub(crate) fn move_object(
 
 /// Result of a batch zone-move (`move_objects_simultaneously`).
 pub(crate) enum BatchMoveResult {
-    /// Every requested object was delivered.
+    /// Every requested object and any inline completion tail were delivered.
     Done,
-    /// A per-object `Moved` replacement surfaced a CR 616.1 choice mid-batch.
-    /// `state.waiting_for` is already parked (with the choosing player) and the
-    /// undelivered tail is stashed in `state.pending_batch_deliveries`, so the
-    /// caller only needs to know that it paused — the resume path
-    /// (`drain_pending_batch_deliveries`) finishes the batch.
+    /// A per-object `Moved` replacement surfaced a CR 616.1 choice while
+    /// delivering the batch or an inline completion tail. `state.waiting_for`
+    /// is already parked (with the choosing player) and the undelivered tail is
+    /// stashed in `state.pending_batch_deliveries`, so the caller only needs to
+    /// know that it paused — the resume path (`drain_pending_batch_deliveries`)
+    /// finishes the batch.
     NeedsChoice,
 }
 
@@ -875,7 +876,10 @@ pub(crate) fn move_objects_simultaneously(
 /// reorder; manifest dread graveyard pile + reveal-marker cleanup): the moves run
 /// through the pipeline so each card's `Moved` redirects fire, and the cleanup
 /// that used to run inline at the end of the loop now rides on the parked tail so
-/// a pause can never run it early or twice.
+/// a pause can never run it early or twice. Its return value covers the whole
+/// delivery, including an inline completion tail: `Done` means that tail also
+/// settled; `NeedsChoice` means a CR 616.1 replacement choice parked it. Callers
+/// may therefore restore priority or run their own tail only after `Done`.
 pub(crate) fn move_objects_simultaneously_then(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
@@ -887,11 +891,10 @@ pub(crate) fn move_objects_simultaneously_then(
     match deliver_batch(state, reqs, &ids, events) {
         BatchMoveResult::Done => {
             // Synchronous completion (the common single-redirect path): run the
-            // cleanup now.
-            if let Some(completion) = completion {
-                run_batch_completion(state, completion, events);
-            }
-            BatchMoveResult::Done
+            // cleanup now, and surface a pause it raises to the enclosing caller.
+            completion.map_or(BatchMoveResult::Done, |completion| {
+                run_batch_completion(state, completion, events)
+            })
         }
         BatchMoveResult::NeedsChoice => {
             // Paused mid-pile. `deliver_batch` stashed the undelivered tail when
@@ -918,8 +921,8 @@ fn run_batch_completion(
     state: &mut GameState,
     completion: BatchCompletion,
     events: &mut Vec<GameEvent>,
-) {
-    crate::game::engine_resolution_choices::run_batch_completion(state, completion, events);
+) -> BatchMoveResult {
+    crate::game::engine_resolution_choices::run_batch_completion(state, completion, events)
 }
 
 /// CR 303.4f / CR 616.1 + CR 603.10a: Hang a [`BatchCompletion`] off the current
@@ -1112,7 +1115,15 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // when `deliver_batch` did NOT re-park, so the completion fires at
                 // most once per batch.
                 if let Some(completion) = completion {
-                    run_batch_completion(state, completion, events);
+                    // The parked/settled result is deliberately unused here: the
+                    // drain's callers are state-mediated (engine_replacement
+                    // re-reads `state.waiting_for` after the drain and gates
+                    // every later drain stage on Priority), so a completion that
+                    // parks a new CR 616.1 choice propagates via the parked
+                    // prompt + fresh `pending_batch_deliveries` record, not via
+                    // this return value. Witnessed by the compound double-pause
+                    // test (miss batch redirect, then hit-delivery redirect).
+                    let _ = run_batch_completion(state, completion, events);
                 }
             }
             BatchMoveResult::NeedsChoice => {
@@ -1402,11 +1413,31 @@ fn legal_aura_attachment_targets(
     enchant_filter: &TargetFilter,
 ) -> Vec<TargetRef> {
     let ctx = crate::game::filter::FilterContext::from_source_with_controller(aura_id, controller);
-    let mut targets: Vec<TargetRef> = state
-        .battlefield
-        .iter()
-        .copied()
+    // CR 303.4f: the controller chooses a legal object per the Aura's current
+    // enchant ability. Enumerate candidate hosts across whatever zone(s) that
+    // ability implies — an ordinary Aura (Pacifism) imposes no zone property and
+    // defaults to the battlefield, while a graveyard/hand-scoped enchant ability
+    // (Animate Dead, Dance of the Dead, Spellweaver Volute, Don't Worry About It)
+    // carries a `FilterProp::InZone`/`InAnyZone` that `extract_zones` surfaces.
+    // Mirrors `object_count_matching_ids` in `game/quantity.rs`. Using
+    // `zone_object_ids` for the battlefield case also (correctly) excludes
+    // phased-out permanents per CR 702.26b — they're treated as nonexistent and
+    // can never be a legal new host.
+    let zones = enchant_filter.extract_zones();
+    let zones = if zones.is_empty() {
+        vec![Zone::Battlefield]
+    } else {
+        zones
+    };
+    let mut targets: Vec<TargetRef> = zones
+        .into_iter()
+        .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
+        // CR 303.4d: an Aura can't enchant itself.
         .filter(|id| *id != aura_id)
+        // CR 115.1b + CR 303.4f: this consult is a controller CHOICE, not a
+        // targeting event (an Aura permanent doesn't target) — use
+        // `matches_target_filter`, never the `find_legal_targets` enumerator, so
+        // hexproof (CR 702.11) / shroud (CR 702.18) never remove a legal host.
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, enchant_filter, &ctx))
         .filter(|id| crate::game::effects::attach::can_attach_to_object(state, aura_id, *id))
         .map(TargetRef::Object)
