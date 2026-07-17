@@ -1848,6 +1848,16 @@ pub struct PendingBatchDeliveries {
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
+    /// CR 702.85a + CR 614.1 + CR 616.1: One proposed cascade exile settled.
+    /// Keep the current card, source threshold, controller, and already-exiled
+    /// misses with the batch so a replacement choice resumes the loop correctly.
+    CascadeExileLoopComplete {
+        controller: PlayerId,
+        source_id: ObjectId,
+        source_mv: u32,
+        exiled_misses: Vec<ObjectId>,
+        current_card: ObjectId,
+    },
     /// CR 702.85a + CR 616.1: A no-hit Cascade's randomized bottom batch has
     /// settled (including any redirected cards), so its completion events may
     /// fire exactly once.

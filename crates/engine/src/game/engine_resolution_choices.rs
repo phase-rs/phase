@@ -5944,6 +5944,21 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::CascadeExileLoopComplete {
+            controller,
+            source_id,
+            source_mv,
+            exiled_misses,
+            current_card,
+        } => effects::cascade::complete_exile_loop_step(
+            state,
+            controller,
+            source_id,
+            source_mv,
+            exiled_misses,
+            current_card,
+            events,
+        ),
         BatchCompletion::CascadeBottomComplete {
             controller,
             source_id,

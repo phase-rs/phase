@@ -7217,6 +7217,176 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
     );
 }
 
+/// W-166 (red first): Cascade's one-card Library-to-Exile delivery must park
+/// the loop before its hit offer or miss-tail runs when CR 616.1 requires a
+/// replacement choice.
+#[test]
+fn cascade_library_exile_redirect_pauses_before_hit_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Cascade Exile Redirect Source", 1, 1)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let miss = scenario
+        .add_spell_to_library_top(P0, "Cascade Redirect Miss", true)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Cascade Redirect Hit", false)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    scenario
+        .add_creature(P0, "Cascade Exile To Hand Redirect", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(
+            redirect_moved_to(Zone::Exile, Zone::Hand)
+                .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+        );
+    scenario
+        .add_creature(P0, "Cascade Exile To Graveyard Redirect", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(
+            redirect_moved_to(Zone::Exile, Zone::Graveyard)
+                .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+        );
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![miss, hit];
+    let ability = ResolvedAbility::new(Effect::Cascade, vec![], source, P0);
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("cascade reaches its first replacement-safe exile");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Library);
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Cascade,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the hit offer tail must not precede the replacement choice"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the settled first exile resumes the cascade loop");
+    assert!(matches!(
+        resumed.waiting_for,
+        WaitingFor::CastOffer {
+            player: P0,
+            kind:
+                engine::types::game_state::CastOfferKind::Cascade {
+                    hit_card,
+                    exiled_misses,
+                    source_mv: 4,
+                    source_id,
+                },
+        } if hit_card == hit && exiled_misses.is_empty() && source_id == source
+    ));
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(resumed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Cascade,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the settled loop exposes the cascade tail exactly once"
+    );
+}
+
+/// W-166-REG: Without replacements Cascade still finds its first eligible hit,
+/// carries every prior miss, and puts both cards on the library bottom when the
+/// controller declines the cast offer.
+#[test]
+fn cascade_exile_loop_stays_synchronous_without_replacements() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Synchronous Cascade Exile Source", 1, 1)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let miss = scenario
+        .add_spell_to_library_top(P0, "Synchronous Cascade Miss", true)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let hit = scenario
+        .add_spell_to_library_top(P0, "Synchronous Cascade Hit", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![miss, hit];
+    let mut events = Vec::new();
+    resolve_ability_chain(
+        runner.state_mut(),
+        &ResolvedAbility::new(Effect::Cascade, vec![], source, P0),
+        &mut events,
+        0,
+    )
+    .expect("unredirected cascade resolves synchronously to its offer");
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            kind:
+                engine::types::game_state::CastOfferKind::Cascade {
+                    hit_card,
+                    exiled_misses,
+                    source_mv: 4,
+                    source_id,
+                },
+            ..
+        } if *hit_card == hit && exiled_misses == &vec![miss] && *source_id == source
+    ));
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Exile);
+
+    let declined = runner
+        .act(GameAction::CascadeChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        })
+        .expect("declined cascade puts its hit and miss on the library bottom");
+    assert!(matches!(
+        declined.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().players[P0.0 as usize].library.len(), 2);
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Library);
+    assert_eq!(
+        events
+            .iter()
+            .chain(declined.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Cascade,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the synchronous cascade tail resolves exactly once"
+    );
+}
+
 /// W-L3 (red first): PutAtLibraryPosition must keep its requested top ordering
 /// while routing every placement through the Library replacement consult.
 #[test]
