@@ -1848,6 +1848,15 @@ pub struct PendingBatchDeliveries {
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
+    /// CR 614.1 + CR 616.1 + CR 611.2a: A `CastFromZone` current-zone-to-Exile
+    /// batch settled. Keep the resolved ability and its two target partitions
+    /// so the permission is recorded only after the exile delivery, while
+    /// established in-place Hand/Graveyard/Exile grants remain unchanged.
+    CastFromZoneExileDeliveryComplete {
+        ability: Box<ResolvedAbility>,
+        in_place_ids: Vec<ObjectId>,
+        exile_delivery_ids: Vec<ObjectId>,
+    },
     /// CR 702.85a + CR 614.1 + CR 616.1: One proposed cascade exile settled.
     /// Keep the current card, source threshold, controller, and already-exiled
     /// misses with the batch so a replacement choice resumes the loop correctly.
