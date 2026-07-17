@@ -37573,7 +37573,7 @@ const PIRANHA_MARSH_ORACLE_FULL: &str =
     "This land enters tapped.\nWhen this land enters, target player loses 1 life.\n{T}: Add {B}.";
 
 /// The classic "Immortal Worldgorger Dragon" self-loop with Animate Dead —
-/// fixed and passing for the in-scope behavior described below (SCOPE).
+/// now closing ONE full cycle end-to-end (single-cycle only; see SCOPE).
 ///
 /// P0 casts Animate Dead on Worldgorger Dragon in P0's OWN graveyard:
 ///   1. Animate Dead resolves, attaches to WGD-in-graveyard; its ETB reanimates
@@ -37586,7 +37586,7 @@ const PIRANHA_MARSH_ORACLE_FULL: &str =
 ///      earlier event — NOT a simultaneous re-entry, so the 2022-12-08 WotC
 ///      "can't attach to a permanent entering at the same time" ruling does not
 ///      apply here). WGD leaving fires its LTB: "return the exiled cards to the
-///      battlefield" (CR 610.3a).
+///      battlefield" (CR 610.3).
 ///   5. The Aura, the plain land, and Piranha Marsh return as NEW objects
 ///      (CR 400.7). The Aura's Enchant reset to its printed "creature card in a
 ///      graveyard" and legally attaches to WGD-in-graveyard (CR 303.4f). The
@@ -37626,15 +37626,22 @@ const PIRANHA_MARSH_ORACLE_FULL: &str =
 /// then scans the appended return events so the returned non-Aura permanents' own
 /// ETBs (Piranha Marsh's life loss) fire.
 ///
-/// SCOPE: this change fixes the mass-exile-return itself — the exiled non-Aura
-/// permanents (the plain land, Piranha Marsh) now return, the land returns
-/// untapped, and Piranha Marsh's ETB refires costing P1 1 life. The final leg
-/// that would CLOSE the infinite loop — the returning Animate Dead Aura
-/// re-attaching to WGD-in-graveyard and re-reanimating it — is NOT fixed here: the
-/// as-enters aura-host scan (`legal_aura_attachment_targets`) is battlefield-only
-/// and cannot find a graveyard-resident host, so the Aura's re-entry is denied
-/// (CR 303.4f/g). That graveyard-host aura-attach gap is a separate, wider
-/// follow-up. The test asserts the in-scope behavior and documents the boundary.
+/// SCOPE: two independent fixes now compose to close a full cycle. (1) The
+/// mass-exile-return parser fix (this branch): the exiled permanents (the plain
+/// land, Piranha Marsh, and the Aura) now return, the land returns untapped, and
+/// Piranha Marsh's ETB refires costing P1 1 life. (2) PR #6072 (merged from
+/// origin/main): the final leg that CLOSES the loop — the returning Animate Dead
+/// Aura re-attaching to WGD-in-graveyard and re-reanimating it — used to be denied
+/// because the as-enters aura-host scan (`legal_aura_attachment_targets`) was
+/// battlefield-only and could not find a graveyard-resident host (CR 303.4f/g).
+/// PR #6072 made that scan enumerate hosts across whatever zone(s) the Aura's own
+/// enchant filter implies (`TargetFilter::extract_zones()` + `zone_object_ids`), so
+/// the graveyard host WGD is now found and the Aura re-enters attached to it. This
+/// test drives that Aura ETB to resolution, reanimating WGD a second time, and
+/// asserts the loop returns to its step-2 configuration — ONE full cycle. It does
+/// NOT attempt to detect or drive an actual infinite loop (no loop-detection
+/// infrastructure exists, and the harness halts the loop at exactly one cycle by
+/// not re-collecting WGD's mass-exile ETB after the closing reanimation).
 #[test]
 fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     use crate::game::game_object::AttachTarget;
@@ -37926,7 +37933,7 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     // `ZoneChanged { from: Battlefield }` event out of `sac_ev` and appends the
     // return events INTO THE SAME vec (mirroring `engine_priority.rs:177-210`). It
     // must be passed the vec that actually contains WGD's leave event — a fresh vec
-    // would silently no-op. CR 610.3 + CR 610.3a: the exiled cards return.
+    // would silently no-op. CR 610.3: the exiled cards return.
     let events_before_returns = sac_ev.len();
     crate::game::engine::check_exile_returns(&mut state, &mut sac_ev);
     crate::game::layers::evaluate_layers(&mut state);
@@ -37939,32 +37946,47 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     assert_eq!(
         state.objects[&plain_land].zone,
         Zone::Battlefield,
-        "the plain land must return to the battlefield via check_exile_returns (CR 610.3a)"
+        "the plain land must return to the battlefield via check_exile_returns (CR 610.3)"
     );
     assert_eq!(
         state.objects[&piranha].zone,
         Zone::Battlefield,
-        "Piranha Marsh must return to the battlefield via check_exile_returns (CR 610.3a)"
+        "Piranha Marsh must return to the battlefield via check_exile_returns (CR 610.3)"
     );
 
-    // SCOPE BOUNDARY — the Aura re-entry leg is NOT fixed by this parser change.
-    // CR 303.4f/g + CR 704.5m: the returning Animate Dead Aura enchants "creature
-    // card in a graveyard"; WGD is now in the graveyard, so per the rules it would
-    // re-enter attached to WGD-in-graveyard and its ETB would re-reanimate WGD,
-    // closing the loop. But `legal_aura_attachment_targets` (zone_pipeline.rs)
-    // scans ONLY `state.battlefield`, so the returning Aura finds zero legal hosts
-    // and the entry is denied (`zone_pipeline.rs` `[] => ZoneMoveResult::Done`) —
-    // it stays in exile. Extending the as-enters aura-host scan to graveyard hosts
-    // for graveyard-referencing Enchant filters (Animate Dead / Necromancy / Dance
-    // of the Dead class) is a separate, wider change tracked as a follow-up; it is
-    // deliberately out of scope for the mass-exile-return parser fix. Asserting the
-    // current (denied-entry) behavior keeps this test honest about the boundary.
+    // THE AURA RE-ENTRY LEG — now CLOSED by PR #6072 (merged from origin/main).
+    // CR 303.4f + CR 704.5m: the returning Animate Dead Aura enchants "creature
+    // card in a graveyard"; WGD is now in the graveyard, so it re-enters attached
+    // to WGD-in-graveyard. Previously `legal_aura_attachment_targets`
+    // (zone_pipeline.rs) scanned ONLY `state.battlefield`, so the returning Aura
+    // found zero legal hosts and the entry was denied (`[] => ZoneMoveResult::Done`)
+    // — it stayed in exile and the loop could not close. PR #6072 made that scan
+    // enumerate candidate hosts across whatever zone(s) the Aura's own enchant
+    // filter implies, via `TargetFilter::extract_zones()` + `zone_object_ids`
+    // (Animate Dead / Dance of the Dead / Necromancy class), so the graveyard host
+    // WGD is now found. The `check_exile_returns` group return above therefore
+    // brought the Aura back onto the battlefield with a single legal host, and the
+    // in-pipeline single-host branch auto-attached it (CR 303.4f — controller's
+    // choice, resolved with no prompt when exactly one legal host exists).
     assert_eq!(
         state.objects[&aura_id].zone,
-        Zone::Exile,
-        "KNOWN GAP (follow-up): the graveyard-enchant Aura cannot yet re-enter — \
-         the as-enters aura-host scan is battlefield-only, so the full self-loop \
-         does not close on this change alone"
+        Zone::Battlefield,
+        "the returning Animate Dead Aura must re-enter the battlefield (PR #6072: \
+         the as-enters aura-host scan now covers graveyard hosts per the Aura's \
+         own enchant filter)"
+    );
+    // At this instant the Aura has re-attached to WGD-in-graveyard (CR 303.4f) —
+    // WGD has NOT been reanimated yet; that is the Aura's ETB, driven below.
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(AttachTarget::Object(wgd_id)),
+        "the returned Aura must re-attach to WGD in the graveyard (CR 303.4f)"
+    );
+    assert_eq!(
+        state.objects[&wgd_id].zone,
+        Zone::Graveyard,
+        "WGD is still in the graveyard when the Aura re-attaches — reanimation is \
+         the Aura's ETB, which fires next"
     );
 
     // Discriminator A: the plain land returned UNTAPPED (fresh object, no
@@ -37976,30 +37998,112 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
         "the plain land must return UNTAPPED (it was tapped before the cycle)"
     );
 
-    // (6) The returned non-Aura permanents are new objects (CR 400.7) whose own
-    // ETBs re-fire on re-entry. Scan the return events that `check_exile_returns`
-    // appended into `sac_ev` (mirroring the second trigger-detection pass at
-    // engine_priority.rs:195-210). Piranha Marsh's "target player loses 1 life"
-    // ETB must be collected against the returned object.
+    // (6) The returned permanents are new objects (CR 400.7) whose own ETBs re-fire
+    // on re-entry. Scan the return events that `check_exile_returns` appended into
+    // `sac_ev` (mirroring the second trigger-detection pass at
+    // engine_priority.rs:195-210). Now that the Aura re-enters too, TWO of P0's
+    // permanents produce an ETB simultaneously — Piranha Marsh's "target player
+    // loses 1 life" and the returned Aura's reanimation ETB — so P0 must order them
+    // (CR 603.3b) before either reaches the stack.
     let return_events: Vec<_> = sac_ev[events_before_returns..].to_vec();
+    let p1_life_before = state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(1))
+        .unwrap()
+        .life;
     crate::game::triggers::process_triggers(&mut state, &return_events);
-
-    // Discriminator B: Piranha Marsh's ETB re-triggered on its return, proving the
-    // returned Piranha is a fully live new object (CR 400.7) — not merely moved.
-    // The re-fired trigger surfaces either as `pending_trigger` (its "target
-    // player" choice awaits the apply-pipeline prompt, which this low-level harness
-    // does not drive) or directly on the stack. Reverting the parser widening
-    // leaves Piranha stranded in exile, so no re-entry event exists and this
-    // trigger is never collected — the assertion flips.
-    let piranha_etb_refired = state
-        .pending_trigger
-        .as_ref()
-        .is_some_and(|t| t.source_id == piranha)
-        || state.stack.iter().any(|entry| entry.source_id == piranha);
+    // Reach-guard: the co-triggered ETBs surface as a CR 603.3b ordering prompt.
+    // If PR #6072 were reverted, the Aura would stay in exile and only Piranha's
+    // single ETB would fire — no ordering prompt, so this `matches!` would flip.
     assert!(
-        piranha_etb_refired,
+        matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::OrderTriggers { .. }
+        ),
+        "the returned Aura's ETB and Piranha Marsh's ETB must co-trigger for P0, \
+         producing a CR 603.3b ordering prompt"
+    );
+    // P0 orders their two simultaneous triggers (identity order). Both are placed on
+    // the stack; Piranha's ETB pauses on its target choice as it is placed (CR 603.3d).
+    crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+
+    // Discriminator B (reach-guard): Piranha Marsh's ETB re-triggered on its return,
+    // proving the returned Piranha is a fully live new object (CR 400.7). It is now
+    // on the stack awaiting its target choice. Reverting the parser widening leaves
+    // Piranha stranded in exile, so no re-entry event exists and this trigger is
+    // never collected — the assertion flips.
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == piranha)
+            || state
+                .pending_trigger
+                .as_ref()
+                .is_some_and(|t| t.source_id == piranha),
         "Piranha Marsh's 'target player loses 1 life' ETB must re-trigger on its \
-         return from exile (CR 119.3 payoff; CR 400.7 fresh object)"
+         return from exile (CR 400.7 fresh object)"
+    );
+
+    // Drive Piranha's target choice (P1, the opponent) so its ETB finishes
+    // construction (CR 603.3d) and the stack can resolve. This is the low-level
+    // equivalent of the apply-pipeline `TriggerTargetSelection` prompt.
+    crate::game::engine::apply_as_current(
+        &mut state,
+        crate::types::actions::GameAction::SelectTargets {
+            targets: vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
+        },
+    )
+    .expect("choosing Piranha Marsh's target player must succeed");
+
+    // Resolve Piranha's ETB first (it was ordered on top): P1 loses 1 life — the
+    // repeatable-damage payoff (CR 119.3) that makes this loop a kill. This flips if
+    // the parser widening is reverted (Piranha never returns to re-trigger).
+    let mut piranha_ev = Vec::new();
+    stack::resolve_top(&mut state, &mut piranha_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+    let p1_life_after = state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(1))
+        .unwrap()
+        .life;
+    assert_eq!(
+        p1_life_after,
+        p1_life_before - 1,
+        "Piranha Marsh's returned ETB must cost the opponent 1 life (CR 119.3)"
+    );
+
+    // (7) Resolve the returned Aura's ETB — the SAME 4-node reanimation chain
+    // (RemoveKeyword/AddKeyword swap, ChangeZone graveyard→battlefield, Attach,
+    // CreateDelayedTrigger) that step 2 drove when Animate Dead FIRST reanimated
+    // WGD. WGD returns to the battlefield under P0 and the Aura re-attaches
+    // (CR 303.4f + CR 608.2c), CLOSING one full cycle of the immortal loop. We stop
+    // here deliberately: `resolve_top` emits WGD's re-entry event but does not
+    // itself re-collect WGD's mass-exile ETB (that needs an explicit
+    // `process_triggers`, as step 3 shows), so the loop halts at exactly one cycle —
+    // no loop-detection infrastructure is exercised or required.
+    let mut aura_etb_ev = Vec::new();
+    stack::resolve_top(&mut state, &mut aura_etb_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // Loop-closed assertions. CR 400.7: WGD is conceptually a new object on this
+    // second reanimation, but the engine preserves its `ObjectId` across the
+    // graveyard→battlefield move (exactly as step 2's first reanimation asserts on
+    // `wgd_id` after the same zone change), so `wgd_id` still names the live WGD.
+    assert_eq!(
+        state.objects[&wgd_id].zone,
+        Zone::Battlefield,
+        "WGD must be reanimated a SECOND time, closing one full cycle of the loop"
+    );
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(AttachTarget::Object(wgd_id)),
+        "the Aura must re-attach to the reanimated WGD (CR 303.4f), completing the \
+         cycle back to the step-2 configuration"
+    );
+    assert_eq!(
+        state.objects[&aura_id].zone,
+        Zone::Battlefield,
+        "the Aura remains on the battlefield attached to the reanimated WGD"
     );
 }
 
