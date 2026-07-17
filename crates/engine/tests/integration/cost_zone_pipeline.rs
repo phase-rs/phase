@@ -7,10 +7,10 @@ use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, CastingPermission,
     CategoryChooserScope, ChoiceType, Chooser, DigSource, DiscardSelfScope, Effect, EffectKind,
-    ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction, ModalChoice,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
-    SacrificeCost, SpellCastingOption, TargetFilter, TargetRef, TargetSelectionMode,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    FilterProp, ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction,
+    ModalChoice, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    ResolvedAbility, SacrificeCost, SpellCastingOption, TargetFilter, TargetRef,
+    TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -9180,4 +9180,222 @@ fn choose_and_sacrifice_rest_replacement_preserves_terminal_sweep() {
             .count(),
         1
     );
+}
+
+/// W-164-A (red first): a hand card selected by an EffectZoneChoice must take
+/// the Library replacement path before the choice's terminal effect and rider.
+#[test]
+fn effect_zone_put_on_top_hand_redirect_pauses_before_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Effect-Zone Put-On-Top Source", 1, 1)
+        .id();
+    let selected = scenario
+        .add_spell_to_hand(P0, "Effect-Zone Put-On-Top Redirect", true)
+        .id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Effect-Zone Put-On-Top To Graveyard", 0, 0)
+            .as_enchantment()
+            .id(),
+        scenario
+            .add_creature(P0, "Effect-Zone Put-On-Top To Exile", 0, 0)
+            .as_enchantment()
+            .id(),
+    ];
+    let ability = ResolvedAbility::new(
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+            count: QuantityExpr::Fixed { value: 1 },
+            position: engine::types::ability::LibraryPosition::Top,
+        },
+        vec![],
+        source,
+        P0,
+    )
+    .sub_ability(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    ));
+    let mut runner = scenario.build();
+    for (redirect_source, destination) in redirect_sources
+        .into_iter()
+        .zip([Zone::Graveyard, Zone::Exile])
+    {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield")
+            .replacement_definitions = vec![redirect_moved_to(Zone::Library, destination)].into();
+    }
+    let mut initial_events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("put-on-top prompts for the hand card");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            ..
+        }
+    ));
+
+    let paused = runner
+        .act(GameAction::SelectCards {
+            cards: vec![selected],
+        })
+        .expect("selected hand card reaches the Library replacement choice");
+    assert!(
+        matches!(paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected a replacement choice, got {:?}",
+        paused.waiting_for
+    );
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+    assert!(
+        !paused.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the terminal effect must remain parked behind the replacement choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the chosen replacement delivers the card and drains the tail");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(paused.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::PutAtLibraryPosition,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the terminal effect fires exactly once after replacement delivery"
+    );
+}
+
+/// W-164-B: a mixed hand/library selection preserves the raw synchronous order
+/// when only the hand members use the replacement-aware delivery path.
+#[test]
+fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Effect-Zone Mixed Put-On-Top Source", 1, 1)
+        .id();
+    let hand_first = scenario
+        .add_spell_to_hand(P0, "Effect-Zone Mixed Hand First", true)
+        .id();
+    let library_first = scenario
+        .add_spell_to_library_top(P0, "Effect-Zone Mixed Library First", true)
+        .id();
+    let hand_second = scenario
+        .add_spell_to_hand(P0, "Effect-Zone Mixed Hand Second", true)
+        .id();
+    let library_second = scenario
+        .add_spell_to_library_top(P0, "Effect-Zone Mixed Library Second", true)
+        .id();
+    let marker = scenario
+        .add_spell_to_library_top(P0, "Effect-Zone Mixed Marker", true)
+        .id();
+    let mut base_state = scenario.build().state().clone();
+    base_state.players[P0.0 as usize].library = im::vector![library_first, library_second, marker];
+
+    for (position, expected) in [
+        (
+            engine::types::ability::LibraryPosition::Top,
+            vec![
+                hand_first,
+                library_first,
+                hand_second,
+                library_second,
+                marker,
+            ],
+        ),
+        (
+            engine::types::ability::LibraryPosition::Bottom,
+            vec![
+                marker,
+                hand_first,
+                library_first,
+                hand_second,
+                library_second,
+            ],
+        ),
+        (
+            engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
+            vec![
+                hand_first,
+                library_second,
+                hand_second,
+                library_first,
+                marker,
+            ],
+        ),
+    ] {
+        let mut runner = GameRunner::from_state(base_state.clone());
+        runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+            player: P0,
+            cards: vec![hand_first, library_first, hand_second, library_second],
+            count: 4,
+            min_count: 0,
+            up_to: false,
+            source_id: source,
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            zone: Zone::Hand,
+            destination: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: Some(position),
+            is_cost_payment: false,
+            enters_modified_if: None,
+        };
+
+        let completed = runner
+            .act(GameAction::SelectCards {
+                cards: vec![hand_first, library_first, hand_second, library_second],
+            })
+            .expect("mixed-source placement resolves synchronously without replacements");
+        assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            runner.state().players[P0.0 as usize]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            expected,
+            "the split delivery matches the prior raw selection-order placement"
+        );
+    }
 }

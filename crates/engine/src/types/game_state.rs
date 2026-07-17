@@ -1903,6 +1903,24 @@ pub enum BatchCompletion {
     /// CR 614.1 + CR 616.1: A PutOnTopOrBottom object's Library delivery has settled, so
     /// its chained resolution tail may run exactly once.
     TopOrBottomComplete { player: PlayerId },
+    /// CR 401.4 + CR 614.1 + CR 616.1 + CR 608.2c: The selected non-Library
+    /// cards have settled through their replaceable Library deliveries. Reorder
+    /// the cards that began in their libraries and then run the one resolution
+    /// tail, preserving the original mixed-source placement order.
+    EffectZonePutAtLibraryPositionComplete {
+        /// Player whose pending continuation drains after the complete choice.
+        player: PlayerId,
+        /// Resolving effect source for the terminal `EffectResolved` event.
+        source_id: ObjectId,
+        /// Full selected order. It determines the printed placement order and
+        /// remains the selected-object tracked set / effect count.
+        chosen: Vec<ObjectId>,
+        /// Selection members that were already in a library at delivery time.
+        /// They are repositions, not replaceable zone-change requests.
+        library_origin: Vec<ObjectId>,
+        /// Normalized placement requested by the original instruction.
+        library_position: LibraryPosition,
+    },
     /// CR 614.1 + CR 616.1 + CR 608.2c: A Dig kept-card batch settled outside
     /// the battlefield. Its rest routing, tracked-set publication, and
     /// continuation drain must follow the delivery, while the published set and

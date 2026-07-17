@@ -994,11 +994,14 @@ pub(super) fn handle_resolution_choice(
                 .iter_mut()
                 .find(|candidate| candidate.id == player)
                 .expect("player exists");
+            // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
             player_state.library.retain(|id| !all_cards.contains(id));
             for (index, &card_id) in top_cards.iter().enumerate() {
+                // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
                 player_state.library.insert(index, card_id);
             }
             for &card_id in &bottom_cards {
+                // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
                 player_state.library.push_back(card_id);
             }
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
@@ -2035,6 +2038,7 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseTopOrBottom { top },
         ) => {
+            // allow-raw-zone: clash reveal/return keeps the card in its library (CR 701.30a + CR 701.20b).
             zones::move_to_library_position(state, card, top, events);
             if let Some(((next_player, next_card), rest)) = remaining.split_first() {
                 state.waiting_for = WaitingFor::ClashCardPlacement {
@@ -2389,13 +2393,16 @@ pub(super) fn handle_resolution_choice(
                         .iter_mut()
                         .find(|candidate| candidate.id == library_owner)
                         .expect("player exists");
+                    // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                     player_state.library.retain(|id| !cards.contains(id));
                     for (index, &card_id) in kept.iter().enumerate() {
+                        // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                         player_state.library.insert(index, card_id);
                     }
                     match rest_destination {
                         Some(Zone::Library) => {
                             for &obj_id in &unkept {
+                                // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                                 player_state.library.push_back(obj_id);
                             }
                             None
@@ -3752,7 +3759,13 @@ pub(super) fn handle_resolution_choice(
                         "Selected card not in eligible set".to_string(),
                     ));
                 }
-                if state.objects.get(card_id).map(|obj| obj.zone) != Some(zone) {
+                let current_zone = state.objects.get(card_id).map(|obj| obj.zone);
+                // `PutAtLibraryPosition` permits either Hand or Library source
+                // cards. Partition them by current zone at delivery time.
+                let is_put_at_library_position_member =
+                    matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+                        && matches!(current_zone, Some(Zone::Hand | Zone::Library));
+                if current_zone != Some(zone) && !is_put_at_library_position_member {
                     return Err(EngineError::InvalidAction(format!(
                         "Selected card is no longer in {:?}",
                         zone
@@ -4100,24 +4113,78 @@ pub(super) fn handle_resolution_choice(
                 // selection order (first chosen = top). Expressive Iteration's
                 // tracked-set bottom step chains an exile `ParentTarget` tail —
                 // detect that continuation shape to honor bottom placement.
-                EffectKind::PutAtLibraryPosition => match library_position {
-                    Some(LibraryPosition::Bottom) => {
-                        for &card_id in &chosen {
-                            super::zones::move_to_library_position(state, card_id, false, events);
+                EffectKind::PutAtLibraryPosition => {
+                    let library_position = match library_position {
+                        Some(LibraryPosition::Bottom) => LibraryPosition::Bottom,
+                        Some(LibraryPosition::NthFromTop { n }) => {
+                            LibraryPosition::NthFromTop { n }
+                        }
+                        _ => LibraryPosition::Top,
+                    };
+                    let library_origin: Vec<ObjectId> = chosen
+                        .iter()
+                        .copied()
+                        .filter(|card_id| {
+                            state
+                                .objects
+                                .get(card_id)
+                                .is_some_and(|object| object.zone == Zone::Library)
+                        })
+                        .collect();
+                    let non_library_order = effect_zone_non_library_delivery_order(
+                        state,
+                        &chosen,
+                        &library_origin,
+                        &library_position,
+                    );
+
+                    if non_library_order.is_empty() {
+                        move_library_origin_cards_in_selection_order(
+                            state,
+                            &chosen,
+                            &library_position,
+                            events,
+                        );
+                    } else {
+                        // The selected EffectZoneChoice is now consumed. Clear it
+                        // before the pipeline may park a CR 616.1 prompt; otherwise
+                        // `park_waiting_for` intentionally preserves the stale
+                        // choice for Devour's nested-choice path.
+                        state.waiting_for = WaitingFor::Priority { player };
+                        let requests = non_library_order
+                            .into_iter()
+                            .map(|card_id| {
+                                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                                    card_id,
+                                    Zone::Library,
+                                    source_id,
+                                )
+                                .at_library_position(library_position.clone())
+                            })
+                            .collect();
+                        let completion =
+                            crate::types::game_state::BatchCompletion::EffectZonePutAtLibraryPositionComplete {
+                                player,
+                                source_id,
+                                chosen: chosen.clone(),
+                                library_origin,
+                                library_position,
+                            };
+                        match crate::game::zone_pipeline::move_objects_simultaneously_then(
+                            state,
+                            requests,
+                            Some(completion),
+                            events,
+                        ) {
+                            crate::game::zone_pipeline::BatchMoveResult::Done
+                            | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                         }
                     }
-                    Some(LibraryPosition::NthFromTop { n }) => {
-                        let index = Some(n.saturating_sub(1) as usize);
-                        for &card_id in &chosen {
-                            super::zones::move_to_library_at_index(state, card_id, index, events);
-                        }
-                    }
-                    _ => {
-                        for &card_id in chosen.iter().rev() {
-                            super::zones::move_to_library_at_index(state, card_id, Some(0), events);
-                        }
-                    }
-                },
+                }
                 // CR 608.2d + CR 301.5b: Resolution-time Equipment pick for
                 // deferred optional attach (Nahiri, the Lithomancer +2).
                 EffectKind::Attach => {
@@ -5582,6 +5649,237 @@ fn pop_first_pile_result(
     (first, completed)
 }
 
+fn effect_zone_library_placement_order(
+    chosen: &[ObjectId],
+    library_position: &LibraryPosition,
+) -> Vec<ObjectId> {
+    match library_position {
+        LibraryPosition::Top => chosen.iter().rev().copied().collect(),
+        LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => chosen.to_vec(),
+        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+            unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+        }
+    }
+}
+
+/// CR 401.4: Deliver Hand-origin cards in the order whose resulting relative
+/// order matches the raw mixed-source placement. The later Library-only replay
+/// can change their interleaving with library cards, but never their own order.
+fn effect_zone_non_library_delivery_order(
+    state: &GameState,
+    chosen: &[ObjectId],
+    library_origin: &[ObjectId],
+    library_position: &LibraryPosition,
+) -> Vec<ObjectId> {
+    let mut owners = Vec::new();
+    for &card_id in chosen {
+        let owner = state.objects[&card_id].owner;
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+
+    let mut delivery_order = Vec::new();
+    for owner in owners {
+        let library = state
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .expect("library owner exists")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        let desired = replay_effect_zone_library_placement(
+            state,
+            owner,
+            library,
+            chosen,
+            chosen,
+            library_position,
+        );
+        let non_library: Vec<_> = desired
+            .into_iter()
+            .filter(|card_id| chosen.contains(card_id) && !library_origin.contains(card_id))
+            .collect();
+        match library_position {
+            LibraryPosition::Top | LibraryPosition::NthFromTop { .. } => {
+                delivery_order.extend(non_library.into_iter().rev());
+            }
+            LibraryPosition::Bottom => delivery_order.extend(non_library),
+            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+                unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+            }
+        }
+    }
+    delivery_order
+}
+
+fn replay_effect_zone_library_placement(
+    state: &GameState,
+    owner: crate::types::player::PlayerId,
+    mut library: Vec<ObjectId>,
+    chosen: &[ObjectId],
+    placed: &[ObjectId],
+    library_position: &LibraryPosition,
+) -> Vec<ObjectId> {
+    for card_id in effect_zone_library_placement_order(chosen, library_position) {
+        if state.objects[&card_id].owner != owner || !placed.contains(&card_id) {
+            continue;
+        }
+        library.retain(|id| *id != card_id);
+        match library_position {
+            LibraryPosition::Top => library.insert(0, card_id),
+            LibraryPosition::Bottom => library.push(card_id),
+            LibraryPosition::NthFromTop { n } => {
+                let index = (n.saturating_sub(1) as usize).min(library.len());
+                library.insert(index, card_id);
+            }
+            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+                unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+            }
+        }
+    }
+    library
+}
+
+fn move_library_origin_cards_in_selection_order(
+    state: &mut GameState,
+    chosen: &[ObjectId],
+    library_position: &LibraryPosition,
+    events: &mut Vec<GameEvent>,
+) {
+    match library_position {
+        LibraryPosition::Bottom => {
+            for &card_id in chosen {
+                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+                zones::move_to_library_position(state, card_id, false, events);
+            }
+        }
+        LibraryPosition::Top | LibraryPosition::NthFromTop { .. } => {
+            let index = match library_position {
+                LibraryPosition::Top => Some(0),
+                LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                _ => unreachable!("matched library position"),
+            };
+            let placement_order = effect_zone_library_placement_order(chosen, library_position);
+            for card_id in placement_order {
+                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+                zones::move_to_library_at_index(state, card_id, index, events);
+            }
+        }
+        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
+            unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
+        }
+    }
+}
+
+/// CR 401.4 + CR 608.2c: Preserve the raw arm's selected-card interleaving
+/// after the Hand-origin delivery batch has settled. Reconstruct each affected
+/// library without the newly delivered cards, replay the original placement
+/// order using only cards that actually landed in a library, then reposition
+/// just the cards that began there into the resulting slots.
+fn reposition_library_origins_after_batch_delivery(
+    state: &mut GameState,
+    chosen: &[ObjectId],
+    library_origin: &[ObjectId],
+    library_position: &LibraryPosition,
+    events: &mut Vec<GameEvent>,
+) {
+    let library_placed: Vec<_> = chosen
+        .iter()
+        .copied()
+        .filter(|card_id| {
+            state
+                .objects
+                .get(card_id)
+                .is_some_and(|object| object.zone == Zone::Library)
+        })
+        .collect();
+    let mut owners = Vec::new();
+    for &card_id in library_origin {
+        let owner = state.objects[&card_id].owner;
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+
+    for owner in owners {
+        let library = state
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .expect("library owner exists")
+            .library
+            .iter()
+            .copied()
+            .filter(|id| library_origin.contains(id) || !chosen.contains(id))
+            .collect();
+        let desired = replay_effect_zone_library_placement(
+            state,
+            owner,
+            library,
+            chosen,
+            &library_placed,
+            library_position,
+        );
+        for (index, &card_id) in desired.iter().enumerate().rev() {
+            if library_origin.contains(&card_id) {
+                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+                zones::move_to_library_at_index(state, card_id, Some(index), events);
+            }
+        }
+    }
+}
+
+fn finish_effect_zone_put_at_library_position(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    chosen: Vec<ObjectId>,
+    library_origin: Vec<ObjectId>,
+    library_position: LibraryPosition,
+    events: &mut Vec<GameEvent>,
+) {
+    reposition_library_origins_after_batch_delivery(
+        state,
+        &chosen,
+        &library_origin,
+        &library_position,
+        events,
+    );
+    if state.pending_continuation.is_some() {
+        let tracked = if matches!(library_position, LibraryPosition::Bottom) {
+            state
+                .chain_tracked_set_id
+                .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| !chosen.contains(id))
+                .filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| object.zone == Zone::Library)
+                })
+                .collect()
+        } else {
+            chosen.clone()
+        };
+        let tracked_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(tracked_id, tracked);
+        state.chain_tracked_set_id = Some(tracked_id);
+    }
+    state.last_effect_count = Some(chosen.len() as i32);
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::PutAtLibraryPosition,
+        source_id,
+        subject: None,
+    });
+    finish_with_continuation(state, player, events);
+}
+
 fn finish_with_continuation(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -5721,6 +6019,24 @@ pub(crate) fn run_batch_completion(
         }
         BatchCompletion::TopOrBottomComplete { player } => {
             finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::EffectZonePutAtLibraryPositionComplete {
+            player,
+            source_id,
+            chosen,
+            library_origin,
+            library_position,
+        } => {
+            finish_effect_zone_put_at_library_position(
+                state,
+                player,
+                source_id,
+                chosen,
+                library_origin,
+                library_position,
+                events,
+            );
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::DigKeptDeliveryComplete {
