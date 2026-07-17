@@ -1538,6 +1538,39 @@ pub struct PendingPlayerScopeSacrificeCompletion {
     /// buffer rather than only events produced by the tail drain.
     #[serde(default)]
     pub spans_replacement_pause: bool,
+    /// The resolution event emitted once the complete sacrifice batch settles.
+    /// Most callers inherit `EffectKind::Sacrifice` from their template; callers
+    /// that reuse this queue for a broader resolution instruction override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_kind: Option<EffectKind>,
+    /// A per-permanent event that must follow every completed sacrifice, even
+    /// when delivery crossed a replacement-choice action boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<PendingPlayerScopeSacrificeFollowUp>,
+    /// Completed follow-up events, retained so a resumed event buffer can never
+    /// emit the same per-sacrifice event twice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followed_up_sacrifices: Vec<ObjectId>,
+    /// `EffectZoneChoice` starts a fresh selected-object set. Its replacement
+    /// pause must defer that publication until every selected sacrifice has
+    /// settled, so continuation consumers see the full actual set.
+    #[serde(default)]
+    pub publish_fresh_tracked_set: bool,
+    /// The interactive selection path normally snapshots the completed
+    /// sacrifice for a parent-referential continuation. Retain that suffix work
+    /// on the same typed batch when the selected sacrifice pauses.
+    #[serde(default)]
+    pub propagate_parent_context: bool,
+}
+
+/// CR 702.110b + CR 701.21a + CR 616.1: A per-sacrifice consequence carried
+/// by the replacement-safe simultaneous-sacrifice queue.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PendingPlayerScopeSacrificeFollowUp {
+    /// Emit the exploit event only after the chosen creature's sacrifice has
+    /// actually completed, including after a graveyard-move replacement choice.
+    Exploit { exploiter: ObjectId },
 }
 
 /// CR 101.4 + CR 701.23i: APNAP state for a self-library search instruction
