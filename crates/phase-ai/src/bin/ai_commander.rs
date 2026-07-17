@@ -171,6 +171,10 @@ fn main() {
     }
 
     let start = Instant::now();
+    let dump_log = std::env::var("PHASE_DUMP_LOG").is_ok();
+    let mut game_log: Vec<engine::types::log::GameLogEntry> = Vec::new();
+    let dump_actions = std::env::var("PHASE_DUMP_ACTIONS").is_ok();
+    let mut actions_log: Vec<String> = Vec::new();
     let mut total_actions: usize = 0;
     let mut last_turn_reported: u32 = 0;
     let mut aborted = false;
@@ -187,6 +191,16 @@ fn main() {
         );
         if results.is_empty() {
             break;
+        }
+        if dump_log {
+            for r in &results {
+                game_log.extend(r.log_entries.iter().cloned());
+            }
+        }
+        if dump_actions {
+            for r in &results {
+                actions_log.push(format!("{:?}", r.action));
+            }
         }
         total_actions += results.len();
 
@@ -257,6 +271,16 @@ fn main() {
             p.graveyard.len(),
             bf_count
         );
+    }
+
+    if let Ok(path) = std::env::var("PHASE_DUMP_ACTIONS") {
+        std::fs::write(&path, actions_log.join("\n")).expect("write actions dump");
+        println!("Dumped {} actions to {path}", actions_log.len());
+    }
+    if let Ok(path) = std::env::var("PHASE_DUMP_LOG") {
+        let json = serde_json::to_string(&game_log).expect("serialize game log");
+        std::fs::write(&path, json).expect("write game log dump");
+        println!("Dumped {} game-log entries to {path}", game_log.len());
     }
 
     if aborted {
