@@ -1882,6 +1882,24 @@ pub enum BatchCompletion {
         publish_tracked_set: Vec<ObjectId>,
         continuation_targets: Vec<ObjectId>,
     },
+    /// CR 701.13a + CR 614.1 + CR 616.1: A per-category exile member has
+    /// settled, so its tracked-set extension and next-member prompt can run.
+    ForEachCategoryExileComplete {
+        ability: Box<ResolvedAbility>,
+        pool: Vec<ObjectId>,
+        remaining_member_filters: Vec<crate::types::ability::TargetFilter>,
+        chosen: Vec<ObjectId>,
+    },
+    /// CR 401.4 + CR 614.1 + CR 616.1 + CR 608.2c: A drawn-this-turn
+    /// topdeck batch has settled, so its life-payment and resolution tail can
+    /// run exactly once after the selected cards' ordered Library delivery.
+    DrawnThisTurnTopdeckComplete {
+        player: PlayerId,
+        life_payment: u32,
+        payment_count: usize,
+        topdecked_count: usize,
+        source_id: ObjectId,
+    },
     /// CR 701.25a: After the surveil rest pile reaches the graveyard, the kept
     /// cards rest on top of the player's library in the chosen order
     /// (`top_cards[0]` becomes the topmost card).

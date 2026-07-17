@@ -3217,9 +3217,16 @@ pub(super) fn handle_resolution_choice(
             // the per-player path (Sanar, Portent of Calamity). The continuation
             // ("from among them" / "put the rest …") reads that tracked set.
             if state.pending_per_category_zone_choice.is_some() {
-                effects::choose_from_zone::drain_pending_per_category_zone_choice(
+                match effects::choose_from_zone::drain_pending_per_category_zone_choice(
                     state, &chosen, events,
-                );
+                ) {
+                    crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
                 super::engine::resume_pending_continuation_if_priority(state, events)
                     .expect("a settled zone choice must resume its continuation");
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -4447,7 +4454,7 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            effects::drawn_this_turn_choice::handle_topdeck_choice(
+            match effects::drawn_this_turn_choice::handle_topdeck_choice(
                 state,
                 effects::drawn_this_turn_choice::TopdeckChoice {
                     player,
@@ -4460,11 +4467,18 @@ pub(super) fn handle_resolution_choice(
                 },
                 events,
             )
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+            {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+            }
             // Issue #423 audit: `handle_topdeck_choice` moves cards between the
             // hand and the top of the library — never off the battlefield — so
             // it produces no dies-triggers and needs no collection here.
-            state.last_effect_count = Some(chosen.len() as i32);
             set_priority(state, player);
             resume_with_error_propagation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -5723,6 +5737,40 @@ pub(crate) fn run_batch_completion(
                 cont.chain.context.optional_effect_performed = !continuation_targets.is_empty();
             }
             finish_with_continuation(state, player, events);
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::ForEachCategoryExileComplete {
+            ability,
+            pool,
+            remaining_member_filters,
+            chosen,
+        } => {
+            effects::choose_from_zone::complete_per_category_exile(
+                state,
+                ability,
+                pool,
+                remaining_member_filters,
+                chosen,
+                events,
+            );
+            crate::game::zone_pipeline::BatchMoveResult::Done
+        }
+        BatchCompletion::DrawnThisTurnTopdeckComplete {
+            player,
+            life_payment,
+            payment_count,
+            topdecked_count,
+            source_id,
+        } => {
+            effects::drawn_this_turn_choice::complete_topdeck_choice(
+                state,
+                player,
+                life_payment,
+                payment_count,
+                topdecked_count,
+                source_id,
+                events,
+            );
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::SurveilKeepOnTop { player, top_cards } => {
