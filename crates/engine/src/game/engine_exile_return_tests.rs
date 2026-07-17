@@ -690,6 +690,7 @@ fn exile_return_occurs_before_a_pending_resolution_choice() {
 
     state.waiting_for = WaitingFor::SearchChoice {
         player: PlayerId(0),
+        library_owner: None,
         cards: Vec::new(),
         count: 1,
         reveal: false,
