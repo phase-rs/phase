@@ -233,6 +233,8 @@ pub(crate) fn resolve_enters_under_player(
     }
 }
 
+/// CR 608.2c: Resolution-time choices use the resolved legal-cardinality bounds
+/// of the instruction, including a successful zero-card choice.
 fn resolution_choice_cardinality(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -553,7 +555,7 @@ pub fn resolve(
             vec![origin]
         } else {
             let extracted = target_filter.extract_zones();
-            if extracted.len() > 1 {
+            if !extracted.is_empty() {
                 extracted
             } else if let Some(zone) = target_filter.extract_in_zone() {
                 vec![zone]
@@ -1300,7 +1302,7 @@ pub fn resolve_all(
             random_order,
         } => {
             let extracted = target.extract_zones();
-            let scan_zones = if extracted.len() > 1 {
+            let scan_zones = if !extracted.is_empty() {
                 extracted
             } else if let Some(origin) = origin {
                 vec![*origin]
@@ -2935,6 +2937,109 @@ mod tests {
             assert!(state.objects[&id].tapped);
         }
         assert_eq!(state.objects[&opposing_land].zone, Zone::Graveyard);
+    }
+
+    /// CR 608.2c: an explicit one-zone `InAnyZone` filter is still an
+    /// authoritative zone constraint. Both the interactive and mass
+    /// ChangeZone resolvers must scan that zone instead of defaulting to the
+    /// battlefield.
+    #[test]
+    fn singleton_in_any_zone_is_authoritative_for_change_zone_variants() {
+        let mut choice_state = GameState::new_two_player(42);
+        let graveyard_card = create_object(
+            &mut choice_state,
+            CardId(31),
+            PlayerId(0),
+            "Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        let battlefield_decoy = create_object(
+            &mut choice_state,
+            CardId(32),
+            PlayerId(0),
+            "Battlefield Decoy".to_string(),
+            Zone::Battlefield,
+        );
+        let mut choice_ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard],
+                    },
+                ])),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        choice_ability.multi_target =
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        choice_ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        let mut events = Vec::new();
+        resolve(&mut choice_state, &choice_ability, &mut events).unwrap();
+
+        match &choice_state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert!(cards.contains(&graveyard_card));
+                assert!(!cards.contains(&battlefield_decoy));
+            }
+            other => panic!("expected graveyard EffectZoneChoice, got {other:?}"),
+        }
+
+        let mut all_state = GameState::new_two_player(42);
+        let all_graveyard_card = create_object(
+            &mut all_state,
+            CardId(33),
+            PlayerId(0),
+            "Mass Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        let all_battlefield_decoy = create_object(
+            &mut all_state,
+            CardId(34),
+            PlayerId(0),
+            "Mass Battlefield Decoy".to_string(),
+            Zone::Battlefield,
+        );
+        let all_ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard],
+                    },
+                ])),
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolve_all(&mut all_state, &all_ability, &mut events).unwrap();
+
+        assert_eq!(all_state.objects[&all_graveyard_card].zone, Zone::Exile);
+        assert_eq!(
+            all_state.objects[&all_battlefield_decoy].zone,
+            Zone::Battlefield
+        );
     }
 
     /// CR 614.12: `effective_enter_mods` applies the tapped/attacking riders
