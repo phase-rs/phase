@@ -35,7 +35,6 @@ crates/engine/src/game/elimination.rs	do_eliminate	exempt	1
 crates/engine/src/game/engine.rs	normalize_recast_frame	exempt	3
 crates/engine/src/game/engine_debug.rs	apply_debug_action	exempt	1
 crates/engine/src/game/engine_resolution_choices.rs	handle_resolution_choice	exempt	7
-crates/engine/src/game/engine_resolution_choices.rs	handle_resolution_choice	mover	1
 crates/engine/src/game/engine_resolution_choices.rs	move_library_origin_cards_in_selection_order	exempt	2
 crates/engine/src/game/engine_resolution_choices.rs	reposition_library_origins_after_batch_delivery	exempt	1
 crates/engine/src/game/planechase.rs	finish_player_left_game_handoff	exempt	2
