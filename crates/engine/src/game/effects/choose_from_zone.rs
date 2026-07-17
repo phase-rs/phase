@@ -1917,7 +1917,10 @@ mod tests {
             !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
             "an empty reveal must not create a choice from an older tracked set"
         );
-        assert!(state.last_choose_from_zone_found_nothing);
+        assert_eq!(
+            state.last_parent_target_missing_reason,
+            Some(crate::types::ability::ParentTargetMissingReason::ChooseFromZone)
+        );
         assert_eq!(state.objects[&stale].zone, Zone::Library);
     }
 
