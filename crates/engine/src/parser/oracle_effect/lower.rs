@@ -3968,10 +3968,13 @@ pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFil
 /// nonland card", matching the official ruling that Kroxa's life loss still
 /// applies to an opponent with no cards in hand.
 ///
-/// Verb is a small closed set of "this way" cost-payment actions (discard,
-/// sacrifice, exile) — `ZoneChangedThisWay` reads `last_zone_changed_ids`
-/// which every one of them populates identically, so the matched verb itself
-/// carries no separate semantics; it only anchors the grammar.
+/// Verb is scoped to "discard" — the only verb this exact "who didn't <verb>
+/// a [filter] this way" relative-clause construction is verified against
+/// (Kroxa). `ZoneChangedThisWay` itself is verb-agnostic (it reads
+/// `last_zone_changed_ids`, which sacrifice/exile populate identically to
+/// discard), so widening the `alt()` to those verbs is a one-line change
+/// once a card actually prints that construction — deferred rather than
+/// speculatively added ahead of a verified card.
 pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
     text: &str,
 ) -> Option<(PlayerFilter, TargetFilter, String)> {
@@ -3984,7 +3987,7 @@ pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
         ))
         .parse(i)?;
         let (i, _) = alt((tag("didn't "), tag("did not "))).parse(i)?;
-        let (i, _) = alt((tag("discard "), tag("sacrifice "), tag("exile "))).parse(i)?;
+        let (i, _) = tag("discard ").parse(i)?;
         let (i, _) = alt((tag("a "), tag("an "))).parse(i)?;
         let (filter, after_filter) = parse_type_phrase(i);
         if matches!(filter, TargetFilter::Any) {

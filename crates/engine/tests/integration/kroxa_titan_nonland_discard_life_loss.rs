@@ -155,3 +155,41 @@ fn kroxa_opponent_with_empty_hand_still_loses_three_life() {
         "opponent had no cards to discard, so they didn't discard a nonland card either — life loss must still fire"
     );
 }
+
+/// Three players: two opponents in the same per-opponent fan-out, one
+/// discarding a land and the other a nonland card. Each opponent's own
+/// discard must gate their own life loss independently — a structural
+/// regression guard for `detach_after_player_scope_local_chain` keeping the
+/// `ZoneChangedThisWay`-gated sub-ability attached to its own iteration
+/// instead of a once-after-all-iterations tail (which would read only the
+/// last-processed opponent's discard for every opponent).
+#[test]
+fn kroxa_three_player_each_opponent_gated_by_their_own_discard() {
+    let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Kroxa".to_string(),
+        Zone::Battlefield,
+    );
+    add_hand_card(&mut state, 100, PlayerId(1), true);
+    add_hand_card(&mut state, 200, PlayerId(2), false);
+
+    let p1_life_before = life(&state, PlayerId(1));
+    let p2_life_before = life(&state, PlayerId(2));
+    let ability = kroxa_trigger(PlayerId(0), source);
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    assert_eq!(
+        life(&state, PlayerId(1)),
+        p1_life_before - 3,
+        "P1 discarded a land — life loss must fire for P1"
+    );
+    assert_eq!(
+        life(&state, PlayerId(2)),
+        p2_life_before,
+        "P2 discarded a nonland card — life loss must NOT fire for P2"
+    );
+}
