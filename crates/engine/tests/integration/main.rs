@@ -873,6 +873,7 @@ mod issue_4365_msh_legality;
 mod issue_4376_elspeth_resplendent_nonmodal_labels;
 mod issue_4937_iona_chosen_color;
 mod issue_4945_zada_hedron_grinder;
+mod issue_4948_samwise_gamgee_sacrifice_target_order;
 mod issue_5263_chaos_warp;
 mod karplusan_yeti_fight_back;
 mod kav_landseeker_delayed_sacrifice;

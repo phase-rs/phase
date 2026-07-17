@@ -195,6 +195,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         distribution: _,          // concrete pre-assigned (TargetRef, u32) portions
         chosen_x: _,              // concrete cast-time X
         cost_paid_object: _,      // concrete captured-object snapshot
+        cost_paid_object_ids: _,  // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _,   // concrete captured-object snapshot
         ability_index: _,         // usize provenance
@@ -4730,6 +4731,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         forward_result: _, // bool
         chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
+        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance

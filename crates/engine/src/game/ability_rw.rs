@@ -3625,6 +3625,7 @@ fn walk_ability(
         distribution: _,
         chosen_x: _,
         cost_paid_object: _,
+        cost_paid_object_ids: _,
         effect_context_object: _,
         amassed_army_object: _,
         ability_index: _,
