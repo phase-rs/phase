@@ -2454,6 +2454,10 @@ fn miracle_sorcery_casts_during_draw_step() {
 fn miracle_cost_is_reduced_by_medallion_static() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let miracle_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 1,
+    };
     // Ruby Medallion-class reducer on the battlefield (full parser path).
     scenario
         .add_creature(P0, "Ruby Medallion Stand-In", 2, 2)
@@ -2466,10 +2470,7 @@ fn miracle_cost_is_reduced_by_medallion_static() {
             shards: vec![ManaCostShard::Red],
             generic: 8,
         })
-        .with_keyword(Keyword::Miracle(ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
-            generic: 1,
-        }))
+        .with_keyword(Keyword::Miracle(miracle_cost.clone()))
         .with_ability(Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
@@ -2492,10 +2493,7 @@ fn miracle_cost_is_reduced_by_medallion_static() {
     runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
         player: P0,
         object_id: miracle_obj,
-        cost: ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
-            generic: 1,
-        },
+        cost: miracle_cost,
     };
     runner
         .act(GameAction::CastSpellAsMiracle {
@@ -2556,6 +2554,10 @@ fn miracle_cost_is_reduced_by_medallion_static() {
 fn miracle_cost_fully_reduced_casts_for_zero() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let miracle_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 2,
+    };
     scenario
         .add_creature(P0, "Ruby Medallion Stand-In", 2, 2)
         .from_oracle_text("Red spells you cast cost {1} less to cast.");
@@ -2569,10 +2571,7 @@ fn miracle_cost_fully_reduced_casts_for_zero() {
             shards: vec![ManaCostShard::Red, ManaCostShard::White],
             generic: 2,
         })
-        .with_keyword(Keyword::Miracle(ManaCost::Cost {
-            shards: vec![],
-            generic: 2,
-        }))
+        .with_keyword(Keyword::Miracle(miracle_cost.clone()))
         .with_ability(Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
@@ -2585,10 +2584,7 @@ fn miracle_cost_fully_reduced_casts_for_zero() {
     runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
         player: P0,
         object_id: miracle_obj,
-        cost: ManaCost::Cost {
-            shards: vec![],
-            generic: 2,
-        },
+        cost: miracle_cost,
     };
     runner
         .act(GameAction::CastSpellAsMiracle {
