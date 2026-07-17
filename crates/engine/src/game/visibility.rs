@@ -676,6 +676,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::SearchChoice {
         player,
+        library_owner,
         ref cards,
         count,
         reveal,
@@ -688,6 +689,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::SearchChoice {
                 player,
+                library_owner,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 count,
                 reveal,
@@ -1646,6 +1648,7 @@ mod tests {
         let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
         state.pending_search_found_batch = Some(PendingSearchFoundBatch {
             searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
             remaining: vec![ObjectId(101)],
             survivors: vec![ObjectId(102)],
             continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
@@ -2045,6 +2048,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,
@@ -2109,6 +2113,7 @@ mod tests {
         });
         state.waiting_for = WaitingFor::SearchChoice {
             player: p1,
+            library_owner: None,
             cards: vec![p1_candidate],
             count: 1,
             reveal: false,
@@ -2456,6 +2461,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,

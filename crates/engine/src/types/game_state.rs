@@ -1607,6 +1607,11 @@ impl From<SearchFoundVisibility> for bool {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingSearchFoundBatch {
     pub searcher: PlayerId,
+    /// CR 701.23a: Owner of the library component actually searched. Bound
+    /// after search prohibitions remove impossible zones; never reconstructed
+    /// from an individual selected card's current zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_owner: Option<PlayerId>,
     pub remaining: Vec<ObjectId>,
     pub survivors: Vec<ObjectId>,
     pub continuation: PendingSearchFoundContinuation,
@@ -1955,7 +1960,11 @@ pub enum BatchCompletion {
     /// CR 701.23a + CR 616.1: A found-card replacement sent the card through a
     /// zone move that itself paused for replacement ordering. Resume the saved
     /// found-card batch only after that move finishes.
-    SearchFoundZoneDelivery { object_id: ObjectId },
+    SearchFoundZoneDelivery {
+        object_id: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<crate::types::proposed_event::BoundSearchFoundGrant>,
+    },
     /// CR 701.42 + CR 616.1: both selected meld referents have completed their
     /// simultaneous exile attempts. The typed context survives any replacement
     /// ordering pauses so physical-pair validation runs exactly once afterward.
@@ -4480,6 +4489,10 @@ pub enum WaitingFor {
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {
         player: PlayerId,
+        /// CR 701.23a: Owner of the library component actually included in
+        /// this search after prohibitions are applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_owner: Option<PlayerId>,
         /// Object IDs of legal choices (pre-filtered from library).
         cards: Vec<ObjectId>,
         /// How many cards to select.
@@ -12383,6 +12396,7 @@ mod tests {
     fn search_found_visibility_preserves_legacy_boolean_wire_shape() {
         let batch = PendingSearchFoundBatch {
             searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
             remaining: vec![ObjectId(7)],
             survivors: vec![ObjectId(8)],
             continuation: PendingSearchFoundContinuation::Standard { split: None },
@@ -12414,6 +12428,37 @@ mod tests {
                 .expect("deserialize pre-field SearchFound batch")
                 .visibility,
             SearchFoundVisibility::Private
+        );
+    }
+
+    #[test]
+    fn search_found_delivery_grant_round_trips_and_legacy_defaults() {
+        let completion = BatchCompletion::SearchFoundZoneDelivery {
+            object_id: ObjectId(7),
+            grant: Some(crate::types::proposed_event::BoundSearchFoundGrant {
+                source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(9), 3),
+                controller: PlayerId(0),
+                grantee: PlayerId(1),
+                mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+            }),
+        };
+        let json = serde_json::to_value(&completion).expect("serialize bound delivery grant");
+        assert_eq!(
+            serde_json::from_value::<BatchCompletion>(json)
+                .expect("deserialize bound delivery grant"),
+            completion
+        );
+
+        let legacy = serde_json::json!({
+            "SearchFoundZoneDelivery": { "object_id": 7 }
+        });
+        assert_eq!(
+            serde_json::from_value::<BatchCompletion>(legacy)
+                .expect("deserialize pre-grant delivery completion"),
+            BatchCompletion::SearchFoundZoneDelivery {
+                object_id: ObjectId(7),
+                grant: None,
+            }
         );
     }
 

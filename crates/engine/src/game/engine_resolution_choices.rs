@@ -27,6 +27,7 @@ use super::{casting, casting_costs, mana_abilities};
 pub(crate) fn apply_search_found_replacements(
     state: &mut GameState,
     searcher: crate::types::player::PlayerId,
+    library_owner: Option<crate::types::player::PlayerId>,
     chosen: &[ObjectId],
     continuation: crate::types::game_state::PendingSearchFoundContinuation,
     reveal: bool,
@@ -38,6 +39,7 @@ pub(crate) fn apply_search_found_replacements(
     state.last_revealed_ids.clear();
     let batch = crate::types::game_state::PendingSearchFoundBatch {
         searcher,
+        library_owner,
         remaining: chosen.to_vec(),
         survivors: Vec::with_capacity(chosen.len()),
         continuation,
@@ -91,14 +93,9 @@ fn process_search_found_batch(
 ) -> Result<crate::types::game_state::PendingSearchFoundBatch, Box<WaitingFor>> {
     let remaining = std::mem::take(&mut batch.remaining);
     for (index, object_id) in remaining.iter().copied().enumerate() {
-        let library_owner = state
-            .objects
-            .get(&object_id)
-            .filter(|object| object.zone == Zone::Library)
-            .map(|object| object.owner);
         let proposed = crate::types::proposed_event::ProposedEvent::SearchFound {
             searcher: batch.searcher,
-            library_owner,
+            library_owner: batch.library_owner,
             object_id,
             disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
             applied: Default::default(),
@@ -155,16 +152,81 @@ fn deliver_search_found_event(
         events,
     );
     match move_result {
-        super::zone_pipeline::ZoneMoveResult::Done => false,
+        super::zone_pipeline::ZoneMoveResult::Done => {
+            grant_search_found_permission_after_delivery(
+                state,
+                object_id,
+                disposition.grant,
+                events,
+            );
+            false
+        }
         super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
             super::zone_pipeline::defer_completion_on_pause(
                 state,
-                crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery { object_id },
+                crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                    object_id,
+                    grant: disposition.grant,
+                },
             );
             true
         }
     }
+}
+
+/// CR 611.2b + CR 601.3: A one-shot effect may create a permission that lasts
+/// after resolution. Install the bound rider only when the replacement-selected
+/// move actually delivered this card to exile; a later zone-change replacement
+/// may have redirected that move elsewhere.
+fn grant_search_found_permission_after_delivery(
+    state: &mut GameState,
+    object_id: ObjectId,
+    grant: Option<crate::types::proposed_event::BoundSearchFoundGrant>,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(grant) = grant else {
+        return;
+    };
+    if !state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        return;
+    }
+
+    let mut ability = ResolvedAbility::new(
+        Effect::GrantCastingPermission {
+            permission: crate::types::ability::CastingPermission::PlayFromExile {
+                duration: crate::types::ability::Duration::Permanent,
+                granted_to: grant.grantee,
+                frequency: crate::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: grant.mana_spend_permission,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
+            },
+            target: crate::types::ability::TargetFilter::ParentTarget,
+            grantee: crate::types::ability::PermissionGrantee::ParentTargetController,
+        },
+        vec![
+            TargetRef::Object(object_id),
+            TargetRef::Player(grant.grantee),
+        ],
+        grant.source.object_id,
+        grant.controller,
+    );
+    ability.source_incarnation = Some(grant.source.incarnation);
+    // The canonical grant resolver is the single authority for stamping
+    // source/controller/grantee provenance and permission replacement.
+    effects::grant_permission::resolve(state, &ability, events)
+        .expect("validated SearchFound permission grant must resolve");
 }
 
 /// CR 616.1 + CR 701.23a: Resume a parked per-card found-event batch from the
@@ -194,7 +256,13 @@ pub(crate) fn resume_search_found_after_replacement(
 /// CR 616.1 + CR 701.23a: Complete a modified found card's inner zone move,
 /// then continue the exact saved found-card suffix. Called from the generic
 /// zone-batch completion drain after the replacement-selected move delivers.
-fn resume_search_found_after_zone_delivery(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn resume_search_found_after_zone_delivery(
+    state: &mut GameState,
+    object_id: ObjectId,
+    grant: Option<crate::types::proposed_event::BoundSearchFoundGrant>,
+    events: &mut Vec<GameEvent>,
+) {
+    grant_search_found_permission_after_delivery(state, object_id, grant, events);
     let Some(batch) = state.pending_search_found_batch.take() else {
         return;
     };
@@ -2631,6 +2699,7 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::SearchChoice {
                 player,
+                library_owner,
                 cards,
                 count,
                 reveal,
@@ -2644,6 +2713,7 @@ pub(super) fn handle_resolution_choice(
             if effects::scoped_library_search::submit_selection(
                 state,
                 player,
+                library_owner,
                 &cards,
                 count,
                 reveal,
@@ -2696,6 +2766,7 @@ pub(super) fn handle_resolution_choice(
             let chosen = match apply_search_found_replacements(
                 state,
                 player,
+                library_owner,
                 &chosen,
                 crate::types::game_state::PendingSearchFoundContinuation::Standard {
                     split: split.clone(),
@@ -5624,8 +5695,8 @@ pub(crate) fn run_batch_completion(
             )
             .expect("scoped library search batch completion must resolve");
         }
-        BatchCompletion::SearchFoundZoneDelivery { .. } => {
-            resume_search_found_after_zone_delivery(state, events);
+        BatchCompletion::SearchFoundZoneDelivery { object_id, grant } => {
+            resume_search_found_after_zone_delivery(state, object_id, grant, events);
         }
         BatchCompletion::MeldExile { context } => {
             crate::game::meld::finish_meld_exile(state, context, events);
@@ -5679,13 +5750,17 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ReplacementDefinition, ReplacementMode,
-        ReplacementPlayerScope, TargetFilter,
+        AbilityDefinition, AbilityKind, CastingPermission, Duration, FilterProp,
+        ManaSpendPermission, PermissionGrantee, QuantityExpr, ReplacementDefinition,
+        ReplacementMode, ReplacementPlayerScope, SearchSelectionConstraint, StaticDefinition,
+        TargetFilter, TypedFilter,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::ReplacementId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
 
     fn search_found_redirect(destination: Zone) -> ReplacementDefinition {
         let execute = AbilityDefinition::new(
@@ -5712,6 +5787,38 @@ mod tests {
         replacement
     }
 
+    fn search_found_redirect_with_grant(
+        mana_spend_permission: Option<ManaSpendPermission>,
+    ) -> ReplacementDefinition {
+        let mut replacement = search_found_redirect(Zone::Exile);
+        let execute = replacement
+            .execute
+            .as_mut()
+            .expect("redirect has execution");
+        execute.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: crate::types::statics::CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission,
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_raise: None,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
+                },
+                target: TargetFilter::ParentTarget,
+                grantee: PermissionGrantee::AbilityController,
+            },
+        )));
+        replacement
+    }
+
     fn install_search_found_redirect(
         state: &mut GameState,
         controller: PlayerId,
@@ -5734,6 +5841,72 @@ mod tests {
         source
     }
 
+    fn install_moved_exile_redirect(
+        state: &mut GameState,
+        destination: Zone,
+        optional: bool,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(90_090),
+            PlayerId(0),
+            "Exile move redirect".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+            .destination_zone(Zone::Exile)
+            .valid_card(TargetFilter::Any);
+        if optional {
+            replacement.mode = ReplacementMode::Optional { decline: None };
+        }
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(replacement);
+        source
+    }
+
+    fn mixed_zone_search(controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Named {
+                        name: "Target".to_string(),
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Graveyard, Zone::Library],
+            },
+            Vec::new(),
+            ObjectId(90_099),
+            controller,
+        )
+    }
+
     #[test]
     fn search_found_redirect_removes_card_from_printed_search_result() {
         let mut state = GameState::new_two_player(42);
@@ -5749,6 +5922,7 @@ mod tests {
         let survivors = apply_search_found_replacements(
             &mut state,
             PlayerId(1),
+            Some(PlayerId(1)),
             &[found],
             crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
             false,
@@ -5758,6 +5932,628 @@ mod tests {
 
         assert!(survivors.is_empty());
         assert_eq!(state.objects[&found].zone, Zone::Exile);
+    }
+
+    #[test]
+    fn search_found_exile_grant_uses_canonical_permission_resolver() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(90_100),
+            PlayerId(0),
+            "Found-card grant".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(search_found_redirect_with_grant(Some(
+                ManaSpendPermission::AnyColor,
+            )));
+        let found = create_object(
+            &mut state,
+            CardId(90_101),
+            PlayerId(1),
+            "Found card".to_string(),
+            Zone::Graveyard,
+        );
+
+        let survivors = apply_search_found_replacements(
+            &mut state,
+            PlayerId(1),
+            Some(PlayerId(1)),
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect("mixed-zone search provenance makes the found card replaceable");
+
+        assert!(survivors.is_empty());
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(
+            matches!(
+                state.objects[&found].casting_permissions.as_slice(),
+                [CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    source_id: Some(grant_source),
+                    exiled_by_ability_controller: Some(PlayerId(0)),
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    ..
+                }] if *grant_source == source
+            ),
+            "unexpected permissions: {:?}",
+            state.objects[&found].casting_permissions
+        );
+    }
+
+    #[test]
+    fn search_found_grant_rejects_stored_parent_target_controller_grantee() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(90_110),
+            PlayerId(0),
+            "Wrong stored grantee".to_string(),
+            Zone::Battlefield,
+        );
+        let mut malformed = search_found_redirect_with_grant(None);
+        let child = malformed
+            .execute
+            .as_mut()
+            .unwrap()
+            .sub_ability
+            .as_mut()
+            .unwrap();
+        let Effect::GrantCastingPermission { grantee, .. } = child.effect.as_mut() else {
+            unreachable!()
+        };
+        *grantee = PermissionGrantee::ParentTargetController;
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(malformed);
+        let found = create_object(
+            &mut state,
+            CardId(90_111),
+            PlayerId(1),
+            "Found card".to_string(),
+            Zone::Library,
+        );
+
+        let survivors = apply_search_found_replacements(
+            &mut state,
+            PlayerId(1),
+            Some(PlayerId(1)),
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect("noncanonical stored grantee is ignored");
+
+        assert_eq!(survivors, vec![found]);
+        assert!(state.objects[&found].casting_permissions.is_empty());
+    }
+
+    #[test]
+    fn optional_search_found_grant_accepts_once_and_decline_grants_nothing() {
+        fn setup() -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(90_112),
+                PlayerId(0),
+                "Optional found grant".to_string(),
+                Zone::Battlefield,
+            );
+            let mut replacement = search_found_redirect_with_grant(None);
+            replacement.mode = ReplacementMode::Optional { decline: None };
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions
+                .push(replacement);
+            let found = create_object(
+                &mut state,
+                CardId(90_113),
+                PlayerId(1),
+                "Found card".to_string(),
+                Zone::Library,
+            );
+            (state, found)
+        }
+
+        let (mut accepted, accepted_card) = setup();
+        apply_search_found_replacements(
+            &mut accepted,
+            PlayerId(1),
+            Some(PlayerId(1)),
+            &[accepted_card],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("optional replacement prompts");
+        super::super::engine::apply_as_current(
+            &mut accepted,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("accept optional found-card grant");
+        assert_eq!(accepted.objects[&accepted_card].zone, Zone::Exile);
+        assert_eq!(
+            accepted.objects[&accepted_card].casting_permissions.len(),
+            1
+        );
+
+        let (mut declined, declined_card) = setup();
+        apply_search_found_replacements(
+            &mut declined,
+            PlayerId(1),
+            Some(PlayerId(1)),
+            &[declined_card],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("optional replacement prompts");
+        super::super::engine::apply_as_current(
+            &mut declined,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("decline optional found-card grant");
+        assert_eq!(declined.objects[&declined_card].zone, Zone::Library);
+        assert!(declined.objects[&declined_card]
+            .casting_permissions
+            .is_empty());
+    }
+
+    #[test]
+    fn mixed_zone_search_production_path_preserves_or_drops_library_provenance() {
+        fn install_found_grant(state: &mut GameState) {
+            let source = create_object(
+                state,
+                CardId(90_114),
+                PlayerId(1),
+                "Found-card grant".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions
+                .push(search_found_redirect_with_grant(None));
+        }
+
+        let mut active = GameState::new_two_player(42);
+        install_found_grant(&mut active);
+        let graveyard_card = create_object(
+            &mut active,
+            CardId(90_115),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Graveyard,
+        );
+        create_object(
+            &mut active,
+            CardId(90_116),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Library,
+        );
+        effects::search_library::resolve(
+            &mut active,
+            &mixed_zone_search(PlayerId(0)),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            active.waiting_for,
+            WaitingFor::SearchChoice {
+                library_owner: Some(PlayerId(0)),
+                ..
+            }
+        ));
+        super::super::engine::apply_as_current(
+            &mut active,
+            GameAction::SelectCards {
+                cards: vec![graveyard_card],
+            },
+        )
+        .expect("standard SearchChoice routes the nonlibrary card through SearchFound");
+        assert_eq!(active.objects[&graveyard_card].zone, Zone::Exile);
+        assert_eq!(active.objects[&graveyard_card].casting_permissions.len(), 1);
+
+        let mut muzzled = GameState::new_two_player(42);
+        install_found_grant(&mut muzzled);
+        let prohibition = create_object(
+            &mut muzzled,
+            CardId(90_117),
+            PlayerId(1),
+            "Search prohibition".to_string(),
+            Zone::Battlefield,
+        );
+        let prohibition_object = muzzled.objects.get_mut(&prohibition).unwrap();
+        prohibition_object
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+        prohibition_object
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::Opponents,
+            }));
+        let graveyard_card = create_object(
+            &mut muzzled,
+            CardId(90_118),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Graveyard,
+        );
+        create_object(
+            &mut muzzled,
+            CardId(90_119),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Library,
+        );
+        effects::search_library::resolve(
+            &mut muzzled,
+            &mixed_zone_search(PlayerId(0)),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            muzzled.waiting_for,
+            WaitingFor::SearchChoice {
+                library_owner: None,
+                ..
+            }
+        ));
+        super::super::engine::apply_as_current(
+            &mut muzzled,
+            GameAction::SelectCards {
+                cards: vec![graveyard_card],
+            },
+        )
+        .expect("muzzled mixed search still resolves its graveyard component");
+        assert_eq!(muzzled.objects[&graveyard_card].zone, Zone::Graveyard);
+        assert!(muzzled.objects[&graveyard_card]
+            .casting_permissions
+            .is_empty());
+    }
+
+    #[test]
+    fn scoped_search_production_path_threads_library_provenance_into_found_event() {
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = create_object(
+            &mut state,
+            CardId(90_120),
+            PlayerId(0),
+            "Found-card grant".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_source)
+            .unwrap()
+            .replacement_definitions
+            .push(search_found_redirect_with_grant(None));
+        let found = create_object(
+            &mut state,
+            CardId(90_121),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Graveyard,
+        );
+        create_object(
+            &mut state,
+            CardId(90_123),
+            PlayerId(1),
+            "Library candidate".to_string(),
+            Zone::Library,
+        );
+        let delivery = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            Vec::new(),
+            ObjectId(90_122),
+            PlayerId(0),
+        );
+        let search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Graveyard, Zone::Library],
+            },
+            Vec::new(),
+            ObjectId(90_122),
+            PlayerId(0),
+        )
+        .sub_ability(delivery);
+
+        let mut muzzled = state.clone();
+        let prohibition = create_object(
+            &mut muzzled,
+            CardId(90_124),
+            PlayerId(0),
+            "Search prohibition".to_string(),
+            Zone::Battlefield,
+        );
+        muzzled
+            .objects
+            .get_mut(&prohibition)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantSearchLibrary {
+                cause: ProhibitionScope::Opponents,
+            }));
+
+        effects::scoped_library_search::start(
+            &mut state,
+            &search,
+            &[PlayerId(1)],
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(1),
+                library_owner: Some(PlayerId(1)),
+                ..
+            }
+        ));
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .expect("scoped SearchChoice routes selection through SearchFound");
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert_eq!(state.objects[&found].casting_permissions.len(), 1);
+        assert!(state.pending_scoped_library_search.is_none());
+        assert!(state.pending_search_found_batch.is_none());
+
+        effects::scoped_library_search::start(
+            &mut muzzled,
+            &search,
+            &[PlayerId(1)],
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            muzzled.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(1),
+                library_owner: None,
+                ..
+            }
+        ));
+        super::super::engine::apply_as_current(
+            &mut muzzled,
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .expect("muzzled scoped search reaches and completes its nonlibrary choice");
+        assert_eq!(muzzled.objects[&found].zone, Zone::Battlefield);
+        assert!(muzzled.objects[&found].casting_permissions.is_empty());
+    }
+
+    #[test]
+    fn search_found_grant_is_not_installed_without_library_provenance() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(90_102),
+            PlayerId(0),
+            "Found-card grant".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(search_found_redirect_with_grant(Some(
+                ManaSpendPermission::AnyColor,
+            )));
+        let selected = create_object(
+            &mut state,
+            CardId(90_103),
+            PlayerId(1),
+            "Nonlibrary selection".to_string(),
+            Zone::Graveyard,
+        );
+
+        let survivors = apply_search_found_replacements(
+            &mut state,
+            PlayerId(1),
+            None,
+            &[selected],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect("nonlibrary-only search is not replaceable");
+
+        assert_eq!(survivors, vec![selected]);
+        assert_eq!(state.objects[&selected].zone, Zone::Graveyard);
+        assert!(state.objects[&selected].casting_permissions.is_empty());
+    }
+
+    #[test]
+    fn deferred_search_found_grant_waits_for_real_zone_pipeline_completion() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(90_104),
+            PlayerId(0),
+            "Found-card grant".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(search_found_redirect_with_grant(None));
+        install_moved_exile_redirect(&mut state, Zone::Graveyard, true);
+        let found = create_object(
+            &mut state,
+            CardId(90_105),
+            PlayerId(1),
+            "Delivered card".to_string(),
+            Zone::Library,
+        );
+
+        apply_search_found_replacements(
+            &mut state,
+            PlayerId(1),
+            Some(PlayerId(1)),
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect_err("optional Moved redirect pauses the SearchFound delivery");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(state.objects[&found].casting_permissions.is_empty());
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("declining the inner redirect completes the original exile move");
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(matches!(
+            state.objects[&found].casting_permissions.as_slice(),
+            [CastingPermission::PlayFromExile {
+                granted_to: PlayerId(0),
+                exiled_by_ability_controller: Some(PlayerId(0)),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn real_zone_pipeline_redirect_does_not_install_search_found_grant() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(90_106),
+            PlayerId(0),
+            "Found-card grant".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(search_found_redirect_with_grant(Some(
+                ManaSpendPermission::AnyColor,
+            )));
+        install_moved_exile_redirect(&mut state, Zone::Graveyard, false);
+        let found = create_object(
+            &mut state,
+            CardId(90_107),
+            PlayerId(1),
+            "Redirected card".to_string(),
+            Zone::Library,
+        );
+
+        let survivors = apply_search_found_replacements(
+            &mut state,
+            PlayerId(1),
+            Some(PlayerId(1)),
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect("mandatory inner redirect resolves synchronously");
+
+        assert!(survivors.is_empty());
+        assert_eq!(state.objects[&found].zone, Zone::Graveyard);
+        assert!(state.objects[&found].casting_permissions.is_empty());
+    }
+
+    #[test]
+    fn search_found_grant_rejects_noncanonical_permission_tree() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(90_108),
+            PlayerId(0),
+            "Malformed grant".to_string(),
+            Zone::Battlefield,
+        );
+        let mut malformed = search_found_redirect_with_grant(None);
+        malformed
+            .execute
+            .as_mut()
+            .unwrap()
+            .sub_ability
+            .as_mut()
+            .unwrap()
+            .optional = true;
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(malformed);
+        let found = create_object(
+            &mut state,
+            CardId(90_109),
+            PlayerId(1),
+            "Found card".to_string(),
+            Zone::Library,
+        );
+
+        let survivors = apply_search_found_replacements(
+            &mut state,
+            PlayerId(1),
+            Some(PlayerId(1)),
+            &[found],
+            crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
+            false,
+            &mut Vec::new(),
+        )
+        .expect("malformed definition is ignored");
+
+        assert_eq!(survivors, vec![found]);
+        assert_eq!(state.objects[&found].zone, Zone::Library);
     }
 
     #[test]
@@ -5803,6 +6599,7 @@ mod tests {
         ));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
             cards: vec![found],
             count: 1,
             reveal: false,
@@ -5848,6 +6645,7 @@ mod tests {
         let survivors = apply_search_found_replacements(
             &mut state,
             PlayerId(1),
+            None,
             &[selected],
             crate::types::game_state::PendingSearchFoundContinuation::Scoped,
             false,
@@ -5880,6 +6678,7 @@ mod tests {
         let waiting = apply_search_found_replacements(
             &mut state,
             PlayerId(1),
+            Some(PlayerId(1)),
             &[found],
             crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
             false,
@@ -5922,6 +6721,7 @@ mod tests {
         apply_search_found_replacements(
             &mut state,
             PlayerId(1),
+            Some(PlayerId(1)),
             &[found],
             crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
             false,
@@ -6002,6 +6802,7 @@ mod tests {
         apply_search_found_replacements(
             &mut state,
             PlayerId(1),
+            Some(PlayerId(1)),
             &[found],
             crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
             false,
@@ -6049,11 +6850,24 @@ mod tests {
     }
 
     #[test]
-    fn search_found_ordering_uses_serialized_candidate_after_source_leaves() {
+    fn search_found_ordering_uses_serialized_grant_after_source_reincarnates() {
         let mut state = GameState::new_two_player(42);
-        install_search_found_redirect(&mut state, PlayerId(0), 90_005, Zone::Exile);
-        let graveyard_source =
-            install_search_found_redirect(&mut state, PlayerId(0), 90_006, Zone::Graveyard);
+        let grant_source = create_object(
+            &mut state,
+            CardId(90_005),
+            PlayerId(0),
+            "Snapshotted grant".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grant_source)
+            .unwrap()
+            .replacement_definitions
+            .push(search_found_redirect_with_grant(Some(
+                ManaSpendPermission::AnyColor,
+            )));
+        install_search_found_redirect(&mut state, PlayerId(0), 90_006, Zone::Graveyard);
         let found = create_object(
             &mut state,
             CardId(90_007),
@@ -6065,12 +6879,29 @@ mod tests {
         apply_search_found_replacements(
             &mut state,
             PlayerId(1),
+            Some(PlayerId(1)),
             &[found],
             crate::types::game_state::PendingSearchFoundContinuation::Standard { split: None },
             false,
             &mut Vec::new(),
         )
         .expect_err("two redirects require CR 616 ordering");
+
+        let bound = state
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .search_found_candidates
+            .iter()
+            .find_map(|candidate| candidate.disposition.grant)
+            .expect("grant-bearing candidate was snapshotted before serialization");
+        assert_eq!(bound.source.object_id, grant_source);
+        assert_eq!(bound.controller, PlayerId(0));
+        assert_eq!(bound.grantee, PlayerId(0));
+        assert_eq!(
+            bound.mana_spend_permission,
+            Some(ManaSpendPermission::AnyColor)
+        );
 
         let json = serde_json::to_string(&state).expect("serialize parked ordering choice");
         let mut restored: GameState = serde_json::from_str(&json).expect("restore parked choice");
@@ -6080,10 +6911,20 @@ mod tests {
             .expect("replacement choice remains parked")
             .search_found_candidates
             .iter()
-            .position(|candidate| candidate.disposition.destination == Zone::Graveyard)
-            .expect("graveyard candidate exists");
-        restored.objects.remove(&graveyard_source);
-        restored.battlefield.retain(|id| *id != graveyard_source);
+            .position(|candidate| candidate.disposition.grant.is_some())
+            .expect("serialized grant candidate exists");
+        let mut reincarnated = crate::game::game_object::GameObject::new(
+            grant_source,
+            CardId(90_500),
+            PlayerId(1),
+            "Same id, different source".to_string(),
+            Zone::Battlefield,
+        );
+        reincarnated.incarnation = bound.source.incarnation + 1;
+        reincarnated
+            .replacement_definitions
+            .push(search_found_redirect(Zone::Hand));
+        restored.objects.insert(grant_source, reincarnated);
 
         super::super::engine::apply_as_current(
             &mut restored,
@@ -6093,7 +6934,17 @@ mod tests {
         )
         .expect("serialized candidate resumes through the public action boundary");
 
-        assert_eq!(restored.objects[&found].zone, Zone::Graveyard);
+        assert_eq!(restored.objects[&found].zone, Zone::Exile);
+        assert!(matches!(
+            restored.objects[&found].casting_permissions.as_slice(),
+            [CastingPermission::PlayFromExile {
+                granted_to: PlayerId(0),
+                source_id: Some(source_id),
+                exiled_by_ability_controller: Some(PlayerId(0)),
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                ..
+            }] if *source_id == grant_source
+        ));
         assert!(restored.pending_search_found_batch.is_none());
     }
 

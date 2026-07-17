@@ -41,6 +41,23 @@ pub struct BoundSearchFoundDisposition {
     /// resumed choice consumes this snapshot without rebinding to a new object
     /// that later reused the same id.
     pub source: ObjectIncarnationRef,
+    /// CR 611.2b + CR 609.4b: A permission rider bound at replacement
+    /// selection time and installed only after the found card actually reaches
+    /// exile. It contains no found-object identity; delivery supplies that
+    /// independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<BoundSearchFoundGrant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundSearchFoundGrant {
+    /// CR 400.7: exact incarnation of the replacement source whose effect
+    /// created the permission.
+    pub source: ObjectIncarnationRef,
+    pub controller: PlayerId,
+    pub grantee: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spend_permission: Option<super::ability::ManaSpendPermission>,
 }
 
 /// CR 616.1: Candidate data frozen when a SearchFound ordering

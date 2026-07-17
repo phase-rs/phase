@@ -182,6 +182,7 @@ pub(crate) fn handle_optional_decision(
 pub(crate) fn submit_selection(
     state: &mut GameState,
     player: PlayerId,
+    library_owner: Option<PlayerId>,
     cards: &[ObjectId],
     count: usize,
     reveal: bool,
@@ -236,6 +237,7 @@ pub(crate) fn submit_selection(
     let chosen = match crate::game::engine_resolution_choices::apply_search_found_replacements(
         state,
         player,
+        library_owner,
         chosen,
         crate::types::game_state::PendingSearchFoundContinuation::Scoped,
         reveal,
