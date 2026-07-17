@@ -4188,13 +4188,7 @@ fn exclude_cost_paid_object_that_left_battlefield(
     ability: &ResolvedAbility,
     targets: Vec<TargetRef>,
 ) -> Vec<TargetRef> {
-    let excluded_ids: Vec<ObjectId> = ability
-        .cost_paid_object_ids
-        .iter()
-        .copied()
-        .chain(ability.cost_paid_object.as_ref().map(|s| s.object_id))
-        .collect();
-    if excluded_ids.is_empty() {
+    if ability.cost_paid_object_ids.is_empty() && ability.cost_paid_object.is_none() {
         return targets;
     }
     let left_battlefield = |id: ObjectId| match state.objects.get(&id) {
@@ -4204,7 +4198,14 @@ fn exclude_cost_paid_object_that_left_battlefield(
     targets
         .into_iter()
         .filter(|target| match target {
-            TargetRef::Object(id) => !(excluded_ids.contains(id) && left_battlefield(*id)),
+            TargetRef::Object(id) => {
+                let was_paid_as_cost = ability.cost_paid_object_ids.contains(id)
+                    || ability
+                        .cost_paid_object
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.object_id == *id);
+                !(was_paid_as_cost && left_battlefield(*id))
+            }
             TargetRef::Player(_) => true,
         })
         .collect()
