@@ -2335,6 +2335,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -2595,6 +2596,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -3313,6 +3315,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
@@ -3626,6 +3629,7 @@ fn walk_ability(
         distribution: _,
         chosen_x: _,
         cost_paid_object: _,
+        cost_paid_object_ids: _,
         effect_context_object: _,
         amassed_army_object: _,
         ability_index: _,
@@ -4135,6 +4139,12 @@ fn rw_effect(
         Effect::Surveil { count, target: _ } => {
             let mut p = ext_write(StateKind::HandLibrary);
             p.merge(rw_quantity_expr(count));
+            (p, None)
+        }
+        Effect::ArrangePlanarDeckTop { count, keep_on_top } => {
+            let mut p = ext_write(StateKind::Other);
+            p.merge(rw_quantity_expr(count));
+            p.merge(rw_quantity_expr(keep_on_top));
             (p, None)
         }
         Effect::Shuffle { target: _ } => (ext_write(StateKind::HandLibrary), None),

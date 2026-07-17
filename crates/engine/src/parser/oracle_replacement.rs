@@ -382,6 +382,18 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "If [player] would planeswalk, instead {effect}" ---
+    // CR 614.1a + CR 701.31: General would-planeswalk replacement (Susan Foreman).
+    // Excludes the planar-die-specific form handled by
+    // `parse_planar_die_planeswalk_replacement`.
+    if nom_primitives::scan_contains(&lower, "would planeswalk")
+        && !nom_primitives::scan_contains(&lower, "as a result of rolling the planar die")
+    {
+        if let Some(def) = parse_would_planeswalk_replacement(&text, &norm_lower) {
+            return Some(def);
+        }
+    }
+
     // --- Explore replacement: "If a creature you control would explore, instead …"
     // (Twists and Turns / Topography Tracker class).
     if nom_primitives::scan_contains(&lower, "would explore") {
@@ -5861,6 +5873,95 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     Some(Effect::CreateDrawReplacement {
         replacement_effect: Box::new(payload),
     })
+}
+
+/// CR 614.1a + CR 701.31 + CR 901.15: Parse "if [you|a player] would planeswalk,
+/// instead look at the top N cards of your planar deck, put M on the bottom …
+/// and the other[s] on top[, then planeswalk]" into a `ReplacementEvent::Planeswalk`
+/// definition whose execute chain is `[ArrangePlanarDeckTop, Planeswalk]`.
+fn parse_would_planeswalk_replacement(
+    text: &str,
+    norm_lower: &str,
+) -> Option<ReplacementDefinition> {
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("if "))
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, player_scope) = alt((
+        value(
+            ReplacementPlayerScope::You,
+            tag::<_, _, OracleError<'_>>("you"),
+        ),
+        value(
+            ReplacementPlayerScope::AnyPlayer,
+            tag::<_, _, OracleError<'_>>("a player"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" would planeswalk, ")
+        .parse(rest)
+        .ok()?;
+    let execute = parse_arrange_planar_deck_planeswalk_substitute(rest)?;
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Planeswalk)
+        .description(text.to_string())
+        .execute(execute);
+    def.valid_player = Some(player_scope);
+    Some(def)
+}
+
+/// CR 901.15: Lower the Susan Foreman-class substitute — arrange the top of the
+/// planar deck, then planeswalk.
+fn parse_arrange_planar_deck_planeswalk_substitute(input: &str) -> Option<AbilityDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("instead look at the top ")
+        .parse(input)
+        .ok()?;
+    let (rest, look_count_u32) = nom_primitives::parse_number.parse(rest).ok()?;
+    let look_count = i32::try_from(look_count_u32).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" cards of your planar deck, put ")
+        .parse(rest)
+        .ok()?;
+    let (rest, bottom_count_u32) = alt((
+        value(1_u32, tag::<_, _, OracleError<'_>>("one")),
+        nom_primitives::parse_number,
+    ))
+    .parse(rest)
+    .ok()?;
+    let bottom_count = i32::try_from(bottom_count_u32).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" on the bottom of your planar deck and the other on top"),
+        tag::<_, _, OracleError<'_>>(" on the bottom of your planar deck and the others on top"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, then_planeswalk) = opt(tag::<_, _, OracleError<'_>>(", then planeswalk"))
+        .parse(rest)
+        .ok()?;
+    if then_planeswalk.is_none() && !rest.is_empty() {
+        return None;
+    }
+    if then_planeswalk.is_some() {
+        crate::parser::oracle_effect::parse_optional_period_and_end(rest)?;
+    }
+
+    let keep_on_top = look_count - bottom_count;
+    if keep_on_top <= 0 || keep_on_top > look_count {
+        return None;
+    }
+
+    let mut execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ArrangePlanarDeckTop {
+            count: QuantityExpr::Fixed { value: look_count },
+            keep_on_top: QuantityExpr::Fixed { value: keep_on_top },
+        },
+    );
+    if then_planeswalk.is_some() {
+        execute = execute.sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Planeswalk,
+        ));
+    }
+    Some(execute)
 }
 
 /// CR 614.1a + CR 611.2 + CR 901.9c: Parse "[if] a player would planeswalk as a
@@ -19978,6 +20079,23 @@ mod snapshot_tests {
             .is_none(),
             "Words of Waste (each-opponent payload) must remain an honest gap"
         );
+    }
+
+    #[test]
+    fn would_planeswalk_replacement_parses_susan_foreman() {
+        let text = "If you would planeswalk, instead look at the top two cards of your planar deck, put one on the bottom of your planar deck and the other on top, then planeswalk.";
+        let def = parse_replacement_line(text, "Susan Foreman").expect("Susan must parse");
+        assert_eq!(def.event, ReplacementEvent::Planeswalk);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
+        let execute = def.execute.expect("execute");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::ArrangePlanarDeckTop { .. }
+        ));
+        assert!(matches!(
+            execute.sub_ability.as_ref().map(|s| s.effect.as_ref()),
+            Some(Effect::Planeswalk)
+        ));
     }
 
     #[test]

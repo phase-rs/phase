@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, ActivationRestriction, Comparator, CostObjectCount, FilterProp, QuantityExpr,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, Comparator, CostObjectCount, CostReduction, FilterProp,
+    QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -235,7 +235,7 @@ pub enum KeywordKind {
     Madness,
     /// CR 702.168: Disguise — see `Keyword::Disguise`. A discriminant-level kind
     /// (like Morph/Mutate) so `FilterProp::HasKeywordKind { Disguise }` can name
-    /// the class regardless of the `Disguise(ManaCost)` parameter payload.
+    /// the class regardless of the `Disguise(DisguiseCost)` parameter payload.
     Disguise,
     /// CR 702.187: Mayhem — see `Keyword::Mayhem`.
     Mayhem,
@@ -551,6 +551,25 @@ pub enum BloodthirstValue {
     X,
 }
 
+/// CR 702.168d + CR 118.7a: A disguise cost can be fixed or carry its own
+/// dynamic generic reduction (Fugitive Codebreaker). The untagged mana form
+/// preserves the existing card-data representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DisguiseCost {
+    Mana(ManaCost),
+    Reduced {
+        cost: ManaCost,
+        reduction: Box<CostReduction>,
+    },
+}
+
+impl From<ManaCost> for DisguiseCost {
+    fn from(cost: ManaCost) -> Self {
+        Self::Mana(cost)
+    }
+}
+
 /// All MTG keywords as typed enum variants.
 /// Simple (unit) variants for keywords with no parameters.
 /// Parameterized variants carry associated data (ManaCost for costs, amounts, etc.).
@@ -734,7 +753,7 @@ pub enum Keyword {
     Foretell(ManaCost),
     Mutate(ManaCost),
     Disturb(ManaCost),
-    Disguise(ManaCost),
+    Disguise(DisguiseCost),
     Blitz(ManaCost),
     Overload(ManaCost),
     Spectacle(ManaCost),
@@ -2298,7 +2317,7 @@ impl FromStr for Keyword {
                 "foretell" => return Ok(Keyword::Foretell(parse_keyword_mana_cost(p))),
                 "mutate" => return Ok(Keyword::Mutate(parse_keyword_mana_cost(p))),
                 "disturb" => return Ok(Keyword::Disturb(parse_keyword_mana_cost(p))),
-                "disguise" => return Ok(Keyword::Disguise(parse_keyword_mana_cost(p))),
+                "disguise" => return Ok(Keyword::Disguise(parse_keyword_mana_cost(p).into())),
                 "blitz" => return Ok(Keyword::Blitz(parse_keyword_mana_cost(p))),
                 "overload" => return Ok(Keyword::Overload(parse_keyword_mana_cost(p))),
                 // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
@@ -3140,7 +3159,10 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Foretell" => Ok(Keyword::Foretell(mana(data)?)),
         "Mutate" => Ok(Keyword::Mutate(mana(data)?)),
         "Disturb" => Ok(Keyword::Disturb(mana(data)?)),
-        "Disguise" => Ok(Keyword::Disguise(mana(data)?)),
+        "Disguise" => Ok(Keyword::Disguise(
+            serde_json::from_value::<DisguiseCost>(data.clone())
+                .or_else(|_| mana(data).map(DisguiseCost::Mana))?,
+        )),
         "Blitz" => Ok(Keyword::Blitz(mana(data)?)),
         "Overload" => Ok(Keyword::Overload(mana(data)?)),
         // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.

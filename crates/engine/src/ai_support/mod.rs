@@ -420,8 +420,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (
             WaitingFor::ScryChoice { player: _, cards },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => selection_mismatch(chosen, cards, None),
+        (
+            WaitingFor::ArrangePlanarDeckTopChoice {
+                player: _,
+                cards,
+                keep_on_top,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(*keep_on_top)),
+        (
             WaitingFor::SurveilChoice { player: _, cards },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, None),
@@ -527,10 +535,11 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { .. },
         ) => true,
-        // CR 118.3: Sacrifice honors the [min_count, count] range.
+        // CR 118.3: Sacrifice and optional zone-exile costs honor the
+        // [min_count, count] range.
         (
             WaitingFor::PayCost {
-                kind: PayCostKind::Sacrifice,
+                kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
                 choices,
                 count,
                 min_count,

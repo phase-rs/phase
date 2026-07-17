@@ -115,6 +115,7 @@ pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
         obj.controller = archenemy;
     }
     // CR 314.2 / CR 904.9: the scheme stays in the command zone, now face up.
+    // allow-raw-zone: scheme-deck promotion stays in command zone (CR 314.2 + CR 904.4).
     state.command_zone.push_back(scheme_id);
 
     // CR 904.9 / CR 701.32b: announce that the scheme was set in motion. The
@@ -151,6 +152,7 @@ fn turn_face_down_to_bottom_of_scheme_deck(state: &mut GameState, scheme_id: Obj
     if let Some(obj) = state.objects.get_mut(&scheme_id) {
         obj.face_down = true;
     }
+    // allow-raw-zone: scheme-deck rotation stays in command zone (CR 314.2 + CR 904.4).
     state.command_zone.retain(|&id| id != scheme_id);
     state.scheme_deck.push_back(scheme_id);
 }

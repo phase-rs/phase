@@ -2444,6 +2444,182 @@ fn miracle_sorcery_casts_during_draw_step() {
     );
 }
 
+/// CR 601.2f: The total cost of a miracle cast is the miracle ALTERNATIVE cost
+/// plus increases minus reductions — a Medallion-class battlefield static
+/// ("Red spells you cast cost {1} less to cast", Ruby Medallion) must discount
+/// the miracle cost, not just the printed cost. A red spell with miracle
+/// {1}{R} casts for {R} with the medallion out: the pool holds ONLY {R}, so if
+/// the reduction were dropped the Auto payment would demand {1}{R} and fail.
+#[test]
+fn miracle_cost_is_reduced_by_medallion_static() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let miracle_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 1,
+    };
+    // Ruby Medallion-class reducer on the battlefield (full parser path).
+    scenario
+        .add_creature(P0, "Ruby Medallion Stand-In", 2, 2)
+        .from_oracle_text("Red spells you cast cost {1} less to cast.");
+
+    // A RED spell (color derived from the printed {8}{R}) with miracle {1}{R}.
+    let miracle_obj = scenario
+        .add_spell_to_hand(P0, "ReducedMiracle", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 8,
+        })
+        .with_keyword(Keyword::Miracle(miracle_cost.clone()))
+        .with_ability(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    // EXACTLY {R} in pool: enough for the reduced {R}, not the unreduced {1}{R}.
+    runner.state_mut().players[0]
+        .mana_pool
+        .add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Red,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+    let card_id = runner.state().objects[&miracle_obj].card_id;
+
+    // Surface the reveal prompt directly (as the other miracle tests do).
+    runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
+        player: P0,
+        object_id: miracle_obj,
+        cost: miracle_cost,
+    };
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Reveal should succeed");
+    runner.act(GameAction::PassPriority).expect("P0 pass");
+    runner.act(GameAction::PassPriority).expect("P1 pass");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            }
+        ),
+        "should be MiracleCastOffer, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Revert-failing: with only {R} in pool this cast succeeds ONLY if the
+    // medallion reduced the miracle {1}{R} to {R} (CR 601.2f).
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("miracle cast should succeed at the medallion-reduced cost {R}");
+
+    assert!(
+        matches!(
+            &runner.state().stack.last().unwrap().kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Miracle,
+                ..
+            }
+        ),
+        "spell should be on the stack via Miracle variant"
+    );
+    assert!(
+        runner.state().players[0].mana_pool.mana.is_empty(),
+        "the reduced miracle cost {{R}} should consume the single red mana, got {:?}",
+        runner.state().players[0].mana_pool.mana
+    );
+}
+
+/// CR 601.2f floor: reductions meeting or exceeding an ALL-GENERIC miracle cost
+/// take it to {0}. A gold R/W spell (color from its printed {2}{R}{W}) with
+/// miracle {2} under BOTH a Ruby and a Pearl Medallion-class static ({1} less
+/// each, both apply to a red-and-white spell) casts with an EMPTY mana pool —
+/// any unreduced residue would make the Auto payment fail.
+#[test]
+fn miracle_cost_fully_reduced_casts_for_zero() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let miracle_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 2,
+    };
+    scenario
+        .add_creature(P0, "Ruby Medallion Stand-In", 2, 2)
+        .from_oracle_text("Red spells you cast cost {1} less to cast.");
+    scenario
+        .add_creature(P0, "Pearl Medallion Stand-In", 2, 2)
+        .from_oracle_text("White spells you cast cost {1} less to cast.");
+
+    let miracle_obj = scenario
+        .add_spell_to_hand(P0, "GoldMiracle", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::White],
+            generic: 2,
+        })
+        .with_keyword(Keyword::Miracle(miracle_cost.clone()))
+        .with_ability(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&miracle_obj].card_id;
+
+    runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
+        player: P0,
+        object_id: miracle_obj,
+        cost: miracle_cost,
+    };
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Reveal should succeed");
+    runner.act(GameAction::PassPriority).expect("P0 pass");
+    runner.act(GameAction::PassPriority).expect("P1 pass");
+
+    // Revert-failing: the pool is EMPTY, so the cast succeeds only if the two
+    // {1}-less reductions floored the all-generic miracle {2} at {0} (CR 601.2f).
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("miracle cast should succeed for {0} with both medallions out");
+
+    assert!(
+        matches!(
+            &runner.state().stack.last().unwrap().kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Miracle,
+                ..
+            }
+        ),
+        "spell should be on the stack via Miracle variant after the {{0}} cast"
+    );
+}
+
 /// CR 118.9: Rooftop Storm — "You may pay {0} rather than pay the mana cost for
 /// Zombie creature spells you cast." End-to-end: parse the Oracle text onto a
 /// battlefield permanent, then casting a Zombie creature offers the alternative

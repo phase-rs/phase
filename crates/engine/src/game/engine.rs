@@ -2199,6 +2199,7 @@ pub(crate) fn drain_pending_cost_move_resume(
             Some(
                 PendingCostMoveResume::Cast { .. }
                     | PendingCostMoveResume::SacrificeForCost { .. }
+                    | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
@@ -2211,6 +2212,7 @@ pub(crate) fn drain_pending_cost_move_resume(
             Some(
                 PendingCostMoveResume::Cast { .. }
                     | PendingCostMoveResume::SacrificeForCost { .. }
+                    | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
                     | PendingCostMoveResume::Foretell { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
@@ -2243,6 +2245,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::Cast { .. } | PendingCostMoveResume::SacrificeForCost { .. })
     ) {
         casting_costs::resume_interrupted_cost_payment(state, events, action_event_start)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::WardSacrificePayment { .. })
+    ) {
+        engine_payment_choices::resume_ward_sacrifice_payment(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::ReplacementMayCost { .. })
@@ -3985,6 +3992,24 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                // CR 601.2h: A ChangeZone effect-as-cost carries the optional
+                // any-number exile selection and its cast-time reduction.
+                PayCostKind::ExileFromZone { zone }
+                    if paid_cost.as_ref().is_some_and(|payment| {
+                        casting_costs::is_exile_any_number_effect_cost(payment.cost)
+                    }) =>
+                {
+                    casting_costs::handle_exile_any_number_for_cost(
+                        state,
+                        *player,
+                        *zone,
+                        *pending_cast.clone(),
+                        *count,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 PayCostKind::ExileFromZone { zone } => engine_casting::handle_exile_for_cost(
                     state,
                     *player,
@@ -4995,25 +5020,25 @@ fn apply_action(
                     ));
                 }
                 for (choice, shard) in choices.iter().zip(current_shards.iter()) {
-                    match (choice, shard.options) {
-                        (
-                            crate::types::game_state::ShardChoice::PayLife,
-                            crate::types::game_state::ShardOptions::ManaOnly,
-                        ) => {
-                            return Err(EngineError::ActionNotAllowed(
-                                "Cannot pay life for shard — only mana available".to_string(),
-                            ));
-                        }
-                        (
-                            crate::types::game_state::ShardChoice::PayMana,
-                            crate::types::game_state::ShardOptions::LifeOnly,
-                        ) => {
-                            return Err(EngineError::ActionNotAllowed(
-                                "Cannot pay mana for shard — only life available".to_string(),
-                            ));
-                        }
-                        _ => {}
+                    if let (
+                        crate::types::game_state::ShardChoice::PayLife,
+                        crate::types::game_state::ShardOptions::ManaOnly,
+                    ) = (choice, shard.options)
+                    {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot pay life for shard — only mana available".to_string(),
+                        ));
                     }
+                }
+                if !casting::pending_phyrexian_route_is_payable(
+                    state,
+                    player,
+                    spell_object,
+                    &choices,
+                ) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay mana cost with selected Phyrexian route".to_string(),
+                    ));
                 }
             }
             // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
@@ -7689,6 +7714,15 @@ fn handle_play_land(
         if super::casting::is_blocked_by_prohibit_play_from_zone(state, obj, player) {
             return Err(EngineError::ActionNotAllowed(
                 "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
+            ));
+        }
+        // CR 305.1 + CR 116.2a: A `PlayLands` restriction denies playing THIS
+        // specific land (e.g. Conjurer's Ban: "lands with the chosen name can't
+        // be played") — the filter-scoped counterpart to the blanket
+        // `CantPlayLand` check above.
+        if super::casting::is_blocked_by_cant_play_lands(state, player, obj) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents playing this land (CR 305.1)".to_string(),
             ));
         }
     }

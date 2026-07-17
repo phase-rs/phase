@@ -424,6 +424,15 @@ pub struct PolicyPenalties {
     /// Consumed by `SelfCostValuePolicy`.
     #[serde(default = "default_self_cost_exile_graveyard_per_card")]
     pub self_cost_exile_graveyard_per_card: f64,
+    /// One card-equivalent of patience that cancels Cycling's generic activation
+    /// edge while leaving tactical payoffs free to justify cycling.
+    /// Consumed by `CyclingDisciplinePolicy`.
+    #[serde(default = "default_cycling_patience_penalty")]
+    pub cycling_patience_penalty: f64,
+    /// Stronger finite penalty for cycling away the sole land still needed by
+    /// the current deck plan. Consumed by `CyclingDisciplinePolicy`.
+    #[serde(default = "default_cycling_needed_land_penalty")]
+    pub cycling_needed_land_penalty: f64,
     /// CR 732.2a / CR 104.2a: bonus for proposing an `UntilLethal` loop shortcut whose latched
     /// `predicted_winner` IS the proposer — the crown ends the game in their favor, and the only
     /// other outcome (`until_lethal_fallback`) restores the board a decline would have produced.
@@ -494,6 +503,8 @@ impl Default for PolicyPenalties {
             self_cost_pay_life_per_point: default_self_cost_pay_life_per_point(),
             self_cost_discard_per_card: default_self_cost_discard_per_card(),
             self_cost_exile_graveyard_per_card: default_self_cost_exile_graveyard_per_card(),
+            cycling_patience_penalty: default_cycling_patience_penalty(),
+            cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
         }
     }
@@ -522,6 +533,13 @@ fn default_self_cost_discard_per_card() -> f64 {
 }
 fn default_self_cost_exile_graveyard_per_card() -> f64 {
     0.15
+}
+
+fn default_cycling_patience_penalty() -> f64 {
+    -1.0
+}
+fn default_cycling_needed_land_penalty() -> f64 {
+    -2.0
 }
 
 /// 8.0 = mid-`critical` band. Sized for the HEURISTIC branch, which adds the tactical score RAW:
@@ -764,6 +782,14 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "self_cost_exile_graveyard_per_card",
         "new SelfCostValuePolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "cycling_patience_penalty",
+        "CyclingDisciplinePolicy one-card-equivalent value cancels the generic +1 activation prior; explicitly untuned pending broader paired-seed calibration",
+    ),
+    (
+        "cycling_needed_land_penalty",
+        "CyclingDisciplinePolicy sole-needed-land value occupies the finite strong band; explicitly untuned pending broader paired-seed calibration",
     ),
     (
         "loop_shortcut_winning_declare_bonus",
@@ -1370,6 +1396,13 @@ mod tests {
         assert_eq!(p.untap_opponent_tapped_penalty, -20.0);
         assert_eq!(p.untap_untapped_penalty, -6.0);
         assert_eq!(p.tapped_removal_no_urgency_penalty, -5.0);
+    }
+
+    #[test]
+    fn policy_penalties_default_cycling_discipline_magnitudes() {
+        let p = PolicyPenalties::default();
+        assert_eq!(p.cycling_patience_penalty, -1.0);
+        assert_eq!(p.cycling_needed_land_penalty, -2.0);
     }
 
     #[test]

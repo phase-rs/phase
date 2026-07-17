@@ -274,12 +274,17 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // CR 704.6f / CR 312.7: In a Planechase game, if a phenomenon is face up
         // in the command zone and none of its triggered abilities are on the
         // stack, its controller planeswalks. Gated on an active Planechase game.
-        if state.planar_controller.is_some() {
-            crate::game::planechase::check_phenomenon_planeswalk_sba(
-                state,
-                events,
-                &mut any_performed,
-            );
+        if state.planar_controller.is_some()
+            && matches!(
+                crate::game::planechase::check_phenomenon_planeswalk_sba(
+                    state,
+                    events,
+                    &mut any_performed,
+                ),
+                Some(crate::game::planechase::PlaneswalkResolution::Deferred)
+            )
+        {
+            return;
         }
 
         // CR 904.10 / CR 314.6: A face-up non-ongoing scheme with no scheme

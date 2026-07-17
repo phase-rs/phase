@@ -961,9 +961,17 @@ fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)>
         terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
             .parse(after_marker)
             .ok()?;
-    // The connector remainder must be exactly the reflexive "when you do".
-    let (rest, ()) = nom_condition::match_when_you_do(connector).ok()?;
-    if !rest.is_empty() {
+    // The connector remainder must be the reflexive "when you do" or its
+    // repeated-payment form, "when you pay this cost one or more times".
+    let when_you_do =
+        nom_condition::match_when_you_do(connector).is_ok_and(|(rest, ())| rest.is_empty());
+    let repeated_payment = terminated(
+        tag::<_, _, OracleError<'_>>("when you pay this cost one or more times"),
+        multispace0,
+    )
+    .parse(connector.trim())
+    .is_ok_and(|(rest, _)| rest.is_empty());
+    if !when_you_do && !repeated_payment {
         return None;
     }
 
@@ -1922,11 +1930,8 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
             ),
             // CR 603.12a + CR 700.2d: "choose up to that many." (Hawkeye, Master
             // Marksman) caps the modal at the resolution-local count of repeated
-            // optional payments. MED-1: match the PERIOD/bare/bullet-terminated
-            // header form ONLY — the negative lookahead rejects a following
-            // em-dash (Tranquil Frillback's "choose up to that many —", whose
-            // reflexive condition is NOT WhenYouDo and so is not handled by the
-            // repeated-optional-payment driver) and a following noun phrase (the
+            // optional payments. Accept the em-dash modal form used by Tranquil
+            // Frillback while rejecting a following noun phrase (the
             // non-modal selection clauses "choose up to that many target
             // creatures you control" / "...creatures tapped this way"). Only a
             // clean termination (period / end / bullet) yields the dynamic cap,
@@ -1937,10 +1942,7 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
                 },
                 terminated(
                     tag::<_, _, OracleError<'_>>("choose up to that many"),
-                    not(preceded(
-                        multispace0,
-                        alt((tag("\u{2014}"), tag("\u{2013}"), tag("-"), alpha1)),
-                    )),
+                    not(preceded(multispace0, alpha1)),
                 ),
             ),
             // CR 700.2a / CR 700.2d: "choose up to N —" is a modal header where
@@ -2274,18 +2276,16 @@ mod tests {
         );
     }
 
-    // MED-1 guard: the "that many" arm must NOT match the em-dash header
-    // (Tranquil Frillback, whose reflexive condition is not WhenYouDo and so is
-    // not handled by the repeated-optional-payment driver — matching it would
-    // false-green an unhandled card) nor the non-modal selection clauses
-    // ("choose up to that many target creatures you control"). These fall to the
-    // fixed default. Revert the negative lookahead → both wrongly become Dynamic.
+    // Tranquil Frillback's em-dash header is a repeated-payment modal, while a
+    // following noun phrase is a non-modal selection clause and stays fixed.
     #[test]
-    fn parse_modal_choose_count_up_to_that_many_em_dash_and_noun_are_not_dynamic() {
+    fn parse_modal_choose_count_up_to_that_many_em_dash_is_dynamic_and_noun_is_not() {
         // Tranquil Frillback (em-dash continuation).
         assert_eq!(
             parse_modal_choose_count("choose up to that many \u{2014}"),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityRef::TimesCostPaidThisResolution
+            }
         );
         // Heroic Feast (non-modal selection clause).
         assert_eq!(

@@ -353,6 +353,24 @@ pub struct CopyTokenSpec {
     pub controller: PlayerId,
 }
 
+/// CR 701.31 + CR 901.9c + CR 701.31c: Which rules path is proposing a
+/// planeswalk event. Scoped replacements (Fixed Point in Time) match only
+/// [`PlanarDie`]; generic "if you would planeswalk" replacements (Susan Foreman)
+/// match every cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PlaneswalkCause {
+    /// CR 901.8 / CR 901.9c: Planeswalker symbol on the planar die.
+    PlanarDie,
+    /// CR 701.31: Planeswalk from a spell or ability instruction (including
+    /// chained "then planeswalk" riders).
+    Instruction,
+    /// CR 701.31c / CR 312.5 / CR 704.6f: Phenomenon encounter, phenomenon
+    /// state-based planeswalk, and other rules-process planeswalks that are not
+    /// the planar-die ability and not an ability resolving on the stack.
+    #[default]
+    RulesProcess,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProposedEvent {
     ZoneChange {
@@ -641,15 +659,18 @@ pub enum ProposedEvent {
         #[serde(default, deserialize_with = "deserialize_applied_keys_step_end_mana")]
         applied: HashSet<AppliedReplacementKey>,
     },
-    /// CR 701.31 + CR 901.9c + CR 614.1a: A player is about to planeswalk as a
-    /// result of rolling the Planeswalker symbol on the planar die (the
-    /// CR 901.8 "planeswalking ability" resolving). This is the ONLY planeswalk
-    /// cause routed through the replacement pipeline — encounter / SBA /
-    /// leave-game planeswalks (CR 701.31c) call `planechase::planeswalk`
-    /// directly and are never replaced. "Chaos ensues instead" (Fixed Point in
-    /// Time) replaces this event.
+    /// CR 701.31 + CR 614.1a: A player is about to planeswalk. All CR 701.31c
+    /// causes except the starting-plane reveal route through
+    /// `planechase::resolve_planeswalk_via_replacements`. Encounter / SBA /
+    /// leave-game paths use [`PlaneswalkCause::RulesProcess`]; ability
+    /// resolutions use [`PlaneswalkCause::Instruction`] or [`PlaneswalkCause::PlanarDie`].
     Planeswalk {
         player_id: PlayerId,
+        /// Distinguishes planar-die planeswalks (CR 901.9c) from ability-
+        /// instructed ones so scoped replacements (Fixed Point in Time) match
+        /// only the cause their Oracle text names.
+        #[serde(default)]
+        cause: PlaneswalkCause,
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.3a + CR 614.1a: An Aura, Equipment, or Fortification is about to
@@ -711,9 +732,21 @@ impl ProposedEvent {
     /// CR 701.31 + CR 901.9c + CR 614.1a: Construct a `Planeswalk` proposed
     /// event for the planar-die planeswalking ability (CR 901.8).
     pub fn planeswalk(player_id: PlayerId) -> Self {
+        Self::planeswalk_with_applied(player_id, PlaneswalkCause::PlanarDie, HashSet::new())
+    }
+
+    /// CR 701.31 + CR 614.5: Construct a `Planeswalk` proposed event with an
+    /// explicit cause and already-applied replacement keys (chained "then
+    /// planeswalk" riders retain the originating replacement's applied set).
+    pub fn planeswalk_with_applied(
+        player_id: PlayerId,
+        cause: PlaneswalkCause,
+        applied: HashSet<AppliedReplacementKey>,
+    ) -> Self {
         Self::Planeswalk {
             player_id,
-            applied: HashSet::new(),
+            cause,
+            applied,
         }
     }
 
