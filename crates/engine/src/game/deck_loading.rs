@@ -516,6 +516,7 @@ pub fn create_attraction_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.in_attraction_deck = true;
+    // allow-raw-zone: new Attraction deck object is born into command-zone bookkeeping (CR 717.2).
     state.command_zone.retain(|id| *id != obj_id);
     state
         .players
@@ -546,6 +547,7 @@ pub fn create_planar_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.face_down = true;
+    // allow-raw-zone: new planar deck object is born into command-zone bookkeeping (CR 901.4 + CR 901.15a).
     state.command_zone.retain(|id| *id != obj_id);
     state.planar_deck.push_back(obj_id);
     obj_id
@@ -573,6 +575,7 @@ pub fn create_scheme_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.face_down = true;
+    // allow-raw-zone: new scheme deck object is born into command-zone bookkeeping (CR 314.2 + CR 904.4).
     state.command_zone.retain(|id| *id != obj_id);
     state.scheme_deck.push_back(obj_id);
     obj_id
@@ -598,6 +601,7 @@ pub fn create_contraption_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.in_contraption_deck = true;
+    // allow-raw-zone: outside CR scope; Contraption deck object birth is not a zone move (CR 400.1).
     state.command_zone.retain(|id| *id != obj_id);
     state
         .players

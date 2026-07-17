@@ -1268,6 +1268,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     entry.object.tapped = enter_tapped.resolve(entry.object.tapped);
     let owner = entry.object.owner;
     state.objects.insert(entry_ref, entry.object);
+    // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
     zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
 
     for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {

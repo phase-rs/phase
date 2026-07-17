@@ -649,6 +649,7 @@ fn do_eliminate(
             .copied()
             .filter(|&id| crate::game::archenemy::is_scheme_object(state, id))
             .collect();
+        // allow-raw-zone: archenemy teardown removes command-zone-only schemes as their owner leaves (CR 800.4a + CR 904.4).
         state.command_zone.retain(|id| !scheme_ids.contains(id));
     }
 

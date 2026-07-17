@@ -276,6 +276,7 @@ pub fn planeswalk(state: &mut GameState, player_id: PlayerId, events: &mut Vec<G
         // CR 701.31b self-planeswalk: when `to == from` the card never left the
         // command zone, so don't push a duplicate entry.
         if !state.command_zone.contains(&to_id) {
+            // allow-raw-zone: planar-deck rotation stays in command zone (CR 901.4 + CR 701.31b).
             state.command_zone.push_back(to_id);
         }
     }
@@ -299,6 +300,7 @@ pub fn planeswalk(state: &mut GameState, player_id: PlayerId, events: &mut Vec<G
     // up — skip the rotation entirely.
     if let Some(from_id) = from {
         if to != Some(from_id) {
+            // allow-raw-zone: planar-deck rotation stays in command zone (CR 901.4 + CR 701.31b).
             state.command_zone.retain(|&id| id != from_id);
             state.planar_deck.push_back(from_id);
         }
@@ -329,7 +331,9 @@ pub fn reveal_starting_plane(state: &mut GameState) {
         };
         if obj.card_types.core_types.contains(&CoreType::Plane) {
             obj.face_down = false;
+            // allow-raw-zone: starting-plane reveal stays in command zone (CR 901.4 + CR 901.5).
             obj.zone = Zone::Command;
+            // allow-raw-zone: starting-plane reveal stays in command zone (CR 901.4 + CR 901.5).
             state.command_zone.push_back(id);
             restamp_planar_objects_to_controller(state);
             return;
@@ -712,10 +716,12 @@ pub fn finish_player_left_game_handoff(
     };
     if let Some(obj) = state.objects.get_mut(&to_id) {
         obj.face_down = false;
+        // allow-raw-zone: player-left planar promotion stays in command zone (CR 901.4 + CR 901.10).
         obj.zone = Zone::Command;
         obj.owner = new_controller;
         obj.controller = new_controller;
     }
+    // allow-raw-zone: player-left planar promotion stays in command zone (CR 901.4 + CR 901.10).
     state.command_zone.push_back(to_id);
     restamp_planar_objects_to_controller(state);
     let event = GameEvent::Planeswalked {
