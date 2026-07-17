@@ -67,7 +67,7 @@ use super::oracle_ir::doc::{
     OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
 use super::oracle_ir::feature::ItemIdTracks;
-use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
+use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -3061,8 +3061,13 @@ fn change_zone_return_has_no_entry_modifiers(effect: &Effect) -> bool {
     }
 }
 
-/// Whether a trigger is the LTB "return the exiled card to the battlefield" side.
-fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
+/// The LTB "return the exiled card(s) to the battlefield" trigger *shape*, with
+/// no entry-modifier gate: mode `LeavesBattlefield` whose execute is a
+/// `ChangeZone` of a `TrackedSet` back to the battlefield. This is the raw
+/// pairing signal; whether the automatic return path can actually carry the
+/// printed return is decided by `change_zone_return_has_no_entry_modifiers`
+/// (see `trigger_is_ltb_return` / `trigger_is_ltb_return_with_entry_modifier`).
+fn trigger_is_ltb_return_shape(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::LeavesBattlefield
         && def.execute.as_deref().is_some_and(|ex| {
             matches!(
@@ -3072,8 +3077,35 @@ fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
                     target: TargetFilter::TrackedSet { .. },
                     ..
                 }
-            ) && change_zone_return_has_no_entry_modifiers(&ex.effect)
+            )
         })
+}
+
+/// Whether a trigger is the LTB "return the exiled card to the battlefield" side
+/// that the automatic `ExileLink::UntilSourceLeaves` return path can carry — the
+/// shape matches and the return has no entry modifiers. Journey to Nowhere,
+/// Oblivion Ring, and Worldgorger Dragon all pass here.
+fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
+    trigger_is_ltb_return_shape(def)
+        && def
+            .execute
+            .as_deref()
+            .is_some_and(|ex| change_zone_return_has_no_entry_modifiers(&ex.effect))
+}
+
+/// CR 610.3: Whether a trigger is the LTB return side whose shape matches but
+/// whose return carries an entry modifier the automatic return path can't apply
+/// (Realm Razer's "return the exiled cards to the battlefield tapped"). This is
+/// exactly the class that shape-matched yet the modifier check rejected — the
+/// surviving signal that distinguishes "shape matched, modifier rejected it"
+/// from "no LTB-return shape at all", so coverage can flag the unsupported
+/// return instead of the card silently showing as fully supported.
+fn trigger_is_ltb_return_with_entry_modifier(def: &TriggerDefinition) -> bool {
+    trigger_is_ltb_return_shape(def)
+        && def
+            .execute
+            .as_deref()
+            .is_some_and(|ex| !change_zone_return_has_no_entry_modifiers(&ex.effect))
 }
 
 /// CR 610.3: Whether a trigger is the ETB "exile ..." side with no printed
@@ -3108,45 +3140,108 @@ fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
 /// trigger with the LTB "return the exiled card(s)" trigger. Covers both the
 /// single-target class (Journey to Nowhere, Oblivion Ring) and the mass-exile
 /// class ("exile all other permanents you control" — Worldgorger Dragon).
-/// Emitted only when an unmodified LTB-return side exists (see
-/// `trigger_is_ltb_return`'s entry-modifier gate).
+/// CR 610.3: When an unmodified LTB-return side exists, emit `DurationStamped`
+/// relations so the ETB exiles gain `Duration::UntilHostLeavesPlay`. Otherwise,
+/// if a shape-matching LTB return exists whose entry modifier the automatic
+/// return path can't carry (Realm Razer), emit `ModifierUnsupported` relations
+/// so the unsupported return is marked visible to coverage. When neither side
+/// exists, no relation is emitted and ordinary cards are untouched. The
+/// diagnostic fragment is captured here, while `items` is in scope, because the
+/// relation applier has no access to the item list afterward.
 fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
-    let Some(ltb) = items
+    let ltb_return = items
         .iter()
-        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return))
-    else {
-        return;
+        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return));
+
+    let (ltb, outcome) = match ltb_return {
+        Some(ltb) => (ltb, LinkedReturnOutcome::DurationStamped),
+        None => {
+            let Some(ltb) = items.iter().find(|item| {
+                item_trigger(item).is_some_and(trigger_is_ltb_return_with_entry_modifier)
+            }) else {
+                return;
+            };
+            // CR 610.3: A low-precision span tier may report no fragment; fall
+            // back to a static description of the unsupported return so the
+            // coverage diagnostic is never handed an empty clause.
+            let fragment = ltb.source.fragment().map(str::to_owned).unwrap_or_else(|| {
+                "return the exiled cards to the battlefield with an entry modifier".to_string()
+            });
+            (ltb, LinkedReturnOutcome::ModifierUnsupported { fragment })
+        }
     };
+
     for item in items {
         if item_trigger(item).is_some_and(trigger_is_etb_exile_pending_duration) {
             relations.push(DocumentRelationIr::EtbExileLtbReturn {
                 etb_exile: item.id,
                 ltb_return: ltb.id,
+                outcome: outcome.clone(),
             });
         }
     }
 }
 
-/// Stamp `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the
-/// existing `ExileLink::UntilSourceLeaves` mechanism returns the exiled card.
+/// CR 610.3: Apply an ETB-exile / LTB-return pair. `DurationStamped` stamps
+/// `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the existing
+/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card(s).
+/// `ModifierUnsupported` instead marks the LTB return trigger unsupported so the
+/// modifier-bearing return is visible to coverage rather than silently dropped.
 fn apply_etb_exile_ltb_return(
     result: &mut ParsedAbilities,
     relations: &[DocumentRelationIr],
     trigger_ids: &[OracleItemId],
 ) {
     for relation in relations {
-        let DocumentRelationIr::EtbExileLtbReturn { etb_exile, .. } = relation else {
+        let DocumentRelationIr::EtbExileLtbReturn {
+            etb_exile,
+            ltb_return,
+            outcome,
+        } = relation
+        else {
             continue;
         };
-        let Some(pos) = position_of(trigger_ids, *etb_exile) else {
-            continue;
-        };
-        if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
-            if execute.duration.is_none() {
-                execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+        match outcome {
+            LinkedReturnOutcome::DurationStamped => {
+                let Some(pos) = position_of(trigger_ids, *etb_exile) else {
+                    continue;
+                };
+                if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
+                    if execute.duration.is_none() {
+                        execute.duration =
+                            Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+                    }
+                }
+            }
+            LinkedReturnOutcome::ModifierUnsupported { fragment } => {
+                let Some(pos) = position_of(trigger_ids, *ltb_return) else {
+                    continue;
+                };
+                if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
+                    attach_modifier_unsupported_marker(execute, fragment);
+                }
             }
         }
     }
+}
+
+/// CR 610.3: Append an `Effect::unimplemented` gap marker to the tail of a
+/// trigger execute's sub-ability chain, marking a modifier-bearing linked LTB
+/// return unsupported so coverage reports the gap. Appends to the chain tail
+/// rather than overwriting any existing sub-ability (defensive — for this card
+/// class the chain is currently always empty).
+fn attach_modifier_unsupported_marker(execute: &mut AbilityDefinition, fragment: &str) {
+    let mut cursor: &mut AbilityDefinition = execute;
+    while cursor.sub_ability.is_some() {
+        cursor = cursor
+            .sub_ability
+            .as_deref_mut()
+            .expect("sub_ability checked present");
+    }
+    cursor.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modifier_bearing_linked_return", fragment),
+    )));
 }
 
 /// CR 207.2c + CR 601.2f: Extract the per-target cost-increase clause,
