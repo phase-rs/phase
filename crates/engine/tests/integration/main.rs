@@ -698,6 +698,7 @@ mod slaughter_the_strong_total_power_4380;
 mod slitherwisp_flash_spell_cast_trigger;
 mod sliver_static_grants;
 mod sothera_supervoid_edict_reanimate;
+mod spark_double_as_enters;
 mod special_action_x_runtime;
 mod specialize_runtime;
 mod spellstutter_sprite_counter_with_x;
