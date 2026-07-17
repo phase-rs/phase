@@ -950,6 +950,7 @@ mod s07_coiling_rebirth_full_cast;
 mod s07_create_token_sequence_middle;
 mod s07_malamet_castpath;
 mod s07_this_way_conditions;
+mod sakashima_of_a_thousand_faces_retains_other_abilities;
 mod same_is_true_type_statics;
 mod sandman_reanimate_self_and_land_s25;
 mod sandswirl_wanderglyph_attacked_you_cant_cast;
