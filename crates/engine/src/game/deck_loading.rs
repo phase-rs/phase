@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
@@ -527,10 +528,8 @@ pub fn create_attraction_deck_card(
 }
 
 fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_attraction_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_attraction_deck_card(state, face, owner);
     }
 }
 
@@ -554,10 +553,8 @@ pub fn create_planar_deck_card(
 
 fn load_shared_planar_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
     state.planar_deck.clear();
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_planar_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_planar_deck_card(state, face, owner);
     }
     state.planar_controller = Some(owner);
     crate::game::planechase::restamp_planar_objects_to_controller(state);
@@ -583,10 +580,8 @@ pub fn create_scheme_deck_card(
 
 fn load_shared_scheme_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
     state.scheme_deck.clear();
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_scheme_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_scheme_deck_card(state, face, owner);
     }
     state.archenemy = Some(owner);
 }
@@ -615,10 +610,8 @@ pub fn create_contraption_deck_card(
 }
 
 fn load_player_contraption_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for entry in entries {
-        for _ in 0..entry.count {
-            create_contraption_deck_card(state, &entry.card, owner);
-        }
+    for face in shuffled_entry_faces(state, entries) {
+        create_contraption_deck_card(state, face, owner);
     }
 }
 
@@ -799,26 +792,13 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             });
     }
 
-    for entry in &payload.player.main_deck {
-        for _ in 0..entry.count {
-            create_object_from_card_face(state, &entry.card, PlayerId(0));
-        }
-    }
-
-    for entry in &payload.opponent.main_deck {
-        for _ in 0..entry.count {
-            create_object_from_card_face(state, &entry.card, PlayerId(1));
-        }
-    }
+    load_player_library(state, &payload.player.main_deck, PlayerId(0));
+    load_player_library(state, &payload.opponent.main_deck, PlayerId(1));
 
     // Load additional AI decks into PlayerId(2), PlayerId(3), etc.
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
-        for entry in &ai_deck.main_deck {
-            for _ in 0..entry.count {
-                create_object_from_card_face(state, &entry.card, player_id);
-            }
-        }
+        load_player_library(state, &ai_deck.main_deck, player_id);
     }
 
     // CR 903.6 + CR 408.1: Place commanders in the command zone at game start.
@@ -992,6 +972,30 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         crate::util::im_ext::shuffle_vector(&mut player.attraction_deck, rng);
         crate::util::im_ext::shuffle_vector(&mut player.contraption_deck, rng);
     }
+}
+
+/// Assign library object/card IDs in an order independent of the submitted
+/// deck list. Public stack/battlefield objects retain their `ObjectId`, so
+/// allocating IDs in deck-list order would let opponents recover the hidden
+/// identity behind any later face-down spell. The normal library shuffle is
+/// intentionally separate: revealed ID/name pairs carry no information about
+/// the current order of unrevealed cards.
+fn load_player_library(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+    for face in shuffled_entry_faces(state, entries) {
+        create_object_from_card_face(state, face, owner);
+    }
+}
+
+/// Produces a fresh ID-allocation order for every hidden-order deck before its
+/// usual game-start shuffle. This prevents a public object ID from encoding the
+/// submitted deck-list position once the card is later revealed.
+fn shuffled_entry_faces<'a>(state: &mut GameState, entries: &'a [DeckEntry]) -> Vec<&'a CardFace> {
+    let mut faces = entries
+        .iter()
+        .flat_map(|entry| std::iter::repeat_n(&entry.card, entry.count as usize))
+        .collect::<Vec<_>>();
+    faces.shuffle(&mut state.rng);
+    faces
 }
 
 /// Canonical init sequence for every transport layer: load the decks into
@@ -1639,6 +1643,59 @@ mod tests {
         // Check that the order differs from insertion order (Card 0, Card 1, ...)
         let insertion_order: Vec<String> = (0..20).map(|i| format!("Card {}", i)).collect();
         assert_ne!(names, insertion_order, "Library should be shuffled");
+    }
+
+    #[test]
+    fn library_object_ids_do_not_encode_submitted_deck_order() {
+        let entries = (0..20)
+            .map(|i| DeckEntry {
+                card: CardFace {
+                    name: format!("Card {i}"),
+                    ..make_creature_face()
+                },
+                count: 1,
+            })
+            .collect::<Vec<_>>();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: entries,
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
+        };
+        let mut first = GameState::new_two_player(42);
+        let mut repeated = GameState::new_two_player(42);
+        load_deck_into_state(&mut first, &payload);
+        load_deck_into_state(&mut repeated, &payload);
+
+        let names_by_id = |state: &GameState| {
+            let mut objects = state
+                .objects
+                .iter()
+                .filter(|(_, object)| object.owner == PlayerId(0))
+                .collect::<Vec<_>>();
+            objects.sort_by_key(|(id, _)| **id);
+            objects
+                .into_iter()
+                .map(|(id, object)| {
+                    assert_eq!(object.card_id.0, id.0);
+                    object.name.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        let insertion_order = (0..20).map(|i| format!("Card {i}")).collect::<Vec<_>>();
+        let first_names = names_by_id(&first);
+
+        assert_ne!(
+            first_names, insertion_order,
+            "public object IDs must not reveal submitted deck order"
+        );
+        assert_eq!(
+            first_names,
+            names_by_id(&repeated),
+            "ID assignment must stay deterministic for replay"
+        );
     }
 
     #[test]

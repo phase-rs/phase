@@ -8,7 +8,8 @@ use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
-    OutsideGameChoiceSource, PayableResource, PendingContinuation, WaitingFor,
+    OutsideGameChoiceSource, PayableResource, PendingContinuation,
+    PendingPlayerScopeSacrificeCompletion, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -3871,26 +3872,47 @@ pub(super) fn handle_resolution_choice(
             let events_before_effect = events.len();
             match effect_kind {
                 EffectKind::Sacrifice => {
-                    for &card_id in &chosen {
-                        match super::sacrifice::sacrifice_permanent(state, card_id, player, events)
-                        {
-                            Ok(super::sacrifice::SacrificeOutcome::Complete) => {}
-                            Ok(super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
-                                choice_player,
-                            )) => {
-                                state.waiting_for =
-                                    super::replacement::replacement_choice_waiting_for(
-                                        choice_player,
-                                        state,
-                                    );
-                                return Ok(action_result_outcome(
-                                    events,
-                                    state.waiting_for.clone(),
-                                ));
+                    let completion = PendingPlayerScopeSacrificeCompletion {
+                        effect_kind: Some(EffectKind::Sacrifice),
+                        publish_fresh_tracked_set: state.pending_continuation.is_some(),
+                        propagate_parent_context: true,
+                        ..Default::default()
+                    };
+                    match effects::perform_collected_player_scope_sacrifices_with_completion(
+                        state,
+                        source_id,
+                        player,
+                        vec![(player, chosen.clone())],
+                        completion,
+                        events,
+                    )
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                    {
+                        effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
+                            unreachable!(
+                                "collected effect-zone sacrifices never prompt a new player"
+                            )
+                        }
+                        effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+                            return Ok(action_result_outcome(events, state.waiting_for.clone()));
+                        }
+                        effects::PendingPlayerScopeSacrificeOutcome::Completed {
+                            events_before_sacrifice,
+                            events_after_sacrifice,
+                        } => {
+                            set_priority(state, player);
+                            resume_with_error_propagation(state, events)?;
+                            if let Some(outcome) = batch_or_drain_observer_triggers(
+                                state,
+                                events,
+                                events_before_sacrifice,
+                                events_after_sacrifice,
+                            ) {
+                                return Ok(outcome);
                             }
-                            Err(error) => {
-                                return Err(EngineError::InvalidAction(error.to_string()));
-                            }
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
                         }
                     }
                 }
@@ -5088,7 +5110,8 @@ pub(super) fn handle_resolution_choice(
                     source_id,
                     source_controller,
                     events,
-                );
+                )
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
             } else if let Err(e) = effects::choose_and_sacrifice_rest::advance_to_next_player(
                 state,
                 &categories,

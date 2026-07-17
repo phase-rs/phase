@@ -5,11 +5,12 @@ use engine::game::mana_abilities::activate_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, CastingPermission, ChoiceType,
-    Chooser, DigSource, DiscardSelfScope, Effect, ForEachCategoryAction, IterationCategory,
-    ManaContribution, ManaProduction, ModalChoice, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, SacrificeCost, SpellCastingOption,
-    TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, CastingPermission,
+    CategoryChooserScope, ChoiceType, Chooser, DigSource, DiscardSelfScope, Effect, EffectKind,
+    ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction, ModalChoice,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+    SacrificeCost, SpellCastingOption, TargetFilter, TargetRef, TargetSelectionMode,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -8787,5 +8788,396 @@ fn drawn_this_turn_topdeck_preserves_selected_library_order() {
             .count(),
         1,
         "the synchronous payment tail emits one resolution event"
+    );
+}
+
+/// W-163-A (red first): a directly targeted sacrifice that pauses on the first
+/// replacement choice retains both the selected suffix and its terminal event.
+#[test]
+fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Sacrifice Resume Source", 1, 1)
+        .as_enchantment()
+        .id();
+    let first = scenario
+        .add_creature(P0, "Targeted Sacrifice First Redirect", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let second = scenario
+        .add_creature(P0, "Targeted Sacrifice Second Redirect", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let ability = ResolvedAbility::new(
+        Effect::Sacrifice {
+            target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 2 },
+            min_count: 0,
+        },
+        vec![TargetRef::Object(first), TargetRef::Object(second)],
+        source,
+        P0,
+    );
+    let mut runner = scenario.build();
+    let mut initial_events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("the first selected sacrifice reaches its replacement choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Sacrifice,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the terminal event must wait for the parked selected suffix"
+    );
+
+    let first_resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the first replacement delivers and re-parks the second sacrifice");
+    assert!(matches!(
+        first_resumed.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+    assert!(
+        !initial_events
+            .iter()
+            .chain(first_resumed.events.iter())
+            .any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    source_id,
+                    ..
+                } if *source_id == source
+            )),
+        "the tail must remain parked across a second replacement choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the remaining selected sacrifice and terminal tail resolve");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
+    assert_eq!(runner.state().last_effect_count, Some(2));
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(first_resumed.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the directly targeted sacrifice finishes exactly once after both replacements"
+    );
+}
+
+/// W-163-B: the mandatory-all sacrifice fast path remains synchronous when no
+/// replacement decision is needed.
+#[test]
+fn mandatory_all_sacrifice_completes_synchronously() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Mandatory-All Sacrifice Source", 1, 1)
+        .as_enchantment()
+        .id();
+    let first = scenario
+        .add_creature(P0, "Mandatory-All Sacrifice First", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Mandatory-All Sacrifice Second", 1, 1)
+        .id();
+    let ability = ResolvedAbility::new(
+        Effect::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            count: QuantityExpr::Fixed { value: 2 },
+            min_count: 0,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("mandatory-all sacrifice resolves inline");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Graveyard);
+    assert_eq!(runner.state().last_effect_count, Some(2));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1
+    );
+}
+
+/// W-163-C: a sacrifice selected through `EffectZoneChoice` keeps its tracked
+/// set and chained tail behind the replacement boundary.
+#[test]
+fn effect_zone_sacrifice_replacement_preserves_tracked_set_and_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Effect-Zone Sacrifice Source", 1, 1)
+        .as_enchantment()
+        .id();
+    let redirected = scenario
+        .add_creature(P0, "Effect-Zone Sacrifice Redirect", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    scenario.add_creature(P0, "Effect-Zone Sacrifice Unchosen", 1, 1);
+    let ability = ResolvedAbility::new(
+        Effect::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+        vec![],
+        source,
+        P0,
+    )
+    .sub_ability(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    ));
+    let mut runner = scenario.build();
+    let mut initial_events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("sacrifice prompts for one creature");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            effect_kind: EffectKind::Sacrifice,
+            ..
+        }
+    ));
+
+    let paused = runner
+        .act(GameAction::SelectCards {
+            cards: vec![redirected],
+        })
+        .expect("selected sacrifice reaches its replacement choice");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(runner.state().chain_tracked_set_id.is_none());
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("replacement delivery resumes the tracked-set publish and rider");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    let tracked = runner
+        .state()
+        .tracked_object_sets
+        .get(
+            &runner
+                .state()
+                .chain_tracked_set_id
+                .expect("selected sacrifice publishes a fresh tracked set after delivery"),
+        )
+        .expect("the published selected-sacrifice set exists");
+    assert_eq!(tracked, &vec![redirected]);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(paused.events.iter())
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the selected sacrifice emits one terminal event after its replacement settles"
+    );
+}
+
+/// W-163-D: Exploit emits its per-creature event and terminal event only after
+/// the replacement-delivered sacrifice has actually completed.
+#[test]
+fn exploit_replacement_preserves_creature_exploited_follow_up() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let exploiter = scenario
+        .add_creature(P0, "Exploit Replacement Source", 1, 1)
+        .id();
+    let victim = scenario
+        .add_creature(P0, "Exploit Replacement Victim", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let ability = ResolvedAbility::new(
+        Effect::Exploit {
+            target: TargetFilter::Any,
+        },
+        vec![TargetRef::Object(victim)],
+        exploiter,
+        P0,
+    );
+    let mut runner = scenario.build();
+    let mut initial_events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("exploit reaches the replacement choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(!initial_events
+        .iter()
+        .any(|event| matches!(event, GameEvent::CreatureExploited { .. })));
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("replacement delivery completes exploit");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::CreatureExploited {
+                    exploiter: event_exploiter,
+                    sacrificed,
+                } if *event_exploiter == exploiter && *sacrificed == victim
+            ))
+            .count(),
+        1,
+        "the exploit follow-up is emitted once after delivery"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Exploit,
+                    source_id,
+                    ..
+                } if *source_id == exploiter
+            ))
+            .count(),
+        1
+    );
+}
+
+/// W-163-E: the terminal sweep of choose-and-sacrifice-rest keeps its complete
+/// unchosen set and terminal event across a replacement choice.
+#[test]
+fn choose_and_sacrifice_rest_replacement_preserves_terminal_sweep() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Choose-and-Sacrifice-Rest Source", 1, 1)
+        .as_enchantment()
+        .id();
+    let victim = scenario
+        .add_creature(P0, "Choose-and-Sacrifice-Rest Victim", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let ability = ResolvedAbility::new(
+        Effect::ChooseAndSacrificeRest {
+            categories: vec![],
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            choose_filter: TargetFilter::Typed(TypedFilter::creature()),
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
+            total_power_cap: None,
+            keeper_constraint: None,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut runner = scenario.build();
+    let mut initial_events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("terminal unchosen sweep reaches its replacement choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ChooseAndSacrificeRest,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the terminal event must wait for the unchosen sacrifice delivery"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("replacement delivery finishes the unchosen sweep");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ChooseAndSacrificeRest,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1
     );
 }
