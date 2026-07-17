@@ -5673,14 +5673,19 @@ fn object_replacement_candidate_applies(
             EventModifiers::first_non_modifier_ability(repl_def.execute.as_deref())
         {
             if let Effect::BecomeCopy { target, .. } = &*real_work.effect {
-                if super::engine_replacement::find_copy_targets(
-                    state,
-                    target,
-                    obj.id,
-                    replacement_player,
-                    None,
-                )
-                .is_empty()
+                // CR 607.2a: Mimeoplasm-style replacements establish their
+                // ExiledCardByIndex target only after the optional exile cost
+                // is paid, so an empty pre-payment lookup cannot disqualify
+                // that replacement.
+                if !matches!(target, TargetFilter::ExiledCardByIndex { .. })
+                    && super::engine_replacement::find_copy_targets(
+                        state,
+                        target,
+                        obj.id,
+                        replacement_player,
+                        None,
+                    )
+                    .is_empty()
                 {
                     return false;
                 }
