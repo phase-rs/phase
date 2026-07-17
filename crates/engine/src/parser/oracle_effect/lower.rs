@@ -9,7 +9,7 @@ use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once
 use super::super::oracle_nom::duration::{
     parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
 };
-use super::super::oracle_nom::error::{OracleError, OracleResult};
+use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
@@ -19,7 +19,7 @@ use super::super::oracle_quantity::{
 };
 use super::super::oracle_target::{
     parse_anaphoric_target_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
-    parse_type_phrase_with_ctx,
+    parse_type_phrase, parse_type_phrase_with_ctx,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -3804,6 +3804,17 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         // for readability, not correctness — but `who does` is listed AFTER the
         // longer `who doesn't`/`who does not` tags to mirror the grammar.
         tag("who does"),
+        // CR 701.9a + CR 608.2c: Reserve the relative-clause shape "who
+        // didn't" / "who did not" for the Kroxa-class subject-only
+        // mandatory-FILTERED decline-tail dispatcher
+        // (`strip_each_scope_who_didnt_verb_filter_this_way_subject` in
+        // `parse_effect_clause_inner`). Without this guard, `each opponent `
+        // would strip here and leave `who didn't discard a nonland card this
+        // way loses 3 life` orphaned — misparsed as an ordinary imperative
+        // clause with no gate, so every opponent loses the life regardless of
+        // what they discarded (issue #6007).
+        tag("who didn't"),
+        tag("who did not"),
         // CR 119.3 + CR 701.55a: "each opponent who lost N or more life this
         // turn faces a villainous choice" is a restricted chooser phrase, not
         // a normal per-player imperative. Preserve the full subject so the
@@ -3938,6 +3949,52 @@ pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFil
         Ok((i, scope))
     })
     .map(|(scope, rest)| (scope, rest.to_string()))
+}
+
+/// CR 701.9a + CR 608.2c + CR 109.5: Strip a leading "each <scope> who
+/// didn't / did not <verb> a [filter] this way, <body>" subject-only
+/// mandatory-FILTERED decline-tail. Returns the player scope, the filter the
+/// scoped player's own zone change failed to match, and the body text.
+///
+/// Sibling of `strip_each_scope_who_cant_subject` (mandatory-IMPOSSIBLE: the
+/// action couldn't happen at all) and `strip_each_scope_who_doesnt_subject`
+/// (OPTIONAL-decline): this fills the mandatory-FILTERED cell, where the
+/// scoped player's mandatory action always happens but the body only cares
+/// whether the moved object matched a filter (Kroxa, Titan of Death's Hunger:
+/// "each opponent discards a card, then each opponent who didn't discard a
+/// nonland card this way loses 3 life"). The gate reads
+/// `ZoneChangedThisWay { filter }` (CR 608.2c) rather than a pass/fail signal
+/// — an opponent who discarded nothing (empty hand) still "didn't discard a
+/// nonland card", matching the official ruling that Kroxa's life loss still
+/// applies to an opponent with no cards in hand.
+///
+/// Verb is a small closed set of "this way" cost-payment actions (discard,
+/// sacrifice, exile) — `ZoneChangedThisWay` reads `last_zone_changed_ids`
+/// which every one of them populates identically, so the matched verb itself
+/// carries no separate semantics; it only anchors the grammar.
+pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
+    text: &str,
+) -> Option<(PlayerFilter, TargetFilter, String)> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |i| {
+        let (i, scope) = alt((
+            value(PlayerFilter::Opponent, tag("each other player who ")),
+            value(PlayerFilter::Opponent, tag("each opponent who ")),
+            value(PlayerFilter::All, tag("each player who ")),
+        ))
+        .parse(i)?;
+        let (i, _) = alt((tag("didn't "), tag("did not "))).parse(i)?;
+        let (i, _) = alt((tag("discard "), tag("sacrifice "), tag("exile "))).parse(i)?;
+        let (i, _) = alt((tag("a "), tag("an "))).parse(i)?;
+        let (filter, after_filter) = parse_type_phrase(i);
+        if matches!(filter, TargetFilter::Any) {
+            return Err(oracle_err(i));
+        }
+        let (i, _) = tag("this way").parse(after_filter.trim_start())?;
+        let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
+        Ok((i, (scope, filter)))
+    })
+    .map(|((scope, filter), rest)| (scope, filter, rest.to_string()))
 }
 
 /// CR 608.2e + CR 608.2c + CR 101.3: Strip a leading "For each opponent who

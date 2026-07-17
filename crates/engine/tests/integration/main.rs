@@ -563,6 +563,7 @@ mod knollspine_dragon_target_damage_draw;
 mod kodama_anti_recursion_intervening_if;
 mod krark_clan_ironworks_castability;
 mod krark_thumb_coin_flip;
+mod kroxa_titan_nonland_discard_life_loss;
 mod kutzils_flanker_mode_one_counter;
 mod l02_bb1_activation_conditions;
 mod l02_bb2_cast_origin;
