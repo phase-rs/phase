@@ -123,7 +123,6 @@ mod tests {
     use super::*;
     use crate::config::AiConfig;
     use crate::context::AiContext;
-    use crate::policies::activation::effective_activated_ability;
     use crate::policies::registry::PolicyRegistry;
     use crate::policies::self_cost_value::SelfCostValuePolicy;
     use crate::session::AiSession;
@@ -479,7 +478,8 @@ mod tests {
         let context = ai_context(&config, None);
         let ctx = policy_context(&state, &runtime_candidate, &decision, &config, &context);
 
-        let effective = effective_activated_ability(&state, &runtime_candidate.action)
+        let effective = ctx
+            .effective_activated_ability()
             .expect("runtime Typecycling must resolve at the engine-provided index");
         assert_eq!(effective.ability_tag, Some(AbilityTag::Cycling));
         assert_score(

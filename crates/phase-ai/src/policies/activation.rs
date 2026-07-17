@@ -4,8 +4,6 @@
 //! at the registry level. This helper applies that composition uniformly so
 //! per-policy `activation()` bodies stay one expression long.
 
-use engine::types::ability::AbilityDefinition;
-use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 
 use crate::deck_profile::DeckArchetype;
@@ -26,26 +24,4 @@ pub fn arch_times_turn(
 /// `turn_phase_mult` only — the archetype dimension was unused historically.
 pub fn turn_only(features: &DeckFeatures, state: &GameState) -> Option<f32> {
     Some(features.strategy.turn_phase_mult(state.turn_number) as f32)
-}
-
-/// Resolve the exact effective activated ability named by an AI action.
-///
-/// Engine action indexes cover printed abilities plus abilities synthesized at
-/// runtime, so policy code must use the same engine authority instead of
-/// indexing `GameObject::abilities` directly.
-pub(crate) fn effective_activated_ability(
-    state: &GameState,
-    action: &GameAction,
-) -> Option<AbilityDefinition> {
-    let GameAction::ActivateAbility {
-        source_id,
-        ability_index,
-    } = action
-    else {
-        return None;
-    };
-
-    engine::game::casting::activated_ability_definitions(state, *source_id)
-        .into_iter()
-        .find_map(|(index, ability)| (index == *ability_index).then_some(ability))
 }
