@@ -6,11 +6,12 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, FilterProp, ReplacementCondition,
-    ReplacementDefinition, TargetFilter,
+    ReplacementDefinition, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::WaitingFor;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{DamageRecord, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::{EtbTapState, Zone};
@@ -167,6 +168,49 @@ fn opposing_etchings_that_trade_exile_each_other() {
 
     assert_eq!(runner.state().objects[&p0_etching].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&p1_etching].zone, Zone::Exile);
+}
+
+#[test]
+fn zero_toughness_etching_exiles_a_simultaneously_lethal_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let etching = scenario
+        .add_creature_from_oracle(P0, "Etching of Kumano", 2, 0, ETCHING)
+        .id();
+    let victim = scenario
+        .add_creature(P1, "Lethally Damaged Creature", 2, 2)
+        .with_damage_marked(2)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .damage_dealt_this_turn
+        .push_back(DamageRecord {
+            source_id: etching,
+            source_controller: P0,
+            target: TargetRef::Object(victim),
+            target_controller: P1,
+            amount: 2,
+            source_controller_snapshot: P0,
+            source_owner: P0,
+            ..Default::default()
+        });
+    let mut events = Vec::new();
+
+    check_state_based_actions(runner.state_mut(), &mut events);
+
+    assert_eq!(runner.state().objects[&etching].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Exile,
+        "CR 704.3 keeps a zero-toughness Etching present while the simultaneous lethal death consults replacements"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == victim)
+    ));
+    assert!(!events.iter().any(
+        |event| matches!(event, GameEvent::CreatureDestroyed { object_id } if *object_id == etching)
+    ));
 }
 
 fn graveyard_exile_replacement(description: &str, consume_on_apply: bool) -> ReplacementDefinition {
