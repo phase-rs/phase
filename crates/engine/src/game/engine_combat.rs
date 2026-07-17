@@ -601,7 +601,6 @@ pub(super) fn handle_assign_combat_damage(
         if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
             return Ok(waiting_for);
         }
-
         priority::reset_priority(state);
         return Ok(WaitingFor::Priority { player });
     }
@@ -745,7 +744,6 @@ pub(super) fn handle_assign_combat_damage(
     if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
         return Ok(waiting_for);
     }
-
     priority::reset_priority(state);
     Ok(WaitingFor::Priority { player })
 }
@@ -815,7 +813,6 @@ pub(super) fn handle_assign_blocker_damage(
     if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
         return Ok(waiting_for);
     }
-
     priority::reset_priority(state);
     Ok(WaitingFor::Priority {
         player: state.active_player,

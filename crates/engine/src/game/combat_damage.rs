@@ -155,8 +155,8 @@ pub fn resolve_combat_damage(
         // combat-damage sub-step is resumed by the priority-pass completeness gate
         // in priority.rs, which re-enters this function once the order is submitted
         // and the resulting triggers resolve.
-        if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-            return Some(state.waiting_for.clone());
+        if let Some(waiting_for) = pending_combat_damage_waiting(state) {
+            return Some(waiting_for);
         }
 
         // CR 510.3 + CR 510.3a + CR 510.4: The first-strike combat-damage step is a
@@ -202,7 +202,24 @@ pub fn resolve_combat_damage(
         events,
         !combat.first_strike_done && !has_first_or_double,
     );
+    if let Some(waiting_for) = pending_combat_damage_waiting(state) {
+        return Some(waiting_for);
+    }
     None
+}
+
+/// Returns a terminal or trigger-ordering state produced while combat damage resolves.
+///
+/// CR 603.3b / CR 704.3: trigger ordering and game-over results are completion
+/// states of the combat-damage resolver, so callers must receive them rather than
+/// replacing them with a fresh priority window.
+fn pending_combat_damage_waiting(state: &GameState) -> Option<WaitingFor> {
+    match &state.waiting_for {
+        WaitingFor::OrderTriggers { .. } | WaitingFor::GameOver { .. } => {
+            Some(state.waiting_for.clone())
+        }
+        _ => None,
+    }
 }
 
 /// Which sub-step of combat damage we're collecting assignments for.
