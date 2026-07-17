@@ -1864,20 +1864,18 @@ pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
 /// `distribute_properties_to_or`. Reusing it is a straight class-coverage win
 /// over re-deriving that machinery in a bespoke splitter.
 ///
-/// The predicate composes three parsers: `parse_animation_spec` (base P/T +
-/// leading type/subtype grant, CR 613.4b + CR 205.1b layer 7b/4),
-/// `parse_additive_type_clause_modifications` (any EXTRA type noun the
-/// animation spec stops short of before "in addition to ..." — none for
-/// Bello, present for a Life-and-Limb-shaped sibling), and — kept LOCAL to
-/// this function rather than folded into that shared helper, which has
-/// several other call sites this change must not perturb — the same
-/// `split_keyword_list` + `push_grant_clause_modifications` +
-/// `parse_quoted_ability_modifications` composition `parse_continuous_modifications`
-/// already uses elsewhere, applied to the "and has ..." tail so a MIXED list
-/// of bare keywords and a quoted granted ability (CR 604.1 trigger / CR 702
-/// keyword) are both captured — today `parse_additive_type_clause_modifications`
-/// extracts only the quoted portion of that tail, silently dropping any bare
-/// keywords listed alongside it.
+/// The predicate composes two parsers: `parse_animation_spec` (base P/T +
+/// leading type/subtype grant, CR 613.4b + CR 205.1b layer 7b/4) and
+/// `parse_additive_type_clause_modifications` — the SINGLE owner of everything
+/// past that leading grant. The additive helper captures any EXTRA type noun
+/// before "in addition to ..." (none for Bello, present for a Life-and-Limb-shaped
+/// sibling) AND routes the trailing "... and has <X>" conjunct through
+/// `parse_continuous_modifications`, which subsumes both the bare-keyword list
+/// and the quoted-ability parse (CR 604.1 trigger / CR 702 keyword). A prior
+/// revision parsed that tail a SECOND time locally to recover bare keywords the
+/// helper then dropped; the helper no longer drops them, so the local re-parse
+/// was pure duplication (it emitted each bare keyword twice) and has been
+/// removed — the tail now has exactly one owner.
 pub(crate) fn parse_each_compound_subject_type_change(
     tp: &TextPair<'_>,
     text: &str,
@@ -1937,36 +1935,19 @@ pub(crate) fn parse_each_compound_subject_type_change(
         return None;
     }
 
-    // STEP G — any EXTRA type/subtype noun the animation spec stops short of
-    // before "in addition to ...".
+    // STEP G — the shared additive-type-clause helper is the SINGLE owner of
+    // everything after the animation spec's leading grant: any EXTRA type/subtype
+    // noun before "in addition to ...", AND the full "... and has <X>" tail
+    // (bare keywords + a quoted granted ability, CR 604.1 trigger / CR 702
+    // keyword). The helper routes that tail through `parse_continuous_modifications`,
+    // which subsumes both the bare-keyword list and the quoted-ability parse — so
+    // this one call captures the mixed list without a second, redundant tail
+    // parser here. Dedup against the animation spec keeps the shared leading
+    // type/subtype (AddType Creature / AddSubtype Elemental) single.
     if let Some(additive) = parse_additive_type_clause_modifications(&format!("~ is {predicate}")) {
         for modification in additive {
             if !modifications.contains(&modification) {
                 modifications.push(modification);
-            }
-        }
-    }
-
-    // STEP H — the granted-ability tail after "... in addition to its/their
-    // other types": a mixed bare-keyword / quoted-ability list (CR 604.1 +
-    // CR 702). Located directly via " and has "/" and have " rather than
-    // re-deriving STEP E's marker word-list grammar.
-    if let Some((_, granted_tp)) = predicate_tp
-        .split_around(" and has ")
-        .or_else(|| predicate_tp.split_around(" and have "))
-    {
-        let granted_original = granted_tp.original.trim().trim_end_matches('.');
-        if !granted_original.is_empty() {
-            let stripped = strip_quoted_segments(granted_original);
-            for part in split_keyword_list(&stripped) {
-                if !part.trim().is_empty() {
-                    push_grant_clause_modifications(&mut modifications, part.as_ref(), None);
-                }
-            }
-            for modification in parse_quoted_ability_modifications(granted_original) {
-                if !modifications.contains(&modification) {
-                    modifications.push(modification);
-                }
             }
         }
     }
