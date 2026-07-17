@@ -766,9 +766,8 @@ fn try_parse_subject_supertype_removal_clause(
     // The copula-negation seam. Keep recognition in the nom grammar and map the
     // remainder back to original case through `nom_on_lower`; the three copulas
     // are independent alternatives, not a full-string permutation list.
-    let (_, predicate) = nom_on_lower(text, &lower, |input| {
-        value(
-            (),
+    let (subject_lower, predicate) = nom_on_lower(text, &lower, |input| {
+        map(
             alt((
                 terminated(
                     take_until::<_, _, OracleError<'_>>(" isn't "),
@@ -783,10 +782,11 @@ fn try_parse_subject_supertype_removal_clause(
                     tag(" is not "),
                 ),
             )),
+            str::to_owned,
         )
         .parse(input)
     })?;
-    let subject = text[..text.len() - predicate.len()].trim();
+    let subject = text[..subject_lower.len()].trim();
     if subject.is_empty() {
         return None;
     }

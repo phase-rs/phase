@@ -39,7 +39,7 @@ use engine::types::zones::Zone;
 use engine::types::PlayerId;
 
 // Arcum's Weathervane's removal clause, as a standalone permanent-duration
-// one-shot (CR 611.2b: a "becomes"/type-change with no explicit duration is
+// one-shot (CR 611.2a: a "becomes"/type-change with no explicit duration is
 // permanent — the same default the AddSupertype sibling receives).
 const IS_NO_LONGER_SNOW: &str = "Target snow land is no longer snow.";
 // Thermal Flux's removal mode, as a standalone until-end-of-turn one-shot.
