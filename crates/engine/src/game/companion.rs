@@ -221,6 +221,7 @@ pub fn is_eligible_companion(
     commanders: &[DeckEntry],
     format: GameFormat,
 ) -> bool {
+    // allow-raw-authority: DeckEntry carries a printed CardFace snapshot; deck validation has no GameState or live object to query.
     let Some(condition) = companion.card.keywords.iter().find_map(|keyword| {
         if let Keyword::Companion(condition) = keyword {
             Some(condition)
