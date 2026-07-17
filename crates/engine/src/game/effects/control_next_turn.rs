@@ -28,6 +28,9 @@ pub fn resolve(
     // that player's team; store the team's seat-order representative as anchor.
     let target_player =
         crate::game::topology::normalize_shared_turn_recipient(state, *target_player);
+    // CR 723.1a: player-controlling effects overwrite one another by creation
+    // time, so retain provenance when this resolved effect is scheduled.
+    let timestamp = state.next_timestamp();
 
     state
         .scheduled_turn_controls
@@ -35,6 +38,7 @@ pub fn resolve(
     state.scheduled_turn_controls.push(ScheduledTurnControl {
         target_player,
         controller: ability.controller,
+        timestamp,
         grant_extra_turn_after: *grant_extra_turn_after,
         // CR 723.1 / CR 723.2: schedule under the parsed window regardless of
         // window — the dedup `retain` above keeps one entry per target (CR 723.1a).
@@ -61,9 +65,12 @@ mod tests {
     #[test]
     fn resolve_overwrites_prior_scheduled_control_for_same_target() {
         let mut state = GameState::new_two_player(42);
+        state.turn_decision_controller = Some(PlayerId(0));
+        state.turn_decision_control_timestamp = Some(0);
         state.scheduled_turn_controls.push(ScheduledTurnControl {
             target_player: PlayerId(1),
             controller: PlayerId(0),
+            timestamp: 0,
             grant_extra_turn_after: false,
             window: ControlWindow::NextTurn,
         });
@@ -88,10 +95,52 @@ mod tests {
             ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(1),
+                timestamp: 1,
                 grant_extra_turn_after: true,
                 window: ControlWindow::NextTurn,
             }
         );
+        assert_eq!(state.turn_decision_controller, Some(PlayerId(0)));
+        assert_eq!(state.turn_decision_control_timestamp, Some(0));
+    }
+
+    #[test]
+    fn scheduled_control_legacy_payload_defaults_creation_timestamp_to_zero() {
+        let current = ScheduledTurnControl {
+            target_player: PlayerId(1),
+            controller: PlayerId(0),
+            timestamp: 17,
+            grant_extra_turn_after: false,
+            window: ControlWindow::NextTurn,
+        };
+        let mut legacy = serde_json::to_value(current).expect("serialize scheduled control");
+        legacy
+            .as_object_mut()
+            .expect("scheduled control serializes as an object")
+            .remove("timestamp");
+
+        let restored: ScheduledTurnControl =
+            serde_json::from_value(legacy).expect("deserialize pre-timestamp payload");
+        assert_eq!(restored.timestamp, 0);
+        assert_eq!(restored.controller, PlayerId(0));
+        assert_eq!(restored.target_player, PlayerId(1));
+    }
+
+    #[test]
+    fn game_state_legacy_payload_defaults_active_control_timestamp_to_none() {
+        let mut current = GameState::new_two_player(42);
+        current.turn_decision_controller = Some(PlayerId(0));
+        current.turn_decision_control_timestamp = Some(17);
+        let mut legacy = serde_json::to_value(current).expect("serialize game state");
+        legacy
+            .as_object_mut()
+            .expect("game state serializes as an object")
+            .remove("turn_decision_control_timestamp");
+
+        let restored: GameState =
+            serde_json::from_value(legacy).expect("deserialize pre-provenance game state");
+        assert_eq!(restored.turn_decision_controller, Some(PlayerId(0)));
+        assert_eq!(restored.turn_decision_control_timestamp, None);
     }
 
     #[test]

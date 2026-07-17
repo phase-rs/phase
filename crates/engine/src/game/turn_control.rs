@@ -2,6 +2,7 @@ use crate::types::game_state::{
     ActiveSearchDecisionAuthority, GameState, ScheduledTurnControl, WaitingFor,
 };
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 
 /// CR 723.1 / CR 723.2 / CR 800.4a: the single authority that ENDS a
 /// player-control effect. Removes the consumed schedule entry (the resolver
@@ -16,6 +17,7 @@ pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> Scheduled
     let entry = state.scheduled_turn_controls.remove(idx);
     if state.turn_decision_controller == Some(entry.controller) {
         state.turn_decision_controller = None;
+        state.turn_decision_control_timestamp = None;
     }
     entry
 }
@@ -63,6 +65,110 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
     } else {
         semantic_player
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlayerControlCandidate {
+    controller: PlayerId,
+    timestamp: u64,
+    tie_breaker: u64,
+}
+
+/// CR 723.1a: Read creation provenance for the currently active scheduled
+/// turn-control effect. A legacy or directly-constructed controller latch with
+/// no provenance remains valid at timestamp zero, making it older than every
+/// normally-created effect.
+fn active_turn_control_candidate(
+    state: &GameState,
+    semantic_player: PlayerId,
+) -> Option<PlayerControlCandidate> {
+    let controlled_seat = if state.format_config.topology().has_shared_team_turns() {
+        super::topology::team_members(state, state.active_player).contains(&semantic_player)
+    } else {
+        semantic_player == state.active_player
+    };
+    if !controlled_seat {
+        return None;
+    }
+    let controller = state.turn_decision_controller?;
+    Some(PlayerControlCandidate {
+        controller,
+        timestamp: state.turn_decision_control_timestamp.unwrap_or(0),
+        tie_breaker: 0,
+    })
+}
+
+/// CR 723.1a + CR 723.5: Select the newest functioning static that controls
+/// `searcher` while that player searches their own library.
+fn own_library_search_control_candidate(
+    state: &GameState,
+    searcher: PlayerId,
+) -> Option<PlayerControlCandidate> {
+    crate::game::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(source, definition)| match &definition.mode {
+            StaticMode::ControlPlayersDuringOwnLibrarySearch { who }
+                if match who {
+                    // CR 102.3: In a team game, a player's teammates are not
+                    // opponents. Keep this search-control scope on the canonical
+                    // team-aware opponent authority without changing legacy
+                    // prohibition-scope semantics for unrelated statics.
+                    crate::types::statics::ProhibitionScope::Opponents => {
+                        crate::game::players::is_opponent(state, source.controller, searcher)
+                    }
+                    _ => crate::game::static_abilities::prohibition_scope_matches_player(
+                        who, searcher, source.id, state,
+                    ),
+                } =>
+            {
+                Some(PlayerControlCandidate {
+                    controller: source.controller,
+                    timestamp: source.timestamp,
+                    // Normally timestamps are unique. The source identity keeps
+                    // direct-constructed zero-timestamp fixtures deterministic
+                    // while treating a real static as newer than a legacy latch.
+                    tie_breaker: source.id.0.saturating_add(1),
+                })
+            }
+            _ => None,
+        })
+        .max_by_key(|candidate| (candidate.timestamp, candidate.tie_breaker))
+}
+
+/// CR 723.1a + CR 723.5: Determine the controller whose authority must be
+/// snapshotted for one prepared search. Search-scoped statics participate only
+/// for an actual own-library search; ordinary turn control still governs every
+/// decision the controlled player makes, including cross-library searches.
+pub(crate) fn library_search_decision_controller(
+    state: &GameState,
+    searcher: PlayerId,
+    effective_library_owner: Option<PlayerId>,
+) -> PlayerId {
+    let active_turn = active_turn_control_candidate(state, searcher);
+    let search_static = (effective_library_owner == Some(searcher))
+        .then(|| own_library_search_control_candidate(state, searcher))
+        .flatten();
+    active_turn
+        .into_iter()
+        .chain(search_static)
+        .max_by_key(|candidate| (candidate.timestamp, candidate.tie_breaker))
+        .map_or(searcher, |candidate| candidate.controller)
+}
+
+fn decision_audience(semantic_player: PlayerId, submitter: PlayerId) -> Vec<PlayerId> {
+    if submitter == semantic_player {
+        vec![semantic_player]
+    } else {
+        vec![semantic_player, submitter]
+    }
+}
+
+/// CR 723.4: Build the hidden-information audience from the same controller
+/// that search preparation is about to latch, avoiding a second live scan.
+pub(crate) fn decision_audience_for_controller(
+    semantic_player: PlayerId,
+    controller: PlayerId,
+) -> Vec<PlayerId> {
+    decision_audience(semantic_player, controller)
 }
 
 /// CR 723.5: The controller of a searching player makes that player's
@@ -121,11 +227,7 @@ pub fn authorized_submitter_for_player(state: &GameState, semantic_player: Playe
 /// controlled player's private information while that control applies.
 pub fn decision_audience_for_player(state: &GameState, semantic_player: PlayerId) -> Vec<PlayerId> {
     let submitter = effective_authority_for_player(state, semantic_player);
-    if submitter == semantic_player {
-        vec![semantic_player]
-    } else {
-        vec![semantic_player, submitter]
-    }
+    decision_audience(semantic_player, submitter)
 }
 
 pub fn authorized_submitter(state: &GameState) -> Option<PlayerId> {

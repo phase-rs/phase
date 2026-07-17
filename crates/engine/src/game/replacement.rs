@@ -5613,7 +5613,9 @@ fn object_replacement_candidate_applies(
     if let ProposedEvent::SearchFound { searcher, .. } = event {
         let player_ok = match &repl_def.valid_player {
             Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
-                *searcher != replacement_player
+                // CR 102.3: SearchFound "opponent" scope excludes teammates
+                // in team games; use the engine's canonical team-aware relation.
+                crate::game::players::is_opponent(state, replacement_player, *searcher)
             }
             Some(crate::types::ability::ReplacementPlayerScope::You) => {
                 *searcher == replacement_player

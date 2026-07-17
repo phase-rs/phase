@@ -487,6 +487,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return false;
     }
 
+    if super::oracle_static::is_control_players_during_own_library_search(lower) {
+        return true;
+    }
+
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
         return true;
     }
@@ -733,6 +737,10 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    if super::oracle_replacement::is_search_found_replacement_pattern(lower) {
+        return true;
+    }
+
     // CR 608.2c: reflexive "enters this way" riders on triggered abilities
     // (Winter Soldier, Reborn Avenger) contain "enters" + "counter" but are
     // not CR 614.1c ETB replacements.

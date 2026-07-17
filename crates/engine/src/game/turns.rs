@@ -560,6 +560,7 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
             .copied()
         {
             state.turn_decision_controller = Some(scheduled.controller);
+            state.turn_decision_control_timestamp = Some(scheduled.timestamp);
         }
     }
 
@@ -641,6 +642,7 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
                 scratch.extra_turns.push(completed_player);
             }
             scratch.turn_decision_controller = None;
+            scratch.turn_decision_control_timestamp = None;
         }
 
         scratch.turn_number += 1;
@@ -684,14 +686,16 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
         // actually begins. Newest matching scheduled control wins.
         let active_turn_key =
             super::topology::normalize_shared_turn_recipient(&scratch, scratch.active_player);
-        scratch.turn_decision_controller = scratch
+        let scheduled = scratch
             .scheduled_turn_controls
             .iter()
             .rfind(|scheduled| {
                 scheduled.window == ControlWindow::NextTurn
                     && scheduled.target_player == active_turn_key
             })
-            .map(|scheduled| scheduled.controller);
+            .copied();
+        scratch.turn_decision_controller = scheduled.map(|scheduled| scheduled.controller);
+        scratch.turn_decision_control_timestamp = scheduled.map(|scheduled| scheduled.timestamp);
     }
 
     slots
@@ -735,6 +739,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // NextCombatPhase control never reaches here (its controller is None until
         // its own BeginCombat), so clearing unconditionally is safe.
         state.turn_decision_controller = None;
+        state.turn_decision_control_timestamp = None;
     }
 
     state.turn_number += 1;
@@ -820,6 +825,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .copied()
     {
         state.turn_decision_controller = Some(scheduled.controller);
+        state.turn_decision_control_timestamp = Some(scheduled.timestamp);
     }
 
     // Reset priority
@@ -7677,6 +7683,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(0),
+                timestamp: 0,
                 grant_extra_turn_after: true,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7686,6 +7693,7 @@ mod tests {
 
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.turn_decision_controller, Some(PlayerId(0)));
+        assert_eq!(state.turn_decision_control_timestamp, Some(0));
         assert_eq!(state.priority_player, PlayerId(0));
         assert_eq!(state.scheduled_turn_controls.len(), 1);
 
@@ -7693,6 +7701,7 @@ mod tests {
 
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.turn_decision_controller, None);
+        assert_eq!(state.turn_decision_control_timestamp, None);
         assert_eq!(state.priority_player, PlayerId(1));
         assert!(state.scheduled_turn_controls.is_empty());
     }
@@ -7777,6 +7786,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(2),
+                timestamp: 0,
                 grant_extra_turn_after: true,
                 window: ControlWindow::NextTurn,
             });
@@ -7802,6 +7812,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(2),
+                timestamp: 0,
                 grant_extra_turn_after: true,
                 window: ControlWindow::NextTurn,
             });
@@ -7835,6 +7846,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(0),
                 controller: PlayerId(2),
+                timestamp: 0,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7863,6 +7875,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(0),
+                timestamp: 1,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7871,6 +7884,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(1),
+                timestamp: 2,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7880,11 +7894,13 @@ mod tests {
 
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.turn_decision_controller, Some(PlayerId(1)));
+        assert_eq!(state.turn_decision_control_timestamp, Some(2));
 
         start_next_turn(&mut state, &mut events);
 
         assert_eq!(state.active_player, PlayerId(0));
         assert_eq!(state.turn_decision_controller, None);
+        assert_eq!(state.turn_decision_control_timestamp, None);
         assert!(state.scheduled_turn_controls.is_empty());
     }
 
@@ -7900,6 +7916,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: target,
                 controller,
+                timestamp: 0,
                 grant_extra_turn_after: false,
                 window: ControlWindow::NextCombatPhase,
             });
@@ -7951,6 +7968,7 @@ mod tests {
                 "{phase:?}: released — owner decides after combat"
             );
         }
+        assert_eq!(state.turn_decision_control_timestamp, None);
         assert!(
             state.scheduled_turn_controls.is_empty(),
             "entry consumed by the phase-boundary release"

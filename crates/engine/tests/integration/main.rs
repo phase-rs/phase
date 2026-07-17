@@ -921,6 +921,7 @@ mod oblivions_hunger_conditional_draw;
 mod omenpath_journey_random_exiled_with;
 mod omnath_unspent_green_mana_2887;
 mod one_ring_burden_upkeep_lethal;
+mod opposition_agent_final;
 mod optional_effect_remember_legal_actions;
 mod otherwise_conditional_effects;
 mod outrageous_robbery_look_and_play;

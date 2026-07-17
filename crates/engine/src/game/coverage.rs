@@ -177,6 +177,9 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // `count`. Runtime enforcement is in
             // game/effects/search_library.rs::library_search_top_limit.
             | StaticMode::RestrictLibrarySearchToTop { .. }
+            // CR 723.1a + CR 723.5: search-scoped player control carries the
+            // affected-player scope and is consumed at search preparation.
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
