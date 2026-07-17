@@ -1847,7 +1847,26 @@ pub struct PendingBatchDeliveries {
 /// on true completion, mirroring the `PendingCounterPostAction` continuation
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloakExileMember {
+    /// The tracked pile member that was proposed to leave the battlefield.
+    pub object_id: ObjectId,
+    /// CR 603.10a: the host's pre-departure attachments. Delivery clears the
+    /// live host list before LTB collection, so the cloak tail uses this list to
+    /// sever the former attachments' back-edges after the batch settles.
+    pub attachments: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
+    /// CR 701.58a + CR 603.10a + CR 614.1 + CR 616.1: A tracked cloak pile's
+    /// Battlefield→Exile batch settled. Keep its pre-departure attachment
+    /// snapshots so the tail can detach every actual departure and manifest
+    /// only cards that actually reached Exile.
+    CloakExileDeliveryComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        members: Vec<CloakExileMember>,
+    },
     /// CR 614.1 + CR 616.1 + CR 611.2a: A `CastFromZone` current-zone-to-Exile
     /// batch settled. Keep the resolved ability and its two target partitions
     /// so the permission is recorded only after the exile delivery, while

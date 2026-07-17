@@ -5953,6 +5953,13 @@ pub(crate) fn run_batch_completion(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     use crate::types::game_state::BatchCompletion;
     match completion {
+        BatchCompletion::CloakExileDeliveryComplete {
+            player,
+            source_id,
+            members,
+        } => effects::cloak::complete_tracked_set_exile_delivery(
+            state, player, source_id, members, events,
+        ),
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,
             in_place_ids,

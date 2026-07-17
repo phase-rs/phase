@@ -9727,3 +9727,222 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
         );
     }
 }
+
+/// W-168 (red first): a tracked-pile cloak must park before its detach/manifest
+/// tail or `EffectResolved` when CR 616.1 requires an exile-redirect choice.
+/// After the selected redirect settles, only the member that actually reached
+/// exile may enter face down under the CR 701.58a cloak profile.
+#[test]
+fn cloak_tracked_exile_redirect_pauses_before_manifest_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Cloak Redirect Source", 1, 1)
+        .id();
+    let redirected = scenario
+        .add_creature(P0, "Redirected Cloak Member", 2, 2)
+        .id();
+    let exiled = scenario.add_creature(P0, "Exiled Cloak Member", 3, 3).id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Cloak Exile To Hand", 0, 0)
+            .as_enchantment()
+            .id(),
+        scenario
+            .add_creature(P0, "Cloak Exile To Graveyard", 0, 0)
+            .as_enchantment()
+            .id(),
+    ];
+
+    let mut runner = scenario.build();
+    for (redirect_source, redirected_to) in [
+        (redirect_sources[0], Zone::Hand),
+        (redirect_sources[1], Zone::Graveyard),
+    ] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield")
+            .replacement_definitions = vec![redirect_moved_to(Zone::Exile, redirected_to)
+            .valid_card(TargetFilter::SpecificObject { id: redirected })]
+        .into();
+    }
+    let tracked_set = engine::types::identifiers::TrackedSetId(0);
+    runner
+        .state_mut()
+        .tracked_object_sets
+        .insert(tracked_set, vec![redirected, exiled]);
+    runner.state_mut().chain_tracked_set_id = Some(tracked_set);
+    let ability = ResolvedAbility::new(
+        Effect::Cloak {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 0 },
+            object_source: Some(TargetFilter::TrackedSet { id: tracked_set }),
+        },
+        vec![],
+        source,
+        P0,
+    );
+
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("cloak reaches its replacement-safe exile batch");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&redirected].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&exiled].zone, Zone::Battlefield);
+    assert!(
+        !runner.state().objects[&redirected].face_down
+            && !runner.state().objects[&exiled].face_down,
+        "the manifest tail must not run before the redirect choice"
+    );
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Cloak,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "Cloak must not resolve before the exile batch settles"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected exile redirect settles the tracked cloak batch");
+    assert!(matches!(resumed.waiting_for, WaitingFor::Priority { .. }));
+    assert!(matches!(
+        runner.state().objects[&redirected].zone,
+        Zone::Hand | Zone::Graveyard
+    ));
+    assert!(
+        !runner.state().objects[&redirected].face_down,
+        "a card redirected away from exile must not be re-manifested"
+    );
+    assert_eq!(runner.state().objects[&exiled].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&exiled].face_down,
+        "the unredirected member must cloak from exile"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(resumed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Cloak,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the settled cloak tail resolves exactly once"
+    );
+}
+
+/// W-168-REG: an unredirected tracked-pile cloak remains synchronous and keeps
+/// the prior two zone changes per member plus the face-down ward-{2} outcome.
+#[test]
+fn cloak_tracked_exile_delivery_stays_synchronous_and_cloaks_every_member() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Synchronous Cloak Source", 1, 1)
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Synchronous Cloak Member", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Synchronous Cloak Member", 3, 3)
+        .id();
+
+    let mut runner = scenario.build();
+    let tracked_set = engine::types::identifiers::TrackedSetId(0);
+    runner
+        .state_mut()
+        .tracked_object_sets
+        .insert(tracked_set, vec![first, second]);
+    runner.state_mut().chain_tracked_set_id = Some(tracked_set);
+    let ability = ResolvedAbility::new(
+        Effect::Cloak {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 0 },
+            object_source: Some(TargetFilter::TrackedSet { id: tracked_set }),
+        },
+        vec![],
+        source,
+        P0,
+    );
+
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("unredirected tracked cloak resolves synchronously");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    for member in [first, second] {
+        let object = &runner.state().objects[&member];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert!(object.face_down);
+        assert_eq!(object.power, Some(2));
+        assert_eq!(object.toughness, Some(2));
+        assert!(object.keywords.iter().any(|keyword| matches!(
+            keyword,
+            Keyword::Ward(cost) if *cost == engine::types::keywords::WardCost::Mana(ManaCost::generic(2))
+        )));
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Exile,
+                    ..
+                } if [first, second].contains(object_id)
+            ))
+            .count(),
+        2,
+        "every tracked member has one battlefield-to-exile event"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if [first, second].contains(object_id)
+            ))
+            .count(),
+        2,
+        "every settled exile member has one face-down battlefield entry"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Cloak,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the synchronous cloak tail resolves exactly once"
+    );
+}
