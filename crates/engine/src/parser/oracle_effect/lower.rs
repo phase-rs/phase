@@ -3968,11 +3968,14 @@ pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFil
 ///
 /// Verb is scoped to "discard" — the only verb this exact "who didn't <verb>
 /// a [filter] this way" relative-clause construction is verified against
-/// (Kroxa). `ZoneChangedThisWay` itself is verb-agnostic (it reads
-/// `last_zone_changed_ids`, which sacrifice/exile populate identically to
-/// discard), so widening the `alt()` to those verbs is a one-line change
-/// once a card actually prints that construction — deferred rather than
-/// speculatively added ahead of a verified card.
+/// (Kroxa, Titan of Death's Hunger — opponent scope, nonland filter; and
+/// Strongarm Tactics — all-players scope, creature filter: "Each player
+/// discards a card. Then each player who didn't discard a creature card
+/// this way loses 4 life."). `ZoneChangedThisWay` itself is verb-agnostic
+/// (it reads `last_zone_changed_ids`, which sacrifice/exile populate
+/// identically to discard), so widening the `alt()` to those verbs is a
+/// one-line change once a card actually prints that construction —
+/// deferred rather than speculatively added ahead of a verified card.
 pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
     text: &str,
 ) -> Option<(PlayerFilter, TargetFilter, String)> {

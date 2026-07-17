@@ -223,6 +223,83 @@ fn hand_size(state: &GameState, player: PlayerId) -> usize {
         .count()
 }
 
+/// Strongarm Tactics — the sibling all-players (`PlayerFilter::All`) scope
+/// of the same mandatory-FILTERED decline-tail construction, with a
+/// "creature" filter instead of Kroxa's "nonland" filter:
+///   "Each player discards a card. Then each player who didn't discard a
+///    creature card this way loses 4 life."
+///
+/// Unlike Kroxa's opponent-only fan-out, "each player" includes the
+/// ability's own controller — this pins that the controller-inclusive scope
+/// and its per-player `ZoneChangedThisWay` gate both resolve correctly.
+const STRONGARM_TACTICS_BODY: &str = "each player discards a card, then each \
+     player who didn't discard a creature card this way loses 4 life.";
+
+fn strongarm_tactics_effect(controller: PlayerId, source_id: ObjectId) -> ResolvedAbility {
+    let def = parse_effect_chain(STRONGARM_TACTICS_BODY, AbilityKind::Spell);
+    build_resolved_from_def(&def, source_id, controller)
+}
+
+fn add_creature_hand_card(state: &mut GameState, card_id: u64, player: PlayerId) -> ObjectId {
+    let oid = create_object(
+        state,
+        CardId(card_id),
+        player,
+        "Card".to_string(),
+        Zone::Hand,
+    );
+    let obj = state
+        .objects
+        .get_mut(&oid)
+        .expect("just-created hand object");
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.base_card_types = obj.card_types.clone();
+    oid
+}
+
+/// Three players, all in the "each player" scope (including the caster):
+/// one discards a creature card (avoids life loss), one discards a
+/// noncreature card (loses life), one has an empty hand (still loses life
+/// per the same "didn't discard" ruling Kroxa relies on).
+#[test]
+fn strongarm_tactics_all_players_gated_by_own_discard() {
+    let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Strongarm Tactics".to_string(),
+        Zone::Battlefield,
+    );
+    // PlayerId(0) is the caster and is still in the "each player" scope.
+    add_creature_hand_card(&mut state, 100, PlayerId(0));
+    add_hand_card(&mut state, 200, PlayerId(1), false);
+    // PlayerId(2) has no cards in hand.
+
+    let p0_life_before = life(&state, PlayerId(0));
+    let p1_life_before = life(&state, PlayerId(1));
+    let p2_life_before = life(&state, PlayerId(2));
+    let ability = strongarm_tactics_effect(PlayerId(0), source);
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    assert_eq!(
+        life(&state, PlayerId(0)),
+        p0_life_before,
+        "caster discarded a creature card, so the life loss must not fire for the caster"
+    );
+    assert_eq!(
+        life(&state, PlayerId(1)),
+        p1_life_before - 4,
+        "P1 discarded a noncreature card, so the life loss must fire for P1"
+    );
+    assert_eq!(
+        life(&state, PlayerId(2)),
+        p2_life_before - 4,
+        "P2 had no cards to discard, so they didn't discard a creature card either — life loss must still fire"
+    );
+}
+
 #[test]
 fn non_discard_who_didnt_clause_still_draws_a_card() {
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
