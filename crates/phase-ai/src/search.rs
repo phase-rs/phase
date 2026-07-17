@@ -4518,6 +4518,7 @@ mod tests {
             .push(CoreType::Land);
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: vec![titan, land],
             count: 1,
             reveal: false,
@@ -4839,6 +4840,7 @@ mod tests {
 
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards,
             count: 4,
             reveal: true,
