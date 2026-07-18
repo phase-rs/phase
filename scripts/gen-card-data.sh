@@ -157,7 +157,8 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 
 # --- Group 1: card-data + card-names (expensive, independent of coverage) ---
 # Build every generator bin in ONE cargo invocation, then run the binaries
-# directly from target/tool/. Two reasons this matters for build time:
+# directly from the tool-profile output dir. Two reasons this matters for
+# build time:
 #   1. Unified feature set: mixing `--features cli` and no-feature invocations
 #      re-fingerprints the engine crate and recompiles it on each switch.
 #   2. Single invocation "shape": cargo's tool-profile artifacts stabilize per
@@ -165,7 +166,10 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 #      alone vs the others) recompiles the engine on each switch. One shape for
 #      every build keeps the warm case a true no-op.
 TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate --bin coverage-parse-diff)
-TOOL_BIN="target/tool"
+# Execute from the SAME target dir cargo built into: `cargo build` honors
+# CARGO_TARGET_DIR, so a hardcoded `target/tool` here would silently run stale
+# binaries from a different build whenever the variable is set.
+TOOL_BIN="${CARGO_TARGET_DIR:-target}/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
 # The token catalog is baked into the engine lib at compile time (build.rs
@@ -319,8 +323,10 @@ GEN_COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 MTGJSON_VERSION="unknown"
 MTGJSON_DATE="unknown"
 if [ -s "$MTGJSON_META_FILE" ]; then
-  MTGJSON_VERSION=$(jq -r '.meta.version // "unknown"' "$MTGJSON_META_FILE")
-  MTGJSON_DATE=$(jq -r '.meta.date // "unknown"' "$MTGJSON_META_FILE")
+  # tr strips Windows jq's trailing \r, which would otherwise embed a raw
+  # control character inside the JSON string values written to META_OUTPUT.
+  MTGJSON_VERSION=$(jq -r '.meta.version // "unknown"' "$MTGJSON_META_FILE" | tr -d '\r')
+  MTGJSON_DATE=$(jq -r '.meta.date // "unknown"' "$MTGJSON_META_FILE" | tr -d '\r')
 fi
 track_tmp "$META_OUTPUT_TMP"
 cat > "$META_OUTPUT_TMP" <<METAEOF
@@ -365,6 +371,7 @@ FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
 NAMES_SIZE=$(du -h "$NAMES_OUTPUT" | cut -f1)
 # Count entries in the small names array (648K) rather than grepping the 90MB
 # card-data for `"name"` — the latter is slower and overcounts nested keys.
-CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT")
+# tr strips Windows jq's trailing \r, which would otherwise corrupt this summary line.
+CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT" | tr -d '\r')
 echo "Generated $OUTPUT ($FILE_SIZE, ~$CARD_COUNT cards)"
 echo "Generated $NAMES_OUTPUT ($NAMES_SIZE)"

@@ -15166,6 +15166,18 @@ pub(crate) fn find_eligible_discard_targets(
     find_eligible_hand_cost_targets(state, player, source, filter)
 }
 
+/// CR 701.20a + CR 601.2b: Eligible cards for an `AbilityCost::Reveal` payment
+/// whose `filter` is `Some` (a non-self reveal). The source spell is never a
+/// legal choice for its own additional cost, mirroring discard/exile.
+pub(crate) fn find_eligible_reveal_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    find_eligible_hand_cost_targets(state, player, source, Some(filter))
+}
+
 /// CR 601.2b + CR 601.2h: Eligible cards for an `AbilityCost::Exile` payment
 /// whose `zone` is `Hand` (pitch spells) or `Graveyard` (escape, CR 702.138a).
 /// The cast source itself is never eligible. The cost's `TargetFilter` is
@@ -17359,7 +17371,7 @@ pub fn handle_cancel_cast(
 // Cost payment handlers are in casting_costs module.
 pub(crate) use super::casting_costs::{
     handle_activation_cost_one_of_choice, handle_discard_for_cost, handle_return_to_hand_for_cost,
-    handle_sacrifice_for_cost,
+    handle_reveal_for_cost, handle_sacrifice_for_cost,
 };
 
 fn generic_mana_in_cost(cost: &AbilityCost) -> u32 {

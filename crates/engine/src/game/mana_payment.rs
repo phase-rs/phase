@@ -348,12 +348,15 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
         _ => (mana_type, 1),
     };
 
+    // CR 107.4h + CR 106.3: mana produced by a snow source is snow mana (payable for {S}).
+    let source_is_snow = super::mana_sources::source_is_snow(state, source_id);
+
     for _ in 0..final_count {
         let unit = ManaUnit {
             color: final_mana_type,
             source_id,
             pip_id: crate::types::mana::ManaPipId(0),
-            supertype: None,
+            supertype: source_is_snow.then_some(crate::types::mana::ManaSupertype::Snow),
             source_could_produce_two_or_more_colors,
             restrictions: restrictions.to_vec(),
             grants: grants.to_vec(),

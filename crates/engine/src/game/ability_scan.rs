@@ -195,6 +195,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         distribution: _,          // concrete pre-assigned (TargetRef, u32) portions
         chosen_x: _,              // concrete cast-time X
         cost_paid_object: _,      // concrete captured-object snapshot
+        cost_paid_object_ids: _,  // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _,   // concrete captured-object snapshot
         ability_index: _,         // usize provenance
@@ -1888,6 +1889,13 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 700.2: reads the triggering-spell object (same event axis as
+        // EventContextSourceCostX and TimesCostPaidThisResolution).
+        QuantityRef::EventContextSourceModesChosen => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         QuantityRef::SpellsCastThisTurn { scope, filter } => {
             let mut acc = Axes {
                 event: false,
@@ -3156,6 +3164,9 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation read; it scans no
+        // board/object axis.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -4736,6 +4747,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         forward_result: _, // bool
         chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
+        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance

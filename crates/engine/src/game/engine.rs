@@ -3970,6 +3970,15 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                PayCostKind::Reveal => engine_casting::handle_reveal_for_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *count,
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
 	                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
 	                    state,
 	                    *player,
@@ -4177,12 +4186,13 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
-                // ReturnToHand, ExileFromZone, RemoveCounter, and Behold do not
-                // have mana-ability cost handlers wired today. If a future mana
-                // ability uses one of these CR-valid cost shapes, add the
-                // corresponding mana-ability handler instead of routing it
-                // through the spell pipeline.
+                // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
+                // do not have mana-ability cost handlers wired today. If a
+                // future mana ability uses one of these CR-valid cost shapes,
+                // add the corresponding mana-ability handler instead of
+                // routing it through the spell pipeline.
                 PayCostKind::ReturnToHand
+                | PayCostKind::Reveal
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExileMaterials { .. }
                 | PayCostKind::ExilePermanent { .. }
@@ -7334,6 +7344,20 @@ pub(super) fn begin_pending_trigger_target_selection(
             };
             let subject_match_count = trigger.subject_match_count;
             let modal = modal.clone();
+            // CR 603.3c + CR 603.3d: a triggered modal's mode choice is announced as
+            // the ability is put on the stack, by the same process as casting a spell
+            // (CR 601.2c-d). The triggering event must be live for the ENTIRE choice,
+            // including the "choose up to X" dynamic cap resolved by
+            // modal_choice_for_player -- push the event window BEFORE cap resolution,
+            // not just around target-legality filtering, so event-context quantity
+            // refs (e.g. EventContextSourceModesChosen, Riku of Many Paths) resolve
+            // against the triggering spell rather than an unset event.
+            let context_snapshot = super::triggers::push_trigger_event_context(
+                state,
+                trigger_event.as_ref(),
+                &trigger_events,
+                subject_match_count,
+            );
             let modal = modal_choice_for_player(
                 state,
                 player,
@@ -7342,12 +7366,6 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &crate::types::ability::SpellContext::default(),
             );
             let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
-            let context_snapshot = super::triggers::push_trigger_event_context(
-                state,
-                trigger_event.as_ref(),
-                &trigger_events,
-                subject_match_count,
-            );
             super::ability_utils::filter_modes_by_target_legality(
                 state,
                 source_id,

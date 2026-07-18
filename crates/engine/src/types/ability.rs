@@ -3757,6 +3757,9 @@ pub enum FilterProp {
     Suspected,
     /// CR 702.112b: Matches permanents with the renowned designation.
     Renowned,
+    /// CR 701.15b/c: Matches creatures with the goaded designation (at least one
+    /// player has goaded it).
+    Goaded,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
     /// CR 208.1 + CR 613.4a + CR 613.4b: Matches a creature whose current
@@ -5488,6 +5491,15 @@ pub enum QuantityRef {
     /// {X} in its mana cost each turn, [do something with X]" (e.g. Nev the
     /// Practical Dean's "put X +1/+1 counters on Nev").
     EventContextSourceCostX,
+    /// CR 700.2 + CR 700.2a + CR 700.2d + CR 601.2b: The number of modes chosen
+    /// for the triggering modal spell (CR 601.2b announces the mode choice as
+    /// part of casting; CR 700.2d counts a repeated mode "that many times in
+    /// sequence"). Reads `GameObject::chosen_modes.len()` on the spell object
+    /// referenced by `current_trigger_event` (the `SpellCast` event), mirroring
+    /// `EventContextSourceCostX`. Used by "whenever you cast a modal spell,
+    /// choose up to X, where X is the number of times you chose a mode for that
+    /// spell" (Riku of Many Paths).
+    EventContextSourceModesChosen,
     /// CR 117.1: Number of spells cast this turn by players in `scope`,
     /// optionally filtered by spell characteristics. `None` = all spells.
     SpellsCastThisTurn {
@@ -17295,6 +17307,16 @@ pub struct SpellContext {
     ///   - `len() >= n`                ⇔ kicker was paid at least N times
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<KickerVariant>,
+    /// CR 700.2a + CR 700.2d + CR 601.2b: The modal-mode indices chosen for this
+    /// spell as it was cast (ascending, with repeats per CR 700.2d). Populated in
+    /// `handle_select_modes` (the modal-SPELL channel) from the same
+    /// `sorted_indices` written to `PendingCast.chosen_modes`, and stamped onto
+    /// the spell-on-stack `GameObject.chosen_modes` at cast finalize so
+    /// cast-triggers (Riku: `QuantityRef::EventContextSourceModesChosen`) read the
+    /// mode count. Empty for non-modal spells. Mirrors the `kickers_paid`
+    /// cast-latch channel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_modes: Vec<usize>,
     /// Whether an optional "you may" effect was performed during resolution.
     /// Used by AbilityCondition::effect_performed() to gate dependent sub_abilities.
     #[serde(default)]
@@ -20247,8 +20269,26 @@ pub struct ResolvedAbility {
     /// paid as part of this resolving ability's cost, captured before it leaves
     /// its zone. Read by cost-paid-object-scoped quantity refs and
     /// `AbilityCondition::CostPaidObjectMatchesFilter` during resolution.
+    /// Stays singular (the FIRST object chosen) because it backs referent
+    /// wording like "the sacrificed creature's toughness", which is
+    /// inherently single-object even when the cost consumed several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 601.2h + CR 602.2b (issue #4948): EVERY object paid as
+    /// part of this resolving ability's own cost — unlike `cost_paid_object`
+    /// above, not just the first. This engine pays non-self
+    /// Sacrifice/Discard/Exile costs BEFORE choosing this SAME ability's own
+    /// targets (a documented CR 601.2c-vs-601.2h/602.2b ordering shortcut,
+    /// see issue #1301's `exclude_cost_paid_object_that_left_battlefield`),
+    /// so any object that already left its zone to pay that cost was never
+    /// actually a legal target under the real target-before-cost order — no
+    /// matter how many objects the cost consumed. Read only by
+    /// `exclude_cost_paid_object_that_left_battlefield`
+    /// (`game/ability_utils.rs`) to strip those ids from this ability's own
+    /// candidate lists; never a resolution-time referent (use
+    /// `cost_paid_object` for that).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cost_paid_object_ids: Vec<ObjectId>,
     /// Public characteristics of an object chosen or moved by an earlier
     /// effect in the same resolving ability. This is distinct from
     /// `cost_paid_object`: the object was not paid as a cost, but later
@@ -20374,6 +20414,7 @@ impl ResolvedAbility {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -20499,6 +20540,26 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_cost_paid_object_recursive(snapshot);
+        }
+    }
+
+    /// CR 601.2h + CR 602.2b (issue #4948): Record EVERY object
+    /// paid as part of this ability's own cost (mirrors
+    /// `set_cost_paid_object_recursive`'s recursion into `sub_ability` /
+    /// `else_ability`, but accumulates every id instead of overwriting a
+    /// single referent). Call this alongside — not instead of —
+    /// `set_cost_paid_object_recursive` at every non-self
+    /// Sacrifice/Discard/Exile cost-payment site; the singular field keeps
+    /// its own resolution-time referent semantics and this one only feeds
+    /// `exclude_cost_paid_object_that_left_battlefield`'s target-candidate
+    /// filter.
+    pub fn add_cost_paid_object_ids_recursive(&mut self, ids: &[ObjectId]) {
+        self.cost_paid_object_ids.extend_from_slice(ids);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.add_cost_paid_object_ids_recursive(ids);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.add_cost_paid_object_ids_recursive(ids);
         }
     }
 
@@ -20731,6 +20792,10 @@ pub enum EffectError {
     ChainTooDeep,
     #[error("unregistered effect type: {0}")]
     Unregistered(String),
+    #[error("a library search session is already active")]
+    SearchAlreadyActive,
+    #[error("scoped library search produced incompatible dispositions for one object")]
+    ConflictingScopedSearchDisposition,
 }
 
 fn is_false(value: &bool) -> bool {

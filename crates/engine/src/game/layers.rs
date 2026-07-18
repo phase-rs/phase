@@ -703,9 +703,9 @@ pub(crate) fn prune_controller_controls_source_on_leave(
                         if source == departed_id
                 )
         };
-        // Only a lapsed `ControllerControlsSource` def or a turn-bound die-exile
-        // rider on the departing host is eligible to be dropped. The host-left
-        // arm must not wipe printed replacements or unrelated runtime riders.
+        // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def or a
+        // turn-bound die-exile rider on the departing host is eligible to be dropped.
+        // The host-left arm must not wipe printed replacements or unrelated runtime riders.
         let drop = |def: &crate::types::ability::ReplacementDefinition| {
             (matches!(
                 def.condition,
@@ -2352,6 +2352,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn

@@ -71,8 +71,8 @@ jobs:
         #     (keyword queries via game/keywords.rs) instead of raw state pokes.
         # (B) Full-tree: gameplay zone changes must go through zone_pipeline,
         #     not the raw movers / zone containers / `GameObject::zone =`.
-        #     Ratchets against scripts/zone-authority-baseline.txt, which may
-        #     only shrink as the Plan 03 tranches migrate each site.
+        #     Every classified site requires a nonempty `allow-raw-zone:`
+        #     annotation explaining why it is not a replaceable zone event.
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then

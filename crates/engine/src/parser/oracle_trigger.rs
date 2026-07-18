@@ -9,12 +9,12 @@ use nom::Parser;
 
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
-    try_parse_each_player_copy_chosen, try_parse_exile_top_each_library_with_collection_counter,
-    try_parse_grant_graveyard_keyword_to_target, try_parse_reanimator_aura_etb_effect,
-    try_parse_reanimator_aura_grant_etb_effect,
+    try_parse_reanimator_aura_etb_effect, try_parse_reanimator_aura_grant_etb_effect,
 };
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
+use super::oracle_ir::effect_chain::EffectChainIr;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
@@ -1399,13 +1399,17 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
         if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
-            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
+            Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
+                &effect_for_parse,
                 AbilityKind::Spell,
-                Effect::Unimplemented {
-                    name: "Unsupported monarch turn-began condition".to_string(),
-                    description: Some(effect_for_parse.clone()),
-                },
-            ))))
+                parsed_clause(Effect::unimplemented(
+                    "Unsupported monarch turn-began condition",
+                    &effect_for_parse,
+                )),
+                None,
+                effect_ctx.actor.clone(),
+                effect_ctx.in_trigger,
+            )))
         // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
         } else if let Some(vote_def) =
             crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
@@ -1441,74 +1445,54 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
         } else {
-            try_parse_exile_top_each_library_with_collection_counter(
-                &effect_for_parse,
-                AbilityKind::Spell,
-            )
-            .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-            .or_else(|| {
-                // CR 702.138a: triggered one-shot grant of escape to a target
-                // graveyard card whose compound cost rides a continuation sentence
-                // (Desdemona, Freedom's Edge). Fail-closed: declines unless the
-                // whole two-sentence shape parses, so a card with an unparsed
-                // target filter stays an honest Unimplemented rather than misparsing.
-                try_parse_grant_graveyard_keyword_to_target(&effect_for_parse, AbilityKind::Spell)
+            // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
+            // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
+            // "it loses ... and gains ...", return/put the enchanted creature
+            // card to the battlefield under your control, attach the Aura to
+            // it, and register the leaves-battlefield sacrifice. Fail-closed:
+            // declines unless the entire body matches, so a deviating card
+            // stays an honest Unimplemented rather than misparsing.
+            try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
+                .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
+                .or_else(|| {
+                    // CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a + CR 701.21a:
+                    // whole-body reanimator-Aura GRANT-shape ETB effect (Necromancy) — a plain
+                    // (non-Aura) enchantment whose ETB ability becomes an Aura AND targets the
+                    // graveyard creature to reanimate itself (unlike the swap shape above,
+                    // which targets at CAST time via its printed Enchant restriction and
+                    // refers back to `TargetFilter::AttachedTo` here). Fail-closed: declines
+                    // unless the entire body matches, so a deviating card stays an honest
+                    // Unimplemented rather than misparsing.
+                    try_parse_reanimator_aura_grant_etb_effect(
+                        &effect_for_parse,
+                        AbilityKind::Spell,
+                    )
                     .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-            })
-            .or_else(|| {
-                // CR 101.4 + CR 707.2 + CR 122.1: whole-body "each player chooses …
-                // creates a token copy of the first … (then scales by the second)"
-                // (WHO phenomena). Fail-closed multi-sentence detector; sees the
-                // full pre-split body. Placed before the terminal
-                // `parse_effect_chain_ir` fallthrough so an unparsed shape stays an
-                // honest Unimplemented rather than misparsing.
-                try_parse_each_player_copy_chosen(&effect_for_parse, AbilityKind::Spell)
-                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-            })
-            .or_else(|| {
-                // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
-                // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
-                // "it loses ... and gains ...", return/put the enchanted creature
-                // card to the battlefield under your control, attach the Aura to
-                // it, and register the leaves-battlefield sacrifice. Fail-closed:
-                // declines unless the entire body matches, so a deviating card
-                // stays an honest Unimplemented rather than misparsing.
-                try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
-                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-            })
-            .or_else(|| {
-                // CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a + CR 701.21a:
-                // whole-body reanimator-Aura GRANT-shape ETB effect (Necromancy) — a plain
-                // (non-Aura) enchantment whose ETB ability becomes an Aura AND targets the
-                // graveyard creature to reanimate itself (unlike the swap shape above,
-                // which targets at CAST time via its printed Enchant restriction and
-                // refers back to `TargetFilter::AttachedTo` here). Fail-closed: declines
-                // unless the entire body matches, so a deviating card stays an honest
-                // Unimplemented rather than misparsing.
-                try_parse_reanimator_aura_grant_etb_effect(&effect_for_parse, AbilityKind::Spell)
-                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-            })
-            .or_else(|| {
-                // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
-                // mode1; or mode2" on a single line (no bullet-line modes). No
-                // printed card currently reaches this branch: it needs an em-dash
-                // *and* "; or " inside one trigger effect body. (Grenzo, Havoc
-                // Raiser — long named here as the canonical case — uses bullet-line
-                // modes, so `raw_modes.len() == 1` and it never arrives.) Route
-                // through the modal parser so each mode body is independently
-                // parsed with the trigger's established relative_player_scope (e.g.
-                // TriggeringPlayer for DamageDone triggers) so "that player" in mode
-                // bodies resolves to the damaged player (CR 603.7c).
-                if let Some(modal_ability) = try_parse_inline_modal(
-                    &effect_for_parse,
-                    effect_ctx.relative_player_scope.clone(),
-                ) {
-                    return Some(TriggerBody::PreLowered(Box::new(modal_ability)));
-                }
-                let ir =
-                    parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
-                Some(TriggerBody::EffectChain(ir))
-            })
+                })
+                .or_else(|| {
+                    // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
+                    // mode1; or mode2" on a single line (no bullet-line modes). No
+                    // printed card currently reaches this branch: it needs an em-dash
+                    // *and* "; or " inside one trigger effect body. (Grenzo, Havoc
+                    // Raiser — long named here as the canonical case — uses bullet-line
+                    // modes, so `raw_modes.len() == 1` and it never arrives.) Route
+                    // through the modal parser so each mode body is independently
+                    // parsed with the trigger's established relative_player_scope (e.g.
+                    // TriggeringPlayer for DamageDone triggers) so "that player" in mode
+                    // bodies resolves to the damaged player (CR 603.7c).
+                    if let Some(modal_ability) = try_parse_inline_modal(
+                        &effect_for_parse,
+                        effect_ctx.relative_player_scope.clone(),
+                    ) {
+                        return Some(TriggerBody::PreLowered(Box::new(modal_ability)));
+                    }
+                    let ir = parse_effect_chain_ir(
+                        &effect_for_parse,
+                        AbilityKind::Spell,
+                        &mut effect_ctx,
+                    );
+                    Some(TriggerBody::EffectChain(ir))
+                })
         }
     } else {
         None
@@ -13347,15 +13331,21 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // `static_condition_to_trigger_condition`, so every presence filter the
     // condition parser already handles (subtype, type, P/T comparator, keyword,
     // …) is covered without re-implementing filter parsing here. Gated on a
-    // `ControlsType` result so only genuine single-permanent presence conditions
-    // become state triggers; the effect ("sacrifice this creature") is parsed
-    // separately by the caller, exactly as for the `ControlsNone` arm.
+    // `ControlsType` (single-permanent presence) or `QuantityComparison`
+    // (count / emptiness — e.g. "there are no creatures on the battlefield",
+    // which `parse_inner_condition` lowers to `ObjectCount(<filter>) == 0` with
+    // no controller restriction, so it counts *any* player's matching
+    // permanents; CR 110.1 / CR 403.1) result, so only genuine game-state
+    // conditions (CR 603.8) become state triggers; the effect ("sacrifice this
+    // creature") is parsed separately by the caller, as for the `ControlsNone` arm.
     for prefix in ["whenever ", "when "] {
         if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) {
             if let Ok((cond_rest, sc)) = parse_inner_condition(rest) {
                 if cond_rest.trim().is_empty() {
-                    if let Some(cond @ TriggerCondition::ControlsType { .. }) =
-                        static_condition_to_trigger_condition(&sc)
+                    if let Some(
+                        cond @ (TriggerCondition::ControlsType { .. }
+                        | TriggerCondition::QuantityComparison { .. }),
+                    ) = static_condition_to_trigger_condition(&sc)
                     {
                         let mut def = make_base();
                         def.mode = TriggerMode::StateCondition;

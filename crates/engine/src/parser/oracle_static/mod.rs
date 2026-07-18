@@ -98,6 +98,7 @@ pub(crate) use dispatch::parse_may_look_at_face_down_filter;
 pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
+pub(crate) use restriction::is_control_players_during_own_library_search;
 
 mod support {
     pub(super) use super::anthem::{
@@ -129,7 +130,7 @@ mod support {
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
-        strip_casting_prohibition_subject,
+        parse_relative_count_typed_cast_prohibitions, strip_casting_prohibition_subject,
     };
     pub(super) use super::shared::*;
     pub(super) use super::static_helpers::*;

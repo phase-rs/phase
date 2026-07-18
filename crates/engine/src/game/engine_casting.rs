@@ -93,6 +93,26 @@ pub(super) fn handle_discard_for_cost(
     )
 }
 
+pub(super) fn handle_reveal_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: PendingCast,
+    count: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting::handle_reveal_for_cost(
+        state,
+        player,
+        pending_cast,
+        count,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
 pub(super) fn handle_activation_cost_one_of_choice(
     state: &mut GameState,
     player: PlayerId,

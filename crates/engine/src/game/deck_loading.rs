@@ -601,7 +601,7 @@ pub fn create_contraption_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.in_contraption_deck = true;
-    // allow-raw-zone: outside CR scope; Contraption deck object birth is not a zone move (CR 400.1).
+    // allow-raw-zone: Contraption deck object is born into command-zone bookkeeping; Contraption mechanics are outside the CR (CR 701.45a).
     state.command_zone.retain(|id| *id != obj_id);
     state
         .players

@@ -1734,6 +1734,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
         | StaticMode::CantCauseSacrificeOrExile { .. }
         | StaticMode::CastWithFlash
         | StaticMode::GrantsExtraVote

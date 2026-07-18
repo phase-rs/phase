@@ -700,6 +700,8 @@ pub(crate) fn apply_damage_after_replacement(
                 .map(|object| object.controller)
                 .unwrap_or(ctx.controller),
         };
+        // CR 400.7: Snapshot the target's incarnation at damage time so
+        // subsequent zone-change look-backs do not match a new incarnation.
         let target_incarnation = match t {
             TargetRef::Object(object_id) => state
                 .objects

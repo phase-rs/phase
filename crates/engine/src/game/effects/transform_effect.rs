@@ -30,6 +30,8 @@ pub fn resolve(
         }
     };
 
+    // CR 701.27f: A self-transform instruction does nothing if the permanent
+    // has already transformed or converted since the ability was put onto the stack.
     let stale_self_transform = object_id == ability.source_id
         && (!ability.source_is_current(state)
             || ability

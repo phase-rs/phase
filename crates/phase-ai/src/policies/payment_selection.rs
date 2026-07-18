@@ -257,6 +257,10 @@ fn payment_cost(
 ) -> f64 {
     match kind {
         PayCostKind::Discard => card_value(state, obj_id),
+        // CR 701.20a + CR 701.20b: Revealing doesn't move the card — it stays
+        // in hand — so the real resource cost is ~0, mirroring Behold's
+        // reveal-from-hand branch.
+        PayCostKind::Reveal => card_value(state, obj_id) * 0.1,
         PayCostKind::ReturnToHand => 0.5 + permanent_value(state, obj_id) * 0.5,
         PayCostKind::ExileFromZone { zone } => match zone {
             ExileCostSourceZone::Hand => card_value(state, obj_id) * 1.2,

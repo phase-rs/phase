@@ -501,7 +501,7 @@ mod tests {
     /// graveyard" residual) makes a graveyard card castable via escape —
     /// `effective_escape_data` resolves the mana sub-cost (CR 601.2g) and surfaces
     /// the exile residual for `pay_additional_cost` (CR 601.2h). Runtime proof for
-    /// the parser front door `try_parse_grant_graveyard_keyword_to_target`
+    /// the parser front door `parse_grant_graveyard_keyword_to_target_ir`
     /// (Confession Dial / Desdemona). Tests the building block — a transient
     /// off-zone Escape grant — not a single card.
     #[test]
