@@ -11995,10 +11995,11 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
 /// Fail-closed at every step: non-matching text returns `None`, the input falls
 /// through to the normal pipeline, and an unrecognized cost surfaces as an honest
 /// `Unimplemented` rather than a cost-free (and thus illegal) escape grant.
-pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
+pub(crate) fn parse_grant_graveyard_keyword_to_target_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let stripped = super::oracle_util::strip_reminder_text(text);
     let lower = stripped.to_lowercase();
 
@@ -12074,7 +12075,14 @@ pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
         duration: Some(Duration::UntilEndOfTurn),
         target: Some(target_filter),
     };
-    Some(AbilityDefinition::new(kind, effect))
+    Some(EffectChainIr::single_clause(
+        text,
+        kind,
+        parsed_clause(effect),
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: Whole-body, fail-closed recognizer
@@ -25172,9 +25180,6 @@ fn try_parse_chain_bypass(
     if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
         return Some(def);
     }
-    if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
-        return Some(def);
-    }
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
         return Some(def);
     }
@@ -25825,6 +25830,9 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    if let Some(ir) = parse_grant_graveyard_keyword_to_target_ir(text, kind, ctx) {
+        return ir;
+    }
     if let Some(ir) = parse_catch_up_draw_ir(text, kind, ctx) {
         return ir;
     }

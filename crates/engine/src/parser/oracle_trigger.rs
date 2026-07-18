@@ -9,8 +9,7 @@ use nom::Parser;
 
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
-    try_parse_grant_graveyard_keyword_to_target, try_parse_reanimator_aura_etb_effect,
-    try_parse_reanimator_aura_grant_etb_effect,
+    try_parse_reanimator_aura_etb_effect, try_parse_reanimator_aura_grant_etb_effect,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
@@ -1440,24 +1439,15 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
         } else {
-            // CR 702.138a: triggered one-shot grant of escape to a target
-            // graveyard card whose compound cost rides a continuation sentence
-            // (Desdemona, Freedom's Edge). Fail-closed: declines unless the
-            // whole two-sentence shape parses, so a card with an unparsed
-            // target filter stays an honest Unimplemented rather than misparsing.
-            try_parse_grant_graveyard_keyword_to_target(&effect_for_parse, AbilityKind::Spell)
+            // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
+            // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
+            // "it loses ... and gains ...", return/put the enchanted creature
+            // card to the battlefield under your control, attach the Aura to
+            // it, and register the leaves-battlefield sacrifice. Fail-closed:
+            // declines unless the entire body matches, so a deviating card
+            // stays an honest Unimplemented rather than misparsing.
+            try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
                 .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-                .or_else(|| {
-                    // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
-                    // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
-                    // "it loses ... and gains ...", return/put the enchanted creature
-                    // card to the battlefield under your control, attach the Aura to
-                    // it, and register the leaves-battlefield sacrifice. Fail-closed:
-                    // declines unless the entire body matches, so a deviating card
-                    // stays an honest Unimplemented rather than misparsing.
-                    try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
-                        .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-                })
                 .or_else(|| {
                     // CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a + CR 701.21a:
                     // whole-body reanimator-Aura GRANT-shape ETB effect (Necromancy) — a plain
