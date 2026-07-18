@@ -39,6 +39,7 @@ fn drain_until_ragavan_trigger_resolves(
             }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty()
+                    && treasure_count(runner.state(), P0) == 1
                     && expected_exiled_card
                         .is_none_or(|card| runner.state().objects[&card].zone == Zone::Exile)
                 {
