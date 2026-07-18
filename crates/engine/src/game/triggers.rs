@@ -628,23 +628,38 @@ fn latch_logical_zone_change_group_immediately_before(
 }
 
 #[allow(dead_code)] // Wired to true ChangeZone completion in Phase 1b step 15.
-fn trigger_explicitly_observes_origin(trigger: &TriggerDefinition, zone: Zone) -> bool {
-    let origin_mentions_zone = |origin: &OriginConstraint| match origin {
-        OriginConstraint::Equals(expected) => *expected == zone,
-        OriginConstraint::OneOf(zones) => zones.contains(&zone),
-        OriginConstraint::Any | OriginConstraint::NotEquals(_) => false,
+fn trigger_observes_zone_change(
+    trigger: &TriggerDefinition,
+    from: &Option<Zone>,
+    to: Zone,
+) -> bool {
+    let destination_matches = |destination: Option<Zone>, constraint: &OriginConstraint| {
+        destination.is_none_or(|expected| expected == to) && constraint.matches_from(&Some(to))
     };
 
     if !trigger.zone_change_clauses.is_empty() {
-        trigger
-            .zone_change_clauses
-            .iter()
-            .any(|clause| origin_mentions_zone(&clause.origin))
-    } else if !trigger.origin_zones.is_empty() {
-        trigger.origin_zones.contains(&zone)
-    } else {
-        trigger.origin == Some(zone)
+        return trigger.zone_change_clauses.iter().any(|clause| {
+            clause.origin.matches_from(from)
+                && destination_matches(clause.destination, &clause.destination_constraint)
+        });
     }
+
+    let origin_matches = if !trigger.origin_zones.is_empty() {
+        from.is_some_and(|zone| trigger.origin_zones.contains(&zone))
+    } else if let Some(origin) = trigger.origin {
+        from == &Some(origin)
+    } else if matches!(trigger.mode, TriggerMode::LeavesBattlefield) {
+        from == &Some(Zone::Battlefield)
+    } else {
+        true
+    };
+
+    origin_matches && destination_matches(trigger.destination, &trigger.destination_constraint)
+}
+
+#[allow(dead_code)] // Wired to true ChangeZone completion in Phase 1b step 15.
+fn zone_is_visible_to_all_players(zone: Zone) -> bool {
+    !matches!(zone, Zone::Hand | Zone::Library)
 }
 
 /// CR 603.10 + CR 603.10a: Classify the only zone-change observations that
@@ -655,6 +670,16 @@ pub(crate) fn trigger_observation_time(
     trigger: &TriggerDefinition,
     event: &GameEvent,
 ) -> TriggerObservationTime {
+    if matches!(
+        (&trigger.mode, event),
+        (
+            TriggerMode::Sacrificed | TriggerMode::SacrificedOnce,
+            GameEvent::PermanentSacrificed { .. }
+        )
+    ) {
+        return TriggerObservationTime::ImmediatelyBefore;
+    }
+
     let GameEvent::ZoneChanged { from, to, .. } = event else {
         return TriggerObservationTime::ImmediatelyAfter;
     };
@@ -671,16 +696,11 @@ pub(crate) fn trigger_observation_time(
         return TriggerObservationTime::ImmediatelyAfter;
     }
 
-    let looks_back = match from {
-        Some(Zone::Battlefield) => {
-            matches!(trigger.mode, TriggerMode::LeavesBattlefield)
-                || trigger_explicitly_observes_origin(trigger, Zone::Battlefield)
-        }
-        Some(Zone::Graveyard) if matches!(to, Zone::Hand | Zone::Library) => {
-            trigger_explicitly_observes_origin(trigger, Zone::Graveyard)
-        }
-        _ => false,
-    };
+    let observes_event = trigger_observes_zone_change(trigger, from, *to);
+    let looks_back = observes_event
+        && (matches!(from, Some(Zone::Battlefield) | Some(Zone::Graveyard))
+            || (matches!(to, Zone::Hand | Zone::Library)
+                && from.is_some_and(|zone| zone_is_visible_to_all_players(zone))));
 
     if looks_back {
         TriggerObservationTime::ImmediatelyBefore
@@ -8911,7 +8931,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
 pub mod tests {
     use super::*;
     use crate::game::filter::{matches_target_filter, FilterContext};
-    use crate::game::zones::create_object;
+    use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
@@ -9073,9 +9093,11 @@ pub mod tests {
 
     #[test]
     fn trigger_observation_time_classifies_cr_603_10_zone_changes() {
-        let mut leaves = TriggerDefinition::new(TriggerMode::ChangesZone);
-        leaves.origin = Some(Zone::Battlefield);
-        leaves.destination = Some(Zone::Graveyard);
+        let leaves = TriggerDefinition::new(TriggerMode::LeavesBattlefield);
+
+        let mut dies = TriggerDefinition::new(TriggerMode::ChangesZone);
+        dies.origin = Some(Zone::Battlefield);
+        dies.destination = Some(Zone::Graveyard);
 
         let mut enters = TriggerDefinition::new(TriggerMode::ChangesZone);
         enters.destination = Some(Zone::Battlefield);
@@ -9100,7 +9122,14 @@ pub mod tests {
             TriggerObservationTime::ImmediatelyAfter,
             "ETB observes the post-event battlefield"
         );
-        for destination in [Zone::Hand, Zone::Library] {
+        for destination in [
+            Zone::Hand,
+            Zone::Library,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Exile,
+            Zone::Command,
+        ] {
             assert_eq!(
                 trigger_observation_time(
                     &leaves_graveyard,
@@ -9110,10 +9139,158 @@ pub mod tests {
                 "graveyard-to-{destination:?} look-back"
             );
         }
+        let mut visible_to_hand = TriggerDefinition::new(TriggerMode::ChangesZone);
+        visible_to_hand.origin = Some(Zone::Exile);
+        visible_to_hand.destination = Some(Zone::Hand);
+        let mut visible_to_library = TriggerDefinition::new(TriggerMode::ChangesZone);
+        visible_to_library.origin = Some(Zone::Stack);
+        visible_to_library.destination = Some(Zone::Library);
+        let mut hidden_to_library = TriggerDefinition::new(TriggerMode::ChangesZone);
+        hidden_to_library.origin = Some(Zone::Hand);
+        hidden_to_library.destination = Some(Zone::Library);
+        assert_eq!(
+            trigger_observation_time(&leaves, &zone_change_event(Zone::Battlefield, Zone::Exile)),
+            TriggerObservationTime::ImmediatelyBefore,
+            "leaves-the-battlefield abilities look back"
+        );
+        assert_eq!(
+            trigger_observation_time(
+                &dies,
+                &zone_change_event(Zone::Battlefield, Zone::Graveyard)
+            ),
+            TriggerObservationTime::ImmediatelyBefore,
+            "battlefield-origin dies trigger looks back"
+        );
+        assert_eq!(
+            trigger_observation_time(
+                &visible_to_hand,
+                &zone_change_event(Zone::Exile, Zone::Hand)
+            ),
+            TriggerObservationTime::ImmediatelyBefore,
+            "a visible object put into hand looks back"
+        );
+        assert_eq!(
+            trigger_observation_time(
+                &visible_to_library,
+                &zone_change_event(Zone::Stack, Zone::Library)
+            ),
+            TriggerObservationTime::ImmediatelyBefore,
+            "a visible object put into a library looks back"
+        );
+        assert_eq!(
+            trigger_observation_time(
+                &hidden_to_library,
+                &zone_change_event(Zone::Hand, Zone::Library)
+            ),
+            TriggerObservationTime::ImmediatelyAfter,
+            "a hidden hand-to-library move is not the visible-object exception"
+        );
+        for mode in [TriggerMode::Sacrificed, TriggerMode::SacrificedOnce] {
+            assert_eq!(
+                trigger_observation_time(
+                    &TriggerDefinition::new(mode),
+                    &GameEvent::PermanentSacrificed {
+                        object_id: ObjectId(901),
+                        player_id: PlayerId(0),
+                    },
+                ),
+                TriggerObservationTime::ImmediatelyBefore,
+                "sacrifice triggers look back"
+            );
+        }
         assert_eq!(
             trigger_observation_time(&unrelated, &zone_change_event(Zone::Hand, Zone::Graveyard)),
             TriggerObservationTime::ImmediatelyAfter,
             "ordinary unrelated zone moves use post-event authority"
+        );
+    }
+
+    #[test]
+    fn immediately_after_latch_is_required_for_post_event_etb_authority() {
+        let mut state = setup();
+        let mut group = state.allocate_logical_zone_change_group(&[]);
+        latch_logical_zone_change_group_immediately_before(&mut state, &mut group);
+        assert!(
+            group
+                .immediately_before_latches()
+                .expect("pre-delivery latch")
+                .0
+                .is_empty(),
+            "before the entry, no ETB observer exists to retain"
+        );
+
+        let source = create_object(
+            &mut state,
+            CardId(905),
+            PlayerId(0),
+            "post-event ETB observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.batched = true;
+        trigger.destination = Some(Zone::Battlefield);
+        let source_object = state.objects.get_mut(&source).expect("source exists");
+        std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+        source_object.materialize_base_trigger_definitions();
+
+        group
+            .append_delivery_events(&[zone_change_event(Zone::Hand, Zone::Battlefield)])
+            .expect("retain the ETB event");
+        latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
+
+        let (after, _) = group
+            .immediately_after_latches()
+            .expect("post-delivery latch");
+        assert_eq!(after.len(), 1, "post-event observer is retained");
+        assert_eq!(after[0].definition_ref.source.object_id, source);
+    }
+
+    #[test]
+    fn immediately_before_latch_is_required_for_departed_ltb_authority() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(906),
+            PlayerId(0),
+            "departing LTB observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::LeavesBattlefield);
+        trigger.batched = true;
+        let source_object = state.objects.get_mut(&source).expect("source exists");
+        std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+        source_object.materialize_base_trigger_definitions();
+
+        let mut group = state.allocate_logical_zone_change_group(&[]);
+        latch_logical_zone_change_group_immediately_before(&mut state, &mut group);
+        let (before, _) = group
+            .immediately_before_latches()
+            .expect("pre-delivery latch");
+        assert_eq!(before.len(), 1, "pre-event LTB observer is retained");
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        group
+            .append_delivery_events(&events)
+            .expect("retain the battlefield departure");
+        latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
+
+        assert!(
+            group
+                .immediately_after_latches()
+                .expect("post-delivery latch")
+                .0
+                .is_empty(),
+            "the departed LTB observer no longer functions after the event"
+        );
+        assert!(
+            group
+                .immediately_before_latches()
+                .expect("pre-delivery latch remains authoritative")
+                .0[0]
+                .source_context_at(TriggerObservationTime::ImmediatelyBefore)
+                .is_some(),
+            "the pre-event source context remains available for the LTB observation"
         );
     }
 
