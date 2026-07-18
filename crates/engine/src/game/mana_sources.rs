@@ -19,6 +19,7 @@ use crate::types::ability::{
     PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use crate::types::card_type::CoreType;
+use crate::types::card_type::Supertype;
 use crate::types::game_state::{GameState, ProductionOverride};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
@@ -457,6 +458,83 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
     ManaSourcePenalty::None
 }
 
+/// CR 603.2e + CR 701.26: Controller-harm amount from a self-referential
+/// `TriggerMode::Taps` sibling trigger on `object_id` — City of Brass prints
+/// its self-damage as a *separate* "Whenever this land becomes tapped, it
+/// deals 1 damage to you" triggered ability (fires on ANY tap, not only a mana
+/// activation), rather than folding the damage into the mana ability's own
+/// resolution chain the way painlands do (Adarkar Wastes: "{T}: Add {W} or
+/// {U}. This land deals 1 damage to you." is ONE ability). Tarnished Citadel
+/// likewise has a mana penalty, but its colored mana ability embeds the damage
+/// in its own chain. `mana_ability_penalty` only walks a mana ability's own
+/// chain, so it never sees City of Brass's sibling trigger.
+///
+/// Returns `Some(amount)` when at least one such trigger is found (summed the
+/// same way `chain_harms_controller_amount` sums a single chain), `None` when
+/// the object carries no self-referential harmful `Taps` trigger.
+fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option<Option<u16>> {
+    let obj = state.objects.get(&object_id)?;
+    let mut harm_amounts = obj
+        .trigger_definitions
+        .iter_all()
+        .map(|entry| entry.definition())
+        .filter(|trigger| trigger.mode == TriggerMode::Taps)
+        .filter(|trigger| {
+            trigger.valid_card.as_ref().is_none_or(|filter| {
+                super::trigger_matchers::target_filter_matches_object(
+                    state, object_id, filter, object_id,
+                )
+            })
+        })
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .filter_map(chain_harms_controller_amount)
+        .peekable();
+    harm_amounts.peek()?;
+    Some(harm_amounts.fold(Some(0_u16), fold_amount))
+}
+
+/// CR 605.3b: Single classification authority for a mana-source OBJECT's full
+/// penalty axis — [`mana_ability_penalty`]'s ability-chain classification
+/// merged with any self-referential `Taps` sibling trigger that harms the
+/// controller ([`object_self_tap_harm_amount`]). This is the version every
+/// real consumer (auto-tap sort, the priority-meaningful gate,
+/// `UntapLandForMana` undoability) must call instead of `mana_ability_penalty`
+/// directly, so a City-of-Brass-shaped card can never be misclassified as
+/// `None` just because its damage lives on a sibling trigger instead of the
+/// mana ability's own chain.
+///
+/// A `Sacrifices`/`PaysLifeOnActivation` classification from the ability's own
+/// chain is already worse than or equal to anything a sibling `Taps` trigger
+/// could add, so those short-circuit unchanged. Otherwise, a sibling harm
+/// amount folds into (or replaces) `DealsDamageOnResolution`.
+pub(crate) fn object_mana_ability_penalty(
+    state: &GameState,
+    object_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> ManaSourcePenalty {
+    let own = mana_ability_penalty(ability);
+    if !has_tap_component(&ability.cost) {
+        return own;
+    }
+    if matches!(
+        own,
+        ManaSourcePenalty::Sacrifices | ManaSourcePenalty::PaysLifeOnActivation { .. }
+    ) {
+        return own;
+    }
+    match object_self_tap_harm_amount(state, object_id) {
+        Some(sibling_amount) => ManaSourcePenalty::DealsDamageOnResolution {
+            fixed_amount: match own {
+                ManaSourcePenalty::DealsDamageOnResolution { fixed_amount } => {
+                    fold_amount(fixed_amount, sibling_amount)
+                }
+                _ => sibling_amount,
+            },
+        },
+        None => own,
+    }
+}
+
 /// CR 119.3 (life) / CR 120.3 (damage → life loss): The benefit twin of
 /// [`effect_controller_harm_amount`]. Returns `true` iff a single `Effect`
 /// favors the player who caused the trigger (the tapper): opponent-scoped
@@ -465,13 +543,14 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
 ///
 /// Exact AST shapes (verified against `types/ability.rs`): opponent scope is
 /// `TargetFilter::Typed(TypedFilter { controller: Some(ControllerRef::Opponent),
-/// .. })` — there is NO bare `TargetFilter::Opponent` variant (cf.
-/// `player_matches_filter`). `DamageEachPlayer { player_filter: Opponent }` is
-/// Zhur-Taa Druid's live shape. `GainLife.player` is a `TargetFilter` that
-/// serde-defaults to `Controller` (never `None` in the AST). Everything else —
-/// self / triggering-player scope, `Unimplemented`, `GenericEffect`, and every
-/// unmodeled shape — falls through the documented default arm to `false`
-/// (default-pass). Broadening beyond CR 119 / CR 120 is a deliberate follow-up.
+/// .. })`; the bare `TargetFilter::Opponent` variant identifies an announcing
+/// player for opponent-choice target slots and is intentionally not a damage
+/// scope. `DamageEachPlayer { player_filter: Opponent }` is Zhur-Taa Druid's live
+/// shape. `GainLife.player` is a `TargetFilter` that serde-defaults to
+/// `Controller` (never `None` in the AST). Everything else — self /
+/// triggering-player scope, `Unimplemented`, `GenericEffect`, and every unmodeled
+/// shape — falls through the documented default arm to `false` (default-pass).
+/// Broadening beyond CR 119 / CR 120 is a deliberate follow-up.
 fn effect_benefits_trigger_controller(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -558,7 +637,8 @@ pub(crate) fn beneficial_non_mana_tap_trigger_sources(
         .filter(|object_id| {
             state.objects.get(object_id).is_some_and(|obj| {
                 obj.controller == player
-                    && obj.trigger_definitions.iter_all().any(|trigger| {
+                    && obj.trigger_definitions.iter_all().any(|entry| {
+                        let trigger = entry.definition();
                         is_non_mana_tap_trigger(trigger)
                             && trigger_chain_benefits_controller(trigger)
                     })
@@ -1096,7 +1176,11 @@ pub(crate) fn feasible_mana_capacity(
     match explicit_max {
         Some(amount) => amount,
         // CR 305.1: Subtype-only basic-land fallback (same as `max_mana_yield`).
-        None if !activatable_mana_options(state, object_id, controller).is_empty() => 1,
+        None if obj.card_types.core_types.contains(&CoreType::Land)
+            && !activatable_mana_options(state, object_id, controller).is_empty() =>
+        {
+            1
+        }
         None => 0,
     }
 }
@@ -1349,35 +1433,39 @@ fn group_profiles_by_object(
     grouped.into_iter().collect()
 }
 
-fn apply_profile_kind(
+fn profile_applications(
     profile: &ActivatableManaProfileKind,
     requirements: &[Vec<ManaType>],
-) -> Option<(Vec<Vec<ManaType>>, u32)> {
+) -> Vec<(Vec<Vec<ManaType>>, u32)> {
     match profile {
         ActivatableManaProfileKind::Exact(types) => {
             let mut remaining = requirements.to_vec();
             for mana_type in types {
-                let pos = remaining.iter().position(|opts| opts.contains(mana_type))?;
+                let Some(pos) = remaining.iter().position(|opts| opts.contains(mana_type)) else {
+                    return Vec::new();
+                };
                 remaining.remove(pos);
             }
-            Some((remaining, types.len() as u32))
+            vec![(remaining, types.len() as u32)]
         }
-        ActivatableManaProfileKind::AnyOneColor { count, options } => {
-            options.iter().find_map(|&color| {
-                combination_assign(*count, std::slice::from_ref(&color), requirements)
+        ActivatableManaProfileKind::AnyOneColor { count, options } => options
+            .iter()
+            .flat_map(|&color| {
+                combination_assignments(*count, std::slice::from_ref(&color), requirements)
             })
-        }
+            .collect(),
         ActivatableManaProfileKind::AnyCombination { count, options } => {
-            combination_assign(*count, options, requirements)
+            combination_assignments(*count, options, requirements)
         }
-        ActivatableManaProfileKind::CombinationChoices(choices) => {
-            choices.iter().find_map(|choice| {
-                apply_profile_kind(
+        ActivatableManaProfileKind::CombinationChoices(choices) => choices
+            .iter()
+            .flat_map(|choice| {
+                profile_applications(
                     &ActivatableManaProfileKind::Exact(choice.clone()),
                     requirements,
                 )
             })
-        }
+            .collect(),
     }
 }
 
@@ -1398,7 +1486,7 @@ fn assign_profiles_to_requirements(
         return Some(consumed);
     }
     for profile in &objects[object_index].1 {
-        if let Some((remaining, consumed)) = apply_profile_kind(profile, &requirements) {
+        for (remaining, consumed) in profile_applications(profile, &requirements) {
             if let Some(rest) =
                 assign_profiles_to_requirements(objects, object_index + 1, remaining)
             {
@@ -1409,21 +1497,26 @@ fn assign_profiles_to_requirements(
     None
 }
 
-fn combination_assign(
+/// CR 106.1 + CR 601.2g: Enumerate the colored shards one flexible source can
+/// cover, allowing later sources to cover the remainder. A one-mana
+/// `AnyOneColor` source must not be rejected simply because the spell has two
+/// colored shards; Relic of Legends plus a dual land is the common case.
+fn combination_assignments(
     count: u32,
     options: &[ManaType],
     requirements: &[Vec<ManaType>],
-) -> Option<(Vec<Vec<ManaType>>, u32)> {
+) -> Vec<(Vec<Vec<ManaType>>, u32)> {
     if requirements.is_empty() {
         // All shards are covered; any leftover `count` is simply surplus mana
         // the player never produces (or lets drain). Rejecting over-production
         // here would falsely mark e.g. a power-3 combination source as unable
         // to pay a two-shard cost.
-        return Some((Vec::new(), 0));
+        return vec![(Vec::new(), 0)];
     }
     if count == 0 {
-        return None;
+        return vec![(requirements.to_vec(), 0)];
     }
+    let mut applications = Vec::new();
     for (index, payment_options) in requirements.iter().enumerate() {
         for &color in payment_options {
             if !options.contains(&color) {
@@ -1431,14 +1524,14 @@ fn combination_assign(
             }
             let mut next_requirements = requirements.to_vec();
             next_requirements.remove(index);
-            if let Some((remaining, inner)) =
-                combination_assign(count - 1, options, &next_requirements)
+            for (remaining, inner) in
+                combination_assignments(count - 1, options, &next_requirements)
             {
-                return Some((remaining, 1 + inner));
+                applications.push((remaining, 1 + inner));
             }
         }
     }
-    None
+    applications
 }
 
 fn assign_profiles_to_shards(
@@ -1676,10 +1769,17 @@ fn scan_mana_abilities(
             continue;
         }
 
-        let penalty = mana_ability_penalty(ability);
+        let penalty = object_mana_ability_penalty(state, object_id, ability);
         let source_could_produce_two_or_more_colors =
             source_could_produce_two_or_more_colors(state, object_id, controller);
-        for row in emit_source_rows(state, controller, object_id, ability_index, ability) {
+        for row in emit_source_rows(
+            state,
+            controller,
+            object_id,
+            ability_index,
+            ability,
+            require_current_payability,
+        ) {
             let option = ManaSourceOption {
                 object_id,
                 ability_index: Some(ability_index),
@@ -1713,6 +1813,7 @@ fn emit_source_rows(
     object_id: ObjectId,
     _ability_index: usize,
     ability: &AbilityDefinition,
+    require_current_payability: bool,
 ) -> Vec<SourceRow> {
     let Effect::Mana {
         produced,
@@ -1757,6 +1858,21 @@ fn emit_source_rows(
                 atomic_combination: (types.len() > 1).then_some(types),
                 restrictions: concrete_restrictions.clone(),
             }]
+        }
+        // CR 106.5: a pure chosen-color source with no color chosen cannot
+        // produce mana. Display/preview paths may show all five colors, but
+        // auto-tap must not plan a payment around an undefined mana type.
+        ManaProduction::ChosenColor {
+            fixed_alternative: None,
+            ..
+        } if !require_current_payability
+            && state
+                .objects
+                .get(&object_id)
+                .and_then(|obj| obj.chosen_color())
+                .is_none() =>
+        {
+            Vec::new()
         }
         _ => mana_options_from_production(state, controller, object_id, produced)
             .into_iter()
@@ -1937,6 +2053,18 @@ fn mana_options_from_production(
         // option set and contributes nothing to mana-source analysis.
         ManaProduction::TriggerEventManaType => Vec::new(),
     }
+}
+
+/// CR 205.4g / CR 106.3 / CR 107.4h: a permanent with the "snow" supertype is a snow
+/// source; mana produced by its abilities is snow mana (spendable for {S}). Reads the
+/// LAYERED (post-CR-613) supertype set on the object, so continuously-granted Snow counts
+/// and continuously-removed Snow does not (CR 205.4b). A missing object / ObjectId(0)
+/// sentinel is not a snow source.
+pub(crate) fn source_is_snow(state: &GameState, source_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| obj.card_types.supertypes.contains(&Supertype::Snow))
 }
 
 pub(crate) fn source_could_produce_two_or_more_colors(
@@ -2140,7 +2268,7 @@ pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> 
             state.objects.get(object_id).is_some_and(|obj| {
                 obj.trigger_definitions
                     .iter_all()
-                    .any(|trigger| trigger.mode == TriggerMode::TapsForMana)
+                    .any(|entry| entry.definition.mode == TriggerMode::TapsForMana)
             })
         })
         .collect()
@@ -2180,7 +2308,8 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
         // control an aura attached to your land (e.g., via Aura Theft), and
         // the trigger still fires for the tapping player when the land is
         // tapped. `taps_for_mana_card_matches` handles the attachment check.
-        for trigger in obj.trigger_definitions.iter_all() {
+        for entry in obj.trigger_definitions.iter_all() {
+            let trigger = entry.definition();
             if trigger.mode != TriggerMode::TapsForMana {
                 continue;
             }
@@ -2237,7 +2366,8 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
         if obj.controller != controller {
             continue;
         }
-        for trigger in obj.trigger_definitions.iter_all() {
+        for entry in obj.trigger_definitions.iter_all() {
+            let trigger = entry.definition();
             if trigger.mode != TriggerMode::TapsForMana {
                 continue;
             }
@@ -3265,6 +3395,161 @@ mod tests {
         assert!(
             penalty.priority_amount() > fixed_max.priority_amount(),
             "unknown amount (None) must sort strictly worse than any known amount (conservative worst)"
+        );
+    }
+
+    /// Issue #5912: City of Brass prints its self-damage as a *separate*
+    /// "Whenever this land becomes tapped, it deals 1 damage to you" trigger
+    /// (`TriggerMode::Taps`, `valid_card: SelfRef`), NOT folded into the
+    /// `{T}: Add one mana of any color.` ability's own resolution chain like a
+    /// painland. `mana_ability_penalty` only walks the ability's own chain, so
+    /// it misclassifies this shape as `None` (byte-identical to a basic land) —
+    /// this is the reach-guard proving the gap exists before the fix.
+    #[test]
+    fn city_of_brass_ability_alone_misclassifies_as_none() {
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: ManaColor::ALL.to_vec(),
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+
+        assert_eq!(
+            mana_ability_penalty(&ability),
+            ManaSourcePenalty::None,
+            "the ability's own chain is pure Effect::Mana with no embedded damage"
+        );
+    }
+
+    /// Issue #5912: [`object_mana_ability_penalty`] must see past the ability
+    /// chain and classify a City-of-Brass-shaped object (mana ability + sibling
+    /// self-referential `Taps` damage trigger) as `DealsDamageOnResolution`, so
+    /// auto-tap sorts it worse than a truly free source (Island) for the same
+    /// generic-mana slot.
+    #[test]
+    fn object_mana_ability_penalty_sees_city_of_brass_self_tap_damage_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let city_of_brass = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "City of Brass".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_index;
+        {
+            let obj = state.objects.get_mut(&city_of_brass).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: ManaColor::ALL.to_vec(),
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap);
+            ability_index = obj.abilities.len();
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Taps)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                            damage_source: None,
+                            excess: None,
+                        },
+                    )),
+            );
+        }
+
+        let ability = state.objects.get(&city_of_brass).unwrap().abilities[ability_index].clone();
+        let penalty = object_mana_ability_penalty(&state, city_of_brass, &ability);
+        assert_eq!(
+            penalty,
+            ManaSourcePenalty::DealsDamageOnResolution {
+                fixed_amount: Some(1)
+            },
+            "the sibling self-tap damage trigger must be folded into the classification"
+        );
+        assert!(
+            penalty.priority_amount() > ManaSourcePenalty::None.priority_amount(),
+            "must sort strictly worse than a truly free source (Island) in the same tier_byte"
+        );
+    }
+
+    /// A sibling `Taps` trigger fires only when the selected mana ability taps
+    /// its source. A no-cost mana ability on the same City-of-Brass-shaped
+    /// object must retain its own penalty classification rather than borrowing
+    /// damage from an event it cannot cause.
+    #[test]
+    fn object_mana_ability_penalty_ignores_self_tap_trigger_for_no_tap_ability() {
+        let mut state = GameState::new_two_player(42);
+        let city_of_brass = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "City of Brass".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_index;
+        {
+            let obj = state.objects.get_mut(&city_of_brass).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: ManaColor::ALL.to_vec(),
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            );
+            ability_index = obj.abilities.len();
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Taps)
+                    .valid_card(TargetFilter::SelfRef)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                            damage_source: None,
+                            excess: None,
+                        },
+                    )),
+            );
+        }
+
+        let ability = state.objects.get(&city_of_brass).unwrap().abilities[ability_index].clone();
+        assert_eq!(
+            object_mana_ability_penalty(&state, city_of_brass, &ability),
+            ManaSourcePenalty::None,
+            "a no-tap mana ability cannot fire the sibling Taps trigger"
         );
     }
 
@@ -4353,5 +4638,51 @@ mod tests {
 
         let sources = beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0));
         assert_eq!(sources, vec![dork], "only P0's controlled source is listed");
+    }
+
+    /// CR 205.4b + CR 205.4g: `source_is_snow` reads the LAYERED (post-CR-613)
+    /// supertype set, not the printed base set. A permanent whose Snow supertype
+    /// was continuously granted (base lacks it, layered set contains it) is a
+    /// snow source. This is the discriminating fixture for "reads layered, not
+    /// base": a `base_card_types`-reading implementation would return `false`.
+    #[test]
+    fn source_is_snow_reads_layered_not_base_supertypes() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Continuously-Snowed Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        // Printed (base) supertypes deliberately LACK Snow ...
+        obj.base_card_types = obj.card_types.clone();
+        // ... while the layered result (post-CR-613 continuous grant) HAS Snow.
+        obj.card_types.supertypes.push(Supertype::Snow);
+
+        // Non-vacuity guard: the base set must genuinely lack Snow, so a
+        // base-reading implementation would fail this test.
+        assert!(
+            !obj.base_card_types.supertypes.contains(&Supertype::Snow),
+            "fixture invalid: base supertypes must NOT contain Snow for this to \
+             discriminate layered vs. base reads",
+        );
+        assert!(
+            source_is_snow(&state, id),
+            "a permanent continuously granted the Snow supertype is a snow source \
+             (CR 205.4g); source_is_snow must read the layered supertype set",
+        );
+    }
+
+    /// A missing object / `ObjectId(0)` sentinel is not a snow source.
+    #[test]
+    fn source_is_snow_false_for_missing_object() {
+        let state = GameState::new_two_player(42);
+        assert!(
+            !source_is_snow(&state, ObjectId(0)),
+            "the ObjectId(0) sentinel (and any absent object) is not a snow source",
+        );
     }
 }

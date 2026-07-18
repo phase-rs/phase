@@ -894,6 +894,149 @@ pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
         .collect()
 }
 
+/// CR 702.85c + CR 105.2: Parse a spell-cast keyword grant whose granted
+/// keyword(s) are QUOTED — "<subject> spells you cast [from <zone>] [with mana
+/// value N or greater] have \"<K0>[, <K1>...]\"" — into one `CastWithKeyword`
+/// static per listed keyword. Repeats are preserved (Zhulodok, Void Gorger's
+/// "Cascade, cascade" yields two `Cascade` grants; the runtime fires one Cascade
+/// trigger per granted keyword instance, CR 702.85a). The subject filter is
+/// parsed by the single authority [`super::keyword_grant::parse_spells_have_keyword`],
+/// re-invoked per keyword with a reconstructed unquoted grant so every subject
+/// qualifier (type, from-zone, mana-value) stays consistent with the
+/// single-keyword path. A leading color-quality prefix — which that handler
+/// cannot see once "spells" is consumed — is peeled here and folded into each
+/// grant's affected filter, keeping a "colorless spells" grant colorless-scoped.
+///
+/// Declines unless the grant is quoted AND every listed token is a keyword the
+/// single handler accepts, so quoted non-keyword grants (a granted triggered
+/// ability) and ordinary unquoted single-keyword grants fall through to their
+/// own handlers.
+fn parse_spells_have_quoted_keyword_list(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+
+    // Split "<subject>" from the quoted keyword list at the grant verb + opening
+    // quote. Requiring the opening quote scopes this handler to the quoted-grant
+    // class and leaves unquoted single-keyword grants to `parse_spells_have_keyword`.
+    // `scan_preceded` yields the post-match remainder (the keyword list), unlike
+    // `scan_split_at_phrase` which returns the slice still starting at the match.
+    // It scans at word boundaries and trims leading whitespace, so the grant-verb
+    // tags carry no leading space; `subject` is trimmed to drop the trailing one.
+    let (subject, _grant_verb, after_quote) = nom_primitives::scan_preceded(&lower, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("have \""),
+            tag("has \""),
+            tag("gain \""),
+            tag("gains \""),
+        ))
+        .parse(i)
+    })?;
+    let subject = subject.trim();
+
+    // The keyword list runs up to the closing quote; consume the quote with a
+    // combinator, after which only an optional trailing period may follow.
+    let (after_close, inner) = take_until::<_, _, OracleError<'_>>("\"")
+        .parse(after_quote)
+        .ok()?;
+    let (residue, _) = tag::<_, _, OracleError<'_>>("\"").parse(after_close).ok()?;
+    if !residue.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    // Split the quoted list into keyword names, validating each is a keyword
+    // (`parse_keyword_name`) so a quoted *ability* grant declines here.
+    let inner = inner.trim().trim_end_matches('.').trim();
+    let (list_rest, keyword_names) = separated_list1(
+        alt((
+            tag::<_, _, OracleError<'_>>(", and "),
+            tag(", "),
+            tag(" and "),
+        )),
+        nom_primitives::parse_keyword_name,
+    )
+    .parse(inner)
+    .ok()?;
+    if !list_rest.trim().is_empty() || keyword_names.is_empty() {
+        return None;
+    }
+
+    // Peel an optional leading color-quality qualifier (CR 105.2). The delegated
+    // subject parser only sees the text before "spells you cast", so a bare
+    // "colorless"/"monocolored"/"multicolored" prefix would otherwise be dropped.
+    let (subject_no_color, color_prop) = peel_color_quality_prefix(subject);
+
+    // Delegate the subject-filter parse per keyword by re-forming an unquoted
+    // single-keyword grant. Declines the whole line if any token isn't accepted.
+    let mut defs = Vec::with_capacity(keyword_names.len());
+    for name in keyword_names {
+        let reconstructed = format!("{subject_no_color} have {name}");
+        let tp = TextPair::new(&reconstructed, &reconstructed);
+        let mut def = super::keyword_grant::parse_spells_have_keyword(&tp, &reconstructed)?;
+        if let Some(prop) = color_prop.clone() {
+            if let Some(affected) = def.affected.take() {
+                def = def.affected(add_property(affected, prop));
+            }
+        }
+        // Preserve the full printed line as the static's description.
+        def = def.description(text.to_string());
+        defs.push(def);
+    }
+
+    // CR 113.2c: A quoted list may REPEAT a keyword ("Cascade, cascade" —
+    // CR 702.85c), but only for keywords whose duplicate cast-time instances the
+    // runtime actually preserves and consumes (`Keyword::cast_merge_preserves_
+    // instances` — the same authority `casting.rs::requires_per_instance_keyword`
+    // gates the merge on). A duplicate of any other keyword that reaches here (e.g.
+    // "Exalted, exalted" — Exalted is in KEYWORDS and functions separately by rule
+    // but its cast-grant count is unconsumed) would emit two grants that
+    // `merge_spell_keyword` coalesces by kind, silently under-counting. Decline the
+    // whole line rather than over-claim a grammar the runtime cannot realize.
+    let mut seen: Vec<&Keyword> = Vec::new();
+    for def in &defs {
+        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+            continue;
+        };
+        if seen.contains(&keyword) && !keyword.cast_merge_preserves_instances() {
+            return None;
+        }
+        seen.push(keyword);
+    }
+
+    Some(defs)
+}
+
+/// Peel a leading color-quality qualifier ("colorless"/"monocolored"/
+/// "multicolored") from a lowercase subject, returning the remainder and the
+/// matching `FilterProp::ColorCount` (CR 105.2). Mirrors the color-quality
+/// prefixes `oracle_target` recognizes before a type word.
+fn peel_color_quality_prefix(subject: &str) -> (&str, Option<FilterProp>) {
+    alt((
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+            tag::<_, _, OracleError<'_>>("colorless "),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            },
+            tag("monocolored "),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            },
+            tag("multicolored "),
+        ),
+    ))
+    .parse(subject)
+    .map(|(rest, prop)| (rest, Some(prop)))
+    .unwrap_or((subject, None))
+}
+
 /// CR 611.3 + CR 613.1: Split a static line into its sentence segments, then
 /// parse each as an independent continuous static. Returns `Some(defs)` only
 /// when the line splits into 2+ segments and EVERY segment yields at least one
@@ -1299,10 +1442,245 @@ fn parse_keyword_grant_from_exiled_object_static(text: &str) -> Option<Vec<Stati
     Some(defs)
 }
 
+/// CR 508.1c + CR 509.1b: predicate combinator for the defensive-flyer compound
+/// "can't attack you or block creatures you control" (Storm, Windrider). Returns
+/// the attack-defender scope (the `you`/`you or …` filter) and the block-target
+/// filter (the creatures the subject may not block). Requires a defender scope —
+/// a bare "can't attack" (no `you`) is a blanket restriction, not this template.
+fn parse_cant_attack_you_or_block_predicate(
+    input: &str,
+) -> OracleResult<
+    '_,
+    (
+        Option<crate::types::triggers::AttackTargetFilter>,
+        TargetFilter,
+    ),
+> {
+    let (input, _) = tag("can't attack").parse(input)?;
+    let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
+    // CR 508.1c: the defended scope ("you") is what keeps this from being a
+    // blanket "can't attack" — bail out to the existing single-clause parsers
+    // when the attack half has no defender.
+    if defended.is_none() {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    let (input, _) = tag(" or block ").parse(input)?;
+    // CR 509.1b: the block target ("creatures you control") is parsed by the
+    // full type-phrase grammar so the class covers any "block <filter>" object.
+    let (block_filter, rest) = parse_type_phrase(input);
+    if rest.len() >= input.len() || matches!(block_filter, TargetFilter::Any) {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    Ok((rest, (defended, block_filter)))
+}
+
+/// CR 508.1c + CR 509.1b: "<subject> can't attack you or block creatures you
+/// control" (Storm, Windrider). The single-clause "<subject> can't attack you"
+/// already parses (`parse_subject_combat_rule_static`); the trailing "or block
+/// …" made that parser reject, and the line then collapsed to a self-scoped
+/// blanket `CantAttack` in the generic dispatch arm — so the source creature
+/// itself could not attack. Emit the two correctly-scoped statics instead:
+///
+///  1. a defender-scoped `CantAttack` (the subject can't attack the source's
+///     controller, per `attack_defended`, but may still attack anyone else); and
+///  2. a `BlockRestriction` whose filter is the negation of the block target —
+///     "can block only things that are NOT creatures you control" is exactly
+///     "can't block creatures you control" (CR 509.1b enforcement in
+///     `combat.rs` allows a block only when the attacker matches the filter).
+///
+/// Both are scoped to the subject filter, so this is a building block for the
+/// defensive-flyer class, not a single card.
+fn parse_subject_cant_attack_you_or_block_static(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (subject_lower, (defended, block_filter), rest) =
+        nom_primitives::scan_preceded(lower, parse_cant_attack_you_or_block_predicate)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+
+    let attack = StaticDefinition::new(StaticMode::CantAttack)
+        .affected(affected.clone())
+        .attack_defended(defended)
+        .description(text.to_string());
+    let block = StaticDefinition::new(StaticMode::BlockRestriction {
+        filter: TargetFilter::Not {
+            filter: Box::new(block_filter),
+        },
+    })
+    .affected(affected)
+    .description(text.to_string());
+    Some(vec![attack, block])
+}
+
+/// CR 613.1f (Layer 6) + CR 105.2: a per-recipient COLOR-qualified keyword grant —
+/// "[subject] has <K0> if it's <C0>, <K1> if it's <C1>, …, and <Kn> if it's <Cn>."
+/// (Scion of Draco: "Each creature you control has vigilance if it's white, hexproof
+/// if it's blue, lifelink if it's black, first strike if it's red, and trample if
+/// it's green.").
+///
+/// Each `if it's <color>` qualifies ONLY the creature its own keyword lands on, so the
+/// color folds into that branch's AFFECTED FILTER as `FilterProp::HasColor` — the same
+/// fold [`parse_continuous_subject_filter`] already applies to a color-named subject
+/// ("White creatures you control") — and never becomes a `StaticCondition`, which
+/// would gate every listed keyword on one shared board check. One `StaticDefinition`
+/// per listed pair, mirroring the per-keyword expansion
+/// [`parse_keyword_grant_from_exiled_object_static`] emits for the Rayami class.
+///
+/// Declines (returns `None`) unless the predicate is ENTIRELY such a list, so a plain
+/// keyword grant ("Creatures you control have flying") is left to its own path.
+fn parse_color_conditional_keyword_grants(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (subject_tp, predicate_tp) = tp
+        .split_around(" has ")
+        .or_else(|| tp.split_around(" have "))?;
+    let base = parse_continuous_subject_filter(subject_tp.original.trim())?;
+    let predicate = predicate_tp.lower.trim().trim_end_matches('.').trim();
+    let (rest, grants) = parse_color_conditional_keyword_list(predicate).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(
+        grants
+            .into_iter()
+            .map(|(keyword, color)| {
+                StaticDefinition::continuous()
+                    .affected(add_property(base.clone(), FilterProp::HasColor { color }))
+                    .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                    .description(text.to_string())
+            })
+            .collect(),
+    )
+}
+
+/// The `"<keyword> if it's <color>"` enumeration, one or more items joined by the
+/// ordinary list connectors. Ordered longest-first so an Oxford `", and "` wins over a
+/// bare `", "` and never leaves a dangling comma on an item.
+fn parse_color_conditional_keyword_list(
+    input: &str,
+) -> OracleResult<'_, Vec<(Keyword, ManaColor)>> {
+    separated_list1(
+        color_conditional_keyword_separator,
+        parse_color_conditional_keyword_grant,
+    )
+    .parse(input)
+}
+
+fn color_conditional_keyword_separator(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", and "),
+            tag(", "),
+            tag(" and "),
+        )),
+    )
+    .parse(input)
+}
+
+/// One `<keyword> if it's <color>` pair. The keyword is read by the shared
+/// `parse_keyword_name` atom (so every keyword the engine knows is accepted) and the
+/// color by the shared `parse_color` atom — no bespoke vocabulary here.
+fn parse_color_conditional_keyword_grant(input: &str) -> OracleResult<'_, (Keyword, ManaColor)> {
+    let (i, name) = nom_primitives::parse_keyword_name(input)?;
+    let keyword: Keyword = name
+        .parse()
+        .map_err(|_| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))?;
+    let (i, _) = alt((tag(" if it's "), tag(" if it\u{2019}s "))).parse(i)?;
+    let (i, color) = nom_primitives::parse_color(i)?;
+    Ok((i, (keyword, color)))
+}
+
+/// CR 104.2b + CR 104.3e + CR 810.8a: Compound player-scope game-outcome lock —
+/// "<player-scope> can't lose|win the game and <player-scope> can't win|lose
+/// the game" — lowered to one `CantLoseTheGame`/`CantWinTheGame` static per
+/// conjunct, each carrying its own subject's affected filter (Platinum Angel:
+/// "You can't lose the game and your opponents can't win the game."; Abyssal
+/// Persecutor reverses the modes; Gideon of the Trials' emblem wraps the same
+/// sentence in an "as long as" gate handled by the inverted-split arm in
+/// `parse_static_line_multi_dispatch`). Requires ≥ 2 conjuncts and consumes
+/// the whole line, so single-mode lines keep their existing
+/// `parse_static_line_inner` arms and rider-bearing one-shot effect sentences
+/// (Angel's Grace: "You can't lose the game this turn and …") fall through
+/// untouched.
+pub(crate) fn parse_cant_win_lose_compound_statics(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
+    // Subject axis: the player scope each conjunct names. Filter shapes match
+    // the single-mode arms' `parse_player_scope_filter` output so both runtime
+    // readers (`static_affects_player`, `static_filter_matches`) see the same
+    // vocabulary. "your opponents " precedes "you " in source order for
+    // clarity only — `tag("you ")` requires a trailing space, so it cannot
+    // claim the "your…" prefix.
+    fn parse_subject(i: &str) -> OracleResult<'_, TargetFilter> {
+        alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("your opponents "),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                tag("you "),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default()),
+                alt((tag("each player "), tag("players "))),
+            ),
+        ))
+        .parse(i)
+    }
+    // Predicate axis: which game outcome is locked (CR 104.2b win effects /
+    // CR 104.3e loss effects; CR 810.8a is the "can't win"/"can't lose"
+    // effect language).
+    fn parse_predicate(i: &str) -> OracleResult<'_, StaticMode> {
+        preceded(
+            alt((tag("can't "), tag("cannot "))),
+            alt((
+                value(StaticMode::CantLoseTheGame, tag("lose the game")),
+                value(StaticMode::CantWinTheGame, tag("win the game")),
+            )),
+        )
+        .parse(i)
+    }
+
+    let (rest, first) = (parse_subject, parse_predicate).parse(lower).ok()?;
+    let (rest, tail) = many1(preceded(tag(" and "), (parse_subject, parse_predicate)))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(
+        std::iter::once(first)
+            .chain(tail)
+            .map(|(affected, mode)| {
+                StaticDefinition::new(mode)
+                    .affected(affected)
+                    .description(text.to_string())
+            })
+            .collect(),
+    )
+}
+
 fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
+
+    // CR 508.1c + CR 509.1b: "<subject> can't attack you or block creatures you
+    // control" — two scoped statics (defender-scoped CantAttack + BlockRestriction).
+    // Must precede generic combat-rule dispatch, which would collapse the whole
+    // line to a self-scoped blanket CantAttack (Storm, Windrider).
+    if let Some(defs) = parse_subject_cant_attack_you_or_block_static(&stripped, &lower) {
+        return defs;
+    }
 
     // CR 604.1 + CR 614.1c + CR 122.1 + CR 202.3: Tiered ETB-counter
     // replacement static. The otherwise sentence is a semantic companion to
@@ -1342,6 +1720,40 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // the shared condition on the first keyword only (the observed bug: the grant
     // applies unconditionally to every keyword).
     if let Some(defs) = parse_keyword_grant_from_exiled_object_static(&stripped) {
+        return defs;
+    }
+
+    // CR 101.2 + CR 109.4 + CR 601.3a (Ward of Bones): "Each opponent who controls
+    // more <T0> than you can't cast <T0> spells. The same is true for <T1> and
+    // <T2>." — one INDEPENDENT relative-count cast prohibition per type, each gated
+    // on that type's own count. Must precede generic multi-sentence splitting,
+    // which would split the "the same is true for" continuation into a bogus
+    // standalone sentence and strand the count on the first type (the observed bug:
+    // every type gated on the single creature count).
+    if let Some(defs) = parse_relative_count_typed_cast_prohibitions(&stripped) {
+        return defs;
+    }
+
+    // CR 613.1f + CR 105.2 (Scion of Draco): "<subject> has <K0> if it's <C0>, …, and
+    // <Kn> if it's <Cn>." — the COLOR-qualified sibling of the exiled-object grant
+    // above: one independent grant per listed pair, each color folded into its own
+    // branch's affected filter. Must precede the single-sentence pipeline, which reads
+    // only the first keyword and drops the "if it's <color>" qualifier — the observed
+    // bug (the whole static vanished, so the card did nothing).
+    if let Some(defs) = parse_color_conditional_keyword_grants(&stripped) {
+        return defs;
+    }
+
+    // CR 702.85a + CR 702.85c + CR 613.1: "<subject> spells you cast [...] have
+    // "<K0>[, <K1>...]"" — a spell-cast keyword grant whose granted keyword(s)
+    // are QUOTED and may repeat (Zhulodok, Void Gorger: "... have 'Cascade,
+    // cascade.'"). The single unquoted keyword grant is owned by
+    // `parse_spells_have_keyword`; this sibling expands the quoted list into one
+    // `CastWithKeyword` static per listed keyword — repeats included, since
+    // granted-keyword multiplicity is meaningful (the runtime fires one Cascade
+    // trigger per granted instance). Mirrors the exiled-object / color-conditional
+    // grant handlers above (one static per listed keyword).
+    if let Some(defs) = parse_spells_have_quoted_keyword_list(&stripped) {
         return defs;
     }
 
@@ -1395,6 +1807,29 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
                 def.description = Some(stripped.to_string());
             }
             return defs;
+        }
+        // CR 104.2b + CR 104.3e + CR 611.3a: conditional game-outcome lock —
+        // "As long as <condition>, you can't lose the game and your opponents
+        // can't win the game" (Gideon of the Trials' emblem). Each conjunct
+        // becomes its own condition-gated static. CR 611.3a: fail CLOSED — an
+        // unrecognized condition falls through to the existing fallback (the
+        // line keeps its honest `Condition_AsLongAs` swallow flag) rather
+        // than emitting an unconditional outcome lock:
+        // `StaticCondition::Unrecognized` evaluates as always-true in the
+        // layer system, which for "you can't lose the game" would be
+        // game-breaking. Mirrors the CantPlayLand trailing-gate precedent in
+        // `dispatch.rs`.
+        let effect_lower = split.effect_text.to_lowercase();
+        if let Some(mut defs) =
+            parse_cant_win_lose_compound_statics(&split.effect_text, &effect_lower)
+        {
+            if let Some(condition) = parse_static_condition(&split.condition_text) {
+                for def in &mut defs {
+                    def.condition = Some(condition.clone());
+                    def.description = Some(stripped.to_string());
+                }
+                return defs;
+            }
         }
     }
 
@@ -1515,6 +1950,16 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         ];
     }
 
+    // CR 104.2b + CR 104.3e + CR 810.8a: "<player-scope> can't lose/win the
+    // game and <player-scope> can't win/lose the game" — one game-outcome-lock
+    // static per conjunct, each with its own player scope (Platinum Angel
+    // wording class, both mode orders; emblem bodies such as Gideon of the
+    // Trials' reach this via `try_parse_emblem_creation` →
+    // `parse_static_line_multi`). Sibling of the life-lock compound above.
+    if let Some(defs) = parse_cant_win_lose_compound_statics(&stripped, &lower) {
+        return defs;
+    }
+
     let tp = TextPair::new(&stripped, &lower);
     let attached_activation_compound_modes =
         attached_subject_filter(&tp).and_then(|(_, predicate)| {
@@ -1560,6 +2005,8 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
                 who: ProhibitionScope::AllPlayers,
                 source_filter,
                 exemption: parse_cant_be_activated_exemption_in_text(&lower),
+                // CR 606.2: not kind-narrowed — blocks any activated ability.
+                kind: None,
             })
             .affected(affected)
             .description(stripped.to_string()),
@@ -3388,6 +3835,24 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
         return Some(filter);
     }
 
+    // NOTE: deliberately NOT wiring `parse_owned_off_battlefield_subject_filter`
+    // in here as a general fallback. It's safe under
+    // `parse_spells_have_keyword`'s `CastWithKeyword` mode (casting is checked
+    // directly against the zone a card sits in, so an off-battlefield filter is
+    // meaningful there), but every OTHER caller of this function feeds a
+    // `Continuous` static whose modifications apply through the Layer system —
+    // which only iterates battlefield objects. `game/off_zone_characteristics.rs`
+    // is the sole off-battlefield continuous-effect path, and its
+    // `supports_off_zone_keyword_query` allowlist is keyword-only (`AddKeyword`
+    // and its siblings) — it has no notion of `AddSubtype`/`AddType`/etc. Folding
+    // an off-battlefield conjunct into a general filter here would let a
+    // type-changing static (e.g. Dune Chanter's "land cards you own that aren't
+    // on the battlefield are Deserts...") claim an `affected` scope the engine
+    // cannot actually realize, which is worse than leaving the line
+    // `Unimplemented` — it would silently under-deliver while looking parsed.
+    // Revisit once an off-zone characteristics path exists for non-keyword
+    // modifications.
+
     let (filter, rest) = parse_type_phrase(trimmed);
     if rest.trim().is_empty() {
         // CR 109.2: a bare "spell(s)" head noun in a static-ability subject
@@ -3402,6 +3867,66 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     }
 
     parse_rule_static_subject_filter(trimmed)
+}
+
+/// CR 109.4 + CR 109.5: "`<type>` cards you own that aren't on the battlefield"
+/// — an off-battlefield-scoped subject naming cards by ownership rather than
+/// control, since CR 109.4 objects that are neither on the stack nor the
+/// battlefield have no controller, so CR 109.5 falls back to reading "you"/
+/// "your" as the object's owner instead. Resolves the leading type phrase and
+/// attaches `ControllerRef::You` (read as "owned by you" off the battlefield)
+/// plus `FilterProp::InAnyZone` over every non-battlefield, non-stack zone this
+/// class of card names (hand/graveyard/exile/command — no printed card in this
+/// shape also reaches into the hidden library zone).
+///
+/// Extracted from [`super::keyword_grant::parse_spells_have_keyword`]'s Pattern
+/// 2 (Leyline of Anticipation: "Creature cards you own that aren't on the
+/// battlefield have flash.") as a standalone, fully-anchored subject parser —
+/// still used only by that caller today. `CastWithKeyword` statics are checked
+/// directly against a card's actual zone (casting inherently happens from
+/// off-battlefield zones), so this filter's off-battlefield scope is realized
+/// there; `Continuous`-mode statics are not (see the caller-side note in
+/// [`parse_continuous_subject_filter`]), so do NOT wire this into that
+/// function's general dispatch chain until an off-zone characteristics path
+/// exists for non-keyword modifications.
+///
+/// All-consuming: the ENTIRE (trimmed, period-stripped) subject must be exactly
+/// `<type phrase>` + `"cards you own that aren't on the battlefield"`, with
+/// nothing before the type phrase and nothing after the fixed suffix. A
+/// partial/substring match (trailing qualifier, leading noise) declines rather
+/// than silently truncating.
+pub(crate) fn parse_owned_off_battlefield_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let trimmed = subject.trim().trim_end_matches('.');
+    let lower = trimmed.to_lowercase();
+    let (prefix, remainder) = nom_primitives::scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("cards you own that aren't on the battlefield").parse(i)
+    })?;
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "cards you own that aren't on the battlefield",
+    ))
+    .parse(remainder)
+    .ok()?;
+    let type_part = &trimmed[..prefix.len()];
+    let (base_filter, rest) = parse_type_phrase(type_part);
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    // A bare, untyped "cards you own that aren't on the battlefield" (empty
+    // type_part) doesn't resolve to a `Typed` filter — pass it through unscoped
+    // rather than force a controller/zone property onto a non-Typed variant.
+    // No printed card in this class omits the type qualifier, so this arm is
+    // unreached in practice; kept to preserve the pre-extraction behavior of
+    // `parse_spells_have_keyword`'s Pattern 2 exactly.
+    match base_filter {
+        TargetFilter::Typed(mut typed) => {
+            typed = typed.controller(ControllerRef::You);
+            typed.properties.push(FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command],
+            });
+            Some(TargetFilter::Typed(typed))
+        }
+        other => Some(other),
+    }
 }
 
 /// CR 109.5: Keep the subject descriptor paired with its "you control" suffix

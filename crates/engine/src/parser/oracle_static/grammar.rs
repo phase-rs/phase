@@ -39,6 +39,8 @@ pub(crate) fn lower_rule_static(
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
                 exemption: ActivationExemption::None,
+                // CR 606.2: not kind-narrowed — blocks any activated ability.
+                kind: None,
             })
             .affected(affected)
             .description(description.to_string())

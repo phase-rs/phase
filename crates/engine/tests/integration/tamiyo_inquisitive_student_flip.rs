@@ -29,11 +29,14 @@
 //! CR 603.2: the third-draw trigger fires only on the third draw of the turn.
 
 use engine::game::effects::draw::resolve as resolve_draw;
+use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::stack::resolve_top;
 use engine::game::triggers::process_triggers;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -78,6 +81,37 @@ fn tamiyo_third_draw_returns_transformed_not_stranded_in_exile() {
     }
 
     let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tamiyo)
+        .unwrap()
+        .back_face = Some(BackFaceData {
+        name: "Tamiyo, Seasoned Scholar".to_string(),
+        power: None,
+        toughness: None,
+        loyalty: Some(2),
+        defense: None,
+        card_types: CardType {
+            supertypes: vec![Supertype::Legendary],
+            core_types: vec![CoreType::Planeswalker],
+            subtypes: vec!["Tamiyo".to_string()],
+        },
+        mana_cost: ManaCost::default(),
+        keywords: vec![],
+        abilities: vec![],
+        trigger_definitions: Default::default(),
+        replacement_definitions: Default::default(),
+        static_definitions: Default::default(),
+        color: vec![ManaColor::Blue],
+        printed_ref: None,
+        modal: None,
+        additional_cost: None,
+        strive_cost: None,
+        casting_restrictions: vec![],
+        casting_options: vec![],
+        layout_kind: None,
+    });
 
     // Precondition: Tamiyo is on the battlefield, front-face (not transformed).
     {
@@ -147,12 +181,9 @@ fn tamiyo_third_draw_returns_transformed_not_stranded_in_exile() {
         Zone::Exile,
         "the source must not be left in exile after the return resolves"
     );
-    // NB: this Oracle-text-synthesized Tamiyo has no printed back face, so the
-    // `enter_transformed` flip has nothing to swap to and `obj.transformed`
-    // stays false — that AST flag (ChangeZone { enter_transformed: true }) is
-    // asserted directly by the parser-shape test
-    // `tamiyo_flip_return_transformed_binds_to_self_ref` in oracle_trigger.rs.
-    // What this runtime test discriminates is the binding bug: the return moves
-    // the source back to the battlefield instead of fizzling on an unresolvable
-    // `TriggeringSource`.
+    assert!(
+        obj.transformed,
+        "Tamiyo must enter showing her planeswalker back face"
+    );
+    assert_eq!(obj.name, "Tamiyo, Seasoned Scholar");
 }

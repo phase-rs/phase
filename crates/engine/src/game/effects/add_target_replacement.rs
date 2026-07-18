@@ -257,9 +257,11 @@ pub fn resolve(
                     // CR 611.2b lapse, so base never accumulates a stale runtime
                     // rider. printed_cards.rs is the only intrinsic base-write
                     // precedent; there is no additive-runtime base-push
-                    // precedent, so this exception is documented here. This
-                    // gate-scoping keeps transient riders (die-exile, Crafty
-                    // Cutpurse, end-of-turn) live-only and untouched.
+                    // precedent, so this exception is documented here.
+                    // A turn-bound die-exile rider must also survive a layer
+                    // reset: a damaged creature can gain/lose characteristics
+                    // or enter combat before it dies. Cleanup prunes this
+                    // narrowly scoped base copy at end of turn.
                     //
                     // Acknowledged out-of-scope edges (NOT fixed here): (1) Cleave
                     // re-baselining only touches spells on the stack (casting.rs)
@@ -269,10 +271,15 @@ pub fn resolve(
                     // base+live replacement defs, CR 708.2a) would end the lock
                     // early — an under-prune, strictly safer than a revival; rare
                     // corner, out of scope.
-                    let install_to_base = matches!(
-                        replacement.condition,
-                        Some(ReplacementCondition::ControllerControlsSource { .. })
-                    );
+                    let durable_die_exile =
+                        crate::game::printed_cards::is_runtime_target_die_exile_replacement(
+                            &replacement,
+                        );
+                    let install_to_base = durable_die_exile
+                        || matches!(
+                            replacement.condition,
+                            Some(ReplacementCondition::ControllerControlsSource { .. })
+                        );
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         if install_to_base {
                             std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
@@ -292,6 +299,7 @@ pub fn resolve(
                         replacement.damage_target_filter =
                             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                                 player: DamageTargetPlayerScope::Specific(player),
+                                permanent_type: None,
                             });
                     }
                     state.pending_damage_replacements.push(replacement);
@@ -567,7 +575,8 @@ mod tests {
         assert_eq!(
             pending.damage_target_filter,
             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                player: DamageTargetPlayerScope::Specific(PlayerId(1))
+                player: DamageTargetPlayerScope::Specific(PlayerId(1)),
+                permanent_type: None,
             })
         );
         assert_eq!(

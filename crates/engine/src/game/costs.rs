@@ -47,7 +47,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, PendingCostMoveCompletion, PendingCostMoveResume, WaitingFor,
+    GameState, ManaAbilityResume, PendingCostMoveCompletion, PendingCostMoveResume, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -56,8 +56,8 @@ use crate::types::zones::Zone;
 
 use super::casting::{
     ability_mana_payment_excluded_sources, can_pay_effect_mana_cost_after_auto_tap,
-    find_eligible_discard_targets, pay_ability_mana_cost, pay_ability_mana_cost_excluding,
-    pay_effect_mana_cost,
+    find_eligible_discard_targets, mana_ability_cost_payment_is_paused, pay_ability_mana_cost,
+    pay_ability_mana_cost_excluding, pay_effect_mana_cost_with_resume,
 };
 use super::engine::EngineError;
 use super::filter::FilterContext;
@@ -184,7 +184,6 @@ pub(crate) enum PaymentScope<'a> {
         /// spend restrictions (Quinjet → power-up) gate eligible mana. Resolution
         /// scope never carries a tag (resolution-time costs aren't activations).
         ability_tag: Option<crate::types::ability::AbilityTag>,
-        cost_move_handling: ActivationCostMoveHandling,
     },
     /// `ability` is normally the PAYER-ADJUSTED `ResolvedAbility` clone
     /// (controller swapped to the resolved payer, per `effects/pay.rs`). All
@@ -202,15 +201,6 @@ pub(crate) enum PaymentScope<'a> {
         ability: &'a ResolvedAbility,
         cost_move_root: ResolutionCostMoveRoot,
     },
-}
-
-/// Whether an activation root retains the typed continuation for a self-move
-/// cost replacement. Only mana abilities use the synchronous path because they
-/// have no stack-root continuation until the dedicated ManaAbilityPayment unit.
-#[derive(Clone, Copy)]
-pub(crate) enum ActivationCostMoveHandling {
-    OutcomeAware,
-    ManaAbilitySynchronous,
 }
 
 /// The owner of a resolution-time non-self cost move. Only an accepted
@@ -275,6 +265,87 @@ fn combine_remaining_costs(
     }
 }
 
+/// CR 118.12 + CR 605.3b + CR 616.1: A paused mana-source cost must retain
+/// the *whole* concrete suffix that remains unpaid.  In particular, a dynamic
+/// mana leaf is resolved before it becomes the leading component of the
+/// serialized `EffectPayCost` root.
+fn resume_cost_with_concrete_mana(
+    resume_cost: Option<&AbilityCost>,
+    mana_cost: crate::types::mana::ManaCost,
+) -> AbilityCost {
+    let concrete = AbilityCost::Mana { cost: mana_cost };
+    let Some(resume_cost) = resume_cost else {
+        return concrete;
+    };
+    let mut flattened = Vec::new();
+    flatten_cost_components(resume_cost, &mut flattened);
+    let first = flattened
+        .first_mut()
+        .expect("a mana payment suffix is never empty");
+    if !matches!(
+        first,
+        AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. }
+    ) {
+        unreachable!("a mana payment root must begin with mana");
+    }
+    *first = concrete;
+    combine_remaining_costs(None, &flattened).expect("a concrete mana suffix is never empty")
+}
+
+/// Flatten nested Composite nodes only while constructing a serialized payment
+/// suffix. The runtime payment order is unchanged; this makes every later leaf
+/// explicit so an interrupted nested Composite cannot drop an outer sibling.
+fn flatten_cost_components(cost: &AbilityCost, components: &mut Vec<AbilityCost>) {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            for cost in costs {
+                flatten_cost_components(cost, components);
+            }
+        }
+        cost => components.push(cost.clone()),
+    }
+}
+
+/// CR 118.12 + CR 605.3b + CR 616.1: A nested composite carries the unpaid
+/// suffix of each enclosing composite into a paused mana-payment root. The
+/// root begins with `active_cost`; anything after that prefix belongs to an
+/// enclosing composite and remains unpaid when a child component pauses.
+fn enclosing_composite_suffix(
+    active_cost: &AbilityCost,
+    resume_cost: Option<&AbilityCost>,
+) -> Vec<AbilityCost> {
+    let Some(resume_cost) = resume_cost else {
+        return Vec::new();
+    };
+
+    let mut active_components = Vec::new();
+    flatten_cost_components(active_cost, &mut active_components);
+    let mut resume_components = Vec::new();
+    flatten_cost_components(resume_cost, &mut resume_components);
+    resume_components
+        .strip_prefix(active_components.as_slice())
+        .expect("an enclosing resume cost begins with its active composite")
+        .to_vec()
+}
+
+/// CR 118.12 + CR 605.3b + CR 616.1: Builds the concrete unpaid suffix for a
+/// composite component, including every enclosing composite's later leaves.
+fn composite_cost_suffix(
+    leading: Option<&AbilityCost>,
+    following: &[AbilityCost],
+    enclosing_suffix: &[AbilityCost],
+) -> Option<AbilityCost> {
+    let mut components = Vec::new();
+    if let Some(leading) = leading {
+        flatten_cost_components(leading, &mut components);
+    }
+    for cost in following {
+        flatten_cost_components(cost, &mut components);
+    }
+    components.extend(enclosing_suffix.iter().cloned());
+    combine_remaining_costs(None, &components)
+}
+
 /// Resolve a cost's dynamic amount in the active scope (plan §2): activation
 /// uses `resolve_quantity` (player + source); resolution uses
 /// `resolve_quantity_with_targets` against the payer-adjusted ability so
@@ -294,6 +365,70 @@ fn resolve_cost_quantity(
     }
 }
 
+/// CR 118.12 + CR 605.3b: A generic `Effect::PayCost` owns the exact
+/// payer-adjusted resolved ability and concrete mana cost while an auto-tapped
+/// mana source is paused by a replacement effect. Other resolution roots (in
+/// particular `UnlessPayment`) retain their own typed outer context.
+fn effect_pay_cost_mana_resume(
+    state: &GameState,
+    payer: PlayerId,
+    scope: &PaymentScope,
+    cost: AbilityCost,
+) -> Option<ManaAbilityResume> {
+    // CR 601.2h + CR 605.3b + CR 616.1: A manual mana-payment window is
+    // likewise already an authoritative root.  Preserve it verbatim while a
+    // source selected from that window pauses, so replacement resolution
+    // returns the player to the same payment flow rather than to priority.
+    if let WaitingFor::ManaPayment {
+        player,
+        convoke_mode,
+    } = &state.waiting_for
+    {
+        return Some(ManaAbilityResume::ManaPayment {
+            outer_player: Some(*player),
+            convoke_mode: *convoke_mode,
+        });
+    }
+    // CR 118.12 + CR 605.3b + CR 616.1: `UnlessPayment` is already the
+    // authoritative outer payment root.  A mana source paused while funding
+    // it must return to that exact prompt, not manufacture an Effect::PayCost
+    // retry that would bypass the player's submitted unless-payment flow.
+    if let WaitingFor::UnlessPayment {
+        player,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+    } = &state.waiting_for
+    {
+        return Some(ManaAbilityResume::UnlessPayment {
+            outer_player: Some(*player),
+            cost: Box::new(cost.clone()),
+            pending_effect: pending_effect.clone(),
+            trigger_event: trigger_event.clone(),
+            effect_description: effect_description.clone(),
+            remaining: remaining.clone(),
+        });
+    }
+    let PaymentScope::Resolution {
+        ability,
+        cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+    } = scope
+    else {
+        return None;
+    };
+    let WaitingFor::Priority { player: return_to } = &state.waiting_for else {
+        return None;
+    };
+    Some(ManaAbilityResume::EffectPayCost {
+        payer,
+        return_to: *return_to,
+        ability: Box::new((*ability).clone()),
+        cost: Box::new(cost),
+    })
+}
+
 /// CR 601.2h + CR 616.1: Pause cost payment for a competing replacement effect.
 pub(crate) fn pause_cost_payment_for_replacement_choice(
     state: &mut GameState,
@@ -303,8 +438,9 @@ pub(crate) fn pause_cost_payment_for_replacement_choice(
 }
 
 /// CR 601.2h + CR 602.2b + CR 616.1: Move a self-referential activation cost
-/// through the zone-change pipeline. The continuation has no `PendingCast`
-/// until the activation caller attaches it after this payment function returns.
+/// through the zone-change pipeline. The activation caller replaces the
+/// provisional continuation with its typed root after this payment function
+/// returns.
 fn move_self_activation_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -327,7 +463,13 @@ fn move_self_activation_cost(
                 destination,
                 completion: PendingCostMoveCompletion::FinishPending,
             });
-            pause_cost_payment_for_replacement_choice(state, choice_player);
+            // A mandatory replacement may have delivered this cost move and
+            // surfaced its own post-effect prompt. Only a still-pending CR
+            // 616.1 ordering choice is synthesized here; never clobber the
+            // live delivery-tail prompt.
+            if state.pending_replacement.is_some() {
+                pause_cost_payment_for_replacement_choice(state, choice_player);
+            }
             Some(PaymentOutcome::Paused {
                 remaining_cost: None,
             })
@@ -404,28 +546,6 @@ pub(crate) fn resume_replacement_may_cost_move(
     super::engine_replacement::handle_replacement_choice(state, 0, events)
 }
 
-/// Pays a mana ability's synchronous auto-payable cost components. This is the
-/// only activation root that may bypass the zone-move pipeline until it owns a
-/// dedicated typed continuation.
-pub(crate) fn pay_mana_ability_cost_synchronously(
-    state: &mut GameState,
-    player: PlayerId,
-    source_id: ObjectId,
-    cost: &AbilityCost,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
-    pay_ability_cost_for_activation_with_cost_move_replacement(
-        state,
-        player,
-        source_id,
-        cost,
-        None,
-        ActivationCostMoveHandling::ManaAbilitySynchronous,
-        events,
-    )
-    .map(|_| ())
-}
-
 pub fn pay_ability_cost_for_activation(
     state: &mut GameState,
     player: PlayerId,
@@ -440,7 +560,6 @@ pub fn pay_ability_cost_for_activation(
         source_id,
         cost,
         ability_tag,
-        ActivationCostMoveHandling::OutcomeAware,
         events,
     )
 }
@@ -451,7 +570,6 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     source_id: ObjectId,
     cost: &AbilityCost,
     ability_tag: Option<crate::types::ability::AbilityTag>,
-    cost_move_handling: ActivationCostMoveHandling,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -464,8 +582,8 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
         &PaymentScope::Activation {
             excluded_sources: &excluded_sources,
             ability_tag,
-            cost_move_handling,
         },
+        None,
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
     // payment failure to an illegal action — the authority's `Failed` is the
@@ -534,6 +652,7 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
             ability,
             cost_move_root,
         },
+        Some(cost),
     )
 }
 
@@ -544,6 +663,7 @@ fn pay_ability_cost_inner(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
     scope: &PaymentScope,
+    resume_cost: Option<&AbilityCost>,
 ) -> Result<PaymentOutcome, EngineError> {
     // CR 118.3 / CR 601.2h: at resolution there is no interactive interceptor or
     // activation-window mana detour, so any shape outside the resolution-payable
@@ -635,9 +755,33 @@ fn pay_ability_cost_inner(
             // auto-tap path. Pre-flight then pay; either step failing is a
             // payment failure (not an engine error).
             PaymentScope::Resolution { .. } => {
-                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, cost)
-                    || pay_effect_mana_cost(state, player, source_id, cost, events).is_err()
+                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, cost) {
+                    return Ok(payment_failed("insufficient mana"));
+                }
+                let resume = effect_pay_cost_mana_resume(
+                    state,
+                    player,
+                    scope,
+                    resume_cost_with_concrete_mana(resume_cost, cost.clone()),
+                );
+                if pay_effect_mana_cost_with_resume(
+                    state,
+                    player,
+                    source_id,
+                    cost,
+                    resume.as_ref(),
+                    events,
+                )
+                .is_err()
                 {
+                    // CR 118.12 + CR 605.3b + CR 616.1: The mana ability
+                    // cursor, rather than the unless-payment handler, owns
+                    // the replacement choice and exact resume state.
+                    if mana_ability_cost_payment_is_paused(state) {
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
                     return Ok(payment_failed("insufficient mana"));
                 }
             }
@@ -655,18 +799,56 @@ fn pay_ability_cost_inner(
             PaymentScope::Resolution { .. } => {
                 let amount = resolve_cost_quantity(state, quantity, player, source_id, scope);
                 let mana_cost = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
-                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, &mana_cost)
-                    || pay_effect_mana_cost(state, player, source_id, &mana_cost, events).is_err()
+                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, &mana_cost) {
+                    return Ok(payment_failed("insufficient mana"));
+                }
+                let resume = effect_pay_cost_mana_resume(
+                    state,
+                    player,
+                    scope,
+                    resume_cost_with_concrete_mana(resume_cost, mana_cost.clone()),
+                );
+                if pay_effect_mana_cost_with_resume(
+                    state,
+                    player,
+                    source_id,
+                    &mana_cost,
+                    resume.as_ref(),
+                    events,
+                )
+                .is_err()
                 {
+                    // CR 118.12 + CR 605.3b + CR 616.1: See the concrete
+                    // mana-cost arm above; the replacement-aware cursor owns
+                    // this pause as well.
+                    if mana_ability_cost_payment_is_paused(state) {
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
                     return Ok(payment_failed("insufficient mana"));
                 }
             }
         },
         AbilityCost::Composite { costs } => {
+            let enclosing_suffix = enclosing_composite_suffix(cost, resume_cost);
             for (index, sub_cost) in costs.iter().enumerate() {
                 let prior_waiting_for = state.waiting_for.clone();
-                let outcome =
-                    pay_ability_cost_inner(state, player, source_id, sub_cost, events, scope)?;
+                let sub_resume_cost = composite_cost_suffix(
+                    Some(sub_cost),
+                    &costs[index + 1..],
+                    &enclosing_suffix,
+                )
+                .expect("a composite component always has an unpaid suffix");
+                let outcome = pay_ability_cost_inner(
+                    state,
+                    player,
+                    source_id,
+                    sub_cost,
+                    events,
+                    scope,
+                    matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
+                )?;
                 match outcome {
                     PaymentOutcome::Paid => {
                         // CR 118.12: Some resolution-time sub-costs acquire a
@@ -678,15 +860,32 @@ fn pay_ability_cost_inner(
                             && state.waiting_for != prior_waiting_for
                         {
                             return Ok(PaymentOutcome::Paused {
-                                remaining_cost: combine_remaining_costs(None, &costs[index + 1..]),
+                                remaining_cost: composite_cost_suffix(
+                                    None,
+                                    &costs[index + 1..],
+                                    &enclosing_suffix,
+                                ),
                             });
                         }
                     }
                     PaymentOutcome::Paused { remaining_cost } => {
+                        // CR 118.12 + CR 605.3b + CR 616.1: A typed mana root
+                        // already owns this component and every later component.
+                        // Never copy that suffix into the generic effect
+                        // continuation: it would retry a paid prefix or let the
+                        // rider run before the unpaid cost is settled.
+                        if matches!(scope, PaymentScope::Resolution { .. })
+                            && mana_ability_cost_payment_is_paused(state)
+                        {
+                            return Ok(PaymentOutcome::Paused {
+                                remaining_cost: None,
+                            });
+                        }
                         return Ok(PaymentOutcome::Paused {
-                            remaining_cost: combine_remaining_costs(
-                                remaining_cost,
+                            remaining_cost: composite_cost_suffix(
+                                remaining_cost.as_ref(),
                                 &costs[index + 1..],
+                                &enclosing_suffix,
                             ),
                         });
                     }
@@ -840,28 +1039,14 @@ fn pay_ability_cost_inner(
                     )));
                 }
             }
-            let PaymentScope::Activation {
-                cost_move_handling,
-                ..
-            } = scope
+            let PaymentScope::Activation { .. } = scope
             else {
                 unreachable!("self-referential exile costs are not payable at resolution")
             };
-            match cost_move_handling {
-                ActivationCostMoveHandling::OutcomeAware => {
-                    if let Some(outcome) = move_self_activation_cost(
-                        state,
-                        player,
-                        source_id,
-                        Zone::Exile,
-                        events,
-                    ) {
-                        return Ok(outcome);
-                    }
-                }
-                ActivationCostMoveHandling::ManaAbilitySynchronous => {
-                    super::zones::move_to_zone(state, source_id, Zone::Exile, events);
-                }
+            if let Some(outcome) =
+                move_self_activation_cost(state, player, source_id, Zone::Exile, events)
+            {
+                return Ok(outcome);
             }
         }
         // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
@@ -1246,28 +1431,14 @@ fn pay_ability_cost_inner(
                     "cannot return source to hand: source is not in the required zone",
                 ));
             }
-            let PaymentScope::Activation {
-                cost_move_handling,
-                ..
-            } = scope
+            let PaymentScope::Activation { .. } = scope
             else {
                 unreachable!("self-referential return costs are not payable at resolution")
             };
-            match cost_move_handling {
-                ActivationCostMoveHandling::OutcomeAware => {
-                    if let Some(outcome) = move_self_activation_cost(
-                        state,
-                        player,
-                        source_id,
-                        Zone::Hand,
-                        events,
-                    ) {
-                        return Ok(outcome);
-                    }
-                }
-                ActivationCostMoveHandling::ManaAbilitySynchronous => {
-                    super::zones::move_to_zone(state, source_id, Zone::Hand, events);
-                }
+            if let Some(outcome) =
+                move_self_activation_cost(state, player, source_id, Zone::Hand, events)
+            {
+                return Ok(outcome);
             }
         }
         // Other cost types require interactive resolution and are intercepted
@@ -1390,7 +1561,8 @@ pub(crate) fn can_pay(
                     source_id,
                     cost,
                     &mut Vec::new(),
-                    scope
+                    scope,
+                    None,
                 ),
                 Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. })
             );
@@ -1939,7 +2111,6 @@ mod tests {
             let scope = PaymentScope::Activation {
                 excluded_sources: &excluded,
                 ability_tag: None,
-                cost_move_handling: ActivationCostMoveHandling::OutcomeAware,
             };
             assert!(
                 can_pay(&scenario.state, P0, src, &cost, &scope),
@@ -1949,7 +2120,8 @@ mod tests {
             // must mean the authority does not report Failed.
             let mut sim = scenario.state.clone();
             let outcome =
-                pay_ability_cost_inner(&mut sim, P0, src, &cost, &mut Vec::new(), &scope).unwrap();
+                pay_ability_cost_inner(&mut sim, P0, src, &cost, &mut Vec::new(), &scope, None)
+                    .unwrap();
             assert!(
                 !matches!(outcome, PaymentOutcome::Failed { .. }),
                 "can_pay==true but pay_cost returned Failed for {cost:?}"
@@ -1968,12 +2140,18 @@ mod tests {
         let scope = PaymentScope::Activation {
             excluded_sources: &excluded,
             ability_tag: None,
-            cost_move_handling: ActivationCostMoveHandling::OutcomeAware,
         };
         let mut events = Vec::new();
-        let outcome =
-            pay_ability_cost_inner(&mut scenario.state, P0, src, &cost, &mut events, &scope)
-                .unwrap();
+        let outcome = pay_ability_cost_inner(
+            &mut scenario.state,
+            P0,
+            src,
+            &cost,
+            &mut events,
+            &scope,
+            None,
+        )
+        .unwrap();
         assert!(matches!(outcome, PaymentOutcome::Paid));
         assert!(!scenario.state.objects.get(&src).unwrap().tapped);
         assert!(events.iter().any(
@@ -1982,8 +2160,15 @@ mod tests {
 
         // CR 107.6: a permanent that's already untapped can't be untapped again
         // to pay the cost — the second payment must FAIL, not silently no-op.
-        let result =
-            pay_ability_cost_inner(&mut scenario.state, P0, src, &cost, &mut events, &scope);
+        let result = pay_ability_cost_inner(
+            &mut scenario.state,
+            P0,
+            src,
+            &cost,
+            &mut events,
+            &scope,
+            None,
+        );
         assert!(
             result.is_err(),
             "paying {{Q}} on an already-untapped permanent must be rejected (CR 107.6)"
@@ -2041,7 +2226,6 @@ mod tests {
             &PaymentScope::Activation {
                 excluded_sources: &excluded,
                 ability_tag: None,
-                cost_move_handling: ActivationCostMoveHandling::OutcomeAware,
             },
         )
     }
@@ -2634,6 +2818,7 @@ mod tests {
             &waterbend,
             &mut Vec::new(),
             &scope,
+            None,
         )
         .unwrap();
         assert!(
@@ -2650,6 +2835,7 @@ mod tests {
             &AbilityCost::Tap,
             &mut Vec::new(),
             &scope,
+            None,
         )
         .unwrap();
         assert!(

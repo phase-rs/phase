@@ -117,7 +117,23 @@ pub(super) fn handle_replacement_choice(
     index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Err(EngineError::InvalidAction(
+            "replacement choice has no pending replacement".to_string(),
+        ));
+    };
+    let option_count = super::replacement::pending_replacement_option_count(state, pending);
+    if index >= option_count {
+        return Err(EngineError::InvalidAction(format!(
+            "replacement choice index {index} is outside 0..{option_count}"
+        )));
+    }
     let replacement_action_event_start = events.len();
+    let parked_search_found_replacement = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::SearchFound { .. }))
+        .cloned();
     let pending_was_counter_move = state
         .pending_replacement
         .as_ref()
@@ -411,6 +427,34 @@ pub(super) fn handle_replacement_choice(
                 // does not prevent the turn-up), so there is nothing to apply on
                 // the post-replacement Execute path here.
                 ProposedEvent::TurnFaceUp { .. } => {}
+                // CR 701.3a + CR 616.1: Attach accepted after a replacement
+                // ordering choice (2+ "as it becomes attached, choose …"
+                // definitions on the same attachment). Unreachable today — the
+                // parser pool has exactly one `ReplacementEvent::Attached`
+                // producer (Psychic Paper) — but wired for correctness if a
+                // future card shares the class. `source_id` for the
+                // `EffectResolved` push is approximated as `attachment_id`:
+                // `ProposedEvent::Attach` doesn't carry the original ability's
+                // source, which only differs from the attachment for a
+                // non-Equip "attach ~ to" effect (e.g. a triggered ability on
+                // another permanent) — no such card has BOTH that shape AND a
+                // second Attached-event replacement to order against today.
+                ProposedEvent::Attach {
+                    attachment_id,
+                    target_id,
+                    ..
+                } => {
+                    if let Some(waiting_for) = crate::game::effects::attach::deliver_attach(
+                        state,
+                        attachment_id,
+                        target_id,
+                        attachment_id,
+                        events,
+                    ) {
+                        state.waiting_for = waiting_for;
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
                 // CR 121.1 + CR 614.6 + CR 614.11: Draw accepted after
                 // replacement choice — delegate to the shared post-replacement
                 // helper so library-zone move + per-turn accounting match the
@@ -556,12 +600,18 @@ pub(super) fn handle_replacement_choice(
                     // already no-ops on a missing player, so emitting unconditionally
                     // would report mana that was never added).
                     if state.players.iter().any(|p| p.id == player_id) {
+                        // CR 107.4h + CR 106.3: mana produced by a snow source is snow mana
+                        // (payable for {S}), even when the ProduceMana replacement surfaces as
+                        // an interactive choice.
+                        let source_is_snow =
+                            crate::game::mana_sources::source_is_snow(state, source_id);
                         for _ in 0..count {
                             let unit = crate::types::mana::ManaUnit {
                                 color: mana_type,
                                 source_id,
                                 pip_id: crate::types::mana::ManaPipId(0),
-                                supertype: None,
+                                supertype: source_is_snow
+                                    .then_some(crate::types::mana::ManaSupertype::Snow),
                                 source_could_produce_two_or_more_colors: false,
                                 restrictions: Vec::new(),
                                 grants: Vec::new(),
@@ -665,6 +715,21 @@ pub(super) fn handle_replacement_choice(
                         false,
                         "CoinFlip replacement reached the optional-choice resume path"
                     );
+                }
+                // CR 701.23a + CR 614.6: modified SearchFound events are delivered by
+                // the search-resolution continuation. This arm is reached only
+                // when CR 616 ordering required a replacement choice; the bound
+                // modified event remains authoritative and is not rescanned.
+                event @ ProposedEvent::SearchFound { .. } => {
+                    return match super::engine_resolution_choices::resume_search_found_after_replacement(
+                        state, event, events,
+                    ) {
+                        Ok(waiting) => Ok(waiting),
+                        Err(error) => {
+                            state.pending_replacement = parked_search_found_replacement;
+                            Err(error)
+                        }
+                    };
                 }
             }
 
@@ -874,6 +939,13 @@ pub(super) fn handle_replacement_choice(
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_continuation.is_some()
                     || state.pending_change_zone_iteration.is_some())
+                // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
+                // owns the unpaid cost suffix.  Do not drain the ordinary
+                // effect rider before that typed root has settled it.
+                && !matches!(
+                    state.pending_cost_move_resume,
+                    Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+                )
             {
                 // CR 614.12b + CR 614.1c + CR 614.13: drain BOTH the chained
                 // continuation and the multi-target ChangeZone iteration that
@@ -937,42 +1009,33 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
-            // CR 601.2h + CR 602.2b + CR 616.1: Resume a cast or activation
-            // cost move after the replacement delivered its current object.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::Cast { .. })
-                )
-            {
-                waiting_for = super::casting_costs::resume_interrupted_cost_payment(
+            // CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: A delivered cost
+            // move resumes through the single typed dispatcher before ordinary
+            // effect continuations. Foretell completed above at its dedicated
+            // delivery boundary and is intentionally ineligible here.
+            if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(resumed) = super::engine::drain_pending_cost_move_resume(
                     state,
                     events,
-                    Some(replacement_action_event_start),
-                )?;
+                    super::engine::CostMoveDrainBoundary::ReplacementDelivered {
+                        action_event_start: replacement_action_event_start,
+                    },
+                )? {
+                    waiting_for = resumed;
+                }
             }
 
-            // CR 614.12a + CR 616.1: Finish the inner forced MayCost moves
-            // before re-entering the optional outer replacement they paid for.
+            // CR 118.12 + CR 605.3b + CR 616.1: The ordinary effect rider may
+            // resume only after the whole typed mana-cost root has either paid
+            // or failed its suffix.  This mirrors the prevention path below.
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::ReplacementMayCost { .. })
-                )
+                && (state.pending_continuation.is_some()
+                    || state.pending_change_zone_iteration.is_some())
             {
-                waiting_for = super::costs::resume_replacement_may_cost_move(state, events)?;
-            }
-
-            // CR 702.143a-c + CR 614.1 + CR 616.1: Finish a foretell special
-            // action after its replacement-aware move is delivered. The
-            // foretell resume stamps the card only if it arrived in exile.
-            if matches!(waiting_for, WaitingFor::Priority { .. })
-                && matches!(
-                    state.pending_cost_move_resume,
-                    Some(PendingCostMoveResume::Foretell { .. })
-                )
-            {
-                waiting_for = super::casting::resume_foretell_cost_move(state, events);
+                effects::drain_pending_continuation(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
             }
 
             // CR 601.2h + CR 602.2b + CR 616.1: Resume a non-move cast or
@@ -1150,30 +1213,28 @@ pub(super) fn handle_replacement_choice(
             state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
             };
-            if matches!(
+            let resumed_mana_ability_cost = matches!(
                 state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::Cast { .. })
-            ) {
-                return super::casting_costs::resume_interrupted_cost_payment(
-                    state,
-                    events,
-                    Some(replacement_action_event_start),
-                );
-            }
-            if matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::ReplacementMayCost { .. })
-            ) {
-                return super::costs::resume_replacement_may_cost_move(state, events);
-            }
-            // CR 702.143a-c + CR 614.1 + CR 616.1: A fully substituted
-            // foretell move completes the special action without stamping a
-            // card that was not delivered to exile.
-            if matches!(
-                state.pending_cost_move_resume,
-                Some(PendingCostMoveResume::Foretell { .. })
-            ) {
-                return Ok(super::casting::resume_foretell_cost_move(state, events));
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+            );
+            if let Some(waiting_for) = super::engine::drain_pending_cost_move_resume(
+                state,
+                events,
+                super::engine::CostMoveDrainBoundary::ReplacementPrevented {
+                    action_event_start: replacement_action_event_start,
+                },
+            )? {
+                // CR 118.12 + CR 605.3b + CR 616.1: A prevented mana cost has
+                // the same rider ordering as a delivered one: its typed root
+                // settles before any ordinary continuation drains.
+                if resumed_mana_ability_cost
+                    && matches!(waiting_for, WaitingFor::Priority { .. })
+                    && (state.pending_continuation.is_some()
+                        || state.pending_change_zone_iteration.is_some())
+                {
+                    effects::drain_pending_continuation(state, events);
+                }
+                return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
@@ -1535,6 +1596,23 @@ fn finish_copy_target_choice_entry(
             counter_pause_post_actions,
         );
         return Ok(Some(state.waiting_for.clone()));
+    }
+    // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
+    // replacement choice acquired from entering as a copy before replaying the entry.
+    if let Some(choice) =
+        super::replacement::current_self_enter_replacement_choice(state, source_id)
+    {
+        if let Some(waiting_for) = apply_post_replacement_effect(
+            state,
+            &choice,
+            Some(source_id),
+            None,
+            Some(&ReplacementEvent::Moved),
+            HashSet::new(),
+            events,
+        ) {
+            return Ok(Some(waiting_for));
+        }
     }
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
@@ -2224,7 +2302,7 @@ pub(super) fn apply_etb_counters(
     true
 }
 
-fn find_copy_targets(
+pub(super) fn find_copy_targets(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,
@@ -2954,6 +3032,7 @@ mod tests {
                 source: bear,
                 index: 0,
             }],
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -4937,6 +5016,115 @@ mod tests {
         assert_eq!(state.players[1].life, initial_life - 3);
     }
 
+    /// Phase-0 G4 baseline. A general post-replacement drain begins a true draw
+    /// that pauses on a replacement consult, the paused state is saved/reloaded,
+    /// and a continuation then reads `PostReplacementSourceController`. Today
+    /// `finish_dispatch` pops the resident drain before that continuation resumes,
+    /// so the event-source context is lost. Phase 1 must retain typed ownership
+    /// across this pause: P1 must draw the second card instead of P0.
+    #[test]
+    fn phase0_g4_general_drain_loses_event_context_across_pausing_draw_resume() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, PostReplacementContinuation, QuantityModification,
+            TargetFilter,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let shield = make_creature(&mut state, PlayerId(0), "Swans-class shield");
+        let damage_source = make_creature(&mut state, PlayerId(1), "Damage source");
+
+        for player in [PlayerId(0), PlayerId(1)] {
+            for index in 0..6 {
+                let card_id = CardId(state.next_object_id);
+                create_object(
+                    &mut state,
+                    card_id,
+                    player,
+                    format!("P{} library {index}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+        // Two one-shot mandatory modifiers produce one real replacement-ordering
+        // pause; after the selected modifier applies the lone survivor finishes
+        // automatically, matching the paused-draw seam G4 needs.
+        for modification in [
+            QuantityModification::Times { factor: 2 },
+            QuantityModification::Plus { value: 1 },
+        ] {
+            let host = make_creature(&mut state, PlayerId(0), "Draw replacement host");
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+            replacement.quantity_modification = Some(modification);
+            replacement.consume_on_apply = true;
+            state
+                .objects
+                .get_mut(&host)
+                .expect("draw replacement host exists")
+                .replacement_definitions
+                .push(replacement);
+        }
+
+        let mut draw_then_context_draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        draw_then_context_draw.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::PostReplacementSourceController,
+            },
+        )));
+        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(
+            draw_then_context_draw,
+        )));
+        let drain = state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("general drain is resident");
+        drain.source = Some(shield);
+        drain.event_source = Some(damage_source);
+
+        let mut events = Vec::new();
+        let waiting = apply_pending_post_replacement_effect(
+            &mut state,
+            Some(shield),
+            None,
+            Some(ReplacementEvent::DamageDone),
+            &mut events,
+        );
+        assert!(
+            matches!(waiting, Some(WaitingFor::ReplacementChoice { .. }))
+                && matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "reach guard: general drain's first draw must pause on a replacement consult"
+        );
+        assert!(
+            state.post_replacement_drains.is_empty(),
+            "CURRENT behavior: finish_dispatch already popped the dispatching drain at the pause"
+        );
+
+        let serialized = serde_json::to_string(&state).expect("save paused state");
+        let mut restored: GameState =
+            serde_json::from_str(&serialized).expect("reload paused state");
+        restored.rehydrate_rng();
+        apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume the paused draw after reload");
+
+        assert!(
+            !restored.players[0].hand.is_empty(),
+            "reach guard: the first draw completed after the replacement consult"
+        );
+        assert_eq!(
+            restored.players[1].hand.len(),
+            0,
+            "CURRENT (wrong): the post-resume PostReplacementSourceController read has no resident drain context, so P1 draws zero; Phase 1 must make P1 draw one"
+        );
+    }
+
     /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
     /// the pre-fold `post_replacement_effect` field (Template binding state)
     /// migrates into the new unified slot when `finalize_public_state` runs
@@ -5336,7 +5524,7 @@ mod tests {
         assert!(
             copy.trigger_definitions
                 .iter_all()
-                .any(|t| t == &granted_trigger),
+                .any(|t| t.definition == granted_trigger),
             "GrantTrigger must place the destroy-trigger on the copy"
         );
         assert!(

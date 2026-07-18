@@ -86,6 +86,7 @@ pub(crate) fn begin_offer(
     mana_cost: ManaCost,
     base_mana_cost: ManaCost,
     casting_variant: CastingVariant,
+    casting_permission_index: Option<crate::types::game_state::CastingPermissionIndex>,
     cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
@@ -96,6 +97,7 @@ pub(crate) fn begin_offer(
     let mut pending = PendingCast::new(object_id, card_id, ability, mana_cost);
     pending.base_cost = Some(base_mana_cost);
     pending.casting_variant = casting_variant;
+    pending.casting_permission_index = casting_permission_index;
     pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
     pending.origin_zone = origin_zone;

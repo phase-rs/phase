@@ -177,6 +177,9 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // `count`. Runtime enforcement is in
             // game/effects/search_library.rs::library_search_top_limit.
             | StaticMode::RestrictLibrarySearchToTop { .. }
+            // CR 723.1a + CR 723.5: search-scoped player control carries the
+            // affected-player scope and is consumed at search preparation.
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
@@ -546,6 +549,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Player => "player".into(),
         TargetFilter::AllPlayers => "any player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::Opponent => "opponent".into(),
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
@@ -615,8 +619,15 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
         }
+        TargetFilter::PostReplacementDamageSource => "prevented event's damage source".into(),
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
         TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
+        TargetFilter::ControllerAndControlledPermanents { permanent_type } => {
+            match permanent_type {
+                Some(ct) => format!("you and {ct:?}s you control"),
+                None => "you and permanents you control".into(),
+            }
+        }
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::PlayerWhoChoseLabel { label } => format!("player who last chose {label}"),
@@ -895,6 +906,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::Suspected => parts.push("suspected".into()),
             FilterProp::Renowned => parts.push("renowned".into()),
+            // CR 701.15b/c
+            FilterProp::Goaded => parts.push("goaded".into()),
             // CR 700.9
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
@@ -943,7 +956,13 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("{prefix} {name}{suffix}"));
             }
-            FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
+            // Both damage-role filters share this human coverage label (the AST
+            // variant carries the source-vs-recipient distinction); keeping the
+            // passive label unchanged avoids a cosmetic coverage-diff on every
+            // existing "was dealt damage this turn" card.
+            FilterProp::WasDealtDamageThisTurn | FilterProp::DealtDamageThisTurn => {
+                parts.push("dealt damage this turn".into())
+            }
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
             FilterProp::ControlledContinuouslySinceTurnBegan => {
                 parts.push("controlled continuously since turn began".into())
@@ -1012,6 +1031,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             // CR 608.2c: "chosen this way" / a member of the resolution-chain set.
             FilterProp::InTrackedSet { .. } => parts.push("chosen this way".into()),
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasAdventure => parts.push("with an Adventure".into()),
             FilterProp::WasKicked => parts.push("kicked".into()),
             FilterProp::HasXInActivationCost => parts.push("with {X} in activation cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
@@ -1717,6 +1737,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("mana spent to cast ({scope:?}, {metric:?})")
         }
         QuantityRef::EventContextSourceCostX => "X of triggering spell".into(),
+        QuantityRef::EventContextSourceModesChosen => {
+            "modes chosen for the triggering spell".into()
+        }
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
         }
@@ -2405,9 +2428,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
+                // Digital-only Alchemy placement (no CR entry): counter-redirect
+                // never emits `RandomWithinTop` (conjure-only), but the arm keeps
+                // the match exhaustive.
                 Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::RandomWithinTop { .. },
-                }) => d.push(("redirect".into(), "library random within top N".into())),
+                }) => d.push(("redirect".into(), "library random within top X".into())),
                 Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
                 }
@@ -3551,6 +3577,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
@@ -3587,6 +3614,34 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     }
     if let Some(dur) = &def.duration {
         d.push(("duration".into(), fmt_duration(dur)));
+    }
+    // CR 608.2c: a lifted "[once] for each ⟨set⟩" repeat multiplier is an
+    // `AbilityDefinition` field. Surface it in the per-card parse-diff signature ONLY
+    // for the shapes THIS PR's lift produces — a fieldless `Effect::Investigate` whose
+    // `repeat_for` is a member-count `QuantityRef` (`PlayerCount`/`ObjectCount`), i.e.
+    // exactly the eligibility set of `for_each_repeatable_repeat_for`
+    // (parser/oracle_effect/mod.rs). Projecting the *whole* repeat_for surface
+    // (CopySpell/Token/Proliferate/… and pre-existing `Fixed`/`Variable`/tracked-set
+    // Investigate forms) would migrate ~250 unrelated, parse-identical cards' coverage
+    // signatures in one shot — a deliberate global coverage-schema migration, deferred
+    // out of this focused feature. `None`, or any out-of-scope shape, pushes nothing,
+    // so those cards keep a byte-identical signature.
+    // COUPLING: if the lift's eligible quantity set ever widens (e.g. the Gap B
+    // leading-adjective fix), this scope MUST widen in lockstep, or the new lift class
+    // becomes false-green in the parse-diff.
+    if let Some(rf) = &def.repeat_for {
+        let is_lift_shape = matches!(&*def.effect, Effect::Investigate)
+            && matches!(
+                rf,
+                QuantityExpr::Ref { qty }
+                    if matches!(
+                        qty,
+                        QuantityRef::PlayerCount { .. } | QuantityRef::ObjectCount { .. }
+                    )
+            );
+        if is_lift_shape {
+            d.push(("repeat_for".into(), fmt_quantity(rf)));
+        }
     }
     if def.optional_targeting {
         d.push(("targeting".into(), "optional (up to)".into()));
@@ -3756,6 +3811,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::SourceMatchesFilter { filter } => {
             format!("source is {}", fmt_target(filter))
+        }
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
+            format!("prevented event's damage source is {}", fmt_target(filter))
         }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             destination,
@@ -4196,6 +4254,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedAbilityFromSource {
             source_ability_index,
         } => format!("retain printed ability {source_ability_index}"),
+        ContinuousModification::RetainAllOtherAbilitiesFromSource => {
+            "retain source's other abilities".into()
+        }
         ContinuousModification::AddSupertype { supertype } => {
             format!("add supertype {supertype}")
         }
@@ -5067,7 +5128,8 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     let trigger_registry = trigger_registry();
     // Classification scan: iterate every printed trigger/static regardless
     // of functioning state — we're computing coverage, not game behavior.
-    for trig in obj.trigger_definitions.iter_all() {
+    for entry in obj.trigger_definitions.iter_all() {
+        let trig = entry.definition();
         if matches!(&trig.mode, TriggerMode::Unknown(_))
             || (!trigger_registry.contains_key(&trig.mode)
                 && !matches!(&trig.mode, TriggerMode::StateCondition))
@@ -7256,6 +7318,11 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 608.2c: Source filter conditions — resolved by `evaluate_condition`
         // against the ability source object.
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 615.5: Prevented-event damage-source filter — resolved by
+        // `evaluate_condition` against `post_replacement_event_source`.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. } => {
+            ("PostReplacementDamageSourceMatchesFilter", Handled)
+        }
         // CR 608.2c: Zone-change-this-way — resolved by `evaluate_condition`
         // against `state.last_zone_changed_ids`.
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
@@ -7456,6 +7523,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TimesCostPaidThisResolution => ("TimesCostPaidThisResolution", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
+        QuantityRef::EventContextSourceModesChosen => ("EventContextSourceModesChosen", Handled),
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)
         }
@@ -8735,7 +8803,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             && (lower.starts_with("cast this spell only ")
                 || lower.starts_with("you can't cast ")
                 || lower.starts_with("you cannot cast ")
-                || lower.starts_with("you can\u{2019}t cast "));
+                || lower.starts_with("you can\u{2019}t cast ")
+                // Hogaak, Arisen Necropolis (issue #1095): "You can't spend mana
+                // to cast this spell" is parsed to CastingRestriction::CantSpendMana.
+                || lower.starts_with("you can't spend mana to cast ")
+                || lower.starts_with("you can\u{2019}t spend mana to cast "));
         // Casting option lines ("You may pay X rather than pay...", "If you control a
         // commander, you may cast this spell without paying its mana cost", etc.)
         let covered_by_casting_option = !face.casting_options.is_empty()
@@ -8743,8 +8815,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 || effective_lower.contains("without paying")
                 || effective_lower.contains("as though it had flash")
                 || effective_lower.contains("you may cast this spell for")
-                || effective_lower.contains("you may pay")
-                || effective_lower.contains("you can't spend mana to cast"));
+                || effective_lower.contains("you may pay"));
         let covered_by_additional_cost = face.additional_cost.is_some()
             && (lower.starts_with("as an additional cost ")
                 || effective_lower.starts_with("as an additional cost ")
@@ -10652,6 +10723,85 @@ mod tests {
                 .iter()
                 .any(|k| k == "enters_attacking"),
             "a plain (non-attacking) ChangeZone must not add the row",
+        );
+    }
+
+    #[test]
+    fn investigate_signature_exposes_repeat_for() {
+        // ASK 2 + #6110 3rd review: a lifted "[once] for each ⟨set⟩" multiplier
+        // (`def.repeat_for = Some(PlayerCount/ObjectCount)`) must be visible in the
+        // per-card parse-diff signature — but ONLY for the shapes this PR's lift
+        // produces (fieldless `Effect::Investigate` + a member-count `QuantityRef`).
+        // The projection must NOT fire for the whole pre-existing repeat_for surface
+        // (CopySpell/Token/Proliferate, or pre-existing `Fixed`/`Variable` Investigate
+        // forms), which would migrate ~250 parse-identical cards' signatures at once.
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, PlayerFilter, QuantityExpr, QuantityRef, TargetFilter,
+            TypedFilter,
+        };
+        let projects = |effect: Effect, repeat: Option<QuantityExpr>| -> bool {
+            let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
+            def.repeat_for = repeat;
+            ability_details(&def)
+                .into_iter()
+                .any(|(k, _)| k == "repeat_for")
+        };
+        let object_count = || QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        };
+        let player_count = || QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentLostLife,
+            },
+        };
+
+        // Positive — both member-count lift shapes surface (Serene = ObjectCount,
+        // Teysa/Wojek = PlayerCount). Revert-probe: reverting the `ability_details`
+        // projection drops the row and flips both.
+        assert!(
+            projects(Effect::Investigate, Some(object_count())),
+            "Investigate + ObjectCount lift must appear in the signature",
+        );
+        assert!(
+            projects(Effect::Investigate, Some(player_count())),
+            "Investigate + PlayerCount lift must appear in the signature",
+        );
+
+        // Negative — no repeat_for → byte-identical signature (unchanged cards).
+        assert!(
+            !projects(Effect::Investigate, None),
+            "an Investigate with no repeat_for must not add the row",
+        );
+        // Negative — a `Fixed` multiplier ("investigate twice", Confirm Suspicions et
+        // al.) is not a member-count lift. Revert-probe: dropping the
+        // `QuantityExpr::Ref` guard flips this.
+        assert!(
+            !projects(Effect::Investigate, Some(QuantityExpr::Fixed { value: 2 })),
+            "a Fixed repeat_for must not project (not a member-count lift)",
+        );
+        // Negative — a non-member-count `Ref` (pre-existing `Variable`/tracked-set
+        // Investigate forms: Disorder in the Court, Declaration in Stone) must not
+        // project. Revert-probe: dropping the inner `PlayerCount|ObjectCount` guard
+        // flips this.
+        assert!(
+            !projects(
+                Effect::Investigate,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "x".into() },
+                }),
+            ),
+            "a non-member-count Ref repeat_for must not project",
+        );
+        // Negative (team-lead required) — the SAME member-count lift on a
+        // NON-Investigate effect (stand-in for the CopySpell/Token/Proliferate
+        // repeat_for surface) must not project. Revert-probe: dropping the
+        // `Effect::Investigate` guard widens the scope to the whole surface and flips
+        // this — this case is what locks a1.
+        assert!(
+            !projects(Effect::Populate, Some(object_count())),
+            "a non-Investigate repeat_for must not project (scope is the Investigate lift class)",
         );
     }
 

@@ -141,6 +141,17 @@ fn can_activate_loyalty_ability_impl(
         return false;
     }
 
+    // CR 602.5 + CR 603.2a: A `CantBeActivated` prohibition scoped to loyalty
+    // abilities (The Immortal Sun — `kind = Some(Loyalty)`) blocks activation on
+    // the loyalty path too. The untaxed loyalty fast path in
+    // `handle_activate_loyalty` does NOT route through
+    // `casting::handle_activate_ability`, so the shared prohibition gate must be
+    // consulted here — this function is the single legality authority for both the
+    // available-actions enumeration and `handle_activate_loyalty` (CR 606.3).
+    if super::casting::is_blocked_by_cant_be_activated(state, player, planeswalker_id, ability) {
+        return false;
+    }
+
     match restriction_gates {
         Some(gates) => super::restrictions::check_activation_restrictions_with_static_gates(
             state,
@@ -293,8 +304,14 @@ pub fn handle_activate_loyalty(
         pending.activation_cost = Some(crate::types::ability::AbilityCost::Loyalty {
             amount: loyalty_cost,
         });
+        // CR 601.2c + CR 606.3: first slot's announcer (controller unless the slot
+        // is "of an opponent's choice").
+        let initial_player = target_slots
+            .first()
+            .and_then(|slot| slot.chooser)
+            .unwrap_or(player);
         return Ok(WaitingFor::TargetSelection {
-            player,
+            player: initial_player,
             pending_cast: Box::new(pending),
             target_slots,
             mode_labels: Vec::new(),

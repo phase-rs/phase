@@ -120,6 +120,7 @@ fn krark_battlefield_trigger_has_correct_flip_branches() {
         })
         .expect("Krark on battlefield");
     let execute = &runner.state().objects[&krark_id].trigger_definitions[0]
+        .definition
         .execute
         .as_ref()
         .expect("execute");

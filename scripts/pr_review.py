@@ -43,21 +43,26 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, Callable
+
+import pr_review_dashboard
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POLICY = REPO_ROOT / ".agents/pr-review-policy.toml"
 PRIVATE_OVERRIDES = "private-overrides.json"
+DASHBOARD_SCHEMA_VERSION = 2
+DASHBOARD_RECENT_CLOSED_HOURS = 48
+DASHBOARD_DEFAULT_TERMINAL_LIMIT = 200
 SUCCESS_STATES = {"accepted", "merged"}
 BLOCK_STATES = {"blocked", "changes_requested"}
 HOLD_STATES = {"held", "held_ci"}
@@ -414,7 +419,7 @@ def validate_policy(policy: Policy) -> None:
             raise ValueError(
                 "admission.mode='enforce' requires a valid UTC admission.enforced_after timestamp ending in Z"
             )
-    if policy.architecture_scope_mode not in {"audit", "enforce"}:
+    if policy.architecture_scope_mode not in {"audit", "review", "enforce"}:
         raise ValueError(
             f"invalid architecture_scope.mode: {policy.architecture_scope_mode!r}"
         )
@@ -529,7 +534,16 @@ def run_json(command: list[str]) -> Any:
 
 
 def gh_user() -> str:
-    return str(run_json(["gh", "api", "user"])["login"])
+    result = run_json(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            "query=query { viewer { login } }",
+        ]
+    )
+    return str(result["data"]["viewer"]["login"])
 
 
 # ─── Event log (the sole mutable store) ──────────────────────────────────────
@@ -678,6 +692,40 @@ def latest_events_by_pr(events: list[dict[str, Any]]) -> dict[int, dict[str, Any
             continue
         latest[int(pr)] = event
     return latest
+
+
+def latest_events_by_pr_matching(
+    events: list[dict[str, Any]], predicate: Callable[[dict[str, Any]], bool]
+) -> dict[int, dict[str, Any]]:
+    """Return the newest event for each PR matching a dashboard-history predicate."""
+    latest: dict[int, dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") == "review_correction" or not predicate(event):
+            continue
+        pr = event.get("pr")
+        if pr is not None:
+            latest[int(pr)] = event
+    return latest
+
+
+def latest_observations_by_pr(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    return latest_events_by_pr_matching(
+        events, lambda event: event.get("event_type") == "observation"
+    )
+
+
+def latest_looks_by_pr(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    ignored_types = {"quality_entry", "tracker_row"}
+    return latest_events_by_pr_matching(
+        events, lambda event: event.get("event_type") not in ignored_types
+    )
+
+
+def latest_material_actions_by_pr(events: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    ignored_types = {"observation", "quality_entry", "tracker_row"}
+    return latest_events_by_pr_matching(
+        events, lambda event: event.get("event_type") not in ignored_types
+    )
 
 
 def is_block_event(event: dict[str, Any] | None) -> bool:
@@ -1775,6 +1823,8 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
         "isDraft": pr.get("isDraft"),
         "url": pr.get("url"),
         "createdAt": pr.get("createdAt"),
+        "closedAt": pr.get("closedAt"),
+        "mergedAt": pr.get("mergedAt"),
         "author_login": author_login,
         "self_authored": author_login == acting_login,
         "headRefName": pr.get("headRefName"),
@@ -2025,6 +2075,15 @@ def accepted_closing_issues(pr: dict[str, Any], accepted_label: str | None) -> l
     )
 
 
+def has_accepted_pr_label(pr: dict[str, Any], accepted_label: str | None) -> bool:
+    if not accepted_label:
+        return False
+    accepted = accepted_label.casefold()
+    return accepted in {
+        str(label.get("name") or "").casefold() for label in pr.get("labels", [])
+    }
+
+
 def architecture_scope_profile(
     pr: dict[str, Any], files: list[str], policy: Policy, private_overrides: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2061,10 +2120,16 @@ def architecture_scope_profile(
         else []
     )
     issue_authorized = bool(issues)
-    authorized = author_authorized or issue_authorized
+    pr_label_authorized = has_accepted_pr_label(
+        pr, policy.architecture_accepted_issue_label
+    )
+    authorized = author_authorized or issue_authorized or pr_label_authorized
     mode = policy.architecture_scope_mode
     incomplete_issue_evidence = (
-        triggered and not author_authorized and not issue_evidence_complete
+        triggered
+        and not author_authorized
+        and not pr_label_authorized
+        and not issue_evidence_complete
     )
     evidence = {
         "matched_paths": matched_paths,
@@ -2075,6 +2140,7 @@ def architecture_scope_profile(
         "closing_issue_records": pr.get("closingIssuesReferences", []),
         "closing_issue_count": pr.get("closingIssuesReferencesCount"),
         "author_private_override": author_authorized,
+        "accepted_pr_label": pr_label_authorized,
         "closing_issue_evidence_complete": issue_evidence_complete,
         "files_complete": bool(pr.get("filesComplete")),
     }
@@ -2084,8 +2150,8 @@ def architecture_scope_profile(
         "**Closed without implementation-diff review.** This PR enters protected "
         "architecture scope because it touches "
         f"`{path_text}` and/or spans `{span_text}`. AI-contributor PRs may enter "
-        "this scope only after an explicit prior maintainer appointment or when "
-        "the PR closes an issue labeled `accepted`. Tier, contributor standing, "
+        "this scope only after an explicit prior maintainer appointment, the PR "
+        "has the `accepted` label, or it closes an issue labeled `accepted`. Tier, contributor standing, "
         "the `quality` label, prior praise, and frontend permission do not waive "
         "this gate. Open a fresh PR from current `main` only after one of those "
         "authorizations exists, and rerun `/engine-implementer`, the final "
@@ -2099,7 +2165,10 @@ def architecture_scope_profile(
         "hold": mode == "enforce" and incomplete_issue_evidence,
         "triggered": triggered,
         "authorized": authorized,
-        "would_decline": triggered and not authorized,
+        "requires_maintainer_review": (
+            mode == "review" and triggered and not authorized
+        ),
+        "would_decline": mode != "review" and triggered and not authorized,
         "decline": (
             mode == "enforce"
             and triggered
@@ -2672,6 +2741,9 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_hold and comment_history_incomplete:
         action = "review"
         reason = "author_activity_history_incomplete"
+    elif local_hold and pr.get("isDraft"):
+        action = "hold"
+        reason = "local_hold_current_head"
     elif local_hold and (packet.get("ci") or {}).get("state") != "green":
         action = "hold_ci"
         reason = "local_hold_current_head"
@@ -3086,7 +3158,7 @@ def pr_node_fields(
         + "}} "
     )
     return (
-        f"number title {pr_body}state isDraft url createdAt updatedAt headRefName headRefOid "
+        f"number title {pr_body}state isDraft url createdAt updatedAt closedAt mergedAt headRefName headRefOid "
         "baseRefName mergeStateStatus reviewDecision changedFiles "
         "author{login} "
         "closingIssuesReferences(first:20){totalCount pageInfo{hasNextPage endCursor} nodes{number state labels(first:20){totalCount pageInfo{hasNextPage endCursor} nodes{name}}}} "
@@ -3117,6 +3189,16 @@ SCAN_PR_QUERY = (
         status_contexts_first=80,
     )
     + "}"
+    "}}}"
+)
+
+TERMINAL_PR_QUERY = (
+    "query($owner:String!,$name:String!,$first:Int!,$after:String){"
+    "repository(owner:$owner,name:$name){"
+    "pullRequests(states:[CLOSED,MERGED], first:$first, after:$after,"
+    " orderBy:{field:UPDATED_AT, direction:DESC}){"
+    "pageInfo{hasNextPage endCursor}"
+    "nodes{number title state url createdAt updatedAt closedAt mergedAt headRefOid author{login}}"
     "}}}"
 )
 
@@ -3279,6 +3361,8 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
         "url": node.get("url"),
         "createdAt": node.get("createdAt"),
         "updatedAt": node.get("updatedAt"),
+        "closedAt": node.get("closedAt"),
+        "mergedAt": node.get("mergedAt"),
         "headRefName": node.get("headRefName"),
         "headRefOid": node.get("headRefOid"),
         "baseRefName": node.get("baseRefName"),
@@ -3329,7 +3413,7 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
+def fetch_pr_nodes(repo: str, limit: int, query: str) -> list[dict[str, Any]]:
     owner, name = repo.split("/", 1)
     nodes: list[dict[str, Any]] = []
     cursor: str | None = None
@@ -3345,7 +3429,7 @@ def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
         ]
         if cursor:
             variables += ["-f", f"after={cursor}"]
-        result = run_json(["gh", "api", "graphql", "-f", f"query={SCAN_PR_QUERY}", *variables])
+        result = run_json(["gh", "api", "graphql", "-f", f"query={query}", *variables])
         connection = ((result.get("data") or {}).get("repository") or {}).get("pullRequests") or {}
         nodes.extend(graphql_nodes(connection))
         page_info = connection.get("pageInfo", {})
@@ -3353,6 +3437,14 @@ def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
             break
         cursor = page_info.get("endCursor")
     return nodes[:limit]
+
+
+def fetch_open_prs(repo: str, limit: int) -> list[dict[str, Any]]:
+    return fetch_pr_nodes(repo, limit, SCAN_PR_QUERY)
+
+
+def fetch_terminal_prs(repo: str, limit: int) -> list[dict[str, Any]]:
+    return fetch_pr_nodes(repo, limit, TERMINAL_PR_QUERY)
 
 
 def gh_pr_view(repo: str, pr_number: int) -> dict[str, Any]:
@@ -3380,43 +3472,49 @@ def required_status_check_names(repo: str, base_ref: str | None) -> set[str] | N
     """Return the actual branch-protection check names for a PR base branch.
 
     `statusCheckRollup` is deliberately broader than merge requirements. The
-    branch-protection endpoint is GitHub's source of truth for legacy required
-    status checks; a failed lookup returns ``None`` so callers preserve the
-    conservative all-checks fallback instead of treating unknown requirements as
-    green.
+    effective branch-protection rule is GitHub's source of truth for legacy
+    required status checks; a failed lookup returns ``None`` so callers preserve
+    the conservative all-checks fallback instead of treating unknown requirements
+    as green.
     """
     if not base_ref:
         return None
+    owner, name = repo.split("/", 1)
     try:
-        required = run_json(
+        result = run_json(
             [
                 "gh",
                 "api",
-                "repos/"
-                f"{repo}/branches/{urllib.parse.quote(base_ref, safe='')}/"
-                "protection/required_status_checks",
+                "graphql",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
+                "-f",
+                f"qualifiedName=refs/heads/{base_ref}",
+                "-f",
+                "query=query($owner:String!,$name:String!,$qualifiedName:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$qualifiedName){branchProtectionRule{requiredStatusCheckContexts}}}}",
             ]
         )
     except subprocess.CalledProcessError:
         print(
-            f"could not read required status checks for {repo}@{base_ref}; "
+            f"could not read required status checks through GraphQL for {repo}@{base_ref}; "
             "using the conservative all-checks fallback",
             file=sys.stderr,
         )
         return None
-    if not isinstance(required, dict):
+    rule = (
+        ((result.get("data") or {}).get("repository") or {})
+        .get("ref")
+        or {}
+    ).get("branchProtectionRule")
+    if not isinstance(rule, dict):
         return None
-    names = {
-        str(name)
-        for name in required.get("contexts", [])
-        if isinstance(name, str) and name
+    return {
+        str(context)
+        for context in rule.get("requiredStatusCheckContexts", [])
+        if isinstance(context, str) and context
     }
-    names.update(
-        str(check.get("context"))
-        for check in required.get("checks", [])
-        if isinstance(check, dict) and check.get("context")
-    )
-    return names
 
 
 def required_checks_by_base(
@@ -3452,6 +3550,9 @@ class ReviewContext:
     acting_login: str
     local_events: dict[tuple[int, str], dict[str, Any]]
     local_latest_events: dict[int, dict[str, Any]]
+    local_latest_observations: dict[int, dict[str, Any]]
+    local_latest_looks: dict[int, dict[str, Any]]
+    local_latest_actions: dict[int, dict[str, Any]]
     first_block_events: dict[tuple[int, str], dict[str, Any]]
     analytics_model: dict[str, Any]
     signal_occurrences: dict[str, list[dict[str, Any]]]
@@ -3470,6 +3571,9 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
         acting_login=args.acting_login or gh_user(),
         local_events=latest_events_by_pr_head(events),
         local_latest_events=latest_events_by_pr(events),
+        local_latest_observations=latest_observations_by_pr(events),
+        local_latest_looks=latest_looks_by_pr(events),
+        local_latest_actions=latest_material_actions_by_pr(events),
         first_block_events=first_block_events_by_pr_head(events),
         analytics_model=build_analytics_model(
             events,
@@ -3495,6 +3599,9 @@ def packet_for_pr(
     head_key = (pr_number, pr.get("headRefOid") or "")
     local_event = context.local_events.get(head_key)
     local_latest_event = context.local_latest_events.get(pr_number)
+    local_latest_observation = context.local_latest_observations.get(pr_number)
+    local_latest_look = context.local_latest_looks.get(pr_number)
+    local_latest_action = context.local_latest_actions.get(pr_number)
     first_block_event = context.first_block_events.get(head_key)
     contributor_summary = build_contributor_summary(
         (pr.get("author") or {}).get("login"),
@@ -3521,6 +3628,9 @@ def packet_for_pr(
         required_check_names,
     )
     packet["local_latest_event"] = local_latest_event
+    packet["local_latest_observation"] = local_latest_observation
+    packet["local_latest_look"] = local_latest_look
+    packet["local_latest_action"] = local_latest_action
     packet["freshness"] = review_freshness(
         packet["pr"], context.acting_login, local_event, local_latest_event
     )
@@ -3547,12 +3657,55 @@ def candidate_sort_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     return (order, pr_number)
 
 
-def scan_candidate(pr: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]:
+def dashboard_event_view(
+    event: dict[str, Any] | None, current_head: str | None
+) -> dict[str, Any] | None:
+    """Project a local event into the compact, head-aware history a dashboard needs."""
+    if event is None:
+        return None
+    event_head = event.get("head_sha")
+    return {
+        "timestamp": event.get("timestamp"),
+        "event_type": event.get("event_type"),
+        "outcome": event.get("outcome"),
+        "summary": excerpt(str(event.get("summary") or "")),
+        "head_sha": event_head,
+        "head_matches_current": (
+            event_head == current_head
+            if isinstance(event_head, str) and isinstance(current_head, str)
+            else None
+        ),
+    }
+
+
+def dashboard_local_history(
+    context: ReviewContext, pr_number: int, current_head: str | None
+) -> dict[str, Any]:
+    return {
+        "last_recorded_activity": dashboard_event_view(
+            context.local_latest_events.get(pr_number), current_head
+        ),
+        "last_recorded_observation": dashboard_event_view(
+            context.local_latest_observations.get(pr_number), current_head
+        ),
+        "last_recorded_look": dashboard_event_view(
+            context.local_latest_looks.get(pr_number), current_head
+        ),
+        "last_material_action": dashboard_event_view(
+            context.local_latest_actions.get(pr_number), current_head
+        ),
+    }
+
+
+def scan_candidate(
+    pr: dict[str, Any], packet: dict[str, Any], context: ReviewContext
+) -> dict[str, Any]:
     """Project a full packet down to the token-minimal triage row scan prints."""
     contributor = packet.get("contributor") or {}
     return {
         "pr": pr.get("number"),
         "title": pr.get("title"),
+        "url": pr.get("url"),
         "created_at": pr.get("createdAt"),
         "updated_at": pr.get("updatedAt"),
         "head_sha": pr.get("headRefOid"),
@@ -3578,11 +3731,15 @@ def scan_candidate(pr: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]
         "first_contribution": contributor.get("first_contribution"),
         "gittensor": packet.get("gittensor"),
         "proof": packet.get("proof"),
+        "local_history": dashboard_local_history(
+            context=context,
+            pr_number=int(pr.get("number") or 0),
+            current_head=pr.get("headRefOid"),
+        ),
     }
 
 
-def command_scan(args: argparse.Namespace) -> int:
-    context = load_review_context(args)
+def build_scan_output(context: ReviewContext, args: argparse.Namespace) -> dict[str, Any]:
     # The repo-wide scan uses small GraphQL pages, but includes individual check
     # contexts so its CI verdict can be restricted to the base branch's actual
     # merge requirements rather than every third-party status.
@@ -3597,7 +3754,7 @@ def command_scan(args: argparse.Namespace) -> int:
             "full",
             required_checks.get(pr.get("baseRefName") or ""),
         )
-        candidates.append(scan_candidate(pr, packet))
+        candidates.append(scan_candidate(pr, packet, context))
 
     candidates.sort(key=candidate_sort_key)
     candidates_by_action: dict[str, list[dict[str, Any]]] = {}
@@ -3622,6 +3779,8 @@ def command_scan(args: argparse.Namespace) -> int:
         if (candidate.get("architecture_scope") or {}).get("would_decline")
     )
     output = {
+        "schema_version": DASHBOARD_SCHEMA_VERSION,
+        "generated_at": now_iso(),
         "acting_login": context.acting_login,
         "completeness": "triage",
         "action_counts": action_counts,
@@ -3641,7 +3800,165 @@ def command_scan(args: argparse.Namespace) -> int:
         output["warnings"] = [
             f"open PR count reached --limit {args.limit}; increase --limit"
         ]
-    print(json_dumps(output))
+    return output
+
+
+def command_scan(args: argparse.Namespace) -> int:
+    print(json_dumps(build_scan_output(load_review_context(args), args)))
+    return 0
+
+
+def dashboard_terminal_row(
+    pr: dict[str, Any], context: ReviewContext
+) -> dict[str, Any]:
+    pr_number = int(pr.get("number") or 0)
+    current_head = pr.get("headRefOid")
+    return {
+        "pr": pr_number,
+        "title": pr.get("title"),
+        "url": pr.get("url"),
+        "author_login": (pr.get("author") or {}).get("login"),
+        "state": pr.get("state"),
+        "created_at": pr.get("createdAt"),
+        "updated_at": pr.get("updatedAt"),
+        "closed_at": pr.get("closedAt"),
+        "merged_at": pr.get("mergedAt"),
+        "head_sha": current_head,
+        "local_history": dashboard_local_history(context, pr_number, current_head),
+    }
+
+
+def dashboard_archive_rows(value: Any) -> dict[int, dict[str, Any]]:
+    if not isinstance(value, list):
+        return {}
+    return {
+        int(row["pr"]): row
+        for row in value
+        if isinstance(row, dict) and isinstance(row.get("pr"), int)
+    }
+
+
+def recently_closed(row: dict[str, Any], reference: datetime) -> bool:
+    if row.get("state") != "CLOSED":
+        return False
+    closed_at = parse_event_datetime(row.get("closed_at"))
+    return closed_at is not None and closed_at >= reference - timedelta(
+        hours=DASHBOARD_RECENT_CLOSED_HOURS
+    )
+
+
+def dashboard_terminal_sections(
+    rows: list[dict[str, Any]], reference: datetime
+) -> dict[str, list[dict[str, Any]]]:
+    closed_recent = []
+    closed_archive = []
+    merged = []
+    for row in rows:
+        if row.get("state") == "MERGED":
+            merged.append(row)
+        elif recently_closed(row, reference):
+            closed_recent.append(row)
+        else:
+            closed_archive.append(row)
+    sort_key = lambda row: (
+        row.get("merged_at") or row.get("closed_at") or row.get("updated_at") or "",
+        row.get("pr") or 0,
+    )
+    return {
+        "closed_recent": sorted(closed_recent, key=sort_key, reverse=True),
+        "closed_archive": sorted(closed_archive, key=sort_key, reverse=True),
+        "merged": sorted(merged, key=sort_key, reverse=True),
+    }
+
+
+def write_json_atomically(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as file:
+        temporary_path = Path(file.name)
+        file.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary_path, path)
+
+
+def read_dashboard_archive(path: Path) -> dict[int, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    try:
+        prior_snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(prior_snapshot, dict):
+        return {}
+    return dashboard_archive_rows(prior_snapshot.get("terminal_archive"))
+
+
+def command_dashboard_data(args: argparse.Namespace) -> int:
+    context = load_review_context(args)
+    output = build_scan_output(context, args)
+    dashboard_path = args.output or args.state_dir / "review-dashboard.json"
+    terminal_nodes = fetch_terminal_prs(args.repo, args.terminal_limit)
+    terminal_rows = [
+        dashboard_terminal_row(node, context)
+        for node in terminal_nodes
+    ]
+    archive = read_dashboard_archive(dashboard_path)
+    archive.update({row["pr"]: row for row in terminal_rows})
+    for candidate in output["candidates_by_action"].values():
+        for row in candidate:
+            archive.pop(int(row["pr"]), None)
+    for row in archive.values():
+        row["local_history"] = dashboard_local_history(
+            context,
+            int(row["pr"]),
+            row.get("head_sha"),
+        )
+    terminal_archive = sorted(
+        archive.values(),
+        key=lambda row: (
+            row.get("merged_at") or row.get("closed_at") or row.get("updated_at") or "",
+            row.get("pr") or 0,
+        ),
+        reverse=True,
+    )
+    sections = dashboard_terminal_sections(terminal_archive, datetime.now(UTC))
+    output.update(
+        {
+            "dashboard": {
+                "terminal_sync": {
+                    "fetched_at": now_iso(),
+                    "fetch_limit": args.terminal_limit,
+                    "truncated": len(terminal_nodes) == args.terminal_limit,
+                },
+                "closed_unmerged": {
+                    "recent": sections["closed_recent"],
+                    "archive": sections["closed_archive"],
+                },
+                "merged": sections["merged"],
+            },
+            "terminal_archive": terminal_archive,
+        }
+    )
+    if len(terminal_nodes) == args.terminal_limit:
+        output.setdefault("warnings", []).append(
+            f"terminal PR count reached --terminal-limit {args.terminal_limit}; increase --terminal-limit"
+        )
+    write_json_atomically(dashboard_path, output)
+    dashboard_html_path = args.html_output or dashboard_path.with_suffix(".html")
+    pr_review_dashboard.write_text_atomically(
+        dashboard_html_path, pr_review_dashboard.render_dashboard(output)
+    )
+    print(
+        json_dumps(
+            {
+                "output": str(dashboard_path),
+                "html_output": str(dashboard_html_path),
+                "generated_at": output["generated_at"],
+            }
+        )
+    )
     return 0
 
 
@@ -3821,6 +4138,33 @@ def command_record(args: argparse.Namespace) -> int:
     if error is not None:
         result["forced"] = True
     print(json_dumps(result))
+    return 0
+
+
+def command_observe(args: argparse.Namespace) -> int:
+    pr = gh_pr_view(args.repo, args.pr)
+    event = normalize_event(
+        {
+            "event_type": "observation",
+            "pr": args.pr,
+            "head_sha": pr.get("headRefOid"),
+            "author": (pr.get("author") or {}).get("login"),
+            "summary": args.summary,
+            "source": {"command": "observe"},
+        }
+    )
+    error = event_validation_error(event, all_events(args.state_dir))
+    if error is not None:
+        print(json_dumps({"inserted": False, "error": error}))
+        return 1
+    print(
+        json_dumps(
+            {
+                "inserted": append_event(args.state_dir, event),
+                "event_id": event["event_id"],
+            }
+        )
+    )
     return 0
 
 
@@ -4033,6 +4377,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--limit", type=int, default=100)
     scan.set_defaults(func=command_scan)
 
+    dashboard = sub.add_parser("dashboard-data")
+    add_common(dashboard)
+    dashboard.add_argument("--limit", type=int, default=100)
+    dashboard.add_argument("--terminal-limit", type=int, default=DASHBOARD_DEFAULT_TERMINAL_LIMIT)
+    dashboard.add_argument("--output", type=Path, default=None)
+    dashboard.add_argument("--html-output", type=Path, default=None)
+    dashboard.set_defaults(func=command_dashboard_data)
+
     inspect = sub.add_parser("inspect")
     add_common(inspect)
     inspect.add_argument("pr", type=int)
@@ -4051,6 +4403,12 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--event-json", required=True)
     record.add_argument("--force", action="store_true")
     record.set_defaults(func=command_record)
+
+    observe = sub.add_parser("observe")
+    add_state(observe)
+    observe.add_argument("pr", type=int)
+    observe.add_argument("--summary", required=True)
+    observe.set_defaults(func=command_observe)
 
     import_cmd = sub.add_parser("import")
     add_state(import_cmd)

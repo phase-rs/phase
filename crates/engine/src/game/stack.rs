@@ -7,9 +7,9 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, GameState, MayTriggerAutoChoiceKey,
-    MayTriggerOrigin, PendingCounterPostAction, StackEntry, StackEntryKind, StackPaidSnapshot,
-    WaitingFor,
+    AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
+    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, StackEntry,
+    StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -23,7 +23,34 @@ use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// CR 405.1: Add an object to the stack.
-pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
+pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut Vec<GameEvent>) {
+    // CR 701.27f: an activated or triggered ability of a permanent may
+    // transform that permanent only if it has not transformed/converted since
+    // the ability was put onto the stack. Spells and keyword actions do not
+    // receive this guard.
+    if matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
+    ) {
+        let source = state
+            .objects
+            .get(&entry.source_id)
+            .filter(|object| object.back_face.is_some());
+        let count = source.map(|object| object.transformation_count);
+        let incarnation = source.map(|object| object.incarnation);
+        if let Some(ability) = entry.ability_mut() {
+            // CR 701.27f: delayed triggered abilities already carry their
+            // creation-time generation and must not be restamped when fired.
+            if ability.context.source_transformation_count.is_none() {
+                ability.set_source_transformation_count_recursive(count);
+                // CR 400.7: a re-entered source can share the same storage ID
+                // and transformation generation, so retain its incarnation too.
+                if ability.source_incarnation.is_none() {
+                    ability.set_source_incarnation_recursive(incarnation);
+                }
+            }
+        }
+    }
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
     });
@@ -702,8 +729,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 608.3: Determine destination zone for spells.
-    if is_spell {
+    // CR 608.2g + CR 608.3: A spell paused on a during-resolution free-cast
+    // window remains on the stack and targetable until its continuation ends.
+    if is_spell
+        && !matches!(
+            state.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
+            }
+        )
+    {
         let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
             matches!(ability.effect, Effect::EndTheTurn)
                 || (matches!(ability.effect, Effect::EndCombatPhase)
@@ -2149,6 +2185,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         starting_with,
         chosen_x,
         cost_paid_object,
+        cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
         ability_index,
@@ -2161,8 +2198,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         sub_link,
         modal,
         mode_abilities,
-        dig_found_nothing_for_parent_target,
-        choose_from_zone_found_nothing_for_parent_target,
+        parent_target_missing_reason,
     } = ability;
 
     let self_counter = matches!(
@@ -2208,6 +2244,13 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        // CR 117.1 (issue #4948): a batched triggered ability must not carry
+        // per-instance cost-paid-object state either — mirrors the
+        // `cost_paid_object` gate above. Always empty for triggered
+        // abilities today (only cost-payment handlers populate it), kept
+        // here so this exhaustive-field check stays correct if that ever
+        // changes.
+        && cost_paid_object_ids.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && ability_index.is_none()
@@ -2219,8 +2262,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && *sub_link == SubAbilityLink::ContinuationStep
         && modal.is_none()
         && mode_abilities.is_empty()
-        && !*dig_found_nothing_for_parent_target
-        && !*choose_from_zone_found_nothing_for_parent_target
+        && parent_target_missing_reason.is_none()
 }
 
 /// CR 608.2: Apply a proven-safe batch. The per-resolution handler body runs
@@ -2363,9 +2405,10 @@ fn observer_candidates_are_inert(
 ) -> bool {
     let event_keys = crate::game::trigger_index::keys_from_event(event, state);
     for candidate in candidates.iter().copied() {
-        let Some((controller, triggers)) = state.objects.get(&candidate).map(|obj| {
+        let Some((controller, source, triggers)) = state.objects.get(&candidate).map(|obj| {
             (
                 obj.controller,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(obj),
                 obj.trigger_definitions
                     .iter_all()
                     .cloned()
@@ -2376,7 +2419,12 @@ fn observer_candidates_are_inert(
             continue;
         };
 
-        for (trigger_index, trigger) in triggers {
+        for (trigger_index, entry) in triggers {
+            let definition_ref = crate::types::ability::TriggerDefinitionRef {
+                source,
+                occurrence: entry.occurrence.clone(),
+            };
+            let trigger = entry.definition;
             let (trigger_keys, unclassified) =
                 crate::game::trigger_index::keys_from_trigger_def(&trigger);
             if !unclassified && !trigger_keys.iter().any(|key| event_keys.contains(key)) {
@@ -2397,7 +2445,7 @@ fn observer_candidates_are_inert(
             let mut ability =
                 super::triggers::build_triggered_ability(state, &trigger, candidate, controller);
             ability.ability_index = Some(trigger_index);
-            ability.may_trigger_origin = Some(MayTriggerOrigin::Printed { trigger_index });
+            ability.may_trigger_origin = Some(MayTriggerOrigin::Definition { definition_ref });
             if !optional_ability_is_inert_under_auto_choice(state, &ability, Some(event)) {
                 return false;
             }
@@ -2414,7 +2462,7 @@ fn optional_ability_is_inert_under_auto_choice(
     if !ability.optional {
         return false;
     }
-    let Some(origin) = ability.may_trigger_origin else {
+    let Some(origin) = ability.may_trigger_origin.clone() else {
         return false;
     };
     let key = MayTriggerAutoChoiceKey {
@@ -3253,12 +3301,12 @@ mod tests {
             let mut state = setup();
             let mut ability = ResolvedAbility::new(effect, vec![], source_id, PlayerId(0));
             ability.optional = true;
-            ability.may_trigger_origin = Some(origin);
+            ability.may_trigger_origin = Some(origin.clone());
             state.set_may_trigger_auto_choice(
                 MayTriggerAutoChoiceKey {
                     player: PlayerId(0),
                     source_id,
-                    origin,
+                    origin: origin.clone(),
                 },
                 AutoMayChoice::Accept,
             );
@@ -8338,7 +8386,7 @@ mod tests {
             let mut normal = setup_board();
             flush_layers(&mut normal);
             add_entry(&mut normal);
-            let entered_ids: std::collections::HashSet<ObjectId> = match &normal.layers_dirty {
+            let entered_ids: std::collections::BTreeSet<ObjectId> = match &normal.layers_dirty {
                 crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
                 other => panic!("expected EnteredObjects dirty state, got {other:?}"),
             };
@@ -9111,7 +9159,7 @@ mod tests {
             flush_layers(&mut state);
             // A green entry perturbs the < 7 gate (would flip 6 → 7).
             add_green_devotion_entry(&mut state, 322);
-            let entered_ids: std::collections::HashSet<ObjectId> = match &state.layers_dirty {
+            let entered_ids: std::collections::BTreeSet<ObjectId> = match &state.layers_dirty {
                 crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
                 other => panic!("expected EnteredObjects, got {other:?}"),
             };

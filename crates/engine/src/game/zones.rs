@@ -170,6 +170,7 @@ pub(crate) fn apply_zone_exit_cleanup(
         let lki_copiable_values =
             crate::game::layers::compute_current_copiable_values(state, object_id);
         if let Some(obj) = state.objects.get(&object_id) {
+            let incarnation = obj.incarnation;
             let lki = crate::types::game_state::LKISnapshot {
                 name: obj.name.clone(),
                 token_image_ref: obj.token_image_ref.clone(),
@@ -210,7 +211,12 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // Supplied by the caller: the sever already ran by the time we get here.
                 attachments,
             };
-            state.lki_cache.insert(object_id, lki);
+            state.lki_cache.insert(object_id, lki.clone());
+            state
+                .lki_by_incarnation
+                .entry(object_id)
+                .or_default()
+                .insert(incarnation, lki);
         }
         if let Some(values) = lki_copiable_values {
             state.lki_copiable_values.insert(object_id, values);
@@ -1256,6 +1262,23 @@ pub fn move_to_library_position(
 ) {
     let index = if top { Some(0) } else { None }; // None = push to end
     move_to_library_at_index(state, object_id, index, events);
+}
+
+/// Digital-only Alchemy placement (no CR entry): resolve a uniformly-random
+/// 0-based insertion index for `LibraryPosition::RandomWithinTop { n }`. A card
+/// slotted "into the top `top_n` cards of a library at random" lands among the
+/// top `top_n` positions; with `slots_after_insert` total positions available
+/// (the destination library's length *including* the card being placed), the
+/// reachable range is `0..min(top_n, slots_after_insert)`. Consumes exactly one
+/// RNG draw. Single authority for the random-top-N index so the conjure resolver
+/// and the zone pipeline compute it identically.
+pub(crate) fn random_top_slot_index(
+    rng: &mut impl rand::Rng,
+    top_n: usize,
+    slots_after_insert: usize,
+) -> usize {
+    let upper = top_n.min(slots_after_insert).max(1);
+    rng.random_range(0..upper)
 }
 
 /// Move an object to a specific index in its owner's library.

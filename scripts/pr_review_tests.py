@@ -10,13 +10,274 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pr_review
+import pr_review_dashboard
 
 
 class PrReviewTests(unittest.TestCase):
+    def test_scan_candidate_keeps_github_url_for_dashboard_navigation(self) -> None:
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": {},
+                "local_latest_observations": {},
+                "local_latest_looks": {},
+                "local_latest_actions": {},
+            },
+        )()
+        candidate = pr_review.scan_candidate(
+            {
+                "number": 44,
+                "title": "Useful change",
+                "url": "https://github.com/phase-rs/phase/pull/44",
+                "headRefOid": "head",
+            },
+            {
+                "pr": {"author_login": "author", "self_authored": False},
+                "classification": {"surface": "backend", "gate": "review", "hard_stop_paths": []},
+                "ci": {"state": "green"},
+                "parse_diff": {},
+                "recommendation": {"advisory_action": "review", "reason": "unreviewed"},
+                "policy_trace": [],
+            },
+            context,
+        )
+
+        self.assertEqual(candidate["url"], "https://github.com/phase-rs/phase/pull/44")
+
+    def test_dashboard_history_separates_observations_from_material_actions(self) -> None:
+        events = [
+            {
+                "event_type": "review",
+                "pr": 52,
+                "head_sha": "old-head",
+                "timestamp": "2026-07-10T00:00:00Z",
+                "summary": "Requested a regression test",
+            },
+            {
+                "event_type": "observation",
+                "pr": 52,
+                "head_sha": "current-head",
+                "timestamp": "2026-07-11T00:00:00Z",
+                "summary": "Confirmed the author follow-up",
+            },
+        ]
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": pr_review.latest_events_by_pr(events),
+                "local_latest_observations": pr_review.latest_observations_by_pr(events),
+                "local_latest_looks": pr_review.latest_looks_by_pr(events),
+                "local_latest_actions": pr_review.latest_material_actions_by_pr(events),
+            },
+        )()
+
+        history = pr_review.dashboard_local_history(context, 52, "current-head")
+
+        self.assertEqual(
+            history["last_recorded_observation"]["summary"],
+            "Confirmed the author follow-up",
+        )
+        self.assertEqual(
+            history["last_recorded_look"]["summary"],
+            "Confirmed the author follow-up",
+        )
+        self.assertEqual(
+            history["last_material_action"]["summary"],
+            "Requested a regression test",
+        )
+        self.assertFalse(history["last_material_action"]["head_matches_current"])
+
+    def test_dashboard_material_action_also_counts_as_a_recorded_look(self) -> None:
+        events = [
+            {
+                "event_type": "blocked",
+                "pr": 52,
+                "head_sha": "current-head",
+                "timestamp": "2026-07-11T00:00:00Z",
+                "summary": "Waiting for a rules fix",
+            }
+        ]
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": pr_review.latest_events_by_pr(events),
+                "local_latest_observations": pr_review.latest_observations_by_pr(events),
+                "local_latest_looks": pr_review.latest_looks_by_pr(events),
+                "local_latest_actions": pr_review.latest_material_actions_by_pr(events),
+            },
+        )()
+
+        history = pr_review.dashboard_local_history(context, 52, "current-head")
+
+        self.assertIsNone(history["last_recorded_observation"])
+        self.assertEqual(history["last_recorded_look"]["event_type"], "blocked")
+        self.assertEqual(
+            history["last_recorded_look"]["summary"],
+            "Waiting for a rules fix",
+        )
+
+    def test_dashboard_terminal_sections_keep_old_closed_prs_in_archive(self) -> None:
+        reference = datetime(2026, 7, 15, tzinfo=UTC)
+        sections = pr_review.dashboard_terminal_sections(
+            [
+                {"pr": 1, "state": "CLOSED", "closed_at": "2026-07-14T00:00:00Z"},
+                {"pr": 2, "state": "CLOSED", "closed_at": "2026-07-10T00:00:00Z"},
+                {"pr": 3, "state": "MERGED", "merged_at": "2026-07-01T00:00:00Z"},
+            ],
+            reference,
+        )
+
+        self.assertEqual([row["pr"] for row in sections["closed_recent"]], [1])
+        self.assertEqual([row["pr"] for row in sections["closed_archive"]], [2])
+        self.assertEqual([row["pr"] for row in sections["merged"]], [3])
+
+    def test_dashboard_renderer_escapes_snapshot_content_and_auto_refreshes(self) -> None:
+        rendered = pr_review_dashboard.render_dashboard(
+            {
+                "generated_at": "2026-07-15T00:00:00Z",
+                "action_counts": {"review": 1},
+                "candidates_by_action": {
+                    "review": [
+                        {
+                            "pr": 44,
+                            "title": "<script>alert(1)</script>",
+                            "url": "https://example.test/pull/44",
+                            "advisory_action": "review",
+                            "reason": "fresh_head",
+                            "ci": "green",
+                            "local_history": {},
+                        }
+                    ]
+                },
+                "dashboard": {"closed_unmerged": {"recent": [], "archive": []}, "merged": []},
+            }
+        )
+
+        self.assertIn('http-equiv="refresh" content="60"', rendered)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+        self.assertIn("<table>", rendered)
+        self.assertIn('data-detail-target="open-details-44"', rendered)
+        self.assertIn('id="pr-review-dashboard"', rendered)
+        self.assertIn('href="https://example.test/pull/44"', rendered)
+        self.assertIn('target="_blank"', rendered)
+        self.assertIn('class="status-label ready"', rendered)
+        self.assertNotIn('class="badge ready"', rendered)
+        self.assertIn('aria-label="CI passing"', rendered)
+        self.assertIn(">✓</span>", rendered)
+        self.assertIn('id="pr-search"', rendered)
+        self.assertIn('data-status-filter="review"', rendered)
+        self.assertIn('id="ci-filter"', rendered)
+        self.assertIn('const syncFilterUrl', rendered)
+
+    def test_dashboard_data_updates_terminal_archive_and_removes_reopened_prs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "review-dashboard.json"
+            pr_review.write_json_atomically(
+                output,
+                {
+                    "terminal_archive": [
+                        {"pr": 7, "state": "CLOSED", "closed_at": "2026-07-01T00:00:00Z"}
+                    ]
+                },
+            )
+            args = type(
+                "DashboardArgs",
+                (),
+                {
+                    "output": output,
+                    "html_output": None,
+                    "state_dir": Path(temp),
+                    "repo": "phase-rs/phase",
+                    "terminal_limit": 200,
+                    "limit": 100,
+                },
+            )()
+            scan_output = {
+                "generated_at": "2026-07-15T00:00:00Z",
+                "candidates_by_action": {"review": [{"pr": 7}]},
+            }
+            terminal_row = {
+                "pr": 8,
+                "state": "CLOSED",
+                "closed_at": pr_review.now_iso(),
+            }
+            context = type(
+                "DashboardContext",
+                (),
+                {
+                    "local_latest_events": {},
+                    "local_latest_observations": {},
+                    "local_latest_looks": {},
+                    "local_latest_actions": {},
+                },
+            )()
+            with (
+                mock.patch.object(pr_review, "load_review_context", return_value=context),
+                mock.patch.object(pr_review, "build_scan_output", return_value=scan_output),
+                mock.patch.object(pr_review, "fetch_terminal_prs", return_value=[{"number": 8}]),
+                mock.patch.object(pr_review, "dashboard_terminal_row", return_value=terminal_row),
+            ):
+                self.assertEqual(pr_review.command_dashboard_data(args), 0)
+
+            snapshot = json.loads(output.read_text())
+            self.assertEqual([row["pr"] for row in snapshot["terminal_archive"]], [8])
+            self.assertEqual([row["pr"] for row in snapshot["dashboard"]["closed_unmerged"]["recent"]], [8])
+            self.assertTrue(output.with_suffix(".html").exists())
+
+    def test_gh_user_uses_graphql_viewer_query(self) -> None:
+        with mock.patch.object(
+            pr_review,
+            "run_json",
+            return_value={"data": {"viewer": {"login": "maintainer"}}},
+        ) as run_json:
+            self.assertEqual(pr_review.gh_user(), "maintainer")
+
+        self.assertEqual(
+            run_json.call_args.args[0],
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query=query { viewer { login } }",
+            ],
+        )
+
+    def test_required_status_checks_use_effective_graphql_branch_rule(self) -> None:
+        with mock.patch.object(
+            pr_review,
+            "run_json",
+            return_value={
+                "data": {
+                    "repository": {
+                        "ref": {
+                            "branchProtectionRule": {
+                                "requiredStatusCheckContexts": ["Rust", "Frontend"]
+                            }
+                        }
+                    }
+                }
+            },
+        ) as run_json:
+            self.assertEqual(
+                pr_review.required_status_check_names("phase-rs/phase", "main"),
+                {"Rust", "Frontend"},
+            )
+
+        command = run_json.call_args.args[0]
+        self.assertIn("graphql", command)
+        self.assertIn("qualifiedName=refs/heads/main", command)
+        self.assertNotIn("protection/required_status_checks", command)
+
     def test_event_record_is_idempotent_and_compacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state_dir = Path(temp)
@@ -2393,7 +2654,7 @@ class PrReviewTests(unittest.TestCase):
             "crates/phase-server/src/main.rs",
         ]
         self.assertEqual(policy.architecture_scope_patterns, expected)
-        self.assertEqual(policy.architecture_scope_mode, "enforce")
+        self.assertEqual(policy.architecture_scope_mode, "review")
         self.assertEqual(policy.architecture_accepted_issue_label, "accepted")
         for pattern in expected:
             path = "crates/server-core/src/session.rs" if pattern.endswith("/**") else pattern
@@ -2402,6 +2663,8 @@ class PrReviewTests(unittest.TestCase):
                     {"author": {"login": "author"}}, [path], policy, {}
                 )
                 self.assertTrue(profile["triggered"])
+                self.assertTrue(profile["requires_maintainer_review"])
+                self.assertFalse(profile["decline"])
                 self.assertEqual(profile["evidence"]["matched_paths"], [path])
 
     def test_enforce_policy_requires_valid_cutoff_but_audit_allows_empty(self) -> None:
@@ -2673,7 +2936,7 @@ class PrReviewTests(unittest.TestCase):
         self.assertFalse(pass_5552["triggered"])
         self.assertFalse(pass_5610["triggered"])
 
-    def test_architecture_scope_authorizes_only_private_author_or_accepted_closing_issue(self) -> None:
+    def test_architecture_scope_authorizes_private_author_or_accepted_label(self) -> None:
         policy = pr_review.Policy(
             {
                 "admission": {"mode": "audit", "accepted_issue_label": "accepted"},
@@ -2694,6 +2957,9 @@ class PrReviewTests(unittest.TestCase):
         private = pr_review.architecture_scope_profile(
             base_pr, ["central.rs"], policy, {"architecture_scope_authors": ["Contrib"]}
         )
+        direct_pr = copy.deepcopy(base_pr)
+        direct_pr["labels"] = [{"name": "accepted"}]
+        direct = pr_review.architecture_scope_profile(direct_pr, ["central.rs"], policy, {})
         issue_pr = copy.deepcopy(base_pr)
         issue_pr["closingIssuesReferences"] = [
             {"number": 42, "labels": [{"name": "accepted"}]}
@@ -2707,6 +2973,8 @@ class PrReviewTests(unittest.TestCase):
         self.assertTrue(denied["would_decline"])
         self.assertFalse(denied["authorized"])
         self.assertTrue(private["authorized"])
+        self.assertTrue(direct["authorized"])
+        self.assertTrue(direct["evidence"]["accepted_pr_label"])
         self.assertTrue(issue["authorized"])
         self.assertEqual(issue["evidence"]["accepted_closing_issues"], [42])
         self.assertFalse(incomplete["authorized"])

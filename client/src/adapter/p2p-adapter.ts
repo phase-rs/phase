@@ -100,6 +100,8 @@ interface DeckSeatPayload {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  companion?: string[];
+  signature_spell?: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
   bracket_tier?: string;
@@ -958,6 +960,8 @@ export class P2PHostAdapter implements EngineAdapter {
           main_deck: deck.main_deck,
           sideboard: deck.sideboard,
           commander: deck.commander ?? [],
+          companion: deck.companion ?? [],
+          signature_spell: deck.signature_spell ?? [],
           selected_format: this.formatConfig!.format,
         }) as { selected_format_compatible?: boolean | null; selected_format_reasons: string[] };
 

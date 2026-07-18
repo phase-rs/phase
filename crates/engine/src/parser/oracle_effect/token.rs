@@ -724,7 +724,21 @@ fn parse_token_description_with_context(
                 .or_else(|| {
                     crate::parser::oracle_quantity::parse_event_context_quantity(&count_expression)
                 })
-                .or_else(|| super::parse_where_x_quantity_expression(&count_expression))?;
+                .or_else(|| super::parse_where_x_quantity_expression(&count_expression))
+                .or_else(|| {
+                    // CR 608.2c: bare anaphoric "the difference" — the two operands
+                    // live on the enclosing ability's condition, not this clause
+                    // ("create a number of tapped Treasure tokens equal to the
+                    // difference" — Hit the Mother Lode). Emit the deferred
+                    // placeholder that the difference binding resolves against the
+                    // condition's `QuantityCheck` operands, mirroring the
+                    // put-counter parser. Distinct from the `parse_cda_quantity`
+                    // "the difference between A and B" form, which carries operands.
+                    all_consuming(tag::<_, _, OracleError<'_>>("the difference"))
+                        .parse(count_expression.trim())
+                        .is_ok()
+                        .then(crate::parser::oracle_effect::difference_anaphor_placeholder)
+                })?;
         }
     }
 
