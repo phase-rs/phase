@@ -194,3 +194,87 @@ fn triple_triad_grants_free_play_to_owned_and_lesser_mv_exiled_cards_only() {
         "a card not exiled with this source must not be playable"
     );
 }
+
+#[test]
+fn triple_triad_does_not_fall_back_to_stale_owned_card_when_current_batch_has_none() {
+    let parsed = parse_oracle_text(
+        TRIPLE_TRIAD_ORACLE,
+        "Triple Triad",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("upkeep trigger should have an execute body");
+    let cast_def =
+        find_cast_from_zone(execute).expect("the play grant must lower to a CastFromZone clause");
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+    let source = scenario.add_creature(P0, "Triple Triad", 0, 0).id();
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+
+    let stale_owned_mv5 = create_object(
+        state,
+        CardId(910),
+        P0,
+        "Stale Owned MV5".to_string(),
+        Zone::Exile,
+    );
+    let current_opp_mv1 = create_object(
+        state,
+        CardId(911),
+        P1,
+        "Current Opp MV1".to_string(),
+        Zone::Exile,
+    );
+    let current_opp_mv4 = create_object(
+        state,
+        CardId(912),
+        P1,
+        "Current Opp MV4".to_string(),
+        Zone::Exile,
+    );
+
+    for (id, mv) in [
+        (stale_owned_mv5, 5u32),
+        (current_opp_mv1, 1),
+        (current_opp_mv4, 4),
+    ] {
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::generic(mv);
+        state.exile_links.push(ExileLink {
+            exiled_id: id,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+    }
+    state.last_zone_changed_ids = vec![current_opp_mv1, current_opp_mv4];
+
+    let ability = build_resolved_from_def(&cast_def, source, P0);
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 1)
+        .expect("the current linked-exile candidate set must reach the play-grant resolver");
+
+    let perms_of = |id: ObjectId| runner.state().objects[&id].casting_permissions.clone();
+
+    // CR 607.2a + CR 608.2c: The current resolution's candidate set is
+    // authoritative. Because it contains no P0-owned card, "the card you own
+    // exiled this way" has no referent; an older linked card cannot supply the
+    // mana-value threshold for either current card.
+    assert!(
+        !has_p0_free_cast(&perms_of(current_opp_mv1)),
+        "the MV-1 current card must not compare against a stale owned MV-5 card"
+    );
+    assert!(
+        !has_p0_free_cast(&perms_of(current_opp_mv4)),
+        "the MV-4 current card must not compare against a stale owned MV-5 card"
+    );
+    assert!(
+        !has_p0_free_cast(&perms_of(stale_owned_mv5)),
+        "the stale owned card must not receive the current resolution's permission"
+    );
+}

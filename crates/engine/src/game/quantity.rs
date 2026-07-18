@@ -23,7 +23,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{DamageRecord, GameState, LinkedExileSnapshot};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
@@ -283,6 +283,23 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
     }
 }
 
+/// CR 607.2a + CR 608.2c: Return the source-linked cards explicitly bound to
+/// this resolved ability. A nonempty result is the current materialized
+/// candidate set and is authoritative over the source's persistent exile pile.
+fn materialized_linked_exile_candidates(
+    ability: &ResolvedAbility,
+    linked: &[LinkedExileSnapshot],
+) -> Vec<ObjectId> {
+    ability
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) if linked.iter().any(|link| link.exiled_id == *id) => Some(*id),
+            TargetRef::Object(_) | TargetRef::Player(_) => None,
+        })
+        .collect()
+}
+
 /// CR 701.57c: True when `scope` is a resolution-only object scope whose referent
 /// is genuinely absent — no snapshot, event-source, or target object is bound to
 /// it. Mirrors the referent-lookup priority in `resolve_object_mana_value` /
@@ -326,23 +343,24 @@ fn resolution_only_scope_referent_present(
             let own = ability.effect_context_object.as_ref().map(|s| s.object_id);
             state.last_revealed_ids.iter().any(|id| Some(*id) != own)
         }
-        // CR 607.2a + CR 608.2c: source-linked exile reads may be narrowed to the
-        // current materialized candidate set, then fall back to persistent linked
-        // exile history for the source.
+        // CR 607.2a + CR 608.2c: A materialized current-resolution candidate set
+        // is authoritative, including when none of its cards has the required
+        // owner. Persistent linked-exile history is only a fallback when no
+        // current candidate set was supplied at all.
         ObjectScope::OwnedLinkedExileCard => {
             let controller = ability.original_controller.unwrap_or(ability.controller);
             let linked =
                 crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
-            ability.targets.iter().any(|target| {
-                let TargetRef::Object(id) = target else {
-                    return false;
-                };
-                linked.iter().any(|link| link.exiled_id == *id)
-                    && state
-                        .objects
-                        .get(id)
-                        .is_some_and(|obj| obj.zone == Zone::Exile && obj.owner == controller)
-            }) || linked.iter().any(|link| link.owner == controller)
+            let current_candidates = materialized_linked_exile_candidates(ability, &linked);
+            if current_candidates.is_empty() {
+                return linked.iter().any(|link| link.owner == controller);
+            }
+            current_candidates.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Exile && obj.owner == controller)
+            })
         }
         ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
     }
@@ -4754,31 +4772,24 @@ fn resolve_object_mana_value(
             let linked =
                 crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
             // CR 607.2a + CR 608.2c: When a same-resolution linked-exile grant
-            // materializes candidate cards into `ability.targets`, read "the
-            // card you own exiled this way" from that current set before the
-            // source's persistent linked-exile history.
-            ability
-                .targets
-                .iter()
-                .find_map(|target| {
-                    let TargetRef::Object(id) = target else {
-                        return None;
-                    };
-                    if !linked.iter().any(|link| link.exiled_id == *id) {
-                        return None;
-                    }
-                    state.objects.get(id).and_then(|obj| {
-                        (obj.zone == Zone::Exile && obj.owner == controller)
-                            .then(|| u32_to_i32_saturating(obj.effective_mana_value()))
-                    })
+            // materializes candidate cards into `ability.targets`, that current
+            // set is authoritative. An owner miss resolves to no referent (0);
+            // it must not borrow an older owned card from the persistent pile.
+            let current_candidates = materialized_linked_exile_candidates(ability, &linked);
+            let current_mana_value = current_candidates.iter().find_map(|id| {
+                state.objects.get(id).and_then(|obj| {
+                    (obj.zone == Zone::Exile && obj.owner == controller)
+                        .then(|| u32_to_i32_saturating(obj.effective_mana_value()))
                 })
-                .or_else(|| {
-                    linked
-                        .iter()
-                        .find(|link| link.owner == controller)
-                        .map(|link| u32_to_i32_saturating(link.mana_value))
-                })
-                .unwrap_or(0)
+            });
+            if current_candidates.is_empty() {
+                linked
+                    .iter()
+                    .find(|link| link.owner == controller)
+                    .map_or(0, |link| u32_to_i32_saturating(link.mana_value))
+            } else {
+                current_mana_value.unwrap_or(0)
+            }
         }
     }
 }
