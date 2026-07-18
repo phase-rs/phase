@@ -22137,6 +22137,37 @@ fn static_activated_ability_cost_opponent_activator_scope() {
     assert_eq!(*activator, Some(PlayerFilter::Controller));
 }
 
+/// CR 601.2f + CR 611.3: the composed cast/activate split (Tithe Taker) emits
+/// BOTH the spell-cast `ModifyCost` and the activated-ability `ReduceAbilityCost`
+/// statics from one line, each carrying the shared leading `DuringYourTurn`
+/// condition. Regression for the combinator-driven `parse_compound_cost_tax_clauses`
+/// split (no manual slicing): the single-return path keeps only the cast half.
+#[test]
+fn compound_cost_tax_line_splits_into_cast_and_ability_statics() {
+    let defs = parse_static_line_multi(
+        "During your turn, spells your opponents cast cost {1} more to cast and abilities your opponents activate cost {1} more to activate unless they're mana abilities.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "compound line must split into cast + ability statics, got {defs:?}",
+    );
+    let cast = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ModifyCost { .. }))
+        .expect("spell-cast half");
+    let ability = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ReduceAbilityCost { .. }))
+        .expect("activated-ability half");
+    assert_eq!(cast.condition, Some(StaticCondition::DuringYourTurn));
+    assert_eq!(
+        ability.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "the leading condition must propagate to the activate half",
+    );
+}
+
 #[test]
 fn static_possessive_equip_ability_cost_reduction_self_ref() {
     // Firion, Wild Rose Warrior's granted equip-cost reduction leaf:

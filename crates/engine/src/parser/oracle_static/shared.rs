@@ -1669,6 +1669,19 @@ pub(crate) fn parse_cant_win_lose_compound_statics(
     )
 }
 
+/// CR 601.2f: Split "<cast-cost clause> to cast and <activate-cost clause>" into
+/// its two clauses with composed combinators. `recognize` captures the cast
+/// clause THROUGH its "to cast" tail (so the reused single-line cost parser sees a
+/// complete "… cost {N} more to cast" clause); `tag(" and ")` consumes the
+/// conjunction; the remainder is the activate clause. Mirrors the `take_until` +
+/// `tag` split idiom used by the gated-combat tail parsers — no manual slicing.
+fn parse_compound_cost_tax_clauses(input: &str) -> OracleResult<'_, (&str, &str)> {
+    let (rest, cast_clause) =
+        recognize((take_until(" to cast and "), tag(" to cast"))).parse(input)?;
+    let (activate_clause, _) = tag(" and ").parse(rest)?;
+    Ok(("", (cast_clause, activate_clause)))
+}
+
 /// CR 601.2f + CR 602.2 + CR 604.1 + CR 611.3: Compound cost-tax static that
 /// conjoins a spell-cast cost modifier and an activated-ability cost modifier in
 /// one (optionally condition-scoped) sentence — "[<timing>,] spells <scope> cast
@@ -1703,18 +1716,11 @@ fn parse_compound_spell_and_ability_cost_tax(text: &str) -> Option<Vec<StaticDef
         return None;
     }
 
-    // Split the conjunction into the cast clause (which retains any leading timing
-    // condition) and the activate clause. `take_until` matches the ASCII-lowercase
-    // marker verbatim in the original-case text, keeping the split combinator-driven.
-    const MARKER: &str = " to cast and ";
-    let (after_marker, before) = take_until::<_, _, OracleError<'_>>(MARKER)
-        .parse(text)
-        .ok()?;
-    let (activate_clause, _) = tag::<_, _, OracleError<'_>>(MARKER)
-        .parse(after_marker)
-        .ok()?;
-    // The cast clause is `before` plus the marker's leading " to cast" fragment.
-    let cast_clause = &text[..before.len() + " to cast".len()];
+    // Split the conjunction with composed combinators (no manual slicing): the
+    // cast clause (which retains any leading timing condition) is `recognize`d
+    // THROUGH its "to cast" tail so the reused single-line parser sees a complete
+    // clause; the " and " conjunction and the trailing activate clause follow.
+    let (_, (cast_clause, activate_clause)) = parse_compound_cost_tax_clauses(text).ok()?;
 
     // Parse each half through the single-line pipeline; adopt only when both
     // resolve to the expected cost-static shapes (CR 601.2f).
