@@ -2138,7 +2138,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 let payload = crate::game::effects::become_copy::PrecomputedCopyValues {
                     source_id: copy.source_id,
                     controller: copy.controller,
-                    target_id: copy.source_id,
+                    duration_subject_id: copy.source_id,
                     duration: copy.sacrifice_at.unwrap_or(Duration::Permanent),
                     values: *copy.values,
                     display_source: copy.display_source,

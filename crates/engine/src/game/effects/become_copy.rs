@@ -76,7 +76,7 @@ pub fn resolve(
     let copy = PrecomputedCopyValues {
         source_id: ability.source_id,
         controller: ability.controller,
-        target_id,
+        duration_subject_id: target_id,
         duration,
         values,
         display_source: source_display_source,
@@ -93,7 +93,11 @@ pub fn resolve(
 pub(crate) struct PrecomputedCopyValues {
     pub source_id: ObjectId,
     pub controller: PlayerId,
-    pub target_id: ObjectId,
+    /// CR 611.2b: the concrete object a target- or recipient-relative
+    /// `ForAsLongAs` duration tracks. For self-copy effects this is the copy
+    /// target; for effects applied to another recipient (Assimilation Aegis), this
+    /// is the recipient while `values` carries the copied object's characteristics.
+    pub duration_subject_id: ObjectId,
     pub duration: Duration,
     pub values: CopiableValues,
     pub display_source: DisplaySource,
@@ -116,7 +120,7 @@ pub(crate) fn apply_precomputed_copy_values(
     let PrecomputedCopyValues {
         source_id,
         controller,
-        target_id,
+        duration_subject_id,
         duration,
         mut values,
         display_source,
@@ -176,7 +180,7 @@ pub(crate) fn apply_precomputed_copy_values(
         modifications,
         None,
     );
-    state.set_transient_duration_subject(tce_id, target_id);
+    state.set_transient_duration_subject(tce_id, duration_subject_id);
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — flush the layer re-evaluation
@@ -296,7 +300,13 @@ fn apply_copy_values_to_recipients(
                 }
             };
             for id in recipient_ids {
-                apply_precomputed_copy_values(state, id, copy.clone(), events)?;
+                let mut recipient_copy = copy.clone();
+                // CR 611.2b: recipient-relative durations ("for as long as ~
+                // remains attached to it") track the concrete object receiving
+                // the copy effect, while the copied values may come from a
+                // different object ("a creature card exiled with ~").
+                recipient_copy.duration_subject_id = id;
+                apply_precomputed_copy_values(state, id, recipient_copy, events)?;
             }
             Ok(())
         }
