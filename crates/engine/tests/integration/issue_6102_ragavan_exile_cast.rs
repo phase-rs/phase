@@ -21,7 +21,7 @@ const RAGAVAN_ORACLE: &str = "Whenever Ragavan deals combat damage to a player, 
 
 fn drain_until_ragavan_trigger_resolves(
     runner: &mut engine::game::scenario::GameRunner,
-    exiled_card: ObjectId,
+    expected_exiled_card: Option<ObjectId>,
 ) {
     for _ in 0..64 {
         match runner.state().waiting_for.clone() {
@@ -39,7 +39,8 @@ fn drain_until_ragavan_trigger_resolves(
             }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty()
-                    && runner.state().objects[&exiled_card].zone == Zone::Exile
+                    && expected_exiled_card
+                        .is_none_or(|card| runner.state().objects[&card].zone == Zone::Exile)
                 {
                     return;
                 }
@@ -97,7 +98,7 @@ fn ragavan_exiles_damaged_players_top_card_and_grants_cast_permission() {
         })
         .expect("declare Ragavan attacking P1");
 
-    drain_until_ragavan_trigger_resolves(&mut runner, opponent_top);
+    drain_until_ragavan_trigger_resolves(&mut runner, Some(opponent_top));
 
     {
         let state = runner.state();
@@ -137,5 +138,32 @@ fn ragavan_exiles_damaged_players_top_card_and_grants_cast_permission() {
     assert!(
         !spell_objects_available_to_cast(cast_outcome.state(), P0).contains(&opponent_top),
         "casting the granted spell must consume the exile-cast path"
+    );
+}
+
+#[test]
+fn ragavan_creates_treasure_when_damaged_player_has_empty_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ragavan = scenario
+        .add_creature(P0, "Ragavan, Nimble Pilferer", 2, 1)
+        .from_oracle_text(RAGAVAN_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(ragavan, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare Ragavan attacking P1");
+
+    drain_until_ragavan_trigger_resolves(&mut runner, None);
+
+    assert_eq!(
+        treasure_count(runner.state(), P0),
+        1,
+        "Ragavan must create its Treasure even when ExileTop finds no card"
     );
 }
