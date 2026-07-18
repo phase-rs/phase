@@ -774,6 +774,7 @@ mod typhoon_per_opponent_island_count;
 mod tyvar_activate_as_though_haste;
 mod unravel_counter_mana_value;
 mod unstoppable_slasher_half_life;
+mod urborg_scavengers_source_exiled_keyword_grant;
 mod ureni_attack_trigger;
 mod urge_to_feed_regression;
 mod urza_lord_high_artificer_shuffle_exile_free_cast;
