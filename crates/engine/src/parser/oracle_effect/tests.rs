@@ -46796,12 +46796,22 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
     };
     assert_eq!(choose_filter, sacrifice_filter);
     assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    assert_eq!(
+        def.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "the keeper instruction continues into the scoped search"
+    );
 
     let search = def
         .sub_ability
         .as_deref()
         .expect("exact keeper must continue to the scoped search");
     assert!(search.optional);
+    assert_eq!(
+        search.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "the search's intrinsic delivery remains a continuation"
+    );
     assert!(matches!(
         &search.player_scope,
         Some(PlayerFilter::ControlsCount {
@@ -46838,6 +46848,11 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
         .sub_ability
         .as_deref()
         .expect("search must carry a result-delivery continuation");
+    assert_eq!(
+        delivery.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "delivery remains the search result continuation"
+    );
     assert!(matches!(
         delivery.effect.as_ref(),
         Effect::ChangeZone {
@@ -46865,6 +46880,11 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
         })
     ));
+    assert_eq!(
+        shuffle.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling,
+        "the final searched-this-way shuffle remains an independent instruction"
+    );
 }
 
 /// The dedicated whole-line grammar must fail closed when the independently

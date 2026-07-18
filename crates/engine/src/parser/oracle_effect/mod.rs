@@ -12687,7 +12687,7 @@ fn parse_balance_equalization_ir(
     })
 }
 
-/// CR 101.4 + CR 701.21a + CR 701.23i: Whole-line parser for the generic
+/// CR 101.4 + CR 701.21a + CR 701.23i: Whole-line recognizer for the generic
 /// threshold-land keeper/search/shuffle grammar represented by Natural Balance.
 ///
 /// Every textual axis is parsed independently with nom: the upper threshold,
@@ -12695,10 +12695,11 @@ fn parse_balance_equalization_ir(
 /// shuffle are not a verbatim card-name/text special case. The lowering uses
 /// the existing player-count filter, exact keeper constraint, self-library
 /// search, ParentTarget delivery, and PerformedActionThisWay ledger.
-pub(crate) fn try_parse_threshold_land_balance(
+fn parse_threshold_land_balance_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
     let ((sacrifice_threshold, keep_count, search_threshold, x_base), _) = nom_on_lower(
         text,
@@ -12757,21 +12758,7 @@ pub(crate) fn try_parse_threshold_land_balance(
         }),
     };
 
-    let mut shuffle = AbilityDefinition::new(
-        kind,
-        Effect::Shuffle {
-            target: TargetFilter::Controller,
-        },
-    );
-    // CR 701.23i + CR 701.24a: only a player who accepted and performed the
-    // prior library search shuffles, including a player who found zero cards.
-    shuffle.player_scope = Some(PlayerFilter::PerformedActionThisWay {
-        relation: PlayerRelation::All,
-        action: crate::types::events::PlayerActionKind::SearchedLibrary,
-    });
-    shuffle.sub_link = SubAbilityLink::SequentialSibling;
-
-    let mut delivery = AbilityDefinition::new(
+    let delivery = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
             origin: Some(Zone::Library),
@@ -12789,56 +12776,117 @@ pub(crate) fn try_parse_threshold_land_balance(
             enters_modified_if: None,
         },
     );
-    delivery.sub_ability = Some(Box::new(shuffle));
 
-    let mut search = AbilityDefinition::new(
-        kind,
-        Effect::SearchLibrary {
-            filter: basic_land,
-            // CR 107.1b: This is directed subtraction, not the engine's
-            // absolute-value `Difference` expression. `SearchLibrary` clamps
-            // a negative upper bound to zero, so this remains correct for every
-            // threshold/base combination accepted by the generic grammar.
-            count: QuantityExpr::up_to(QuantityExpr::Sum {
-                exprs: vec![
-                    QuantityExpr::Fixed { value: x_base },
-                    QuantityExpr::Multiply {
-                        factor: -1,
-                        inner: Box::new(QuantityExpr::Ref {
-                            qty: QuantityRef::ObjectCount {
-                                filter: scoped_land,
-                            },
-                        }),
-                    },
-                ],
-            }),
-            reveal: false,
-            target_player: None,
-            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
-            split: None,
-            source_zones: vec![Zone::Library],
-        },
-    );
-    search.player_scope = Some(search_scope);
-    search.optional = true;
+    let mut search = parsed_clause(Effect::SearchLibrary {
+        filter: basic_land,
+        // CR 107.1b: This is directed subtraction, not the engine's
+        // absolute-value `Difference` expression. `SearchLibrary` clamps
+        // a negative upper bound to zero, so this remains correct for every
+        // threshold/base combination accepted by the generic grammar.
+        count: QuantityExpr::up_to(QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Fixed { value: x_base },
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: scoped_land,
+                        },
+                    }),
+                },
+            ],
+        }),
+        reveal: false,
+        target_player: None,
+        selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+        split: None,
+        source_zones: vec![Zone::Library],
+    });
     search.sub_ability = Some(Box::new(delivery));
 
-    let mut sacrifice = AbilityDefinition::new(
-        kind,
-        Effect::ChooseAndSacrificeRest {
-            categories: Vec::new(),
-            chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
-            choose_filter: land.clone(),
-            sacrifice_filter: land,
-            total_power_cap: None,
-            keeper_constraint: Some(KeeperConstraint::ExactCount {
-                count: QuantityExpr::Fixed { value: keep_count },
+    // Provenance bookkeeping only: the nom grammar above already validated the
+    // complete instruction. Keep the final "Then" with its own clause so the
+    // sentence boundary before it stamps the legacy SequentialSibling link.
+    let (sacrifice_source, remainder_source) =
+        super::oracle_nom::bridge::split_once_on_lower(text, &lower, ". ")?;
+    let remainder_lower = &lower[lower.len() - remainder_source.len()..];
+    let (search_source, _) = super::oracle_nom::bridge::split_once_on_lower(
+        remainder_source,
+        remainder_lower,
+        ". then ",
+    )?;
+    // allow-noncombinator: source-span slicing after nom validated the sentence separator
+    let shuffle_source = remainder_source.get(search_source.len() + 2..)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            sacrifice_source,
+            parsed_clause(Effect::ChooseAndSacrificeRest {
+                categories: Vec::new(),
+                chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+                choose_filter: land.clone(),
+                sacrifice_filter: land,
+                total_power_cap: None,
+                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                    count: QuantityExpr::Fixed { value: keep_count },
+                }),
             }),
-        },
-    );
-    sacrifice.player_scope = Some(sacrifice_scope);
-    sacrifice.sub_ability = Some(Box::new(search));
-    Some(sacrifice)
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .player_scope(Some(sacrifice_scope))
+        .push();
+    // CR 608.2c: leave the first sentence's boundary unset so the search stays
+    // the legacy ContinuationStep; its intrinsic delivery remains a search result.
+    builder
+        .clause(
+            search_source,
+            search,
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .is_optional(true)
+        .player_scope(Some(search_scope))
+        .push();
+    // CR 701.23i + CR 701.24a: only a player who accepted and performed the
+    // prior library search shuffles, including a player who found zero cards.
+    // The preceding sentence boundary makes this a SequentialSibling exactly as
+    // the legacy recognizer did.
+    builder
+        .clause(
+            shuffle_source,
+            parsed_clause(Effect::Shuffle {
+                target: TargetFilter::Controller,
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .player_scope(Some(PlayerFilter::PerformedActionThisWay {
+            relation: PlayerRelation::All,
+            action: crate::types::events::PlayerActionKind::SearchedLibrary,
+        }))
+        .push();
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 /// CR 121.1 + CR 402.1 + CR 608.2e: Whole-line interceptor for the "catch up to
@@ -25127,9 +25175,6 @@ fn try_parse_chain_bypass(
     if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
         return Some(def);
     }
-    if let Some(def) = try_parse_threshold_land_balance(text, kind) {
-        return Some(def);
-    }
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
         return Some(def);
     }
@@ -25790,6 +25835,9 @@ pub(crate) fn parse_effect_chain_ir(
         return ir;
     }
     if let Some(ir) = parse_balance_equalization_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_threshold_land_balance_ir(text, kind, ctx) {
         return ir;
     }
     if let Some(ir) = parse_return_target_and_same_name_from_your_graveyard_ir(text, kind, ctx) {
