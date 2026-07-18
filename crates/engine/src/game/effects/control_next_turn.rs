@@ -32,16 +32,36 @@ pub fn resolve(
     // time, so retain provenance when this resolved effect is scheduled.
     let timestamp = state.next_timestamp();
 
-    state
-        .scheduled_turn_controls
-        .retain(|scheduled| scheduled.target_player != target_player);
+    // CR 723.1a: Deduplicate inactive future effects for this target, but keep
+    // the exact entry that created a control effect already governing the
+    // current turn/phase. A newly resolved "next turn" effect is future-facing
+    // and must not erase the active effect's release identity.
+    let active_target =
+        crate::game::topology::normalize_shared_turn_recipient(state, state.active_player);
+    let active_identity = (active_target == target_player)
+        .then(|| {
+            state.turn_decision_controller.map(|controller| {
+                (
+                    controller,
+                    state.turn_decision_control_timestamp.unwrap_or(0),
+                )
+            })
+        })
+        .flatten();
+    state.scheduled_turn_controls.retain(|scheduled| {
+        scheduled.target_player != target_player
+            || active_identity.is_some_and(|(controller, active_timestamp)| {
+                scheduled.controller == controller && scheduled.timestamp == active_timestamp
+            })
+    });
     state.scheduled_turn_controls.push(ScheduledTurnControl {
         target_player,
         controller: ability.controller,
         timestamp,
         grant_extra_turn_after: *grant_extra_turn_after,
         // CR 723.1 / CR 723.2: schedule under the parsed window regardless of
-        // window — the dedup `retain` above keeps one entry per target (CR 723.1a).
+        // window — the dedup above keeps the active identity plus the newest
+        // future entry for a target (CR 723.1a).
         window: *window,
     });
 
@@ -63,8 +83,9 @@ mod tests {
     use crate::types::player::PlayerId;
 
     #[test]
-    fn resolve_overwrites_prior_scheduled_control_for_same_target() {
+    fn resolve_preserves_active_control_while_replacing_future_control() {
         let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
         state.turn_decision_controller = Some(PlayerId(0));
         state.turn_decision_control_timestamp = Some(0);
         state.scheduled_turn_controls.push(ScheduledTurnControl {
@@ -89,9 +110,10 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.scheduled_turn_controls.len(), 1);
+        assert_eq!(state.scheduled_turn_controls.len(), 2);
+        assert_eq!(state.scheduled_turn_controls[0].timestamp, 0);
         assert_eq!(
-            state.scheduled_turn_controls[0],
+            state.scheduled_turn_controls[1],
             ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(1),

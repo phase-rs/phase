@@ -327,7 +327,11 @@ fn future_scheduled_control_cannot_replace_active_control_provenance() {
     .expect("schedule the future control");
 
     assert_eq!(runner.state().turn_decision_control_timestamp, Some(50));
-    assert_eq!(runner.state().scheduled_turn_controls[0].timestamp, 150);
+    assert!(runner
+        .state()
+        .scheduled_turn_controls
+        .iter()
+        .any(|scheduled| scheduled.timestamp == 150));
 
     resolve_to_search(&mut runner, tutor);
 
@@ -346,6 +350,31 @@ fn future_scheduled_control_cannot_replace_active_control_provenance() {
         !search.learned_audience().contains(&active_controller),
         "future scheduled control must not expose the library to its controller"
     );
+
+    let found = match &runner.state().waiting_for {
+        WaitingFor::SearchChoice { cards, .. } => *cards
+            .first()
+            .expect("the prepared search has a selectable card"),
+        other => panic!("expected prepared search choice, got {other:?}"),
+    };
+    runner
+        .act(GameAction::SelectCards { cards: vec![found] })
+        .expect("the Agent controller completes the search before turns advance");
+
+    // Finish P1's current controlled turn, then advance P2, P3, and P0. The
+    // newly scheduled effect must survive that first boundary and activate when
+    // P1's next turn begins.
+    let mut turn_events = Vec::new();
+    for _ in 0..4 {
+        engine::game::turns::start_next_turn(runner.state_mut(), &mut turn_events);
+    }
+    assert_eq!(runner.state().active_player, P1);
+    assert_eq!(
+        runner.state().turn_decision_controller,
+        Some(active_controller),
+        "the future control must govern P1's next turn"
+    );
+    assert_eq!(runner.state().turn_decision_control_timestamp, Some(150));
 }
 
 /// CR 723.1a + CR 723.5: multiple Agents and an active turn-control effect are

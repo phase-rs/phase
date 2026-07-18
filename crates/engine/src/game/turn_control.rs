@@ -1,3 +1,4 @@
+use crate::types::ability::ControlWindow;
 use crate::types::game_state::{
     ActiveSearchDecisionAuthority, GameState, ScheduledTurnControl, WaitingFor,
 };
@@ -5,21 +6,40 @@ use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 
 /// CR 723.1 / CR 723.2 / CR 800.4a: the single authority that ENDS a
-/// player-control effect. Removes the consumed schedule entry (the resolver
-/// dedups to at most one per target — CR 723.1a) and clears
-/// `turn_decision_controller` iff it currently points at that entry's
-/// controller. Returns the removed entry so the caller can apply
+/// player-control effect. Removes the consumed schedule entry and clears
+/// `turn_decision_controller` iff it currently points at that exact effect
+/// identity. Returns the removed entry so the caller can apply
 /// window-specific post-processing (CR 723.1 extra-turn grant; CR 723.2 no-op).
 /// All three release sites — turn boundary (`start_next_turn`), combat-phase
 /// boundary (`finish_enter_phase`), and leave-game cleanup (`do_eliminate`) —
 /// route through here so control ends in exactly one place.
 pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> ScheduledTurnControl {
     let entry = state.scheduled_turn_controls.remove(idx);
-    if state.turn_decision_controller == Some(entry.controller) {
+    if state.turn_decision_controller == Some(entry.controller)
+        && state.turn_decision_control_timestamp.unwrap_or(0) == entry.timestamp
+    {
         state.turn_decision_controller = None;
         state.turn_decision_control_timestamp = None;
     }
     entry
+}
+
+/// CR 723.1a: Locate the scheduled entry that created the currently active
+/// player-control effect. Controller alone is insufficient because a newer,
+/// future control effect may have the same controller and target.
+pub(super) fn active_scheduled_control_index(
+    state: &GameState,
+    target_player: PlayerId,
+    window: ControlWindow,
+) -> Option<usize> {
+    let controller = state.turn_decision_controller?;
+    let timestamp = state.turn_decision_control_timestamp.unwrap_or(0);
+    state.scheduled_turn_controls.iter().position(|scheduled| {
+        scheduled.target_player == target_player
+            && scheduled.window == window
+            && scheduled.controller == controller
+            && scheduled.timestamp == timestamp
+    })
 }
 
 pub fn turn_resource_owner(state: &GameState) -> PlayerId {

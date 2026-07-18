@@ -535,11 +535,11 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     {
         let active_key =
             super::topology::normalize_shared_turn_recipient(state, state.active_player);
-        if let Some(idx) = state.scheduled_turn_controls.iter().position(|scheduled| {
-            scheduled.window == ControlWindow::NextCombatPhase
-                && Some(scheduled.controller) == state.turn_decision_controller
-                && scheduled.target_player == active_key
-        }) {
+        if let Some(idx) = turn_control::active_scheduled_control_index(
+            state,
+            active_key,
+            ControlWindow::NextCombatPhase,
+        ) {
             turn_control::release_control_at(state, idx);
         }
     }
@@ -620,24 +620,21 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
         let completed_turn_key =
             super::topology::normalize_shared_turn_recipient(&scratch, completed_player);
         if scratch.turn_decision_controller.is_some() {
-            let completed_controller = scratch.turn_decision_controller;
-            let mut grant_extra_turn_after = false;
             // CR 614.10a + CR 723.1: "next turn" control releases when that
             // controlled turn is complete; any granted follow-up extra turn is
             // scheduled before the next turn is selected.
-            while let Some(idx) = scratch
-                .scheduled_turn_controls
-                .iter()
-                .position(|scheduled| {
-                    scheduled.window == ControlWindow::NextTurn
-                        && scheduled.target_player == completed_turn_key
-                })
-            {
-                let entry = scratch.scheduled_turn_controls.remove(idx);
-                if Some(entry.controller) == completed_controller {
-                    grant_extra_turn_after |= entry.grant_extra_turn_after;
-                }
-            }
+            let grant_extra_turn_after = turn_control::active_scheduled_control_index(
+                &scratch,
+                completed_turn_key,
+                ControlWindow::NextTurn,
+            )
+            .map(|idx| {
+                scratch
+                    .scheduled_turn_controls
+                    .remove(idx)
+                    .grant_extra_turn_after
+            })
+            .unwrap_or(false);
             if grant_extra_turn_after {
                 scratch.extra_turns.push(completed_player);
             }
@@ -715,23 +712,20 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let completed_turn_key =
         super::topology::normalize_shared_turn_recipient(state, completed_player);
     if state.turn_decision_controller.is_some() {
-        let completed_controller = state.turn_decision_controller;
-        let mut grant_extra_turn_after = false;
         // CR 723.1: A full-turn (NextTurn) control ends at the boundary of the
         // turn it governed — route every removal through the single release
         // authority. CR 723.1b: a NextCombatPhase entry for this player is LEFT
         // IN PLACE (it binds to a combat phase, not a turn, and carries until the
-        // player actually takes a combat phase). The resolver dedups to ≤1 entry
-        // per target (CR 723.1a); the loop preserves the legacy retain semantics.
-        while let Some(idx) = state.scheduled_turn_controls.iter().position(|scheduled| {
-            scheduled.window == ControlWindow::NextTurn
-                && scheduled.target_player == completed_turn_key
-        }) {
-            let entry = turn_control::release_control_at(state, idx);
-            if Some(entry.controller) == completed_controller {
-                grant_extra_turn_after |= entry.grant_extra_turn_after;
-            }
-        }
+        // player actually takes a combat phase). Match the active effect's
+        // controller+timestamp identity so a future control for the same target
+        // remains scheduled (CR 723.1a).
+        let grant_extra_turn_after = turn_control::active_scheduled_control_index(
+            state,
+            completed_turn_key,
+            ControlWindow::NextTurn,
+        )
+        .map(|idx| turn_control::release_control_at(state, idx).grant_extra_turn_after)
+        .unwrap_or(false);
         if grant_extra_turn_after {
             state.extra_turns.push(completed_player);
         }

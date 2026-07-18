@@ -1004,15 +1004,10 @@ fn parse_search_found_play_permission(input: &str) -> OracleResult<'_, SearchFou
 }
 
 fn parse_search_found_mana_concession(input: &str) -> OracleResult<'_, ManaSpendPermission> {
-    let (input, _) = tag("you may spend mana as though it were mana of any ").parse(input)?;
-    let (input, permission) = alt((
-        value(ManaSpendPermission::AnyColor, tag("color")),
-        value(ManaSpendPermission::AnyTypeOrColor, tag("type")),
-    ))
-    .parse(input)?;
+    let (input, _) = tag("you may spend mana as though it were mana of any color").parse(input)?;
     let (input, _) = tag(" to cast ").parse(input)?;
     let (input, _) = alt((tag("them"), tag("those cards"), tag("those spells"))).parse(input)?;
-    Ok((input, permission))
+    Ok((input, ManaSpendPermission::AnyColor))
 }
 
 fn parse_search_found_replacement_clause(
@@ -20969,21 +20964,12 @@ mod opposition_agent_parser_tests {
     #[test]
     fn search_found_parser_composes_supported_surface_axes_independently() {
         let cases = [
-            (
-                "While an opponent is searching their library, that player exiles each card they find. You may play them for as long as those cards remain exiled, and you may spend mana as though it were mana of any type to cast those cards.",
-                ManaSpendPermission::AnyTypeOrColor,
-            ),
-            (
-                "While one or more opponents are searching their libraries, those players exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast those spells.",
-                ManaSpendPermission::AnyColor,
-            ),
-            (
-                "While one or more opponents are searching their library, they exile each card they find. You may play them for as long as they remain exiled, and you may spend mana as though it were mana of any type to cast them.",
-                ManaSpendPermission::AnyTypeOrColor,
-            ),
+            "While an opponent is searching their library, that player exiles each card they find. You may play them for as long as those cards remain exiled, and you may spend mana as though it were mana of any color to cast those cards.",
+            "While one or more opponents are searching their libraries, those players exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast those spells.",
+            "While one or more opponents are searching their library, they exile each card they find. You may play them for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
         ];
 
-        for (text, expected_mana) in cases {
+        for text in cases {
             assert!(is_search_found_replacement_pattern(&text.to_lowercase()));
             let definition = parse_replacement_line(text, "Search Interceptor")
                 .expect("composed SearchFound paragraph should reach replacement lowering");
@@ -21006,7 +20992,7 @@ mod opposition_agent_parser_tests {
                     },
                     target: TargetFilter::ParentTarget,
                     grantee: PermissionGrantee::AbilityController,
-                } if *actual_mana == expected_mana
+                } if *actual_mana == ManaSpendPermission::AnyColor
             ));
         }
     }
