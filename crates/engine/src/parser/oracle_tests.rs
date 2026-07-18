@@ -22315,3 +22315,125 @@ fn azors_gateway_transform_condition_parses_with_zero_swallowed_clauses() {
     assert_eq!(transform.condition, expected_ability_condition);
     assert!(transform.sub_ability.is_none());
 }
+
+/// CR 104.2b + CR 104.3e + CR 114.1 + CR 611.3a + CR 205.3j: Gideon of the
+/// Trials (verbatim MTGJSON Oracle text) — the third loyalty ability creates
+/// an emblem carrying BOTH game-outcome locks, each gated on an `IsPresent`
+/// check for a Gideon planeswalker you control. Exercises all three seams of
+/// the fix in one production-shaped parse: the name normalizer keeps the
+/// type-adjective "Gideon" literal, the compound cant-win/lose multi arm
+/// splits the conjunction, and the emblem parser carries multiple statics.
+/// Reverting any of the three fails this test.
+#[test]
+fn gideon_of_the_trials_emblem_full_parse() {
+    let r = parse(
+        "[+1]: Until your next turn, prevent all damage target permanent would deal.\n[0]: Until end of turn, Gideon becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+        "Gideon of the Trials",
+        &[],
+        &["Planeswalker"],
+        &["Gideon"],
+    );
+    assert_eq!(
+        r.abilities.len(),
+        3,
+        "three loyalty abilities, got {:#?}",
+        r.abilities
+    );
+    // Positive reach guard for the swallow assertion below: every ability
+    // parses with zero residual `Effect::Unimplemented`.
+    for def in &r.abilities {
+        assert!(
+            !has_unimplemented(def),
+            "no residual Unimplemented node, got {:#?}",
+            def
+        );
+    }
+
+    let Effect::CreateEmblem { statics, triggers } = &*r.abilities[2].effect else {
+        panic!(
+            "third loyalty ability must create an emblem, got {:?}",
+            r.abilities[2].effect
+        );
+    };
+    assert!(triggers.is_empty(), "emblem grants statics, not triggers");
+    assert_eq!(
+        statics.len(),
+        2,
+        "one static per conjunct of the emblem body, got {statics:#?}"
+    );
+    assert_eq!(statics[0].mode, StaticMode::CantLoseTheGame);
+    assert_eq!(
+        statics[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(statics[1].mode, StaticMode::CantWinTheGame);
+    assert_eq!(
+        statics[1].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    // CR 611.3a + CR 205.3j: each lock is gated on controlling a Gideon
+    // planeswalker — live, typed, never `Unrecognized`.
+    for static_def in statics {
+        let Some(StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(typed)),
+        }) = &static_def.condition
+        else {
+            panic!("each emblem static carries the IsPresent gate: {static_def:#?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(
+            typed.type_filters.contains(&TypeFilter::Planeswalker),
+            "gate requires a planeswalker: {typed:?}"
+        );
+        assert!(
+            typed
+                .type_filters
+                .contains(&TypeFilter::Subtype("Gideon".to_string())),
+            "gate requires the Gideon planeswalker type: {typed:?}"
+        );
+    }
+
+    // The `Condition_AsLongAs` swallow flag must clear — non-vacuously: the
+    // fully-typed positive shape asserted above IS the reach guard.
+    assert!(
+        r.parse_warnings.iter().all(|warning| {
+            let s = warning.to_string();
+            s.split_whitespace().next() != Some("Swallow:Condition_AsLongAs")
+        }),
+        "as-long-as gate is typed, so the swallow flag must clear: {:?}",
+        r.parse_warnings
+    );
+}
+
+/// CR 114.1: a standalone emblem-granting instant/sorcery ("You get an emblem
+/// with ...") must parse its spell effect to a `CreateEmblem` carrying the full
+/// static payload — the same emblem body outside any loyalty-ability context.
+/// Pins the spell-path class so any emblem-granting instant/sorcery is covered,
+/// not just Gideon.
+#[test]
+fn standalone_spell_emblem_grant_parses_to_create_emblem() {
+    let r = parse(
+        "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+        "Test Emblem Grant",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let create = r
+        .abilities
+        .iter()
+        .find_map(|def| match &*def.effect {
+            Effect::CreateEmblem { statics, .. } => Some(statics),
+            _ => None,
+        })
+        .expect("standalone spell emblem grant must parse to a CreateEmblem effect");
+    assert_eq!(
+        create.len(),
+        2,
+        "emblem carries both outcome-lock statics, got {create:#?}"
+    );
+}

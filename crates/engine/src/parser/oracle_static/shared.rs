@@ -1596,6 +1596,79 @@ fn parse_color_conditional_keyword_grant(input: &str) -> OracleResult<'_, (Keywo
     Ok((i, (keyword, color)))
 }
 
+/// CR 104.2b + CR 104.3e + CR 810.8a: Compound player-scope game-outcome lock —
+/// "<player-scope> can't lose|win the game and <player-scope> can't win|lose
+/// the game" — lowered to one `CantLoseTheGame`/`CantWinTheGame` static per
+/// conjunct, each carrying its own subject's affected filter (Platinum Angel:
+/// "You can't lose the game and your opponents can't win the game."; Abyssal
+/// Persecutor reverses the modes; Gideon of the Trials' emblem wraps the same
+/// sentence in an "as long as" gate handled by the inverted-split arm in
+/// `parse_static_line_multi_dispatch`). Requires ≥ 2 conjuncts and consumes
+/// the whole line, so single-mode lines keep their existing
+/// `parse_static_line_inner` arms and rider-bearing one-shot effect sentences
+/// (Angel's Grace: "You can't lose the game this turn and …") fall through
+/// untouched.
+pub(crate) fn parse_cant_win_lose_compound_statics(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
+    // Subject axis: the player scope each conjunct names. Filter shapes match
+    // the single-mode arms' `parse_player_scope_filter` output so both runtime
+    // readers (`static_affects_player`, `static_filter_matches`) see the same
+    // vocabulary. "your opponents " precedes "you " in source order for
+    // clarity only — `tag("you ")` requires a trailing space, so it cannot
+    // claim the "your…" prefix.
+    fn parse_subject(i: &str) -> OracleResult<'_, TargetFilter> {
+        alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                tag("your opponents "),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                tag("you "),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default()),
+                alt((tag("each player "), tag("players "))),
+            ),
+        ))
+        .parse(i)
+    }
+    // Predicate axis: which game outcome is locked (CR 104.2b win effects /
+    // CR 104.3e loss effects; CR 810.8a is the "can't win"/"can't lose"
+    // effect language).
+    fn parse_predicate(i: &str) -> OracleResult<'_, StaticMode> {
+        preceded(
+            alt((tag("can't "), tag("cannot "))),
+            alt((
+                value(StaticMode::CantLoseTheGame, tag("lose the game")),
+                value(StaticMode::CantWinTheGame, tag("win the game")),
+            )),
+        )
+        .parse(i)
+    }
+
+    let (rest, first) = (parse_subject, parse_predicate).parse(lower).ok()?;
+    let (rest, tail) = many1(preceded(tag(" and "), (parse_subject, parse_predicate)))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(
+        std::iter::once(first)
+            .chain(tail)
+            .map(|(affected, mode)| {
+                StaticDefinition::new(mode)
+                    .affected(affected)
+                    .description(text.to_string())
+            })
+            .collect(),
+    )
+}
+
 fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
@@ -1724,6 +1797,29 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
             }
             return defs;
         }
+        // CR 104.2b + CR 104.3e + CR 611.3a: conditional game-outcome lock —
+        // "As long as <condition>, you can't lose the game and your opponents
+        // can't win the game" (Gideon of the Trials' emblem). Each conjunct
+        // becomes its own condition-gated static. CR 611.3a: fail CLOSED — an
+        // unrecognized condition falls through to the existing fallback (the
+        // line keeps its honest `Condition_AsLongAs` swallow flag) rather
+        // than emitting an unconditional outcome lock:
+        // `StaticCondition::Unrecognized` evaluates as always-true in the
+        // layer system, which for "you can't lose the game" would be
+        // game-breaking. Mirrors the CantPlayLand trailing-gate precedent in
+        // `dispatch.rs`.
+        let effect_lower = split.effect_text.to_lowercase();
+        if let Some(mut defs) =
+            parse_cant_win_lose_compound_statics(&split.effect_text, &effect_lower)
+        {
+            if let Some(condition) = parse_static_condition(&split.condition_text) {
+                for def in &mut defs {
+                    def.condition = Some(condition.clone());
+                    def.description = Some(stripped.to_string());
+                }
+                return defs;
+            }
+        }
     }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and
@@ -1841,6 +1937,16 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
                 .affected(affected)
                 .description(stripped.to_string()),
         ];
+    }
+
+    // CR 104.2b + CR 104.3e + CR 810.8a: "<player-scope> can't lose/win the
+    // game and <player-scope> can't win/lose the game" — one game-outcome-lock
+    // static per conjunct, each with its own player scope (Platinum Angel
+    // wording class, both mode orders; emblem bodies such as Gideon of the
+    // Trials' reach this via `try_parse_emblem_creation` →
+    // `parse_static_line_multi`). Sibling of the life-lock compound above.
+    if let Some(defs) = parse_cant_win_lose_compound_statics(&stripped, &lower) {
+        return defs;
     }
 
     let tp = TextPair::new(&stripped, &lower);

@@ -1355,8 +1355,10 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
 /// (`you get an emblem with "…"` or the subject-stripped `get an emblem with
 /// "…"`). Combinator-only dispatch mirroring `try_parse_emblem_creation`'s prefix
 /// so the clause splitter treats an emblem's granted-ability quote as a
-/// self-contained sentence.
-fn clause_is_emblem_creation_head(current: &str) -> bool {
+/// self-contained sentence. Also the emblem-head deferral predicate for
+/// `should_defer_spell_to_effect`: a spell line matching this head routes to
+/// the effect parser even when its quoted body looks like a static pattern.
+pub(crate) fn is_emblem_creation_head(current: &str) -> bool {
     let is_emblem_head = alt((
         tag_no_case::<_, _, OracleError<'_>>("you get an emblem with \""),
         tag_no_case("get an emblem with \""),
@@ -1385,7 +1387,7 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     // sibling effects split into their own clauses — Nissa, Who Shakes the World's
     // "… Search your library …" would otherwise be swallowed into the emblem's
     // static text (issue #5282).
-    if clause_is_emblem_creation_head(current) {
+    if is_emblem_creation_head(current) {
         return true;
     }
 

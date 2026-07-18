@@ -30536,3 +30536,132 @@ fn flying_cant_attack_you_alone_is_unchanged() {
         "single-clause can't-attack-you must stay a defender-scoped subject static: {defs:?}"
     );
 }
+
+/// CR 104.2b + CR 104.3e + CR 810.8a: the compound game-outcome lock emits one
+/// static per conjunct, each scoped to its own subject (Platinum Angel,
+/// verbatim Oracle text). Reverting `parse_cant_win_lose_compound_statics`
+/// collapses this to the single-def scan arm's lone `CantWinTheGame`.
+#[test]
+fn cant_win_lose_compound_emits_both_scoped_statics() {
+    let defs =
+        parse_static_line_multi("You can't lose the game and your opponents can't win the game.");
+    assert_eq!(defs.len(), 2, "one static per conjunct: {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::CantLoseTheGame);
+    assert_eq!(
+        defs[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(defs[1].mode, StaticMode::CantWinTheGame);
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
+/// CR 104.2b + CR 104.3e: the mode axis composes with the subject axis — the
+/// reversed order (Abyssal Persecutor, verbatim) yields the mirrored pair.
+#[test]
+fn cant_win_lose_compound_reversed_modes() {
+    let defs =
+        parse_static_line_multi("You can't win the game and your opponents can't lose the game.");
+    assert_eq!(defs.len(), 2, "one static per conjunct: {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::CantWinTheGame);
+    assert_eq!(
+        defs[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(defs[1].mode, StaticMode::CantLoseTheGame);
+    assert_eq!(
+        defs[1].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
+/// CR 104.2b + CR 104.3e: the one-shot spell sentence (Angel's Grace, verbatim
+/// first clause) carries "this turn" riders that break the all-consuming
+/// conjunction grammar — the compound STATIC arm must decline so the effect
+/// parser keeps owning it. Reach guard: the rider-free Platinum Angel sentence
+/// IS claimed by the same arm, so the negative is not vacuous.
+#[test]
+fn cant_win_lose_compound_declines_turn_rider_spell_sentence() {
+    let grace =
+        "You can't lose the game this turn and your opponents can't win the game this turn.";
+    assert!(
+        parse_cant_win_lose_compound_statics(grace, &grace.to_lowercase()).is_none(),
+        "turn-rider sentence must fall through to the effect parser"
+    );
+    let platinum = "You can't lose the game and your opponents can't win the game.";
+    assert!(
+        parse_cant_win_lose_compound_statics(platinum, &platinum.to_lowercase()).is_some(),
+        "reach guard: the rider-free static sentence is claimed"
+    );
+}
+
+/// CR 104.2b + CR 104.3e + CR 611.3a: the inverted "As long as <cond>,
+/// <compound>" form (Gideon of the Trials' emblem body, verbatim inner text)
+/// yields both statics, each gated on the parsed condition — an
+/// `IsPresent` check for a Gideon planeswalker you control (CR 205.3j).
+#[test]
+fn conditional_cant_win_lose_compound_attaches_condition_to_each_static() {
+    let defs = parse_static_line_multi(
+        "As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game",
+    );
+    assert_eq!(defs.len(), 2, "one static per conjunct: {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::CantLoseTheGame);
+    assert_eq!(defs[1].mode, StaticMode::CantWinTheGame);
+    for def in &defs {
+        let Some(StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(typed)),
+        }) = &def.condition
+        else {
+            panic!("each conjunct must carry the IsPresent gate: {def:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(
+            typed.type_filters.contains(&TypeFilter::Planeswalker),
+            "condition filter must require a planeswalker: {typed:?}"
+        );
+        assert!(
+            typed
+                .type_filters
+                .contains(&TypeFilter::Subtype("Gideon".to_string())),
+            "condition filter must require the Gideon planeswalker type: {typed:?}"
+        );
+    }
+}
+
+/// CR 611.3a: fail CLOSED — an unrecognized "as long as" condition must not
+/// produce an unconditional outcome lock (`StaticCondition::Unrecognized`
+/// evaluates as always-true at runtime, which for "you can't lose the game"
+/// would be game-breaking). The line falls through to today's fallback, which
+/// never emits `CantLoseTheGame` for this shape. Reach guard: the recognized
+/// condition in `conditional_cant_win_lose_compound_attaches_condition_to_each_static`
+/// proves the same sentence shape parses when the gate is parseable.
+#[test]
+fn conditional_cant_win_lose_compound_fails_closed_on_unrecognized_condition() {
+    let defs = parse_static_line_multi(
+        "As long as the froopiness is maximal, you can't lose the game and your opponents can't win the game",
+    );
+    assert!(
+        defs.iter().all(|d| d.mode != StaticMode::CantLoseTheGame),
+        "an unrecognized gate must never yield an (unconditional) CantLoseTheGame: {defs:?}"
+    );
+    assert!(
+        defs.iter().all(
+            |d| !matches!(d.condition, Some(StaticCondition::Unrecognized { .. }))
+                || !matches!(
+                    d.mode,
+                    StaticMode::CantLoseTheGame | StaticMode::CantWinTheGame
+                )
+        ),
+        "no outcome lock may ride on an Unrecognized (always-true) condition: {defs:?}"
+    );
+}

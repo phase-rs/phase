@@ -19806,13 +19806,22 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
         });
     }
 
-    // Try to parse the emblem text as a static ability line.
-    if let Some(mut static_def) = super::oracle_static::parse_static_line(inner) {
+    // Try to parse the emblem text as one or more static ability lines.
+    // CR 604.1 + CR 114.4: a compound emblem body ("… you can't lose the game
+    // and your opponents can't win the game" — Gideon of the Trials) defines
+    // several statics at once; `parse_static_line_multi` emits them all and
+    // internally falls back to the single-def parser for simple bodies. An
+    // empty result still routes to the honest `EmblemStatic` fallback below,
+    // so an unparseable body stays a visible coverage gap.
+    let mut static_defs = super::oracle_static::parse_static_line_multi(inner);
+    if !static_defs.is_empty() {
         // CR 114: retain the emblem's granted rules text for the display
-        // tooltip, mirroring the trigger and fallback branches.
-        static_def.description = Some(inner.to_string());
+        // tooltip on the first def only, mirroring the trigger branch.
+        if let Some(first) = static_defs.first_mut() {
+            first.description = Some(inner.to_string());
+        }
         Some(Effect::CreateEmblem {
-            statics: vec![static_def],
+            statics: static_defs,
             triggers: Vec::new(),
         })
     } else {
