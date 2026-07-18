@@ -751,6 +751,7 @@ mod terror_of_the_peaks_issue_2911;
 mod teysa_wojek_investigate_per_opponent;
 mod the_chain_veil_loyalty_grants;
 mod the_fourteenth_doctor_graveyard_copy;
+mod the_immortal_sun;
 mod the_kingpin_of_crime_combat_damage;
 mod the_ur_dragon_eminence;
 mod the_who_opponent_guess_resolution;

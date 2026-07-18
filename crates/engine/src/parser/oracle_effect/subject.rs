@@ -1759,6 +1759,9 @@ fn try_parse_subject_restriction_clause(
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
             exemption,
+            // CR 606.2: "<subject>'s activated abilities can't be activated"
+            // (Dovin Baan, Xathrid Gorgon) is not kind-narrowed.
+            kind: None,
         };
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {

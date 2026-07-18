@@ -2005,6 +2005,8 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
                 who: ProhibitionScope::AllPlayers,
                 source_filter,
                 exemption: parse_cant_be_activated_exemption_in_text(&lower),
+                // CR 606.2: not kind-narrowed — blocks any activated ability.
+                kind: None,
             })
             .affected(affected)
             .description(stripped.to_string()),

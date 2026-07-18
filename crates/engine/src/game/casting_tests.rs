@@ -29898,6 +29898,8 @@ fn add_cant_be_activated_source(
             // CR 605.1a: Existing test helpers cover the Karn/Clarion family which
             // has no exemption suffix.
             exemption: ActivationExemption::None,
+            // CR 606.2: Karn/Clarion family is not kind-narrowed.
+            kind: None,
         }));
     id
 }
@@ -30042,6 +30044,7 @@ fn cant_be_activated_selfref_blocks_only_this_permanent() {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
                 exemption: ActivationExemption::None,
+                kind: None,
             }));
         Arc::make_mut(&mut obj.abilities).push(
             crate::types::ability::AbilityDefinition::new(
@@ -30200,6 +30203,7 @@ fn pithing_needle_blocks_named_non_mana_ability_but_not_mana_ability() {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::HasChosenName,
                 exemption: ActivationExemption::ManaAbilities,
+                kind: None,
             }));
     }
 
@@ -44269,6 +44273,7 @@ fn plot_special_action_bypasses_activated_ability_prohibitions() {
                     who: ProhibitionScope::AllPlayers,
                     source_filter: TargetFilter::HasChosenName,
                     exemption: ActivationExemption::ManaAbilities,
+                    kind: None,
                 }));
         }
         let plot_def = state.objects[&plot_card].abilities[0].clone();

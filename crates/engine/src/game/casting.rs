@@ -9,7 +9,7 @@ use crate::types::ability::{
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
-use crate::types::events::GameEvent;
+use crate::types::events::{ActivatedAbilityKind, GameEvent};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
@@ -18007,6 +18007,7 @@ pub(super) fn is_blocked_by_cant_be_activated(
             ref who,
             ref source_filter,
             ref exemption,
+            ref kind,
         } = def.mode
         else {
             continue;
@@ -18014,6 +18015,26 @@ pub(super) fn is_blocked_by_cant_be_activated(
         // CR 109.5: The "who" axis — is the caster within the scope?
         if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
             continue;
+        }
+        // CR 606.1 + CR 606.2: The ability-KIND axis. A loyalty-only prohibition
+        // (The Immortal Sun) blocks only loyalty abilities — activated abilities
+        // with a loyalty symbol in their cost (CR 606.2) — classified through the
+        // single-authority `is_loyalty_ability_cost` the activation path itself
+        // uses. `Some(Normal)` blocks only ordinary activated abilities; `None`
+        // blocks any activated ability (Chalice/Karn/Pithing Needle class).
+        if let Some(required_kind) = kind {
+            let is_loyalty = activating_ability
+                .cost
+                .as_ref()
+                .is_some_and(crate::types::ability::is_loyalty_ability_cost);
+            let ability_kind = if is_loyalty {
+                ActivatedAbilityKind::Loyalty
+            } else {
+                ActivatedAbilityKind::Normal
+            };
+            if *required_kind != ability_kind {
+                continue;
+            }
         }
         // CR 602.5: The permanent-axis — does the object whose ability is being
         // activated match the static's filter? `ControllerRef` is resolved against

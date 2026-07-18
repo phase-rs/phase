@@ -57,6 +57,7 @@ mod prelude {
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
     };
     pub(super) use crate::types::counter::{parse_counter_type, CounterMatch};
+    pub(super) use crate::types::events::ActivatedAbilityKind;
     pub(super) use crate::types::keywords::{Keyword, KeywordKind};
     pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType, SpecialAction};
     pub(super) use crate::types::phase::Phase;
