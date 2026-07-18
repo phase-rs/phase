@@ -23,7 +23,9 @@ use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
-use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use super::identifiers::{
+    CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef, TrackedSetId,
+};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
@@ -60,6 +62,10 @@ pub(crate) fn is_zero_usize(value: &usize) -> bool {
 }
 
 fn default_remaining_one() -> u32 {
+    1
+}
+
+fn initial_logical_zone_change_group_id() -> u64 {
     1
 }
 
@@ -1301,6 +1307,67 @@ pub struct ResolutionCoinFlip {
     pub result: CoinFlipResult,
 }
 
+/// One battlefield member announced by a logical zone-change action.
+///
+/// Membership is captured before the first delivery and is never inferred from
+/// an undelivered suffix or from the records that happened to be emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalZoneChangeProspectiveMember {
+    pub identity: ObjectIncarnationRef,
+}
+
+/// Terminal disposition of one prospective battlefield member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum LogicalZoneChangeTerminalOutcome {
+    Pending,
+    Prevented,
+    Remained,
+    Moved { occurrence_ordinal: usize },
+}
+
+/// One actual zone-change record retained by a logical zone-change action.
+///
+/// The ordinal is action-local, not the per-turn history index. This lets a
+/// paused owner preserve the exact delivery order across arbitrary resume
+/// boundaries while still retaining events from every origin zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalZoneChangeOccurrence {
+    pub ordinal: usize,
+    pub event: GameEvent,
+}
+
+/// Complete ownership for one logical zone-change action.
+///
+/// Both pause carriers persist this same shape. It deliberately has no serde
+/// defaults: an active legacy carrier cannot reconstruct the original member
+/// set, terminal outcomes, or already-delivered event authority safely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalZoneChangeGroup {
+    pub logical_group_id: LogicalZoneChangeGroupId,
+    pub prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+    pub terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
+    pub all_origin_occurrences: Vec<LogicalZoneChangeOccurrence>,
+}
+
+impl LogicalZoneChangeGroup {
+    pub fn new(
+        logical_group_id: LogicalZoneChangeGroupId,
+        prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+    ) -> Self {
+        let terminal_outcomes = prospective_battlefield_members
+            .iter()
+            .map(|_| LogicalZoneChangeTerminalOutcome::Pending)
+            .collect();
+        Self {
+            logical_group_id,
+            prospective_battlefield_members,
+            terminal_outcomes,
+            all_origin_occurrences: Vec::new(),
+        }
+    }
+}
+
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
 /// `ChangeZone` resolution loop paused when one of the moving objects
 /// triggered a per-permanent replacement choice (shock-land "pay 2 life?",
@@ -1327,6 +1394,7 @@ pub struct ResolutionCoinFlip {
 /// to the live `resolve` path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingChangeZoneIteration {
+    pub logical_zone_change_group: LogicalZoneChangeGroup,
     pub remaining: Vec<ObjectId>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
@@ -2343,6 +2411,7 @@ pub struct PendingCounterRemovalQueue {
 /// name change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBatchDeliveries {
+    pub logical_zone_change_group: LogicalZoneChangeGroup,
     /// Objects whose per-object zone move has not yet been delivered.
     pub remaining: Vec<ObjectId>,
     /// The batch destination zone (graveyard for mill by default; hand for mass
@@ -8607,6 +8676,11 @@ pub struct GameState {
     #[serde(deserialize_with = "deserialize_objects_with_trigger_provenance")]
     pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
     pub next_object_id: u64,
+    /// Monotonic allocator for [`LogicalZoneChangeGroupId`]. It is pure
+    /// identity, so equality intentionally compares the active owner rather
+    /// than this historical counter.
+    #[serde(default = "initial_logical_zone_change_group_id")]
+    pub next_logical_zone_change_group_id: u64,
     /// CR 118.3a: monotonic counter minting `ManaPipId`s for pool units so they
     /// can be pinned. Serialized plainly (mirrors `next_object_id`) so reloaded
     /// games don't re-mint colliding ids.
@@ -11399,6 +11473,31 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// Allocate the complete owner for one logical zone-change action before
+    /// any member is delivered. Only objects on the battlefield at this exact
+    /// point become prospective battlefield members; nonbattlefield actions
+    /// still receive an owner with an empty member list so their all-origin
+    /// occurrence authority is retained.
+    pub fn allocate_logical_zone_change_group(
+        &mut self,
+        announced_members: &[ObjectId],
+    ) -> LogicalZoneChangeGroup {
+        let logical_group_id = LogicalZoneChangeGroupId(self.next_logical_zone_change_group_id);
+        self.next_logical_zone_change_group_id = self
+            .next_logical_zone_change_group_id
+            .checked_add(1)
+            .expect("logical zone-change group allocator exhausted");
+        let prospective_battlefield_members = announced_members
+            .iter()
+            .filter_map(|object_id| self.objects.get(object_id))
+            .filter(|object| object.zone == Zone::Battlefield)
+            .map(|object| LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::from_object(object),
+            })
+            .collect();
+        LogicalZoneChangeGroup::new(logical_group_id, prospective_battlefield_members)
+    }
+
     /// Capture the live ChaCha20 stream offset into `rng_word_pos` so it
     /// survives serialization — `rng` is `#[serde(skip)]`, so this field is the
     /// only carrier of the position across a snapshot (issue #5466). Callers
@@ -11649,6 +11748,7 @@ impl GameState {
             active_search_decision_controls: ActiveSearchDecisionControls::default(),
             objects: im::HashMap::default(),
             next_object_id: 1,
+            next_logical_zone_change_group_id: initial_logical_zone_change_group_id(),
             // CR 118.3a: start at 1 so minted pip ids never collide with the
             // `ManaPipId(0)` unstamped sentinel.
             next_pip_id: 1,
@@ -12764,6 +12864,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_search_decision_controls: _,
         objects: _,
         next_object_id: _,
+        next_logical_zone_change_group_id: _,
         next_pip_id: _,
         active_payment_pins: _,
         active_casting_permission_index: _,
@@ -15820,6 +15921,10 @@ mod tests {
     #[test]
     fn pending_change_zone_iteration_modern_shape_roundtrips() {
         let original = PendingChangeZoneIteration {
+            logical_zone_change_group: LogicalZoneChangeGroup::new(
+                LogicalZoneChangeGroupId(1),
+                Vec::new(),
+            ),
             remaining: vec![],
             source_id: ObjectId(7),
             controller: PlayerId(0),
@@ -15863,6 +15968,58 @@ mod tests {
             "face_down_profile must survive the pause/resume round-trip"
         );
         assert_eq!(parsed, original);
+
+        let mut legacy = serde_json::to_value(&original).expect("serialize modern carrier");
+        legacy
+            .as_object_mut()
+            .expect("pending carrier serializes as an object")
+            .remove("logical_zone_change_group");
+        let error = serde_json::from_value::<PendingChangeZoneIteration>(legacy)
+            .expect_err("legacy active carrier without complete group authority must reject");
+        assert!(
+            error.to_string().contains("logical_zone_change_group"),
+            "missing group rejection must name the missing authority: {error}"
+        );
+    }
+
+    #[test]
+    fn logical_zone_change_group_latches_only_initial_battlefield_members() {
+        let mut state = GameState::new_two_player(19);
+        let battlefield_id = ObjectId(71);
+        let hand_id = ObjectId(72);
+        let mut battlefield = GameObject::new(
+            battlefield_id,
+            CardId(71),
+            PlayerId(0),
+            "battlefield member".to_string(),
+            Zone::Battlefield,
+        );
+        battlefield.incarnation = 4;
+        let mut hand = GameObject::new(
+            hand_id,
+            CardId(72),
+            PlayerId(0),
+            "hand member".to_string(),
+            Zone::Hand,
+        );
+        hand.incarnation = 7;
+        state.objects.insert(battlefield_id, battlefield);
+        state.objects.insert(hand_id, hand);
+
+        let group = state.allocate_logical_zone_change_group(&[battlefield_id, hand_id]);
+
+        assert_eq!(group.logical_group_id, LogicalZoneChangeGroupId(1));
+        assert_eq!(
+            group.prospective_battlefield_members,
+            vec![LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::of(battlefield_id, 4),
+            }]
+        );
+        assert_eq!(
+            group.terminal_outcomes,
+            vec![LogicalZoneChangeTerminalOutcome::Pending]
+        );
+        assert!(group.all_origin_occurrences.is_empty());
     }
 
     #[test]

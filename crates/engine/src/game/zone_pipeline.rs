@@ -997,6 +997,7 @@ pub(crate) fn move_objects_simultaneously_then(
     let event_start = events.len();
     let zone_change_record_start = state.zone_changes_this_turn.len();
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
+    let logical_zone_change_group = state.allocate_logical_zone_change_group(&ids);
     let destination = reqs.first().map(|r| r.to);
     match deliver_batch(state, reqs, events) {
         BatchMoveResult::Done => {
@@ -1021,6 +1022,7 @@ pub(crate) fn move_objects_simultaneously_then(
             // an empty tail (no object re-delivers), so the first request's
             // destination is a safe placeholder.
             let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
+            pending.logical_zone_change_group = logical_zone_change_group;
             pending.completion = completion;
             pending.attempted = ids;
             pending.zone_change_record_start = zone_change_record_start;
@@ -1058,10 +1060,11 @@ pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: Batch
 /// paused-on-last-card case) if `deliver_batch` did not stash a tail. Used only
 /// to hang a [`BatchCompletion`] off a paused batch.
 fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut PendingBatchDeliveries {
-    let zone_change_record_start = state.zone_changes_this_turn.len();
-    state
-        .pending_batch_deliveries
-        .get_or_insert_with(|| PendingBatchDeliveries {
+    if state.pending_batch_deliveries.is_none() {
+        let zone_change_record_start = state.zone_changes_this_turn.len();
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        state.pending_batch_deliveries = Some(PendingBatchDeliveries {
+            logical_zone_change_group,
             remaining: Vec::new(),
             destination,
             source_id: None,
@@ -1074,7 +1077,12 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             attempted: Vec::new(),
             zone_change_record_start,
             deferred_events: Vec::new(),
-        })
+        });
+    }
+    state
+        .pending_batch_deliveries
+        .as_mut()
+        .expect("pending batch record was just initialized")
 }
 
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
@@ -1154,11 +1162,16 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
     let library_placement = first.placement.clone();
     let replacement_applied = first.replacement_applied.clone();
     let remaining = tail.iter().map(|request| request.object_id).collect();
+    let announced_members = tail
+        .iter()
+        .map(|request| request.object_id)
+        .collect::<Vec<_>>();
     let requests = tail
         .into_iter()
         .map(ZoneMoveRequest::into_pending)
         .collect();
     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
+        logical_zone_change_group: state.allocate_logical_zone_change_group(&announced_members),
         remaining,
         destination,
         source_id,
@@ -1207,6 +1220,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 /// parks WITH a completion that must fire once after the second park drains).
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.pending_batch_deliveries.take() {
+        let logical_zone_change_group = pending.logical_zone_change_group;
         let completion = pending.completion;
         let mut deferred_events = pending.deferred_events;
         deferred_events.append(events);
@@ -1277,6 +1291,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // empty record). Re-attach the cleanup so it survives the next
                 // pause boundary and runs once the remaining tail finally drains.
                 let reparking = ensure_batch_record(state, destination);
+                reparking.logical_zone_change_group = logical_zone_change_group;
                 reparking.completion = completion;
                 reparking.attempted = attempted;
                 reparking.zone_change_record_start = zone_change_record_start;

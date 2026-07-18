@@ -4164,6 +4164,8 @@ pub(super) fn handle_resolution_choice(
                         )
                     })?;
                     let chosen_ids: Vec<_> = chosen.to_vec();
+                    let logical_zone_change_group =
+                        state.allocate_logical_zone_change_group(&chosen_ids);
                     for (i, card_id) in chosen_ids.iter().enumerate() {
                         let origin = state
                             .objects
@@ -4221,6 +4223,8 @@ pub(super) fn handle_resolution_choice(
                             effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        logical_zone_change_group: logical_zone_change_group
+                                            .clone(),
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -4263,6 +4267,7 @@ pub(super) fn handle_resolution_choice(
                                 // choice resolves (issue #535).
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        logical_zone_change_group,
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -4561,6 +4566,8 @@ pub(super) fn handle_resolution_choice(
                     };
                     let events_before_effect = events.len();
                     let chosen_ids: Vec<_> = chosen.to_vec();
+                    let logical_zone_change_group =
+                        state.allocate_logical_zone_change_group(&chosen_ids);
                     for (i, card_id) in chosen_ids.iter().enumerate() {
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
@@ -4576,6 +4583,8 @@ pub(super) fn handle_resolution_choice(
                             effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        logical_zone_change_group: logical_zone_change_group
+                                            .clone(),
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -4611,6 +4620,7 @@ pub(super) fn handle_resolution_choice(
                             effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        logical_zone_change_group,
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,

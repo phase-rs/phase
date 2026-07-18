@@ -881,6 +881,7 @@ pub fn resolve(
     // Tracked the same way the mass `resolve_all` path counts, so the chained
     // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
     let mut moved_count: i32 = 0;
+    let logical_zone_change_group = state.allocate_logical_zone_change_group(&targeted_objects);
     for (i, obj_id) in targeted_objects.iter().enumerate() {
         if dest_zone == Zone::Exile {
             let acting_player = state
@@ -933,6 +934,7 @@ pub fn resolve(
                 }
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group: logical_zone_change_group.clone(),
                         remaining: targeted_objects[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -973,6 +975,7 @@ pub fn resolve(
                 // (issue #535).
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
                         remaining: targeted_objects[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -1560,6 +1563,7 @@ pub fn resolve_all(
 
     let mut moved_count: i32 = 0;
     let mut departed: Vec<ObjectId> = Vec::new();
+    let logical_zone_change_group = state.allocate_logical_zone_change_group(&matching);
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
         // CR 400.3: Each object's actual current zone is the source zone for the
@@ -1637,6 +1641,7 @@ pub fn resolve_all(
                 // (`process_one_zone_move`) now reads it from the ctx.
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
                         remaining: matching[i + 1..].to_vec(),
                         source_id: ability.source_id,
                         controller: ability.controller,
@@ -1684,6 +1689,7 @@ pub fn resolve_all(
                 // the resumed members may still consume it.
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
                         remaining: matching[i + 1..].to_vec(),
                         source_id: ability.source_id,
                         controller: ability.controller,
@@ -5739,6 +5745,8 @@ mod tests {
 
         state.pending_change_zone_iteration =
             Some(crate::types::game_state::PendingChangeZoneIteration {
+                logical_zone_change_group: state
+                    .allocate_logical_zone_change_group(&[hero, soldier]),
                 remaining: vec![hero, soldier],
                 source_id: ObjectId(100),
                 controller: PlayerId(0),

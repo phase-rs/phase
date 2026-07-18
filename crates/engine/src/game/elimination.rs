@@ -974,6 +974,10 @@ mod tests {
         object_id: ObjectId,
     ) -> crate::types::game_state::PendingBatchDeliveries {
         crate::types::game_state::PendingBatchDeliveries {
+            logical_zone_change_group: crate::types::game_state::LogicalZoneChangeGroup::new(
+                crate::types::identifiers::LogicalZoneChangeGroupId(1),
+                Vec::new(),
+            ),
             remaining: Vec::new(),
             destination: Zone::Exile,
             source_id: None,
