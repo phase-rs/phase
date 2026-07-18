@@ -1101,6 +1101,7 @@ impl AssemblyEnv {
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
+    let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
 
     // ── Phase 1: ClauseIr → AbilityDefinition ──────────────────────────
     let mut defs: Vec<AbilityDefinition> = Vec::new();
@@ -2312,12 +2313,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // R1 — a SHAPE REPAIR, not materialization.
             merge_search_tail_into_additional_cost_else(&mut prev, &chain);
             // A node attached as a `sub_ability` is a resolution continuation
-            // of its parent, not an independently activatable ability.
-            // Normalize its kind to `Spell` (the "resolves alongside parent"
-            // kind) before linking. This matches the convention used by
-            // dedicated clause builders that construct sub-abilities directly
-            // (e.g., `try_parse_pump_with_damage_sub` at line 3220).
-            chain.kind = AbilityKind::Spell;
+            // of its parent, not an independently activatable ability. Ordinary
+            // chains normalize it to `Spell`; an IR producer can preserve a
+            // legacy enclosing kind when that is part of its lowered shape.
+            chain.kind = continuation_kind;
             // R2 — a SHAPE REPAIR, not materialization.
             normalize_linked_exile_cast_pair(&mut prev, &mut chain);
             if prev.sub_ability.is_some() {

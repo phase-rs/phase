@@ -17557,6 +17557,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
         chain_rounding: None,
         actor: None,
         in_trigger: true,
@@ -17636,6 +17637,7 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
         chain_rounding: None,
         actor: None,
         in_trigger: true,
@@ -17729,6 +17731,7 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
         chain_rounding: None,
         actor: None,
         in_trigger: true,

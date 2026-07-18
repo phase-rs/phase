@@ -25091,9 +25091,6 @@ fn try_parse_chain_bypass(
     if let Some(def) = try_parse_threshold_land_balance(text, kind) {
         return Some(def);
     }
-    if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
-        return Some(def);
-    }
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
         return Some(def);
     }
@@ -25417,10 +25414,11 @@ fn try_parse_for_each_attacker_copy_blocker(
     Some(def)
 }
 
-fn try_parse_return_target_and_same_name_from_your_graveyard(
+fn parse_return_target_and_same_name_from_your_graveyard_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     let (_, rest) = nom_on_lower(text, &lower, |input| value((), tag("return ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest.len()..];
@@ -25444,47 +25442,74 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
         add_inferred_origin_constraints_to_target(target, Some(Zone::Graveyard), rest_lower);
     let enter_tapped =
         crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped.unwrap_or(false));
-    let mut def = AbilityDefinition::new(
+    let first_source_len = text.len() - rest.len() + target_tp.original.len();
+    let first_source = text.get(..first_source_len)?;
+    let second_source = text.get(first_source_len..)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            first_source,
+            parsed_clause(Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    builder
+        .clause(
+            second_source,
+            parsed_clause(Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::SameNameAsParentTarget,
+                ])),
+                enters_under: None,
+                enter_tapped,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    Some(EffectChainIr {
+        clauses: builder.finish(),
         kind,
-        Effect::ChangeZone {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
-            target,
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: None,
-            enter_tapped,
-            enters_attacking: false,
-            up_to: false,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
-            face_down_profile: None,
-            enters_modified_if: None,
-        },
-    );
-    def.sub_ability = Some(Box::new(AbilityDefinition::new(
-        kind,
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
-            target: TargetFilter::Typed(TypedFilter::default().properties(vec![
-                FilterProp::InZone {
-                    zone: Zone::Graveyard,
-                },
-                FilterProp::Owned {
-                    controller: ControllerRef::You,
-                },
-                FilterProp::SameNameAsParentTarget,
-            ])),
-            enters_under: None,
-            enter_tapped,
-            enter_with_counters: vec![],
-            face_down_profile: None,
-            library_position: None,
-            random_order: false,
-        },
-    )));
-    Some(def)
+        continuation_kind: Some(kind),
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 /// CR 508.1c + CR 611.2c: Parse "only X can attack during that combat phase"
@@ -25713,6 +25738,9 @@ pub(crate) fn parse_effect_chain_ir(
     if let Some(ir) = parse_exile_top_each_library_with_collection_counter_ir(text, kind, ctx) {
         return ir;
     }
+    if let Some(ir) = parse_return_target_and_same_name_from_your_graveyard_ir(text, kind, ctx) {
+        return ir;
+    }
     let text = strip_trailing_activation_restriction_sentence(text);
     // CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
     // sentence before chain splitting — it is a chain-level rounding annotation
@@ -25803,6 +25831,7 @@ pub(crate) fn parse_effect_chain_ir(
             return EffectChainIr {
                 clauses: meld_builder.finish(),
                 kind,
+                continuation_kind: None,
                 chain_rounding,
                 actor: ctx.actor.clone(),
                 in_trigger: ctx.in_trigger,
@@ -29051,6 +29080,7 @@ pub(crate) fn parse_effect_chain_ir(
     EffectChainIr {
         clauses,
         kind,
+        continuation_kind: None,
         chain_rounding,
         actor: ctx.actor.clone(),
         in_trigger: ctx.in_trigger,

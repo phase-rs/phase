@@ -46333,6 +46333,7 @@ fn drawn_this_turn_followup_overwrites_prior_life_payment() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
         chain_rounding: None,
         actor: None,
         in_trigger: false,

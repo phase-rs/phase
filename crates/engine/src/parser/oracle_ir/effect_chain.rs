@@ -32,6 +32,14 @@ pub(crate) struct EffectChainIr {
     pub(crate) clauses: Vec<ClauseIr>,
     /// The ability kind (Spell, Activated, etc.).
     pub(crate) kind: AbilityKind,
+    /// Kind to retain on definitions linked as this chain's continuations.
+    ///
+    /// Ordinary clause assembly normalizes linked definitions to `Spell`: they
+    /// resolve with their parent rather than becoming independently activatable
+    /// abilities. Whole-body recognizers that already constructed every link
+    /// with the enclosing kind can opt into preserving that serialized shape
+    /// while still routing through the shared chain assembly.
+    pub(crate) continuation_kind: Option<AbilityKind>,
     /// CR 107.1a: Chain-level rounding annotation ("Round down/up each time").
     pub(crate) chain_rounding: Option<RoundingMode>,
     /// CR 701.21a: Actor context threaded from ParseContext (per D-07).
@@ -85,6 +93,7 @@ impl EffectChainIr {
         Self {
             clauses: builder.finish(),
             kind,
+            continuation_kind: None,
             chain_rounding: None,
             actor,
             in_trigger,
@@ -805,6 +814,7 @@ mod tests {
         let ir = EffectChainIr {
             clauses: vec![],
             kind: AbilityKind::Spell,
+            continuation_kind: None,
             chain_rounding: None,
             actor: None,
             in_trigger: false,
@@ -920,6 +930,7 @@ mod tests {
         let ir = EffectChainIr {
             clauses: b.finish(),
             kind: AbilityKind::Spell,
+            continuation_kind: None,
             chain_rounding: None,
             actor: None,
             in_trigger: false,
