@@ -78,10 +78,22 @@ function recordReload(key: string): void {
   }
 }
 
+/** Chunks whose loop-abort has already been reported this pageload. Without
+ *  this latch, a component retrying a failing dynamic import would re-probe
+ *  and re-emit on every attempt (loop-abort events have no per-event session
+ *  cap). Module-level on purpose: after a breach there are no reloads, so
+ *  per-pageload scope is exactly once-per-stuck-page; a manual refresh
+ *  starting a fresh page reports once more, which is the desired signal. */
+const abortReported = new Set<string>();
+
 /** Best-effort diagnosis of a persistently failing chunk: refetch it and
  *  report status + Cloudflare cache/colo headers (same-origin, all readable)
  *  plus whether a service worker controls this page. Runs only on the
- *  loop-abort path, where no reload is pending — never delays recovery. */
+ *  loop-abort path, where no reload is pending — never delays recovery.
+ *  Interpretation rule: when `probe_sw` is 1 the page is SW-controlled and
+ *  the probe routes through the SW fetch handler (`cache: "no-store"` only
+ *  bypasses the HTTP cache), so status/cache/ray may describe the SW's
+ *  cached copy rather than the Cloudflare edge. */
 async function probeFailedChunk(message: string): Promise<Record<string, unknown>> {
   const probeSw =
     typeof navigator !== "undefined" &&
@@ -117,6 +129,9 @@ export function installChunkReloadHandler(): void {
 
     // The failed chunk identifier lives in the event's `.payload` Error
     // (its message carries the failing URL). Best-effort; truncated at enqueue.
+    // Payload-less events share the "unknown" key deliberately: distinct
+    // identity-less failures cross-count toward one breach, which fails
+    // conservative (stops reloading) rather than risking a loop.
     const chunk = (event as { payload?: Error }).payload?.message;
     const guardKey = `chunk-reload:${chunk ?? "unknown"}`;
 
@@ -125,9 +140,22 @@ export function installChunkReloadHandler(): void {
       // a third won't either. Stop reloading and don't queue a new deferred
       // reload — an already-queued one from an earlier failure is left intact
       // (it's a single reload and may succeed after the game ends).
+      if (abortReported.has(guardKey)) return;
+      abortReported.add(guardKey);
       setUpdateError("App update failed to load. Please refresh the page.");
+      // Emit the abort marker synchronously — the user was just told to
+      // refresh, and a refresh (or tab close) during the async probe below
+      // must not lose the one event this breaker exists to capture. The
+      // probe result follows as its own event when (if) it resolves.
+      trackEvent("chunk_reload", { reason: "loop-abort", deferred: false, chunk });
+      flushNow();
       void probeFailedChunk(chunk ?? "").then((probe) => {
-        trackEvent("chunk_reload", { reason: "loop-abort", deferred: false, chunk, ...probe });
+        trackEvent("chunk_reload", {
+          reason: "loop-abort-probe",
+          deferred: false,
+          chunk,
+          ...probe,
+        });
         flushNow();
       });
       return;
