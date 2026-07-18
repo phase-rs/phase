@@ -1958,27 +1958,32 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             }
         }
         // CR 115.1d: Apply multi-target spec — prefer explicit choose-count text,
-        // then strip result, then clause-level propagation.
-        if let Some(spec) =
-            extract_exact_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
-        {
-            def = def.multi_target(spec);
-        } else if let Some(spec) =
-            extract_bounded_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
-        {
-            def = def.multi_target(spec);
-        } else if let Some(spec) =
-            extract_optional_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
-        {
-            def = def.multi_target(spec);
-        } else if let Some(spec) =
-            extract_verb_up_to_multi_target(clause_ir.source.fragment().unwrap_or_default())
-        {
-            def = def.multi_target(spec);
-        } else if let Some(ref spec) = clause_ir.multi_target {
-            def = def.multi_target(spec.clone());
-        } else if let Some(ref spec) = clause_ir.parsed.multi_target {
-            def = def.multi_target(spec.clone());
+        // then strip result, then clause-level propagation. An explicit
+        // `ChooseObjectsIntoTrackedSet` instead owns its selection cardinality in
+        // the effect's `min`/`max`; adding `multi_target` would duplicate that
+        // resolver-owned selection state.
+        if !matches!(&*def.effect, Effect::ChooseObjectsIntoTrackedSet { .. }) {
+            if let Some(spec) =
+                extract_exact_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
+            {
+                def = def.multi_target(spec);
+            } else if let Some(spec) =
+                extract_bounded_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
+            {
+                def = def.multi_target(spec);
+            } else if let Some(spec) = extract_optional_target_multi_target(
+                clause_ir.source.fragment().unwrap_or_default(),
+            ) {
+                def = def.multi_target(spec);
+            } else if let Some(spec) =
+                extract_verb_up_to_multi_target(clause_ir.source.fragment().unwrap_or_default())
+            {
+                def = def.multi_target(spec);
+            } else if let Some(ref spec) = clause_ir.multi_target {
+                def = def.multi_target(spec.clone());
+            } else if let Some(ref spec) = clause_ir.parsed.multi_target {
+                def = def.multi_target(spec.clone());
+            }
         }
         if parse_controlled_by_different_players_target_constraint(
             clause_ir.source.fragment().unwrap_or_default(),
