@@ -4097,11 +4097,93 @@ where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
+    read_object_pt_by_id_for_incarnation(state, id, None, obj_extract, lki_extract)
+}
+
+/// CR 400.7 + CR 608.2h: read P/T for one exact incarnation when the triggering
+/// zone-change record identifies it. A leave and re-entry can reuse the same
+/// `ObjectId`, but the re-entered permanent is a new object; it must not replace
+/// the original entrant's LKI for an already-pending trigger.
+fn read_object_pt_by_id_for_incarnation<F, G>(
+    state: &GameState,
+    id: ObjectId,
+    expected_incarnation: Option<u64>,
+    obj_extract: &F,
+    lki_extract: &G,
+) -> Option<i32>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
     let live = state.objects.get(&id);
-    live.filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-        .and_then(obj_extract)
-        .or_else(|| state.lki_cache.get(&id).and_then(lki_extract))
-        .or_else(|| live.and_then(obj_extract))
+    live.filter(|obj| {
+        obj.zone == crate::types::zones::Zone::Battlefield
+            && expected_incarnation.is_none_or(|expected| obj.incarnation == expected)
+    })
+    .and_then(obj_extract)
+    .or_else(|| match expected_incarnation {
+        Some(expected) => state
+            .lki_by_incarnation
+            .get(&id)
+            .and_then(|history| history.get(&expected).and_then(lki_extract))
+            .or_else(|| {
+                // Saves written before incarnation-versioned LKI have only
+                // the legacy cache. Once any versioned history exists for
+                // this ObjectId, fail closed instead of reading a different
+                // incarnation through the overwritten legacy slot.
+                if state.lki_by_incarnation.contains_key(&id) {
+                    None
+                } else {
+                    state.lki_cache.get(&id).and_then(lki_extract)
+                }
+            }),
+        None => state.lki_cache.get(&id).and_then(lki_extract),
+    })
+    .or_else(|| {
+        if expected_incarnation.is_none() {
+            live.and_then(obj_extract)
+        } else {
+            None
+        }
+    })
+}
+
+fn trigger_event_source_identity(state: &GameState) -> Option<(ObjectId, Option<u64>)> {
+    let event = state
+        .current_trigger_event
+        .as_ref()
+        .cloned()
+        .or_else(detection_trigger_event)?;
+    let object_id = crate::game::targeting::extract_source_from_event(&event)?;
+    let expected_incarnation = match &event {
+        crate::types::events::GameEvent::ZoneChanged {
+            object_id: event_object,
+            record,
+            ..
+        } if *event_object == object_id => record.entered_incarnation,
+        _ => None,
+    };
+    Some((object_id, expected_incarnation))
+}
+
+fn read_trigger_event_source_pt<F, G>(
+    state: &GameState,
+    obj_extract: &F,
+    lki_extract: &G,
+) -> Option<i32>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
+    trigger_event_source_identity(state).and_then(|(id, expected_incarnation)| {
+        read_object_pt_by_id_for_incarnation(
+            state,
+            id,
+            expected_incarnation,
+            obj_extract,
+            lki_extract,
+        )
+    })
 }
 
 fn resolve_object_pt<F, G>(
@@ -4182,12 +4264,7 @@ where
         // dies, ... its power"). When the source has left the battlefield, prefer
         // its buffed LKI over a base-only live read via the shared guarded read.
         ObjectScope::EventSource => {
-            let Some(object_id) =
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-            else {
-                return 0;
-            };
-            read_object_pt_by_id(state, object_id, &obj_extract, &lki_extract).unwrap_or(0)
+            read_trigger_event_source_pt(state, &obj_extract, &lki_extract).unwrap_or(0)
         }
         // CR 603.2 + CR 208.1: the power/toughness of the object that received
         // the triggering damage ("that creature's toughness"). Same guarded
@@ -4233,11 +4310,11 @@ where
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
             })
             .or_else(|| {
-                // CR 608.2h: trigger-event source fallback; guarded live-then-LKI
-                // read so a buffed source that left the battlefield reports its
-                // last-known P/T. Slots 1 and 2 (snapshot-only) are unchanged.
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
+                // CR 400.7 + CR 608.2h: trigger-event source fallback. An ETB
+                // record's incarnation prevents a blinked object from reading
+                // the re-entered permanent's live P/T instead of original LKI.
+                // Slots 1 and 2 (snapshot-only) are unchanged.
+                read_trigger_event_source_pt(state, &obj_extract, &lki_extract)
             })
             .unwrap_or(0),
         // CR 608.2c: A demonstrative noun phrase ("that creature's toughness")
@@ -4252,10 +4329,9 @@ where
             .and_then(|a| a.effect_context_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
-                // CR 608.2h: slot 2 trigger-event source; guarded live-then-LKI
-                // read. Slots 1 and 3 (snapshot-only) are unchanged.
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
+                // CR 400.7 + CR 608.2h: slot 2 trigger-event source uses exact
+                // ETB incarnation identity. Slots 1 and 3 are unchanged.
+                read_trigger_event_source_pt(state, &obj_extract, &lki_extract)
             })
             .or_else(|| {
                 ability
@@ -12026,10 +12102,12 @@ mod tests {
         );
     }
 
-    /// CR 608.2c — `ObjectScope::Anaphoric` power reads `effect_context_object`
-    /// as slot 1 (the `resolve_object_pt` analogue of the mana-value test).
+    /// CR 608.2c — anaphoric and demonstrative P/T reads use the object from the
+    /// preceding effect instruction before a cost-paid referent. The typed
+    /// difference assertion is the non-card-specific runtime pin for bare
+    /// "that creature's power and toughness" grammar.
     #[test]
-    fn resolve_object_pt_anaphoric_reads_effect_context_object() {
+    fn resolve_object_pt_demonstrative_prefers_effect_context_over_cost_paid() {
         use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
         use crate::types::game_state::LKISnapshot;
 
@@ -12043,15 +12121,15 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
-        let snapshot = |name: &str, power: i32| CostPaidObjectSnapshot {
+        let snapshot = |name: &str, power: i32, toughness: i32| CostPaidObjectSnapshot {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
                 token_image_ref: None,
                 power: Some(power),
-                toughness: Some(power),
+                toughness: Some(toughness),
                 base_power: Some(power),
-                base_toughness: Some(power),
+                base_toughness: Some(toughness),
                 mana_value: 0,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -12067,18 +12145,36 @@ mod tests {
                 attachments: Vec::new(),
             },
         };
-        ability.set_effect_context_object_recursive(snapshot("Effect Context", 5));
-        ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 2));
+        ability.set_effect_context_object_recursive(snapshot("Effect Context", 7, 2));
+        ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 3, 3));
 
-        let expr = QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Anaphoric,
-            },
+        for scope in [ObjectScope::Anaphoric, ObjectScope::Demonstrative] {
+            let power = QuantityExpr::Ref {
+                qty: QuantityRef::Power { scope },
+            };
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &power, &ability),
+                7,
+                "{scope:?} power must read effect_context_object (CR 608.2c slot 1)"
+            );
+        }
+
+        let difference = QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Demonstrative,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Demonstrative,
+                },
+            }),
         };
         assert_eq!(
-            resolve_quantity_with_targets(&state, &expr, &ability),
+            resolve_quantity_with_targets(&state, &difference, &ability),
             5,
-            "Anaphoric power must read effect_context_object (CR 608.2c slot 1)"
+            "Demonstrative P/T difference must use effect context 7/2, not cost-paid 3/3"
         );
     }
 

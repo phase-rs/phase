@@ -511,7 +511,9 @@ fn do_eliminate(
     if state.turn_decision_controller.is_some()
         && super::topology::normalize_shared_turn_recipient(state, state.active_player) == leaving
     {
-        state.turn_decision_controller = None;
+        state.active_full_turn_control = None;
+        state.active_combat_phase_control = None;
+        super::turn_control::recompute_active_player_control(state);
     }
 
     // CR 800.4a + CR 800.4b: a departing searcher/zone owner invalidates its
@@ -2432,10 +2434,12 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: owner,
                 controller,
+                timestamp: 0,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
         state.turn_decision_controller = Some(controller);
+        state.turn_decision_control_timestamp = Some(0);
         // An unrelated control by a different controller (reach-guard: proves the
         // cleanup is scoped to the leaving player, not a blanket wipe).
         state
@@ -2443,6 +2447,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: other_owner,
                 controller: other_controller,
+                timestamp: 0,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -2454,6 +2459,7 @@ mod tests {
             state.turn_decision_controller, None,
             "the departed controller's live control ends"
         );
+        assert_eq!(state.turn_decision_control_timestamp, None);
         assert!(
             !state
                 .scheduled_turn_controls

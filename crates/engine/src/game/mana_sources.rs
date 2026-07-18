@@ -477,6 +477,7 @@ fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option
     let mut harm_amounts = obj
         .trigger_definitions
         .iter_all()
+        .map(|entry| entry.definition())
         .filter(|trigger| trigger.mode == TriggerMode::Taps)
         .filter(|trigger| {
             trigger.valid_card.as_ref().is_none_or(|filter| {
@@ -636,7 +637,8 @@ pub(crate) fn beneficial_non_mana_tap_trigger_sources(
         .filter(|object_id| {
             state.objects.get(object_id).is_some_and(|obj| {
                 obj.controller == player
-                    && obj.trigger_definitions.iter_all().any(|trigger| {
+                    && obj.trigger_definitions.iter_all().any(|entry| {
+                        let trigger = entry.definition();
                         is_non_mana_tap_trigger(trigger)
                             && trigger_chain_benefits_controller(trigger)
                     })
@@ -2266,7 +2268,7 @@ pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> 
             state.objects.get(object_id).is_some_and(|obj| {
                 obj.trigger_definitions
                     .iter_all()
-                    .any(|trigger| trigger.mode == TriggerMode::TapsForMana)
+                    .any(|entry| entry.definition.mode == TriggerMode::TapsForMana)
             })
         })
         .collect()
@@ -2306,7 +2308,8 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
         // control an aura attached to your land (e.g., via Aura Theft), and
         // the trigger still fires for the tapping player when the land is
         // tapped. `taps_for_mana_card_matches` handles the attachment check.
-        for trigger in obj.trigger_definitions.iter_all() {
+        for entry in obj.trigger_definitions.iter_all() {
+            let trigger = entry.definition();
             if trigger.mode != TriggerMode::TapsForMana {
                 continue;
             }
@@ -2363,7 +2366,8 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
         if obj.controller != controller {
             continue;
         }
-        for trigger in obj.trigger_definitions.iter_all() {
+        for entry in obj.trigger_definitions.iter_all() {
+            let trigger = entry.definition();
             if trigger.mode != TriggerMode::TapsForMana {
                 continue;
             }

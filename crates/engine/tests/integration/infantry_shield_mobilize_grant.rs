@@ -72,9 +72,9 @@ fn infantry_shield_grants_dynamic_mobilize_equal_to_power() {
     // mobilize").
     assert!(
         host.trigger_definitions.iter_unchecked().any(|t| {
-            matches!(t.mode, TriggerMode::Attacks)
+            matches!(t.definition.mode, TriggerMode::Attacks)
                 && matches!(
-                    t.execute.as_deref().map(|a| &*a.effect),
+                    t.definition.execute.as_deref().map(|a| &*a.effect),
                     Some(Effect::Token { name, .. }) if name == "Warrior"
                 )
         }),

@@ -7095,6 +7095,37 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
     }
 
+    #[test]
+    fn dynamic_qty_accepts_jaws_of_defeat_pt_difference_carrier() {
+        let parsed = parse_named(
+            "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+            "Jaws of Defeat",
+            &["Enchantment"],
+        );
+
+        let trigger = parsed.triggers.first().expect("Jaws trigger must parse");
+        let execute = trigger.execute.as_ref().expect("Jaws execute must parse");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::LoseLife {
+                    amount: crate::types::ability::QuantityExpr::Difference { .. },
+                    ..
+                }
+            ),
+            "positive reach guard: Jaws must carry a typed P/T Difference, got {execute:?}"
+        );
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "positive reach guard: Jaws must contain no Unimplemented root effect"
+        );
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
     /// CR 702.170a: Fblthp's "The plot cost is equal to its mana cost" is the
     /// intrinsic plot cost of the `TopOfLibraryHasPlot` static (computed at
     /// synthesis, no stored `QuantityExpr`), so the " equal to " marker must NOT

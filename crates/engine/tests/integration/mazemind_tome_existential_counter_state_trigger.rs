@@ -84,13 +84,13 @@ fn run_with_pages(pages: u32) -> (GameRunner, ObjectId, i32) {
         runner.state().objects[&tome]
             .trigger_definitions
             .iter_unchecked()
-            .any(|t| t.mode == TriggerMode::StateCondition),
+            .any(|t| t.definition.mode == TriggerMode::StateCondition),
         "Mazemind Tome must parse an existential counter-threshold StateCondition \
          trigger; got {:?}",
         runner.state().objects[&tome]
             .trigger_definitions
             .iter_unchecked()
-            .map(|t| t.mode.clone())
+            .map(|t| t.definition.mode.clone())
             .collect::<Vec<_>>()
     );
 

@@ -1,23 +1,161 @@
+use crate::types::ability::ControlWindow;
 use crate::types::game_state::{
-    ActiveSearchDecisionAuthority, GameState, ScheduledTurnControl, WaitingFor,
+    ActivePlayerControl, ActiveSearchDecisionAuthority, GameState, ScheduledTurnControl, WaitingFor,
 };
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 
 /// CR 723.1 / CR 723.2 / CR 800.4a: the single authority that ENDS a
-/// player-control effect. Removes the consumed schedule entry (the resolver
-/// dedups to at most one per target — CR 723.1a) and clears
-/// `turn_decision_controller` iff it currently points at that entry's
-/// controller. Returns the removed entry so the caller can apply
+/// player-control effect. Removes the consumed schedule entry, clears its typed
+/// active-window identity iff it is that exact effect, then recomputes the
+/// current decision controller from the effects that remain applicable. Returns
+/// the removed entry so the caller can apply
 /// window-specific post-processing (CR 723.1 extra-turn grant; CR 723.2 no-op).
 /// All three release sites — turn boundary (`start_next_turn`), combat-phase
 /// boundary (`finish_enter_phase`), and leave-game cleanup (`do_eliminate`) —
 /// route through here so control ends in exactly one place.
 pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> ScheduledTurnControl {
-    let entry = state.scheduled_turn_controls.remove(idx);
-    if state.turn_decision_controller == Some(entry.controller) {
-        state.turn_decision_controller = None;
+    let entry = state.scheduled_turn_controls[idx];
+    let identity = control_identity(entry);
+    let legacy_latch = (state.active_full_turn_control.is_none()
+        && state.active_combat_phase_control.is_none())
+    .then_some((
+        state.turn_decision_controller,
+        state.turn_decision_control_timestamp,
+    ));
+    let was_active =
+        active_control_identity(state, entry.target_player, entry.window) == Some(identity);
+    state.scheduled_turn_controls.remove(idx);
+    match entry.window {
+        ControlWindow::NextTurn if state.active_full_turn_control == Some(identity) => {
+            state.active_full_turn_control = None;
+        }
+        ControlWindow::NextCombatPhase if state.active_combat_phase_control == Some(identity) => {
+            state.active_combat_phase_control = None;
+        }
+        ControlWindow::NextTurn | ControlWindow::NextCombatPhase => {}
+    }
+    recompute_active_player_control(state);
+    if !was_active {
+        if let Some((controller, timestamp)) = legacy_latch {
+            state.turn_decision_controller = controller;
+            state.turn_decision_control_timestamp = timestamp;
+        }
     }
     entry
+}
+
+pub(super) fn control_identity(scheduled: ScheduledTurnControl) -> ActivePlayerControl {
+    ActivePlayerControl {
+        controller: scheduled.controller,
+        timestamp: scheduled.timestamp,
+    }
+}
+
+/// CR 723.1a: Recompute the controlling player from every currently applicable
+/// player-control effect. A combat-only effect may temporarily win by timestamp;
+/// when it ends, the still-applicable full-turn effect automatically resumes.
+pub(super) fn recompute_active_player_control(state: &mut GameState) {
+    let active = [
+        state.active_full_turn_control,
+        state.active_combat_phase_control,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|control| control.timestamp);
+    state.turn_decision_controller = active.map(|control| control.controller);
+    state.turn_decision_control_timestamp = active.map(|control| control.timestamp);
+}
+
+/// CR 723.1a: Activate the newest pending effect for one player-control window
+/// and discard older effects it overwrote. Entries created after activation are
+/// retained by the scheduler until the next matching window begins.
+pub(super) fn activate_scheduled_control(
+    state: &mut GameState,
+    target_player: PlayerId,
+    window: ControlWindow,
+) -> Option<ScheduledTurnControl> {
+    let selected_idx = state
+        .scheduled_turn_controls
+        .iter()
+        .enumerate()
+        .filter(|(_, scheduled)| {
+            scheduled.target_player == target_player && scheduled.window == window
+        })
+        .max_by_key(|(_, scheduled)| scheduled.timestamp)
+        .map(|(idx, _)| idx)?;
+    let selected = state.scheduled_turn_controls[selected_idx];
+
+    for idx in (0..state.scheduled_turn_controls.len()).rev() {
+        if idx != selected_idx {
+            let scheduled = state.scheduled_turn_controls[idx];
+            if scheduled.target_player == target_player && scheduled.window == window {
+                state.scheduled_turn_controls.remove(idx);
+            }
+        }
+    }
+
+    match window {
+        ControlWindow::NextTurn => {
+            state.active_full_turn_control = Some(control_identity(selected));
+        }
+        ControlWindow::NextCombatPhase => {
+            state.active_combat_phase_control = Some(control_identity(selected));
+        }
+    }
+    recompute_active_player_control(state);
+    Some(selected)
+}
+
+fn explicit_active_control(
+    state: &GameState,
+    window: ControlWindow,
+) -> Option<ActivePlayerControl> {
+    match window {
+        ControlWindow::NextTurn => state.active_full_turn_control,
+        ControlWindow::NextCombatPhase => state.active_combat_phase_control,
+    }
+}
+
+/// CR 723.1a: Return the identity applicable in one typed control window. The
+/// latch fallback preserves compatibility with legacy saves and direct test
+/// fixtures created before active-window identities were serialized.
+pub(super) fn active_control_identity(
+    state: &GameState,
+    target_player: PlayerId,
+    window: ControlWindow,
+) -> Option<ActivePlayerControl> {
+    explicit_active_control(state, window).or_else(|| {
+        let identity = ActivePlayerControl {
+            controller: state.turn_decision_controller?,
+            timestamp: state.turn_decision_control_timestamp.unwrap_or(0),
+        };
+        state
+            .scheduled_turn_controls
+            .iter()
+            .any(|scheduled| {
+                scheduled.target_player == target_player
+                    && scheduled.window == window
+                    && control_identity(*scheduled) == identity
+            })
+            .then_some(identity)
+    })
+}
+
+/// CR 723.1a: Locate the scheduled entry that created the currently active
+/// player-control effect. Controller alone is insufficient because a newer,
+/// future control effect may have the same controller and target.
+pub(super) fn active_scheduled_control_index(
+    state: &GameState,
+    target_player: PlayerId,
+    window: ControlWindow,
+) -> Option<usize> {
+    let identity = active_control_identity(state, target_player, window)?;
+    state.scheduled_turn_controls.iter().position(|scheduled| {
+        scheduled.target_player == target_player
+            && scheduled.window == window
+            && control_identity(*scheduled) == identity
+    })
 }
 
 pub fn turn_resource_owner(state: &GameState) -> PlayerId {
@@ -63,6 +201,110 @@ fn effective_authority_for_player(state: &GameState, semantic_player: PlayerId) 
     } else {
         semantic_player
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlayerControlCandidate {
+    controller: PlayerId,
+    timestamp: u64,
+    tie_breaker: u64,
+}
+
+/// CR 723.1a: Read creation provenance for the currently active scheduled
+/// turn-control effect. A legacy or directly-constructed controller latch with
+/// no provenance remains valid at timestamp zero, making it older than every
+/// normally-created effect.
+fn active_turn_control_candidate(
+    state: &GameState,
+    semantic_player: PlayerId,
+) -> Option<PlayerControlCandidate> {
+    let controlled_seat = if state.format_config.topology().has_shared_team_turns() {
+        super::topology::team_members(state, state.active_player).contains(&semantic_player)
+    } else {
+        semantic_player == state.active_player
+    };
+    if !controlled_seat {
+        return None;
+    }
+    let controller = state.turn_decision_controller?;
+    Some(PlayerControlCandidate {
+        controller,
+        timestamp: state.turn_decision_control_timestamp.unwrap_or(0),
+        tie_breaker: 0,
+    })
+}
+
+/// CR 723.1a + CR 723.5: Select the newest functioning static that controls
+/// `searcher` while that player searches their own library.
+fn own_library_search_control_candidate(
+    state: &GameState,
+    searcher: PlayerId,
+) -> Option<PlayerControlCandidate> {
+    crate::game::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(source, definition)| match &definition.mode {
+            StaticMode::ControlPlayersDuringOwnLibrarySearch { who }
+                if match who {
+                    // CR 102.3: In a team game, a player's teammates are not
+                    // opponents. Keep this search-control scope on the canonical
+                    // team-aware opponent authority without changing legacy
+                    // prohibition-scope semantics for unrelated statics.
+                    crate::types::statics::ProhibitionScope::Opponents => {
+                        crate::game::players::is_opponent(state, source.controller, searcher)
+                    }
+                    _ => crate::game::static_abilities::prohibition_scope_matches_player(
+                        who, searcher, source.id, state,
+                    ),
+                } =>
+            {
+                Some(PlayerControlCandidate {
+                    controller: source.controller,
+                    timestamp: source.timestamp,
+                    // Normally timestamps are unique. The source identity keeps
+                    // direct-constructed zero-timestamp fixtures deterministic
+                    // while treating a real static as newer than a legacy latch.
+                    tie_breaker: source.id.0.saturating_add(1),
+                })
+            }
+            _ => None,
+        })
+        .max_by_key(|candidate| (candidate.timestamp, candidate.tie_breaker))
+}
+
+/// CR 723.1a + CR 723.5: Determine the controller whose authority must be
+/// snapshotted for one prepared search. Search-scoped statics participate only
+/// for an actual own-library search; ordinary turn control still governs every
+/// decision the controlled player makes, including cross-library searches.
+pub(crate) fn library_search_decision_controller(
+    state: &GameState,
+    searcher: PlayerId,
+    effective_library_owner: Option<PlayerId>,
+) -> PlayerId {
+    let active_turn = active_turn_control_candidate(state, searcher);
+    let search_static = (effective_library_owner == Some(searcher))
+        .then(|| own_library_search_control_candidate(state, searcher))
+        .flatten();
+    active_turn
+        .into_iter()
+        .chain(search_static)
+        .max_by_key(|candidate| (candidate.timestamp, candidate.tie_breaker))
+        .map_or(searcher, |candidate| candidate.controller)
+}
+
+fn decision_audience(semantic_player: PlayerId, submitter: PlayerId) -> Vec<PlayerId> {
+    if submitter == semantic_player {
+        vec![semantic_player]
+    } else {
+        vec![semantic_player, submitter]
+    }
+}
+
+/// CR 723.4: Build the hidden-information audience from the same controller
+/// that search preparation is about to latch, avoiding a second live scan.
+pub(crate) fn decision_audience_for_controller(
+    semantic_player: PlayerId,
+    controller: PlayerId,
+) -> Vec<PlayerId> {
+    decision_audience(semantic_player, controller)
 }
 
 /// CR 723.5: The controller of a searching player makes that player's
@@ -121,11 +363,7 @@ pub fn authorized_submitter_for_player(state: &GameState, semantic_player: Playe
 /// controlled player's private information while that control applies.
 pub fn decision_audience_for_player(state: &GameState, semantic_player: PlayerId) -> Vec<PlayerId> {
     let submitter = effective_authority_for_player(state, semantic_player);
-    if submitter == semantic_player {
-        vec![semantic_player]
-    } else {
-        vec![semantic_player, submitter]
-    }
+    decision_audience(semantic_player, submitter)
 }
 
 pub fn authorized_submitter(state: &GameState) -> Option<PlayerId> {

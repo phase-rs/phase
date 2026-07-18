@@ -2361,7 +2361,7 @@ fn set_may_trigger_auto_choice_remove_revokes_actor_choice() {
     let mut state = setup_game_at_main_phase();
     let source = ObjectId(500);
     let key = may_trigger_key(PlayerId(0), source);
-    state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
     assert_eq!(state.may_trigger_auto_choices.len(), 1);
 
     apply(
@@ -2432,7 +2432,7 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
     let mut state = setup_game_at_main_phase();
     let source = ObjectId(500);
     let p0_key = may_trigger_key(PlayerId(0), source);
-    state.set_may_trigger_auto_choice(p0_key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(p0_key.clone(), AutoMayChoice::Accept);
 
     // Reach-guard: a non-exempt action from P1 in P0's priority window errors,
     // proving the auth gate is live (so the exemption below is what lets P1 act).
@@ -2448,7 +2448,9 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
         &mut state,
         PlayerId(1),
         GameAction::SetMayTriggerAutoChoice {
-            op: MayTriggerAutoChoiceOp::Remove { key: p0_key },
+            op: MayTriggerAutoChoiceOp::Remove {
+                key: p0_key.clone(),
+            },
         },
     )
     .expect("SetMayTriggerAutoChoice is exempt from the priority-holder gate");

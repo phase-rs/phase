@@ -667,7 +667,15 @@ impl EventObjectSnapshot {
             // ---- unsupported: needs a live candidate lookup or an unmodeled field ----
             // Not reachable from the subject grammar today. Reaching one fails the gate,
             // which is the designed signal to extend the snapshot + evaluator together.
-            FilterProp::WasPlayed
+            // CR 701.15b/c: goad is a designation on the LIVE permanent (its `goaded_by`
+            // set, read by game/filter.rs `FilterProp::Goaded => !obj.goaded_by.is_empty()`).
+            // Neither EventObjectSnapshot nor ZoneChangeRecord carries a goaded field, and the
+            // runtime already fail-closes it (game/filter.rs zone-change-record matcher).
+            // Classify Unsupported so a future goaded event-subject filter fails the reach gate
+            // LOUDLY rather than silently reading an ungoaded snapshot. Deferred follow-up
+            // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
+            FilterProp::Goaded
+            | FilterProp::WasPlayed
             // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
             // a nontoken object is a copy, so card representation cannot be reconstructed.
             | FilterProp::RepresentedByCard
@@ -1799,6 +1807,22 @@ mod tests {
             properties: vec![FilterProp::WasKicked],
         });
         assert_eq!(classify(&needs_live), Unsupported);
+    }
+
+    /// CR 701.15b/c: goad is a designation on the LIVE permanent, not a fact the event
+    /// snapshot / zone-change record carries — the runtime fail-closes it. The reach-gate
+    /// classifier must AGREE: a goaded event-subject filter is `Unsupported`, so a future
+    /// card that reaches it fails the gate loudly instead of silently certifying ungoaded.
+    /// Revert-probe: returning Goaded to the Supported group (its state on head e3448a3c3)
+    /// makes classify yield Supported, flipping this assertion.
+    #[test]
+    fn goaded_subject_filter_is_unsupported() {
+        let goaded = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Goaded],
+        });
+        assert_eq!(classify(&goaded), Unsupported);
     }
 
     /// `Unsupported` dominates a composite: if one branch cannot be answered, the whole

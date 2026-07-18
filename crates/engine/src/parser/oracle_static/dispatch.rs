@@ -2330,6 +2330,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "<subject> can't activate <type>s' loyalty abilities" ---
+    // CR 602.5 + CR 606.2: The Immortal Sun — subject-first loyalty-activation
+    // prohibition. Distinct prefix from the "activated abilities of <filter>"
+    // form above; narrows to loyalty abilities via `kind = Some(Loyalty)`.
+    if let Some(def) = parse_subject_cant_activate_loyalty(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "~ can be attached only to {filter}" ---
     // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction on an
     // Aura/Equipment — the source can only attach to a host matching the parsed
@@ -2344,6 +2352,13 @@ pub(crate) fn parse_static_line_inner(
     // prohibition — the "can't" effect takes precedence over any effect directing
     // a search — where `cause` identifies whose spells/abilities are muzzled.
     if let Some(def) = parse_cant_search_library(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 723.1a + CR 723.5: search-scoped player control is a non-layer static;
+    // its runtime consumer snapshots the newest applicable authority when the
+    // search begins.
+    if let Some(def) = parse_control_players_during_own_library_search(&tp, &text) {
         return Some(def);
     }
 
@@ -2382,6 +2397,8 @@ pub(crate) fn parse_static_line_inner(
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
             exemption,
+            // CR 606.2: self-reference form blocks any activated ability.
+            kind: None,
         })
         .affected(TargetFilter::SelfRef)
         .description(text.to_string());

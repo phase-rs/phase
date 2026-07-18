@@ -27,8 +27,8 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
-    SubtypeExclusion, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
+    ObjectScope, PlayerFilter, PlayerScope, PtStat, QuantityExpr, QuantityRef, RoundingMode,
+    SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -56,6 +56,89 @@ pub fn parse_quantity_ref_complete(input: &str) -> OracleResult<'_, QuantityRef>
 pub fn parse_for_each_clause_ref_complete(input: &str) -> OracleResult<'_, QuantityRef> {
     let input = input.trim().trim_end_matches('.');
     all_consuming(parse_for_each_clause_ref).parse(input)
+}
+
+fn parse_pt_stat(input: &str) -> OracleResult<'_, PtStat> {
+    alt((
+        value(PtStat::Power, tag("power")),
+        value(PtStat::Toughness, tag("toughness")),
+    ))
+    .parse(input)
+}
+
+#[derive(Clone, Copy)]
+enum SameObjectReferent {
+    Recipient,
+    Demonstrative,
+}
+
+impl SameObjectReferent {
+    fn parse_possessive(self, input: &str) -> OracleResult<'_, ()> {
+        match self {
+            Self::Recipient => {
+                value((), alt((tag("its "), tag("~'s "), tag("this creature's ")))).parse(input)
+            }
+            Self::Demonstrative => value((), tag("that creature's ")).parse(input),
+        }
+    }
+
+    fn scope(self) -> ObjectScope {
+        match self {
+            Self::Recipient => ObjectScope::Recipient,
+            Self::Demonstrative => ObjectScope::Demonstrative,
+        }
+    }
+}
+
+fn parse_same_object_pt_difference_stats(
+    input: &str,
+    referent: SameObjectReferent,
+) -> OracleResult<'_, (PtStat, PtStat)> {
+    let (rest, _) = tag("the difference between ").parse(input)?;
+    let (rest, ()) = referent.parse_possessive(rest)?;
+    let (rest, left) = parse_pt_stat(rest)?;
+    let (rest, _) = tag(" and ").parse(rest)?;
+    let (rest, _) = opt(tag("its ")).parse(rest)?;
+    let (rest, right) = parse_pt_stat(rest)?;
+    if left == right {
+        return Err(oracle_err(rest));
+    }
+    Ok((rest, (left, right)))
+}
+
+fn pt_stat_quantity(stat: PtStat, scope: ObjectScope) -> QuantityExpr {
+    // CR 208.1: A creature's two P/T characteristics are power and toughness.
+    let qty = match stat {
+        PtStat::Power => QuantityRef::Power { scope },
+        PtStat::Toughness => QuantityRef::Toughness { scope },
+        PtStat::TotalPowerToughness => unreachable!("P/T difference grammar excludes totals"),
+    };
+    QuantityExpr::Ref { qty }
+}
+
+fn parse_same_object_pt_difference(
+    input: &str,
+    referent: SameObjectReferent,
+) -> OracleResult<'_, QuantityExpr> {
+    let scope = referent.scope();
+    map(
+        move |input| parse_same_object_pt_difference_stats(input, referent),
+        move |(left, right)| QuantityExpr::Difference {
+            left: Box::new(pt_stat_quantity(left, scope)),
+            right: Box::new(pt_stat_quantity(right, scope)),
+        },
+    )
+    .parse(input)
+}
+
+pub(crate) fn parse_recipient_pt_difference(input: &str) -> OracleResult<'_, QuantityExpr> {
+    parse_same_object_pt_difference(input, SameObjectReferent::Recipient)
+}
+
+// CR 608.2c: The demonstrative noun phrase follows the established instruction-
+// order referent chain: an earlier effect-context object, then the trigger event.
+pub(crate) fn parse_demonstrative_pt_difference(input: &str) -> OracleResult<'_, QuantityExpr> {
+    parse_same_object_pt_difference(input, SameObjectReferent::Demonstrative)
 }
 
 fn parse_quantity_operand(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -5077,6 +5160,78 @@ mod tests {
         SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    fn assert_pt_difference(parsed: QuantityExpr, scope: ObjectScope, left: PtStat, right: PtStat) {
+        assert_eq!(
+            parsed,
+            QuantityExpr::Difference {
+                left: Box::new(pt_stat_quantity(left, scope)),
+                right: Box::new(pt_stat_quantity(right, scope)),
+            }
+        );
+    }
+
+    #[test]
+    fn same_object_pt_difference_recipient_surfaces_preserve_operand_order() {
+        for phrase in [
+            "the difference between its power and toughness",
+            "the difference between ~'s power and its toughness",
+            "the difference between this creature's power and toughness",
+        ] {
+            let (rest, parsed) = all_consuming(parse_recipient_pt_difference)
+                .parse(phrase)
+                .unwrap_or_else(|error| panic!("recipient phrase {phrase:?}: {error:?}"));
+            assert_eq!(rest, "");
+            assert_pt_difference(
+                parsed,
+                ObjectScope::Recipient,
+                PtStat::Power,
+                PtStat::Toughness,
+            );
+        }
+
+        let (rest, reversed) = all_consuming(parse_recipient_pt_difference)
+            .parse("the difference between its toughness and its power")
+            .expect("reversed recipient P/T difference");
+        assert_eq!(rest, "");
+        assert_pt_difference(
+            reversed,
+            ObjectScope::Recipient,
+            PtStat::Toughness,
+            PtStat::Power,
+        );
+    }
+
+    #[test]
+    fn same_object_pt_difference_demonstrative_covers_trigger_referent() {
+        let (rest, parsed) = all_consuming(parse_demonstrative_pt_difference)
+            .parse("the difference between that creature's power and its toughness")
+            .expect("Jaws of Defeat event-object P/T difference");
+        assert_eq!(rest, "");
+        assert_pt_difference(
+            parsed,
+            ObjectScope::Demonstrative,
+            PtStat::Power,
+            PtStat::Toughness,
+        );
+    }
+
+    #[test]
+    fn same_object_pt_difference_rejects_equal_stats_and_distinct_referents() {
+        for phrase in [
+            "the difference between its power and power",
+            "the difference between its toughness and its toughness",
+            "the difference between its power and that creature's toughness",
+            "the difference between target creature's power and another target creature's toughness",
+        ] {
+            assert!(
+                all_consuming(parse_recipient_pt_difference)
+                    .parse(phrase)
+                    .is_err(),
+                "unsupported or multi-object phrase must fail closed: {phrase:?}"
+            );
+        }
+    }
 
     #[test]
     fn parse_for_each_object_spell_could_target_covers_zada_and_ink_treader() {

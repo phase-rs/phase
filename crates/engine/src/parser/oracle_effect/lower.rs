@@ -3532,30 +3532,71 @@ pub(super) fn zada_repeat_for_implies_distinct_copy_targets(qty: &QuantityExpr) 
     filter_has_could_be_targeted_by_triggering_spell(filter)
 }
 
+/// Split a clause at the first " for each " boundary. Returns the base byte-length
+/// (an offset into the ORIGINAL text — lowercasing is byte-length-preserving for the
+/// ASCII Oracle corpus) and the lowercase tail after " for each ". The single split
+/// authority shared by `strip_for_each_repeat_suffix` and `for_each_repeatable_repeat_for`.
+fn split_for_each_suffix(text: &str) -> Option<(usize, String)> {
+    let lower = text.to_lowercase();
+    let (rest, base) = take_until::<_, _, OracleError<'_>>(" for each ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (tail, _) = tag::<_, _, OracleError<'_>>(" for each ")
+        .parse(rest)
+        .ok()?;
+    Some((base.len(), tail.to_string()))
+}
+
 pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let (_, text) = strip_each_copy_targets_distinct_member_suffix(text);
-    let lower = text.to_lowercase();
-    let parsed = nom_on_lower(&text, &lower, |input| {
-        let (rest, base) = take_until::<_, _, OracleError<'_>>(" for each ").parse(input)?;
-        let (rest, _) = tag(" for each ").parse(rest)?;
-        let (rest, qty) = nom_quantity::parse_for_each_clause_ref(rest)?;
-        let (rest, _) = nom::combinator::opt(tag(".")).parse(rest)?;
-        let (rest, _) = nom::combinator::eof::<_, OracleError<'_>>(rest)?;
-        Ok((rest, (base.len(), qty)))
-    });
-    if let Some(((base_len, qty), _)) = parsed {
-        if matches!(&qty, QuantityRef::CommanderCastFromCommandZoneCount)
-            || zada_repeat_for_implies_distinct_copy_targets(&QuantityExpr::Ref {
-                qty: qty.clone(),
-            })
+    if let Some((base_len, tail)) = split_for_each_suffix(&text) {
+        if let Ok((_, qty)) = all_consuming(terminated(
+            nom_quantity::parse_for_each_clause_ref,
+            opt(tag::<_, _, OracleError<'_>>(".")),
+        ))
+        .parse(tail.as_str())
         {
-            return (
-                Some(QuantityExpr::Ref { qty }),
-                text[..base_len].trim_end().to_string(),
-            );
+            // Unchanged gate: the repeat-suffix lift is restricted to CommanderCast
+            // and Zada distinct-copy today. A player-set `PlayerCount` is deliberately
+            // NOT admitted here — that class routes through the fieldless-Investigate
+            // seam via `for_each_repeatable_repeat_for`.
+            if matches!(&qty, QuantityRef::CommanderCastFromCommandZoneCount)
+                || zada_repeat_for_implies_distinct_copy_targets(&QuantityExpr::Ref {
+                    qty: qty.clone(),
+                })
+            {
+                return (
+                    Some(QuantityExpr::Ref { qty }),
+                    text[..base_len].trim_end().to_string(),
+                );
+            }
         }
     }
     (None, text)
+}
+
+/// CR 701.16a + CR 608.2c: Lift a trailing "[once] for each ⟨set⟩" multiplier off a
+/// fieldless keyword-action effect (Investigate has no count slot) into a `repeat_for`.
+/// Restricted to the per-each MEMBER-COUNT class — a count of the players or objects the
+/// "for each" ranges over: `PlayerCount` (including its nested `PlayerAttribute` filter,
+/// e.g. Wojek's comparative hand size) and `ObjectCount` (e.g. Serene Sleuth's goaded
+/// creatures). Contextual amount-refs (`FilteredTrackedSetSize` / `TrackedSetSize` /
+/// `PreviousEffectAmount` / `EventContextAmount`) are deliberately NOT lifted, and the
+/// match is fail-closed (an unrecognized ref leaves the Investigate bare). This matters
+/// because such refs co-occur with a leading Fixed multiplier the single `repeat_for`
+/// slot cannot represent: Tamiyo Meets the Story Circle's "investigate TWICE for each
+/// card discarded this way" would otherwise lift the per-each `FilteredTrackedSetSize`
+/// and silently DROP the "twice" (N Clues instead of 2×N). The runtime repeat_for driver
+/// resolves either admitted member-count generically (one Clue per member). One shape —
+/// a class-membership guard, not per-family handling.
+pub(super) fn for_each_repeatable_repeat_for(text: &str) -> Option<QuantityExpr> {
+    let (_, tail) = split_for_each_suffix(text)?;
+    match parse_for_each_clause(&tail) {
+        Some(qty @ (QuantityRef::PlayerCount { .. } | QuantityRef::ObjectCount { .. })) => {
+            Some(QuantityExpr::Ref { qty })
+        }
+        _ => None,
+    }
 }
 
 /// CR 107.1: Strip "twice" / "three times" / "N times" suffix to produce a
@@ -11560,5 +11601,157 @@ mod strip_optional_effect_prefix_tests {
         );
         assert!(is_optional);
         assert_eq!(rest, "cast the exiled card without paying its mana cost");
+    }
+}
+
+/// DynQty subgroup D — "[once] for each ⟨player-set⟩" lift for fieldless Investigate.
+/// Building-block tests for the shared split refactor (byte-identity), the player-set
+/// lift helper, and the wrapper-vs-`_ref` non-domination guard.
+#[cfg(test)]
+mod dq_d_player_set_lift_tests {
+    use super::{for_each_repeatable_repeat_for, strip_for_each_repeat_suffix};
+    use crate::parser::oracle_nom::quantity::parse_for_each_clause_ref;
+    use crate::types::ability::{PlayerFilter, QuantityExpr, QuantityRef};
+
+    // Matrix #3 — the shared `split_for_each_suffix` refactor is byte-identical:
+    // each input yields the SAME `(Option<QuantityExpr>, String)` as pre-refactor.
+    // Reverting to a byte-changing split (or admitting `PlayerCount` into the gate)
+    // flips one of these assertions.
+    #[test]
+    fn strip_for_each_repeat_suffix_byte_identity_corpus() {
+        // (a) CommanderCast "for each" lift is preserved.
+        let (qty, base) = strip_for_each_repeat_suffix(
+            "copy it for each time you've cast your commander from the command zone this game",
+        );
+        assert!(
+            matches!(
+                qty,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::CommanderCastFromCommandZoneCount
+                })
+            ),
+            "CommanderCast lift must survive the refactor: {qty:?}"
+        );
+        assert_eq!(base, "copy it");
+
+        // (b) a player-set for-each is REJECTED by this gate (routes through the
+        // fieldless-Investigate seam instead) → `(None, <full text>)`.
+        let input = "investigate for each opponent who lost life this turn";
+        let (qty, base) = strip_for_each_repeat_suffix(input);
+        assert!(
+            qty.is_none(),
+            "PlayerCount must not be lifted here: {qty:?}"
+        );
+        assert_eq!(base, input);
+
+        // (c) the Zada distinct-copy ObjectCount lift is preserved: strip lifts
+        // "other creature you control that the spell could target" to an
+        // `ObjectCount{CouldBeTargetedByTriggeringSpell}` and returns the base "copy
+        // that spell". Byte-identical to the pre-refactor `_ref + eof` path, and proves
+        // the new player-set routing did not disturb the CopySpell/Zada gate.
+        let (qty, base) = strip_for_each_repeat_suffix(
+            "copy that spell for each other creature you control that the spell could target",
+        );
+        assert!(
+            matches!(
+                qty,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                })
+            ),
+            "Zada ObjectCount lift must survive the refactor: {qty:?}"
+        );
+        assert_eq!(base, "copy that spell");
+
+        // (d) no "for each" suffix at all → unchanged passthrough.
+        let (qty, base) = strip_for_each_repeat_suffix("draw a card");
+        assert!(qty.is_none());
+        assert_eq!(base, "draw a card");
+    }
+
+    // Matrix #4 — the repeatable member-count lift helper (widened: player-set OR object-set).
+    #[test]
+    fn for_each_repeatable_repeat_for_lifts_any_repeatable_count() {
+        // Teysa: OpponentLostLife → PlayerCount.
+        let teysa =
+            for_each_repeatable_repeat_for("investigate for each opponent who lost life this turn");
+        assert!(
+            matches!(
+                teysa,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::OpponentLostLife
+                    }
+                })
+            ),
+            "Teysa must lift OpponentLostLife: {teysa:?}"
+        );
+
+        // Wojek: PlayerAttribute (comparative hand size). REVERT PROBE: switching the
+        // helper body from the `parse_for_each_clause` wrapper to `parse_for_each_clause_ref`
+        // makes THIS case return `None` (the `_ref` alt has no PlayerAttribute arm) —
+        // that is the wrapper-vs-`_ref` guard.
+        let wojek = for_each_repeatable_repeat_for(
+            "investigate once for each opponent who has more cards in hand than you",
+        );
+        assert!(
+            matches!(
+                wojek,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::PlayerAttribute { .. }
+                    }
+                })
+            ),
+            "Wojek must lift PlayerAttribute via the wrapper: {wojek:?}"
+        );
+
+        // Object for-each now DOES lift (parameterized gate-widen). "attacking creature
+        // you control" is an already-supported typed filter (needs no Gap A / FilterProp::
+        // Goaded), so the widened helper lifts it to `ObjectCount`. REVERT PROBE: narrowing
+        // the gate back to `PlayerCount`-only flips this assertion to None.
+        let object_lift =
+            for_each_repeatable_repeat_for("investigate for each attacking creature you control");
+        assert!(
+            matches!(
+                object_lift,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                })
+            ),
+            "object for-each must now lift to ObjectCount: {object_lift:?}"
+        );
+
+        // Amount-ref for-each is NOT lifted (fail-closed member-count restriction).
+        // Tamiyo Meets the Story Circle's "investigate twice for each card discarded this
+        // way" parses the tail to a contextual `FilteredTrackedSetSize`, NOT a member
+        // count. Lifting it would silently drop the leading "twice" Fixed multiplier
+        // (N Clues instead of 2×N — CR 701.16a). REVERT PROBE: broadening the body back to
+        // `parse_for_each_clause(&tail).map(...)` makes this return `Some` and FAILS.
+        assert!(
+            for_each_repeatable_repeat_for("investigate twice for each card discarded this way")
+                .is_none(),
+            "a contextual amount-ref (FilteredTrackedSetSize) must NOT be lifted"
+        );
+
+        // No "for each" suffix → None.
+        assert!(for_each_repeatable_repeat_for("investigate").is_none());
+    }
+
+    // Matrix #2 — non-domination: the bare `_ref` combinator does NOT consume Wojek's
+    // comparative tail. This is why the helper MUST use the wrapper (which reaches the
+    // `oracle_quantity` PlayerAttribute producer). If `_ref` DID consume this to empty,
+    // matrix #4/#6's discriminator would be vacuous.
+    #[test]
+    fn parse_for_each_clause_ref_does_not_dominate_comparative_hand_size() {
+        let tail = "opponent who has more cards in hand than you";
+        match parse_for_each_clause_ref(tail) {
+            Err(_) => {} // rejected outright — non-dominating
+            Ok((rest, _)) => assert!(
+                !rest.is_empty(),
+                "_ref must NOT consume the comparative tail to empty (would make the \
+                 wrapper's `rest.is_empty()` gate fire): rest={rest:?}"
+            ),
+        }
     }
 }

@@ -3012,7 +3012,7 @@ fn apply_action(
             MayTriggerAutoChoiceOp::Remove { key } => {
                 let actor_key = MayTriggerAutoChoiceKey {
                     player: actor,
-                    ..*key
+                    ..key.clone()
                 };
                 state.remove_may_trigger_auto_choice(&actor_key);
             }
@@ -3970,6 +3970,15 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                PayCostKind::Reveal => engine_casting::handle_reveal_for_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *count,
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
 	                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
 	                    state,
 	                    *player,
@@ -4177,12 +4186,13 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
-                // ReturnToHand, ExileFromZone, RemoveCounter, and Behold do not
-                // have mana-ability cost handlers wired today. If a future mana
-                // ability uses one of these CR-valid cost shapes, add the
-                // corresponding mana-ability handler instead of routing it
-                // through the spell pipeline.
+                // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
+                // do not have mana-ability cost handlers wired today. If a
+                // future mana ability uses one of these CR-valid cost shapes,
+                // add the corresponding mana-ability handler instead of
+                // routing it through the spell pipeline.
                 PayCostKind::ReturnToHand
+                | PayCostKind::Reveal
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExileMaterials { .. }
                 | PayCostKind::ExilePermanent { .. }
@@ -7325,7 +7335,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             // Clone optional-gate fields before any `&mut state` borrow so the
             // `pending_trigger` imm borrow from `trigger` does not overlap.
             let ability_optional = trigger.ability.optional;
-            let may_trigger_origin = trigger.may_trigger_origin;
+            let may_trigger_origin = trigger.may_trigger_origin.clone();
             let trigger_description = trigger.description.clone();
             let trigger_events = if state.pending_trigger_event_batch.is_empty() {
                 trigger_event.iter().cloned().collect::<Vec<_>>()

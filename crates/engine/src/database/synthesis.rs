@@ -3122,7 +3122,11 @@ pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::G
     // so the trigger is collectable this same resolution before the next layers
     // pass re-derives `trigger_definitions`.
     if obj.base_trigger_definitions.iter().any(is_evoke_sac) {
-        if !obj.trigger_definitions.iter_all().any(is_evoke_sac) {
+        if !obj
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| is_evoke_sac(entry.definition()))
+        {
             obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
         }
         return;
@@ -3217,11 +3221,9 @@ pub(crate) fn ensure_paid_offspring_etb_copy_triggers(
             .iter()
             .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal));
         if has_base {
-            if !obj
-                .trigger_definitions
-                .iter_all()
-                .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal))
-            {
+            if !obj.trigger_definitions.iter_all().any(|entry| {
+                is_offspring_etb_copy_trigger_for_ordinal(entry.definition(), origin_ordinal)
+            }) {
                 obj.trigger_definitions
                     .push(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
             }
@@ -15915,8 +15917,9 @@ mod myriad_runtime_tests {
             "Muddle should have Myriad keyword after becoming a copy"
         );
         let has_myriad_trigger = muddle_obj.trigger_definitions.iter_all().any(|trigger| {
-            matches!(trigger.mode, TriggerMode::Attacks)
+            matches!(trigger.definition.mode, TriggerMode::Attacks)
                 && trigger
+                    .definition
                     .execute
                     .as_deref()
                     .is_some_and(|a| a.optional && matches!(a.effect.as_ref(), Effect::Myriad))
@@ -15970,10 +15973,12 @@ mod myriad_runtime_tests {
         assert_eq!(token_attacker.defending_player, PlayerId(2));
 
         // Token should inherit the combat damage trigger from Face-Breaker.
-        let token_has_damage_trigger = token_obj
-            .trigger_definitions
-            .iter_all()
-            .any(|trigger| matches!(trigger.mode, TriggerMode::DamageDoneOnceByController));
+        let token_has_damage_trigger = token_obj.trigger_definitions.iter_all().any(|trigger| {
+            matches!(
+                trigger.definition.mode,
+                TriggerMode::DamageDoneOnceByController
+            )
+        });
         assert!(
             token_has_damage_trigger,
             "Token copy should inherit the source's triggered abilities"

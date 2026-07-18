@@ -16,7 +16,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
-use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::oracle_nom::condition::{
     parse_attached_subject_target_filter, parse_inner_condition,
     parse_opponent_who_controls_at_least_as_many,
@@ -31,20 +31,22 @@ use super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
     strip_reminder_text, TextPair,
 };
+use crate::types::ability::CastingPermission;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
     Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaModification,
-    ManaReplacementScope, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TypeFilter, TypedFilter,
+    ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
+    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::CastFrequency;
 use crate::types::zones::Zone;
 
 /// Parse a replacement effect line into a ReplacementDefinition.
@@ -88,6 +90,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     let lower = text.to_lowercase();
     let normalized = replace_self_refs(&text, card_name);
     let norm_lower = normalized.to_lowercase();
+
+    if let Some(definition) = parse_search_found_replacement(&text, &lower) {
+        return Some(definition);
+    }
 
     // --- Krark's Thumb: "If you would flip a coin, instead flip two coins and
     //     ignore one." (CR 705.1 + CR 614.1a) ---
@@ -276,12 +282,20 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If ~ would die, {effect}" ---
-    if nom_primitives::scan_contains(&norm_lower, "~ would die")
-        || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
-    {
-        let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
-            .valid_card(TargetFilter::SelfRef)
-            .description(text.to_string());
+    let self_would_die = nom_primitives::scan_contains(&norm_lower, "~ would die")
+        && !nom_primitives::scan_contains(&norm_lower, "dealt damage by ~ would die this turn");
+    if self_would_die || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed") {
+        // CR 700.4: Dying is a battlefield-to-graveyard move, not the
+        // narrower destroy action. A self-die replacement must also catch
+        // sacrifice and zero-toughness SBAs; "would be destroyed" remains a
+        // Destroy replacement.
+        let mut def = if self_would_die {
+            ReplacementDefinition::new(ReplacementEvent::Moved).destination_zone(Zone::Graveyard)
+        } else {
+            ReplacementDefinition::new(ReplacementEvent::Destroy)
+        }
+        .valid_card(TargetFilter::SelfRef)
+        .description(text.to_string());
         // CR 614.1a + CR 122.1: Try the shared exile-anaphor recognizer first
         // so the self-die branch sees the same prefix/suffix word-order
         // handling and `with N <type> counter(s) on it` lift as the non-self
@@ -883,6 +897,222 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchFoundSearcherAgreement {
+    Singular,
+    Plural,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFoundSearcher {
+    player_scope: ReplacementPlayerScope,
+    agreement: SearchFoundSearcherAgreement,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchFoundExileActor {
+    SingularPlayer,
+    PluralPlayers,
+    GenderNeutral,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFoundExileAction {
+    actor: SearchFoundExileActor,
+    destination: Zone,
+    target: TargetFilter,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFoundPlayPermission {
+    duration: Duration,
+    target: TargetFilter,
+    grantee: PermissionGrantee,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFoundReplacementClause {
+    searcher: SearchFoundSearcher,
+    exile: SearchFoundExileAction,
+    play_permission: SearchFoundPlayPermission,
+    mana_spend_permission: ManaSpendPermission,
+}
+
+fn parse_search_found_searcher(input: &str) -> OracleResult<'_, SearchFoundSearcher> {
+    preceded(
+        tag("while "),
+        alt((
+            value(
+                SearchFoundSearcher {
+                    player_scope: ReplacementPlayerScope::Opponent,
+                    agreement: SearchFoundSearcherAgreement::Singular,
+                },
+                (tag("an opponent is searching their library"), tag(", ")),
+            ),
+            value(
+                SearchFoundSearcher {
+                    player_scope: ReplacementPlayerScope::Opponent,
+                    agreement: SearchFoundSearcherAgreement::Plural,
+                },
+                (
+                    tag("one or more opponents are searching their "),
+                    alt((tag("libraries"), tag("library"))),
+                    tag(", "),
+                ),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_search_found_exile_action(input: &str) -> OracleResult<'_, SearchFoundExileAction> {
+    let (input, actor) = alt((
+        value(SearchFoundExileActor::GenderNeutral, tag("they exile ")),
+        value(
+            SearchFoundExileActor::SingularPlayer,
+            tag("that player exiles "),
+        ),
+        value(
+            SearchFoundExileActor::PluralPlayers,
+            tag("those players exile "),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("each card they find. ").parse(input)?;
+    Ok((
+        input,
+        SearchFoundExileAction {
+            actor,
+            destination: Zone::Exile,
+            target: TargetFilter::ParentTarget,
+        },
+    ))
+}
+
+fn parse_search_found_play_permission(input: &str) -> OracleResult<'_, SearchFoundPlayPermission> {
+    let (input, _) = tag("you may play ").parse(input)?;
+    let (input, _) = alt((tag("those cards"), tag("them"))).parse(input)?;
+    let (input, _) = tag(" for as long as ").parse(input)?;
+    let (input, _) =
+        alt((tag("they remain exiled"), tag("those cards remain exiled"))).parse(input)?;
+    let (input, _) = tag(", and ").parse(input)?;
+    Ok((
+        input,
+        SearchFoundPlayPermission {
+            // The permission is stored on each exiled object and removed when
+            // that object changes zones, so the existing permanent duration is
+            // the engine representation of this linked-exile lifetime.
+            duration: Duration::Permanent,
+            target: TargetFilter::ParentTarget,
+            grantee: PermissionGrantee::AbilityController,
+        },
+    ))
+}
+
+fn parse_search_found_mana_concession(input: &str) -> OracleResult<'_, ManaSpendPermission> {
+    let (input, _) = tag("you may spend mana as though it were mana of any color").parse(input)?;
+    let (input, _) = tag(" to cast ").parse(input)?;
+    let (input, _) = alt((tag("them"), tag("those cards"), tag("those spells"))).parse(input)?;
+    Ok((input, ManaSpendPermission::AnyColor))
+}
+
+fn parse_search_found_replacement_clause(
+    input: &str,
+) -> OracleResult<'_, SearchFoundReplacementClause> {
+    let (input, searcher) = parse_search_found_searcher(input)?;
+    let (input, exile) = parse_search_found_exile_action(input)?;
+    let actor_agrees = matches!(exile.actor, SearchFoundExileActor::GenderNeutral)
+        || matches!(
+            (searcher.agreement, exile.actor),
+            (
+                SearchFoundSearcherAgreement::Singular,
+                SearchFoundExileActor::SingularPlayer
+            ) | (
+                SearchFoundSearcherAgreement::Plural,
+                SearchFoundExileActor::PluralPlayers
+            )
+        );
+    if !actor_agrees {
+        return Err(oracle_err(input));
+    }
+    let (input, play_permission) = parse_search_found_play_permission(input)?;
+    let (input, mana_spend_permission) = parse_search_found_mana_concession(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((
+        input,
+        SearchFoundReplacementClause {
+            searcher,
+            exile,
+            play_permission,
+            mana_spend_permission,
+        },
+    ))
+}
+
+/// Parser-authoritative classifier for the complete SearchFound replacement
+/// paragraph. This intentionally requires both sentences so the exile and its
+/// duration/payment permission cannot be parsed as independent abilities.
+pub(crate) fn is_search_found_replacement_pattern(lower: &str) -> bool {
+    nom_parse_lower(lower, parse_search_found_replacement_clause).is_some()
+}
+
+/// CR 701.23a + CR 614.1 + CR 611.2b: During the scoped own-library search,
+/// replace each found-card event with exile and bind a permission that lasts
+/// for as long as that object remains exiled. CR 609.4b: the permission also
+/// carries the parsed any-color or any-type mana-spending concession for casting
+/// that card.
+fn parse_search_found_replacement(original: &str, lower: &str) -> Option<ReplacementDefinition> {
+    let parsed = nom_parse_lower(lower, parse_search_found_replacement_clause)?;
+
+    let grant = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile {
+                duration: parsed.play_permission.duration,
+                granted_to: crate::types::player::PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: Some(parsed.mana_spend_permission),
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
+            },
+            target: parsed.play_permission.target,
+            grantee: parsed.play_permission.grantee,
+        },
+    );
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: None,
+            destination: parsed.exile.destination,
+            target: parsed.exile.target,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: Vec::new(),
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .sub_ability(grant);
+
+    let mut definition = ReplacementDefinition::new(ReplacementEvent::SearchFound)
+        .execute(execute)
+        .description(original.to_string());
+    definition.valid_player = Some(parsed.searcher.player_scope);
+    Some(definition)
 }
 
 /// CR 614.1a + CR 614.6: Library of Leng — when an effect causes the controller
@@ -4813,6 +5043,11 @@ fn parse_creature_die_exile_replacement(
     if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
         return None;
     }
+    // CR 700.4: A creature only dies when it moves from the battlefield to a
+    // graveyard. Destination alone would also match a milled, discarded, or
+    // countered creature card, so keep the origin on the affected-object
+    // filter.
+    let filter = attach_zone_to_filter(filter, Zone::Battlefield);
 
     // Extract the replacement effect after "would die, " via a nom combinator.
     // CR 614.1a: Replacement effects use "instead" — both word orders are equivalent:
@@ -4894,7 +5129,11 @@ fn parse_creature_die_exile_replacement(
         parse_effect_chain(orig_effect, AbilityKind::Spell)
     };
 
-    let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
+    // CR 700.4 + CR 614.1a: Dying is any battlefield-to-graveyard move,
+    // including sacrifice and lethal-damage or zero-toughness SBAs. A
+    // die-exile replacement must intercept that move, not only Destroy.
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
         .execute(execute)
         .valid_card(filter)
         .description(original_text.to_string());
@@ -15275,7 +15514,8 @@ mod tests {
             "Kalitas, Traitor of Ghet",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -15288,6 +15528,9 @@ mod tests {
         match &def.valid_card {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }));
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
@@ -15392,8 +15635,14 @@ mod tests {
             "Frostwielder",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
-        assert_eq!(def.destination_zone, None);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        assert!(matches!(
+            &def.valid_card,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Battlefield,
+            })
+        ));
         assert_eq!(
             def.condition,
             Some(ReplacementCondition::DealtDamageThisTurnBySource {
@@ -15417,6 +15666,8 @@ mod tests {
             "Kumano's Blessing",
         )
         .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         assert_eq!(
             def.condition,
             Some(ReplacementCondition::DealtDamageThisTurnBySource {
@@ -15450,7 +15701,8 @@ mod tests {
             "The Darkness Crystal",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -15488,7 +15740,8 @@ mod tests {
             "Kalitas, Traitor of Ghet",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -15515,7 +15768,8 @@ mod tests {
             "Hypothetical Card",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -15539,7 +15793,8 @@ mod tests {
             "Hypothetical Card",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -15562,7 +15817,8 @@ mod tests {
             "Draugr Necromancer",
         )
         .expect("expected non-empty ReplacementDefinition for Draugr-shape die-replacement");
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         match &def.valid_card {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -15603,7 +15859,8 @@ mod tests {
             "Darigaaz Reincarnated",
         )
         .expect("expected non-empty ReplacementDefinition for Darigaaz self-die");
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         assert!(
             matches!(def.valid_card, Some(TargetFilter::SelfRef)),
             "self-die replacement must target the source via SelfRef"
@@ -20989,5 +21246,163 @@ mod snapshot_tests {
             None,
             "the 'to you' player shield must not be flipped to SelfRef"
         );
+    }
+}
+
+#[cfg(test)]
+mod opposition_agent_parser_tests {
+    use super::*;
+    use crate::types::ability::{CastingPermission, ManaSpendPermission, PermissionGrantee};
+    use crate::types::statics::{CastFrequency, ProhibitionScope, StaticMode};
+
+    const REPLACEMENT_TEXT: &str = "While an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.";
+
+    #[test]
+    fn search_found_paragraph_lowers_to_canonical_existing_building_blocks() {
+        let definition = parse_replacement_line(REPLACEMENT_TEXT, "Opposition Agent")
+            .expect("complete SearchFound replacement paragraph should parse atomically");
+        assert_eq!(definition.event, ReplacementEvent::SearchFound);
+        assert_eq!(definition.mode, ReplacementMode::Mandatory);
+        assert_eq!(
+            definition.valid_player,
+            Some(ReplacementPlayerScope::Opponent)
+        );
+
+        let execute = definition.execute.as_deref().expect("execute definition");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enters_attacking: false,
+                up_to: false,
+                face_down_profile: None,
+                enters_modified_if: None,
+                ..
+            }
+        ));
+        let grant = execute
+            .sub_ability
+            .as_deref()
+            .expect("exile must chain the persistent play permission");
+        assert!(matches!(
+            grant.effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: crate::types::player::PlayerId(0),
+                    frequency: CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    card_filter: None,
+                    single_use_group: None,
+                    single_use: false,
+                    cast_cost_raise: None,
+                    invalidation: None,
+                    ..
+                },
+                target: TargetFilter::ParentTarget,
+                grantee: PermissionGrantee::AbilityController,
+            }
+        ));
+    }
+
+    #[test]
+    fn search_found_parser_composes_supported_surface_axes_independently() {
+        let cases = [
+            "While an opponent is searching their library, that player exiles each card they find. You may play them for as long as those cards remain exiled, and you may spend mana as though it were mana of any color to cast those cards.",
+            "While one or more opponents are searching their libraries, those players exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast those spells.",
+            "While one or more opponents are searching their library, they exile each card they find. You may play them for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+        ];
+
+        for text in cases {
+            assert!(is_search_found_replacement_pattern(&text.to_lowercase()));
+            let definition = parse_replacement_line(text, "Search Interceptor")
+                .expect("composed SearchFound paragraph should reach replacement lowering");
+            assert_eq!(
+                definition.valid_player,
+                Some(ReplacementPlayerScope::Opponent)
+            );
+            let grant = definition
+                .execute
+                .as_deref()
+                .and_then(|execute| execute.sub_ability.as_deref())
+                .expect("found-card exile must carry its linked play permission");
+            assert!(matches!(
+                grant.effect.as_ref(),
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::Permanent,
+                        mana_spend_permission: Some(actual_mana),
+                        ..
+                    },
+                    target: TargetFilter::ParentTarget,
+                    grantee: PermissionGrantee::AbilityController,
+                } if *actual_mana == ManaSpendPermission::AnyColor
+            ));
+        }
+    }
+
+    #[test]
+    fn search_found_parser_requires_the_complete_atomic_paragraph() {
+        assert!(parse_replacement_line(
+            "While an opponent is searching their library, they exile each card they find.",
+            "Search Interceptor",
+        )
+        .is_none());
+        assert!(!is_search_found_replacement_pattern(
+            "while an opponent are searching their library, they exile each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them."
+        ));
+        assert!(!is_search_found_replacement_pattern(
+            "while an opponent is searching their library, those players exile each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them."
+        ));
+        assert!(!is_search_found_replacement_pattern(
+            "while one or more opponents are searching their libraries, that player exiles each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them."
+        ));
+        assert!(!is_search_found_replacement_pattern(
+            "while an opponent is searching their library, they exile each card they find. you may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them. draw a card."
+        ));
+
+        // Reach guard: the rejection assertions above are meaningful only if
+        // the neighboring well-formed production still reaches this parser.
+        assert!(is_search_found_replacement_pattern(
+            &REPLACEMENT_TEXT.to_lowercase()
+        ));
+        assert_eq!(
+            parse_replacement_line(REPLACEMENT_TEXT, "Search Interceptor")
+                .expect("well-formed reach guard")
+                .event,
+            ReplacementEvent::SearchFound
+        );
+    }
+
+    #[test]
+    fn opposition_agent_full_oracle_routes_without_unimplemented() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flash\nYou control your opponents while they're searching their libraries.\nWhile an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.",
+            "Opposition Agent",
+            &["Flash".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Rogue".to_string()],
+        );
+        assert!(parsed.statics.iter().any(|definition| matches!(
+            definition.mode,
+            StaticMode::ControlPlayersDuringOwnLibrarySearch {
+                who: ProhibitionScope::Opponents
+            }
+        )));
+        assert!(parsed.replacements.iter().any(|definition| {
+            definition.event == ReplacementEvent::SearchFound
+                && definition.valid_player == Some(ReplacementPlayerScope::Opponent)
+        }));
+        assert!(!parsed
+            .abilities
+            .iter()
+            .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })));
     }
 }

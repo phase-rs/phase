@@ -23,7 +23,34 @@ use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// CR 405.1: Add an object to the stack.
-pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
+pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut Vec<GameEvent>) {
+    // CR 701.27f: an activated or triggered ability of a permanent may
+    // transform that permanent only if it has not transformed/converted since
+    // the ability was put onto the stack. Spells and keyword actions do not
+    // receive this guard.
+    if matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
+    ) {
+        let source = state
+            .objects
+            .get(&entry.source_id)
+            .filter(|object| object.back_face.is_some());
+        let count = source.map(|object| object.transformation_count);
+        let incarnation = source.map(|object| object.incarnation);
+        if let Some(ability) = entry.ability_mut() {
+            // CR 701.27f: delayed triggered abilities already carry their
+            // creation-time generation and must not be restamped when fired.
+            if ability.context.source_transformation_count.is_none() {
+                ability.set_source_transformation_count_recursive(count);
+                // CR 400.7: a re-entered source can share the same storage ID
+                // and transformation generation, so retain its incarnation too.
+                if ability.source_incarnation.is_none() {
+                    ability.set_source_incarnation_recursive(incarnation);
+                }
+            }
+        }
+    }
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
     });
@@ -2378,9 +2405,10 @@ fn observer_candidates_are_inert(
 ) -> bool {
     let event_keys = crate::game::trigger_index::keys_from_event(event, state);
     for candidate in candidates.iter().copied() {
-        let Some((controller, triggers)) = state.objects.get(&candidate).map(|obj| {
+        let Some((controller, source, triggers)) = state.objects.get(&candidate).map(|obj| {
             (
                 obj.controller,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(obj),
                 obj.trigger_definitions
                     .iter_all()
                     .cloned()
@@ -2391,7 +2419,12 @@ fn observer_candidates_are_inert(
             continue;
         };
 
-        for (trigger_index, trigger) in triggers {
+        for (trigger_index, entry) in triggers {
+            let definition_ref = crate::types::ability::TriggerDefinitionRef {
+                source,
+                occurrence: entry.occurrence.clone(),
+            };
+            let trigger = entry.definition;
             let (trigger_keys, unclassified) =
                 crate::game::trigger_index::keys_from_trigger_def(&trigger);
             if !unclassified && !trigger_keys.iter().any(|key| event_keys.contains(key)) {
@@ -2412,7 +2445,7 @@ fn observer_candidates_are_inert(
             let mut ability =
                 super::triggers::build_triggered_ability(state, &trigger, candidate, controller);
             ability.ability_index = Some(trigger_index);
-            ability.may_trigger_origin = Some(MayTriggerOrigin::Printed { trigger_index });
+            ability.may_trigger_origin = Some(MayTriggerOrigin::Definition { definition_ref });
             if !optional_ability_is_inert_under_auto_choice(state, &ability, Some(event)) {
                 return false;
             }
@@ -2429,7 +2462,7 @@ fn optional_ability_is_inert_under_auto_choice(
     if !ability.optional {
         return false;
     }
-    let Some(origin) = ability.may_trigger_origin else {
+    let Some(origin) = ability.may_trigger_origin.clone() else {
         return false;
     };
     let key = MayTriggerAutoChoiceKey {
@@ -3268,12 +3301,12 @@ mod tests {
             let mut state = setup();
             let mut ability = ResolvedAbility::new(effect, vec![], source_id, PlayerId(0));
             ability.optional = true;
-            ability.may_trigger_origin = Some(origin);
+            ability.may_trigger_origin = Some(origin.clone());
             state.set_may_trigger_auto_choice(
                 MayTriggerAutoChoiceKey {
                     player: PlayerId(0),
                     source_id,
-                    origin,
+                    origin: origin.clone(),
                 },
                 AutoMayChoice::Accept,
             );

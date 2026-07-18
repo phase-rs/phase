@@ -220,6 +220,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation (reads only the
+        // object's own `goaded_by` set), so the board population is irrelevant.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::Modified
@@ -464,6 +467,9 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: an entering object cannot perturb a candidate-local goad
+        // designation (reads only the object's own `goaded_by` set).
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::Modified
@@ -3380,6 +3386,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: a spell on the stack carries no goad designation. Fail closed.
+        | FilterProp::Goaded
         // CR 700.9: Modified requires on-battlefield attachments/counters,
         // unavailable from a stack-snapshot record.
         | FilterProp::Modified
@@ -4325,6 +4333,8 @@ fn matches_filter_prop(
         FilterProp::Suspected => obj.is_suspected,
         // CR 702.112b: Match permanents with the renowned designation.
         FilterProp::Renowned => obj.is_renowned,
+        // CR 701.15b/c: a creature is goaded iff at least one player has goaded it.
+        FilterProp::Goaded => !obj.goaded_by.is_empty(),
         // CR 700.9: A permanent is modified if it has one or more counters on
         // it (CR 122), is equipped (CR 301.5), or is enchanted by an Aura
         // controlled by its controller (CR 303.4).
@@ -5066,6 +5076,9 @@ fn zone_change_record_matches_property(
         // evaluated on the live stack object, not the snapshot).
         | FilterProp::Modal
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is not snapshotted onto the zone-change record
+        // (unlike Suspected's `record.is_suspected`). Fail closed.
+        | FilterProp::Goaded
         // CR 700.9: Modified is a live-battlefield predicate (counters +
         // attachments) — a zone-change snapshot cannot represent it.
         | FilterProp::Modified
@@ -8085,10 +8098,10 @@ mod tests {
         };
 
         let trigger = &runner.state().objects[&mana_echoes].trigger_definitions[0];
-        let execute = trigger.execute.as_ref().expect("execute");
+        let execute = trigger.definition.execute.as_ref().expect("execute");
         let ability = crate::game::triggers::build_triggered_ability(
             runner.state(),
-            trigger,
+            &trigger.definition,
             mana_echoes,
             P0,
         );

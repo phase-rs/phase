@@ -1597,6 +1597,23 @@ fn finish_copy_target_choice_entry(
         );
         return Ok(Some(state.waiting_for.clone()));
     }
+    // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
+    // replacement choice acquired from entering as a copy before replaying the entry.
+    if let Some(choice) =
+        super::replacement::current_self_enter_replacement_choice(state, source_id)
+    {
+        if let Some(waiting_for) = apply_post_replacement_effect(
+            state,
+            &choice,
+            Some(source_id),
+            None,
+            Some(&ReplacementEvent::Moved),
+            HashSet::new(),
+            events,
+        ) {
+            return Ok(Some(waiting_for));
+        }
+    }
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
     // captured into `state.deferred_entry_events` when `CopyTargetChoice` was
@@ -2278,7 +2295,7 @@ pub(super) fn apply_etb_counters(
     true
 }
 
-fn find_copy_targets(
+pub(super) fn find_copy_targets(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,
@@ -5498,7 +5515,7 @@ mod tests {
         assert!(
             copy.trigger_definitions
                 .iter_all()
-                .any(|t| t == &granted_trigger),
+                .any(|t| t.definition == granted_trigger),
             "GrantTrigger must place the destroy-trigger on the copy"
         );
         assert!(

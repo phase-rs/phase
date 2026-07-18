@@ -15,7 +15,7 @@ use super::ability::{
     KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
     ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
     TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerCondition,
-    TriggerDefinition,
+    TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -121,6 +121,53 @@ mod tuple_key_map {
 
         deserializer.deserialize_map(TupleKeyVisitor)
     }
+}
+
+/// Serde adapter for trigger occurrence ledgers. JSON object keys must be
+/// strings, while a `TriggerDefinitionRef` is structured identity; encode the
+/// map as an explicit entry list rather than flattening or guessing a key.
+mod trigger_definition_ref_map {
+    use super::*;
+
+    pub fn serialize<S>(
+        map: &HashMap<TriggerDefinitionRef, u32>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        map.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<TriggerDefinitionRef, u32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Vec::<(TriggerDefinitionRef, u32)>::deserialize(deserializer)
+            .map(|entries| entries.into_iter().collect())
+    }
+}
+
+/// Deserializes the object store and validates the one legacy trigger shape
+/// that can be materialized without guessing: a complete ordered payload list
+/// proven by the persisted printed base slots. Runtime copied/granted payloads
+/// have no such proof and are rejected at the state restore boundary.
+fn deserialize_objects_with_trigger_provenance<'de, D>(
+    deserializer: D,
+) -> Result<im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut objects =
+        im::HashMap::<ObjectId, GameObject, rustc_hash::FxBuildHasher>::deserialize(deserializer)?;
+    for (_, object) in objects.iter_mut() {
+        object
+            .migrate_legacy_trigger_definitions()
+            .map_err(serde::de::Error::custom)?;
+    }
+    Ok(objects)
 }
 
 /// Tracks whether the game is in day or night state (CR 730).
@@ -501,7 +548,7 @@ pub struct ZoneChangeRecord {
     /// from the live object before the look-back trigger scan, so the zone-change
     /// record carries the exact LKI trigger multiset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trigger_definitions: Vec<TriggerDefinition>,
+    pub trigger_definitions: Vec<TriggerEntry>,
     /// CR 208.1: Power as of the zone change.
     pub power: Option<i32>,
     /// CR 208.1: Toughness as of the zone change.
@@ -744,21 +791,32 @@ pub enum AutoMayChoice {
     Decline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MayTriggerOrigin {
-    Printed { trigger_index: usize },
-    Keyword { keyword: KeywordKind },
+    Definition {
+        definition_ref: TriggerDefinitionRef,
+    },
+    /// Compatibility-only wire shape for saves created before trigger
+    /// occurrences were serialized. Live collection always emits
+    /// [`Self::Definition`]; consumers must not derive new authority from this
+    /// display index.
+    Printed {
+        trigger_index: usize,
+    },
+    Keyword {
+        keyword: KeywordKind,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MayTriggerAutoChoiceKey {
     pub player: PlayerId,
     pub source_id: ObjectId,
     pub origin: MayTriggerOrigin,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MayTriggerAutoChoiceRecord {
     pub key: MayTriggerAutoChoiceKey,
     pub choice: AutoMayChoice,
@@ -853,6 +911,10 @@ pub struct DamageRecord {
     pub target: TargetRef,
     #[serde(default)]
     pub target_controller: PlayerId,
+    /// CR 400.7: Incarnation of an object target when it was dealt damage.
+    /// `None` preserves compatibility with legacy records and player targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_incarnation: Option<u64>,
     pub amount: u32,
     #[serde(default)]
     pub is_combat: bool,
@@ -913,6 +975,7 @@ impl Default for DamageRecord {
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(0)),
             target_controller: PlayerId(0),
+            target_incarnation: None,
             amount: 0,
             is_combat: false,
             source_name: String::new(),
@@ -4571,6 +4634,11 @@ pub struct CastingVariantChoiceOption {
 #[serde(tag = "type")]
 pub enum PayCostKind {
     Discard,
+    /// CR 701.20a + CR 601.2b: Reveal a card from hand matching the cost's
+    /// filter as an additional/alternative cast cost. The chosen card stays
+    /// in hand (revealing doesn't move it) and becomes the resolving
+    /// ability's cost-paid-object referent (CR 608.2k).
+    Reveal,
     Sacrifice,
     ReturnToHand,
     /// Exile objects from the specified zone.
@@ -8512,6 +8580,21 @@ pub struct GameState {
     pub priority_player: PlayerId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_decision_controller: Option<PlayerId>,
+    /// CR 723.1a: Creation timestamp of the player-control effect currently
+    /// latched in `turn_decision_controller`. This remains independent from
+    /// future scheduled effects that may replace the consumed schedule entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_decision_control_timestamp: Option<u64>,
+    /// CR 723.1a: Identity of the full-turn player-control effect that is
+    /// currently applicable. Kept separately from the winning decision latch
+    /// so a newer phase-scoped effect can temporarily override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_full_turn_control: Option<ActivePlayerControl>,
+    /// CR 723.1a + CR 723.2: Identity of the combat-phase player-control effect
+    /// that is currently applicable. The newest applicable identity wins, and
+    /// the full-turn identity resumes after this window ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_combat_phase_control: Option<ActivePlayerControl>,
     #[serde(default, skip_serializing_if = "ActiveLibrarySearches::is_empty")]
     pub active_library_searches: ActiveLibrarySearches,
     #[serde(
@@ -8526,6 +8609,7 @@ pub struct GameState {
     // the default SipHash RandomState: ObjectId is a thin integer key and this
     // map is looked up millions of times per large-board resolution — profiling
     // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
+    #[serde(deserialize_with = "deserialize_objects_with_trigger_provenance")]
     pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
     pub next_object_id: u64,
     /// CR 118.3a: monotonic counter minting `ManaPipId`s for pool units so they
@@ -9271,23 +9355,23 @@ pub struct GameState {
     #[serde(default)]
     pub sideboard_submitted: Vec<PlayerId>,
 
-    // Trigger constraint tracking: (object_id, trigger_index) pairs that have fired
+    // Trigger constraint tracking keyed by exact source incarnation + occurrence.
     #[serde(default)]
-    pub triggers_fired_this_turn: HashSet<(ObjectId, usize)>,
+    pub triggers_fired_this_turn: HashSet<TriggerDefinitionRef>,
     /// CR 603.4: Per-trigger fire counts for MaxTimesPerTurn constraint.
-    /// Tracks how many times each (object_id, trigger_index) has fired this turn.
+    /// Tracks how many times each exact occurrence has fired this turn.
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
-        with = "tuple_key_map"
+        with = "trigger_definition_ref_map"
     )]
-    pub trigger_fire_counts_this_turn: HashMap<(ObjectId, usize), u32>,
+    pub trigger_fire_counts_this_turn: HashMap<TriggerDefinitionRef, u32>,
     /// CR 603.2: Tracks per-opponent-per-turn firing for
-    /// OncePerOpponentPerTurn. Keyed by (object_id, trigger_index, opponent_id).
+    /// OncePerOpponentPerTurn. Keyed by exact occurrence and opponent.
     #[serde(default)]
-    pub triggers_fired_this_turn_per_opponent: HashSet<(ObjectId, usize, PlayerId)>,
+    pub triggers_fired_this_turn_per_opponent: HashSet<(TriggerDefinitionRef, PlayerId)>,
     #[serde(default)]
-    pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
+    pub triggers_fired_this_game: HashSet<TriggerDefinitionRef>,
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
@@ -9592,12 +9676,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub zone_changes_this_turn: Vec<ZoneChangeRecord>,
     /// CR 603.2c: Batched zone-change triggers already collected for
-    /// `(source_id, trig_idx, turn_zone_change_index)`. Prevents a second
+    /// `(definition_ref, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
     /// stacking duplicate batched triggers (issue #3866) without suppressing a
     /// later distinct leave by the same object in the same turn.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub batched_zone_change_trigger_fired: HashSet<(ObjectId, usize, usize)>,
+    pub batched_zone_change_trigger_fired: HashSet<(TriggerDefinitionRef, usize)>,
     /// CR 403.3: Battlefield entry snapshots this turn, enabling data-driven ETB queries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub battlefield_entries_this_turn: Vec<BattlefieldEntryRecord>,
@@ -10393,6 +10477,14 @@ pub struct GameState {
     /// Cleared on phase/step transitions via `advance_phase()`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub lki_cache: HashMap<ObjectId, LKISnapshot>,
+
+    /// CR 400.7 + CR 608.2h: LKI keyed by exact object incarnation. The legacy
+    /// `lki_cache` remains the broad ObjectId-only authority for existing callers;
+    /// resolution paths that carry an incarnation use this history so a later
+    /// departure of a re-entered object cannot overwrite the earlier object's LKI.
+    /// Cleared with `lki_cache` on phase/step transitions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub lki_by_incarnation: HashMap<ObjectId, HashMap<u64, LKISnapshot>>,
 
     /// CR 607.2b + CR 603.10e: Last-known "cards exiled with [source]" linkage,
     /// captured when a source with `TrackedBySource` exile links leaves the
@@ -11244,6 +11336,11 @@ pub struct PendingMutateMerge {
 pub struct ScheduledTurnControl {
     pub target_player: PlayerId,
     pub controller: PlayerId,
+    /// CR 723.1a: Creation timestamp used only to compare this player-control
+    /// effect with other currently applicable player-control effects. Legacy
+    /// saves deserialize to zero, making them deterministically oldest.
+    #[serde(default)]
+    pub timestamp: u64,
     #[serde(default)]
     pub grant_extra_turn_after: bool,
     /// CR 723.1 / CR 723.2: which window this control binds to. `NextTurn` is
@@ -11252,6 +11349,15 @@ pub struct ScheduledTurnControl {
     /// games predating this field load unchanged.
     #[serde(default)]
     pub window: ControlWindow,
+}
+
+/// CR 723.1a: Stable identity of one currently applicable player-control
+/// effect. Controller alone is insufficient when the same player creates
+/// multiple effects; creation timestamp distinguishes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivePlayerControl {
+    pub controller: PlayerId,
+    pub timestamp: u64,
 }
 
 /// CR 500.8: An extra phase added to a turn by an effect, anchored to the
@@ -11541,6 +11647,9 @@ impl GameState {
             players,
             priority_player: starting_player,
             turn_decision_controller: None,
+            turn_decision_control_timestamp: None,
+            active_full_turn_control: None,
+            active_combat_phase_control: None,
             active_library_searches: ActiveLibrarySearches::default(),
             active_search_decision_controls: ActiveSearchDecisionControls::default(),
             objects: im::HashMap::default(),
@@ -11796,6 +11905,7 @@ impl GameState {
             last_discover_value: None,
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
+            lki_by_incarnation: HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
             pending_taps_for_mana_overrides: std::collections::HashMap::new(),
@@ -12379,6 +12489,112 @@ impl GameState {
         for epic in clone.epic_effects.iter_mut() {
             epic.spell.set_source_incarnation_recursive(None);
         }
+
+        // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
+        // state, not independently loop-material state. Retain only snapshots
+        // reachable from trigger-event carriers that can still resume or resolve:
+        // stack/resolving entries, pending/deferred/ordering triggers, current and
+        // batched trigger contexts, and continuation/optional-choice sidecars.
+        // WaitingFor copies are intentionally not a separate authority: every
+        // trigger-event-bearing prompt has one of those pending/continuation
+        // carriers, and loop samples are taken at the post-pipeline Priority frame.
+        let mut referenced_lki = HashSet::new();
+        let mut record_event = |event: &GameEvent| {
+            if let GameEvent::ZoneChanged {
+                object_id, record, ..
+            } = event
+            {
+                if let Some(incarnation) = record.entered_incarnation {
+                    referenced_lki.insert(ObjectIncarnationRef::of(*object_id, incarnation));
+                }
+            }
+        };
+
+        for entry in &clone.stack {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &entry.kind
+            {
+                record_event(event);
+            }
+        }
+        if let Some(entry) = clone.resolving_stack_entry.as_ref() {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &entry.kind
+            {
+                record_event(event);
+            }
+        }
+        if let Some(pending) = clone.pending_trigger.as_ref() {
+            if let Some(event) = pending.trigger_event.as_ref() {
+                record_event(event);
+            }
+        }
+        for event in &clone.pending_trigger_event_batch {
+            record_event(event);
+        }
+        for context in &clone.deferred_triggers {
+            if let Some(event) = context.pending.trigger_event.as_ref() {
+                record_event(event);
+            }
+            for event in &context.trigger_events {
+                record_event(event);
+            }
+        }
+        if let Some(order) = clone.pending_trigger_order.as_ref() {
+            for context in order.groups.iter().flat_map(|group| group.triggers.iter()) {
+                if let Some(event) = context.pending.trigger_event.as_ref() {
+                    record_event(event);
+                }
+                for event in &context.trigger_events {
+                    record_event(event);
+                }
+            }
+        }
+        if let Some(event) = clone.current_trigger_event.as_ref() {
+            record_event(event);
+        }
+        for event in &clone.current_trigger_events {
+            record_event(event);
+        }
+        for events in clone.stack_trigger_event_batches.values() {
+            for event in events {
+                record_event(event);
+            }
+        }
+        if let Some(event) = clone.pending_optional_trigger_event.as_ref() {
+            record_event(event);
+        }
+        if let Some(context) = clone.pending_choose_zone_trigger_context.as_ref() {
+            if let Some(event) = context.event.as_ref() {
+                record_event(event);
+            }
+            for event in &context.events {
+                record_event(event);
+            }
+        }
+        if let Some(context) = clone
+            .pending_continuation
+            .as_ref()
+            .and_then(|continuation| continuation.trigger_context.as_ref())
+        {
+            if let Some(event) = context.event.as_ref() {
+                record_event(event);
+            }
+            for event in &context.events {
+                record_event(event);
+            }
+        }
+
+        clone.lki_by_incarnation.retain(|object_id, history| {
+            history.retain(|incarnation, _| {
+                referenced_lki.contains(&ObjectIncarnationRef::of(*object_id, *incarnation))
+            });
+            !history.is_empty()
+        });
         clone
     }
 
@@ -12477,7 +12693,8 @@ pub(crate) fn objects_content_eq(
 /// `_gameobject_partition_is_total`): every per-object field a MANDATORY action can
 /// change on a stable (same-zone) object between two loop frames. Fields omitted
 /// here are justified by write site, not doc-string — volatile layer identity
-/// (`timestamp`/`incarnation`), projected P/T, cast-fact latches co-variate of a
+/// (`timestamp`/`incarnation`/`transformation_count`), projected P/T, cast-fact
+/// latches co-variate of a
 /// compared field, monotone-saturating latches (`foretold`/`monstrous`/…), and
 /// layer-derived characteristics (firewall-scanned statics) — see §5.2c.
 ///
@@ -12546,6 +12763,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players: _,
         priority_player: _,
         turn_decision_controller: _,
+        turn_decision_control_timestamp: _,
+        active_full_turn_control: _,
+        active_combat_phase_control: _,
         active_library_searches: _,
         active_search_decision_controls: _,
         objects: _,
@@ -12798,6 +13018,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         current_trigger_events: _,
         stack_trigger_event_batches: _,
         lki_cache: _,
+        lki_by_incarnation: _,
         linked_exile_lki: _,
         cost_payment_failed_flag: _,
         pending_taps_for_mana_overrides: _,
@@ -12877,6 +13098,9 @@ impl PartialEq for GameState {
             && self.players == other.players
             && self.priority_player == other.priority_player
             && self.turn_decision_controller == other.turn_decision_controller
+            && self.turn_decision_control_timestamp == other.turn_decision_control_timestamp
+            && self.active_full_turn_control == other.active_full_turn_control
+            && self.active_combat_phase_control == other.active_combat_phase_control
             && self.active_library_searches == other.active_library_searches
             && self.active_search_decision_controls == other.active_search_decision_controls
             && self.objects.len() == other.objects.len()
@@ -13101,6 +13325,7 @@ impl PartialEq for GameState {
             && self.optional_cost_payments_this_resolution
                 == other.optional_cost_payments_this_resolution
             && self.lki_cache == other.lki_cache
+            && self.lki_by_incarnation == other.lki_by_incarnation
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
@@ -14010,6 +14235,119 @@ mod tests {
         );
     }
 
+    /// CR 104.4b + CR 732.2a: repeated same-step zone cycles accumulate
+    /// incarnation-versioned LKI, but snapshots no pending trigger can consume
+    /// are history rather than a change to the recurring game state. A snapshot
+    /// still named by a trigger event remains rules-material and must distinguish
+    /// normalized states.
+    #[test]
+    fn normalize_for_loop_prunes_unreferenced_lki_incarnations_but_keeps_referenced_snapshot() {
+        use crate::types::ability::Effect;
+
+        fn snapshot(power: i32) -> LKISnapshot {
+            LKISnapshot {
+                name: "Loop Entrant".to_string(),
+                token_image_ref: None,
+                power: Some(power),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                attachments: Vec::new(),
+            }
+        }
+
+        let entrant = ObjectId(50);
+        let referenced_incarnation = 7;
+        let mut record =
+            ZoneChangeRecord::test_minimal(entrant, Some(Zone::Exile), Zone::Battlefield);
+        record.entered_incarnation = Some(referenced_incarnation);
+        let trigger_event = GameEvent::ZoneChanged {
+            object_id: entrant,
+            from: Some(Zone::Exile),
+            to: Zone::Battlefield,
+            record: Box::new(record),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+
+        let mut a = GameState::new_two_player(7);
+        a.stack.push_back(StackEntry {
+            id: ObjectId(20),
+            source_id: ObjectId(5),
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(5),
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(trigger_event),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        a.lki_by_incarnation
+            .entry(entrant)
+            .or_default()
+            .insert(referenced_incarnation, snapshot(5));
+        a.lki_by_incarnation
+            .entry(entrant)
+            .or_default()
+            .insert(8, snapshot(2));
+
+        let mut b = a.clone();
+        b.lki_by_incarnation
+            .entry(entrant)
+            .or_default()
+            .insert(9, snapshot(2));
+        assert_ne!(a, b, "fixture differs by irrelevant accumulated LKI");
+
+        let normalized_a = a.normalize_for_loop();
+        let normalized_b = b.normalize_for_loop();
+        assert!(
+            loop_states_equal(&normalized_a, &normalized_b),
+            "irrelevant incarnation history must not block loop recurrence"
+        );
+        assert_eq!(
+            normalized_a.lki_by_incarnation[&entrant]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![referenced_incarnation],
+            "the trigger-referenced incarnation remains available"
+        );
+
+        let mut changed_reference = a;
+        changed_reference
+            .lki_by_incarnation
+            .get_mut(&entrant)
+            .unwrap()
+            .insert(referenced_incarnation, snapshot(4));
+        assert!(
+            !loop_states_equal(&normalized_a, &changed_reference.normalize_for_loop()),
+            "different LKI for a still-referenced incarnation remains meaningful"
+        );
+    }
+
     /// PR-6 test 8 (B2 loop-equality guard): `unbounded_resources` is
     /// display/annotation state, NOT rules state for equality. Two states
     /// identical except one has a populated `unbounded_resources` (the
@@ -14655,6 +14993,31 @@ mod tests {
         // Reconstruct RNG from seed since it's skipped in serde
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn damage_record_target_incarnation_roundtrips_and_defaults_for_legacy_records() {
+        let record = DamageRecord {
+            target: TargetRef::Object(ObjectId(7)),
+            target_incarnation: Some(3),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["target_incarnation"], 3);
+        assert_eq!(
+            serde_json::from_value::<DamageRecord>(value.clone())
+                .unwrap()
+                .target_incarnation,
+            Some(3)
+        );
+
+        value.as_object_mut().unwrap().remove("target_incarnation");
+        assert_eq!(
+            serde_json::from_value::<DamageRecord>(value)
+                .unwrap()
+                .target_incarnation,
+            None
+        );
     }
 
     #[test]
@@ -15623,7 +15986,7 @@ mod tests {
             source_id: ObjectId(5),
             origin: MayTriggerOrigin::Printed { trigger_index: 1 },
         };
-        state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+        state.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
 
         let serialized = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
@@ -15760,6 +16123,70 @@ mod tests {
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn game_state_deserialize_materializes_proven_legacy_printed_trigger_payload() {
+        let object_id = ObjectId(991);
+        let trigger = crate::types::ability::TriggerDefinition::new(
+            crate::types::triggers::TriggerMode::Phase,
+        );
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(991),
+            PlayerId(0),
+            "Legacy printed trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions = Arc::new(vec![trigger.clone()]);
+        state.objects.insert(object_id, object);
+
+        let mut snapshot = serde_json::to_value(state).expect("serialize fixture state");
+        snapshot["objects"][object_id.0.to_string()]["trigger_definitions"] =
+            serde_json::to_value(vec![trigger]).expect("serialize legacy trigger payload");
+
+        let restored: GameState = serde_json::from_value(snapshot)
+            .expect("persisted base slots prove this legacy printed payload");
+        assert!(matches!(
+            restored.objects[&object_id].trigger_definitions[0].occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                printed_index: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn game_state_deserialize_rejects_unproven_legacy_trigger_payload() {
+        let object_id = ObjectId(992);
+        let mut state = GameState::new_two_player(42);
+        state.objects.insert(
+            object_id,
+            GameObject::new(
+                object_id,
+                CardId(992),
+                PlayerId(0),
+                "Hostile payload".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+
+        let mut snapshot = serde_json::to_value(state).expect("serialize fixture state");
+        snapshot["objects"][object_id.0.to_string()]["trigger_definitions"] =
+            serde_json::to_value(vec![crate::types::ability::TriggerDefinition::new(
+                crate::types::triggers::TriggerMode::Attacks,
+            )])
+            .expect("serialize hostile legacy payload");
+
+        let error = serde_json::from_value::<GameState>(snapshot)
+            .expect_err("payload-only runtime triggers must not be guessed as printed");
+        assert!(
+            error
+                .to_string()
+                .contains("legacy runtime trigger payload has no provable producer or base slot"),
+            "restore must reject unproven trigger provenance, got {error}"
+        );
     }
 
     /// 2026-05-09 audit M4 backward-compat: a JSON snapshot saved before the

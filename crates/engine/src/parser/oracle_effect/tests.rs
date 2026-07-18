@@ -10057,6 +10057,7 @@ fn effect_mirror_match_copy_blockers_and_delayed_exile() {
         .sub_ability
         .as_ref()
         .expect("delayed end-of-combat exile sub_ability present");
+    assert_eq!(sub.sub_link, SubAbilityLink::ContinuationStep);
     match &*sub.effect {
         Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase },
@@ -14124,19 +14125,21 @@ fn effect_target_graveyard_card_gains_escape_compound_cost() {
 /// (flashback/embalm/harmonize) so they keep flowing through their existing
 /// absorber — the two mechanisms partition the class by cost shape.
 #[test]
-fn grant_graveyard_keyword_front_door_declines_self_mana_cost_siblings() {
+fn grant_graveyard_keyword_ir_declines_self_mana_cost_siblings() {
     assert!(
-            try_parse_grant_graveyard_keyword_to_target(
+            parse_grant_graveyard_keyword_to_target_ir(
                 "target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.",
                 AbilityKind::Spell,
+                &ParseContext::default(),
             )
             .is_none(),
             "flashback (self-mana-cost) must not be claimed by the compound-cost front door"
         );
     assert!(
-            try_parse_grant_graveyard_keyword_to_target(
+            parse_grant_graveyard_keyword_to_target_ir(
                 "target creature card in your graveyard gains embalm until end of turn. The embalm cost is equal to its mana cost.",
                 AbilityKind::Spell,
+                &ParseContext::default(),
             )
             .is_none(),
             "embalm (self-mana-cost) must not be claimed by the compound-cost front door"
@@ -14147,6 +14150,29 @@ fn grant_graveyard_keyword_front_door_declines_self_mana_cost_siblings() {
             AbilityKind::Spell,
         );
     assert!(matches!(&*def.effect, Effect::GenericEffect { .. }));
+    assert!(def.sub_ability.is_none());
+}
+
+#[test]
+fn conditional_protection_grant_routes_through_ability_ir() {
+    let def = parse_effect_chain(
+        "Until end of turn, creatures you control gain protection from white if you control a Plains, from blue if you control an Island, from black if you control a Swamp, from red if you control a Mountain, and from green if you control a Forest.",
+        AbilityKind::Spell,
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected conditional protection grant, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(static_abilities.len(), 5);
     assert!(def.sub_ability.is_none());
 }
 
@@ -19498,6 +19524,7 @@ fn cant_be_activated_effect_standalone_targets_creature() {
                         who: ProhibitionScope::AllPlayers,
                         source_filter: TargetFilter::SelfRef,
                         exemption: ActivationExemption::None,
+                        kind: None,
                     }
                 ),
                 "expected CantBeActivated(AllPlayers), got {:?}",
@@ -45589,6 +45616,10 @@ fn expose_the_culprit_mode2_lowers_to_choose_shuffle_cloak_chain() {
     assert_eq!(*chooser, TargetFilter::Controller);
     assert_eq!((*min, *max), (0, None));
     assert!(
+        head.multi_target.is_none(),
+        "tracked-set selection owns its cardinality in the effect, not multi_target"
+    );
+    assert!(
         matches!(filter, TargetFilter::Typed(t)
         if t.properties.iter().any(|p| matches!(
             p,
@@ -45625,6 +45656,34 @@ fn expose_the_culprit_mode2_lowers_to_choose_shuffle_cloak_chain() {
         ),
         "sub-sub must be Cloak{{object_source: Some(TrackedSet)}}, got {:?}",
         cloak.effect
+    );
+}
+
+/// The legacy bypass exposed the pile/shuffle/cloak recognizer only to the
+/// WithContext entry point. U3c routes it through `AbilityIr`, but retains that
+/// entry-point gate rather than making die-result (`Standalone`) callers newly
+/// recognize the card.
+#[test]
+fn exile_pile_shuffle_cloak_remains_with_context_only() {
+    let text = "Exile any number of face-up creatures you control with disguise in a face-down pile, shuffle that pile, then cloak them.";
+
+    let standalone = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        !matches!(
+            &*standalone.effect,
+            Effect::ChooseObjectsIntoTrackedSet { .. }
+        ),
+        "Standalone must not reach the WithContext-only pile recognizer: {standalone:?}"
+    );
+
+    let with_context =
+        parse_effect_chain_with_context(text, AbilityKind::Spell, &mut ParseContext::default());
+    assert!(
+        matches!(
+            &*with_context.effect,
+            Effect::ChooseObjectsIntoTrackedSet { .. }
+        ),
+        "WithContext must reach the pile recognizer: {with_context:?}"
     );
 }
 
@@ -46333,6 +46392,8 @@ fn drawn_this_turn_followup_overwrites_prior_life_payment() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: false,
@@ -46794,12 +46855,22 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
     };
     assert_eq!(choose_filter, sacrifice_filter);
     assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    assert_eq!(
+        def.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "the keeper instruction continues into the scoped search"
+    );
 
     let search = def
         .sub_ability
         .as_deref()
         .expect("exact keeper must continue to the scoped search");
     assert!(search.optional);
+    assert_eq!(
+        search.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "the search's intrinsic delivery remains a continuation"
+    );
     assert!(matches!(
         &search.player_scope,
         Some(PlayerFilter::ControlsCount {
@@ -46836,6 +46907,11 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
         .sub_ability
         .as_deref()
         .expect("search must carry a result-delivery continuation");
+    assert_eq!(
+        delivery.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "delivery remains the search result continuation"
+    );
     assert!(matches!(
         delivery.effect.as_ref(),
         Effect::ChangeZone {
@@ -46863,6 +46939,11 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
         })
     ));
+    assert_eq!(
+        shuffle.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling,
+        "the final searched-this-way shuffle remains an independent instruction"
+    );
 }
 
 /// The dedicated whole-line grammar must fail closed when the independently

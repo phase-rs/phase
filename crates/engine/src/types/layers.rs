@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ContinuousModification, StaticCondition, TargetFilter};
+use super::ability::{
+    ContinuousModification, StaticCondition, TargetFilter, TriggerDefinitionRef,
+    TriggerProducerOrigin,
+};
 use super::identifiers::ObjectId;
 use super::player::PlayerId;
 use super::statics::StaticMode;
@@ -186,6 +189,16 @@ pub struct ActiveContinuousEffect {
     /// the canonical `TransientContinuousEffect` (which carries the snapshotted
     /// source name for spells whose source has left the stack).
     pub transient_id: Option<u64>,
+    /// Exact static or transient producer identity used when this effect
+    /// creates a recipient-local trigger occurrence. Synthetic effects that
+    /// cannot create trigger definitions leave this absent.
+    pub trigger_producer_origin: Option<TriggerProducerOrigin>,
+    /// For `GrantAllTriggeredAbilitiesOf`, the exact provider occurrence whose
+    /// triggered ability was expanded into this synthetic Layer-6 effect. This
+    /// is separate from the host producer origin: replacing an otherwise
+    /// byte-identical provider occurrence must retire the old recipient grant
+    /// and allocate a new one (CR 113.2c).
+    pub expanded_trigger_provider: Option<TriggerDefinitionRef>,
     /// Index of this modification within the originating source's
     /// `modifications` vector (`StaticDefinition.modifications` or
     /// `TransientContinuousEffect.modifications`). Used by source-attribution

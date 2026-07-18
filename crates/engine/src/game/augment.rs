@@ -464,7 +464,7 @@ fn merged_ability_sets(
     let replacements = augment
         .base_replacement_definitions
         .iter()
-        .filter(|definition| !printed_cards::is_runtime_control_gated_replacement(definition))
+        .filter(|definition| !printed_cards::is_runtime_non_copiable_replacement(definition))
         .cloned()
         .collect();
 

@@ -363,7 +363,7 @@ fn strip_spell_casting_copiable_characteristics(obj: &mut GameObject) {
     obj.keywords.retain(|kw| !kw.is_spell_casting_only());
     obj.base_keywords.retain(|kw| !kw.is_spell_casting_only());
     obj.trigger_definitions
-        .retain(|trig| !is_cast_payment_gated_trigger(trig));
+        .retain(|entry| !is_cast_payment_gated_trigger(entry.definition()));
     Arc::make_mut(&mut obj.base_trigger_definitions)
         .retain(|trig| !is_cast_payment_gated_trigger(trig));
 }
@@ -4383,7 +4383,7 @@ mod tests {
         );
         assert!(
             !token.trigger_definitions.iter_all().any(|trig| matches!(
-                trig.condition,
+                trig.definition.condition,
                 Some(TriggerCondition::AdditionalCostPaid { .. })
             )),
             "offspring token must not retain AdditionalCostPaid ETB triggers"
@@ -4468,7 +4468,7 @@ mod tests {
             token
                 .trigger_definitions
                 .iter_all()
-                .any(|trig| matches!(trig.mode, TriggerMode::SpellCastOrCopy)),
+                .any(|trig| matches!(trig.definition.mode, TriggerMode::SpellCastOrCopy)),
             "token copy must keep the persistent Magecraft SpellCastOrCopy trigger (CR 707.2)"
         );
         assert!(
@@ -4480,7 +4480,7 @@ mod tests {
         );
         assert!(
             !token.trigger_definitions.iter_all().any(|trig| matches!(
-                trig.condition,
+                trig.definition.condition,
                 Some(TriggerCondition::AdditionalCostPaid { .. })
             )),
             "token copy must strip cast-payment-gated triggers (CR 601.2f + CR 603.4)"
