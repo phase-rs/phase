@@ -72,6 +72,25 @@ static OFFER_STATE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     ))
 });
 
+/// The real live game state, captured at ordinary priority with Witherbloom UNTAPPED — the
+/// failing-playtest configuration where the object-growth offer did NOT surface (the untapped,
+/// lower-ObjectId B/G cost-reducer suppressed the CR 732.2a detection replay).
+static UNTAPPED_PRECAST_STATE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    gunzip_fixture(include_bytes!(
+        "../fixtures/combo_infinite_pile_4p_untapped_precast.json.gz"
+    ))
+});
+
+/// Count P0's Saprolings on the battlefield (fodder), tapped or not — the reach-guard oracle
+/// for "the cast resolved and made one more Saproling".
+fn count_battlefield_saprolings(state: &GameState) -> usize {
+    state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects.get(id).is_some_and(|o| o.name == "Saproling"))
+        .count()
+}
+
 /// P0's tapped, vanilla (no counters, no damage) Saprolings — the NON-CIRCULAR oracle for the
 /// ∞ pile. Derived by a NAME + vanilla filter INDEPENDENT of the engine's content-eq authority
 /// (`fodder_content_eq`), so matching it cross-checks the engine rather than itself.
@@ -214,6 +233,117 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
     );
 }
 
+// ───────────────── UNTAPPED-Witherbloom PRIMARY discriminator (real dump) ─────────────────
+//
+// USER DIRECTIVE (memory: combo-detector-must-fire-in-real-games / real-game-fixtures-not-
+// synthetic): the acceptance bar for this fix is that a REAL 4-player game with an UNTAPPED
+// green cost-reducer actually surfaces the CR 732.2a object-growth offer in live play. This
+// LOADS the user's ACTUAL failed-playtest dump (turn-2, ordinary priority, Witherbloom UNTAPPED,
+// `last_loop_action_sequence` armed for Sprout Swarm 402) and drives the REAL cast through the
+// harness `apply()` path. Pre-fix (lowest-ObjectId Canonical detection replay) the offer was
+// SUPPRESSED — the replay tapped the lower-id Witherbloom (a stable-partition permanent) instead
+// of a fodder Saproling, drifting `loop_states_cover_modulo_fodder_growth`'s `tapped` compare.
+//
+// REVERT-PROBE (MEASURED, non-vacuous): reverting `resolve_pin(ConvokeTaps)` back to
+// `ConvokeTapOrder::Canonical` (or deleting the `DetectionFodderFirst` sort arm in
+// `select_convoke_taps`) FLIPS the final `LoopShortcut{proposer:P0}` assertion to `Priority{P0}`
+// (no offer). The buyback-return + Saproling-+1 reach-guard holds in BOTH modes (the LIVE cast
+// resolves identically; only the clone-drive DETECTION differs), so it proves the cast reached
+// the detector — the offer assertion is therefore not vacuous.
+
+#[test]
+fn real_4p_untapped_witherbloom_sprout_swarm_offers_object_growth_loop() {
+    let state: GameState = serde_json::from_str(&UNTAPPED_PRECAST_STATE)
+        .expect("the real untapped-precast 4p dump must deserialize into the current GameState");
+
+    // ── Preconditions: the loaded state IS the real failing configuration ──
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "fixture precondition: ordinary priority for P0 (pre-cast), got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        state.pending_cast.is_none(),
+        "fixture precondition: no cast is in progress yet"
+    );
+    let witherbloom = ObjectId(401);
+    let w = state
+        .objects
+        .get(&witherbloom)
+        .expect("Witherbloom present");
+    assert_eq!(w.name, "Witherbloom, the Balancer");
+    assert!(
+        !w.tapped,
+        "fixture precondition: Witherbloom is UNTAPPED (the bug trigger)"
+    );
+    assert!(
+        !w.is_token,
+        "fixture precondition: Witherbloom is a nontoken engine permanent"
+    );
+    let sprout = ObjectId(402);
+    assert_eq!(
+        state
+            .objects
+            .get(&sprout)
+            .map(|o| (o.name.as_str(), o.zone)),
+        Some(("Sprout Swarm", Zone::Hand)),
+        "fixture precondition: Sprout Swarm is in P0's hand"
+    );
+    // The untapped fodder Saprolings are green tokens with HIGHER ObjectIds than Witherbloom —
+    // the exact divergence condition (fodder-first must beat lowest-id to reach the fodder).
+    let untapped_fodder: Vec<ObjectId> = [403u64, 404, 406].map(ObjectId).to_vec();
+    for id in &untapped_fodder {
+        let o = state.objects.get(id).expect("fodder Saproling present");
+        assert_eq!(o.name, "Saproling", "{id:?} is a Saproling");
+        assert!(
+            o.is_token && !o.tapped && o.controller == P0,
+            "fixture: {id:?} is an untapped P0 fodder token"
+        );
+        assert!(
+            id.0 > witherbloom.0,
+            "fixture: fodder {id:?} id must exceed Witherbloom's {witherbloom:?} (divergence condition)"
+        );
+    }
+    let saprolings_before = count_battlefield_saprolings(&state);
+    assert_eq!(
+        saprolings_before, 4,
+        "fixture: P0 controls 4 Saprolings before the cast (403/404/405/406)"
+    );
+
+    // ── Drive the REAL Sprout Swarm cast (accept buyback + convoke one fodder Saproling for {G}) ──
+    let mut runner = GameRunner::from_state(state);
+    let outcome = runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[untapped_fodder[0]])
+        .commit()
+        .resolve();
+
+    // Positive reach-guard (true in BOTH modes ⇒ the negative revert-probe is non-vacuous): the
+    // live cast resolved — buyback returned Sprout Swarm to hand and made one more Saproling.
+    assert_eq!(
+        outcome.zone_of(sprout),
+        Zone::Hand,
+        "buyback must return Sprout Swarm to P0's hand (reach-guard: the cast resolved)"
+    );
+    assert_eq!(
+        count_battlefield_saprolings(outcome.state()),
+        saprolings_before + 1,
+        "the first iteration created exactly one more Saproling (reach-guard: +1 fodder)"
+    );
+
+    // ── DISCRIMINATOR: the object-growth offer FIRES (revert-probe → Priority{P0}, MEASURED) ──
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+        ),
+        "untapped Witherbloom + fodder-first detection MUST surface the CR 732.2a LoopShortcut \
+         offer to P0, got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
 // ─────────────────────────── BUILD-FRESH acceptance ───────────────────────────
 //
 // Current-code reconstruction (USER DIRECTIVE — the second acceptance path). Bootstraps a
@@ -346,15 +476,13 @@ fn build_fresh_4p_cast_offer_accept_writes_infinite_pile() {
     // Tap Witherbloom, FAITHFUL to the captured real state: in the committed turn-2 dump
     // (`combo_infinite_pile_4p_offer.json`) object 401 "Witherbloom, the Balancer" (controller 0)
     // is `tapped: true` at the exact LoopShortcut offer — the load-dump test asserts the same
-    // `ObjectId(401)`. This is not arbitrary rigging: the player had already tapped it. It also
-    // matters mechanically — real Witherbloom is B/G, so an UNTAPPED one is the lowest-ObjectId
-    // green convoke candidate, and the deterministic detection replay (`select_convoke_taps`,
-    // lowest-id-per-color) would tap the stable Witherbloom instead of a fodder Saproling,
-    // drifting the stable partition and suppressing the offer (see the KNOWN-GAP note at
-    // `select_convoke_taps`). A tapped Witherbloom is removed from the convoke candidate set so
-    // the replay taps a Saproling (the sustainable loop the player actually plays). Affinity
-    // counts creatures "you control" (CR 702.41a) — a tapped creature is still controlled, so a
-    // tapped Witherbloom still grants and self-counts for the cost reduction.
+    // `ObjectId(401)`. This is not arbitrary rigging: the player had already tapped it. The
+    // UNTAPPED configuration (where B/G Witherbloom is the lowest-ObjectId green convoke
+    // candidate) is now handled by the `DetectionFodderFirst` tap order and is covered by its
+    // own real-dump discriminator `real_4p_untapped_witherbloom_sprout_swarm_offers_object_
+    // growth_loop` above; here we simply reproduce the captured tapped state. Affinity counts
+    // creatures "you control" (CR 702.41a) — a tapped creature is still controlled, so a tapped
+    // Witherbloom still grants and self-counts for the cost reduction.
     runner
         .state_mut()
         .objects

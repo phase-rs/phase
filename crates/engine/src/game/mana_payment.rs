@@ -416,6 +416,31 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
     )
 }
 
+/// Candidate ordering mode for [`select_convoke_taps`]. CR 702.51a makes convoke a
+/// player *option* ("you MAY tap ..."), so both orderings pay the same cost legally —
+/// they only differ in WHICH untapped creatures are chosen when several qualify.
+///
+/// This is a private (`pub(crate)`) selector-mode switch, not a rules-bearing engine
+/// type: it expresses the real present distinction between the live/general canonical
+/// tap order and the loop-detection replay's fodder-first order, without letting a
+/// future live/AI/UI caller silently inherit the detection-only preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvokeTapOrder {
+    /// Lowest-ObjectId-per-color (the historical live/general default). Deterministic and
+    /// byte-unchanged from the pre-mode behavior; the pinned contract of the unit tests.
+    ///
+    /// Constructed only in tests today: the sole production caller (`resolve_pin(ConvokeTaps)`)
+    /// is a loop-replay artifact that uses `DetectionFodderFirst`. This variant is retained as
+    /// the API-complete default so the FIRST future live/AI/UI convoke-suggestion caller must
+    /// opt into an order explicitly rather than silently inherit the detection preference.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Canonical,
+    /// Reproduced fodder (token) creatures first, then lowest ObjectId within each class.
+    /// Used only by the CR 732.2a object-growth loop-detection replay so it taps the
+    /// disposable fodder it reproduces rather than a stable-partition engine permanent.
+    DetectionFodderFirst,
+}
+
 /// CR 601.2h + CR 702.51a/b: the SINGLE authority for choosing a deterministic,
 /// minimal convoke tap-set that covers the locked post-affinity `remaining_cost` from
 /// `player`'s current pool plus untapped creatures they control. Shares the convoke
@@ -424,19 +449,21 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
 /// eligibility path. Both `resolve_pin(ConvokeTaps)` (replay) and the loop-shortcut
 /// injector route through this function.
 ///
-/// Deterministic + minimal: for each colored pip the lowest-ObjectId untapped creature
-/// of that color is tapped (CR 702.51a — a colored convoke tap pays a matching colored
-/// pip); each residual generic pip is paid by the lowest-ObjectId untapped creature
-/// (colorless marker). `can_pay` (the same authority the real finalize uses) arbitrates
-/// after each tap, so the returned set is exactly sufficient. Returns `None` when no
-/// legal untapped-creature set can cover the cost (⇒ the replay raises
-/// `ReplayFailure::UnpayableConvoke`, CR 702.51b). Hybrid/Phyrexian/{X}/{C}-only pips
-/// that a colorless marker can't satisfy fail closed here (outside the deterministic
-/// convoke class the offer targets).
+/// Deterministic + minimal: for each colored pip an untapped creature of that color is
+/// tapped (CR 702.51a — a colored convoke tap pays a matching colored pip); each residual
+/// generic pip is paid by an untapped creature (colorless marker). `order` selects which
+/// qualifying creature is preferred within a color (see [`ConvokeTapOrder`]): `Canonical`
+/// takes the lowest ObjectId; `DetectionFodderFirst` prefers reproduced fodder tokens.
+/// `can_pay` (the same authority the real finalize uses) arbitrates after each tap, so the
+/// returned set is exactly sufficient. Returns `None` when no legal untapped-creature set
+/// can cover the cost (⇒ the replay raises `ReplayFailure::UnpayableConvoke`, CR 702.51b).
+/// Hybrid/Phyrexian/{X}/{C}-only pips that a colorless marker can't satisfy fail closed
+/// here (outside the deterministic convoke class the offer targets).
 pub(crate) fn select_convoke_taps(
     state: &GameState,
     player: PlayerId,
     remaining_cost: &ManaCost,
+    order: ConvokeTapOrder,
 ) -> Option<Vec<(ObjectId, ManaType)>> {
     let ManaCost::Cost { shards, .. } = remaining_cost else {
         // NoCost / unresolved placeholder: nothing to convoke.
@@ -452,18 +479,6 @@ pub(crate) fn select_convoke_taps(
     let mut taps: Vec<(ObjectId, ManaType)> = Vec::new();
     let mut used: Vec<ObjectId> = Vec::new();
 
-    // Canonical candidate order: lowest ObjectId first ⇒ reproducible replay.
-    //
-    // KNOWN GAP (CR 732.2a object-growth detection): this lowest-ObjectId-per-color pick is used
-    // by the DETERMINISTIC loop-detection replay (`try_offer_object_growth_shortcut` →
-    // `drive_loop_sequence_iteration`), not just live casts. When an UNTAPPED green cost-reducer
-    // (e.g. B/G Witherbloom) has a lower ObjectId than the reproduced fodder tokens, the replay
-    // convoke-taps that STABLE permanent instead of a fodder token. Tapping a stable-partition
-    // object drifts it across the period, so `board_covers_modulo_fodder`'s `objects_content_eq`
-    // fails and an otherwise-valid infinite object-growth loop is NOT offered. It only bites when
-    // the cost-reducer is untapped at cast time; the real game had Witherbloom already tapped, so
-    // it never triggered there. A robust fix (prefer the reproduced fodder class over stable
-    // permanents in the detection replay) belongs in the detection drive, not the ∞-pile display.
     let mut candidates: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -477,7 +492,30 @@ pub(crate) fn select_convoke_taps(
         // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't convoke.
         .filter(|id| !crate::game::restrictions::object_cant_tap(state, *id))
         .collect();
-    candidates.sort_by_key(|id| id.0);
+    match order {
+        // CR 702.51b: canonical lowest-ObjectId order ⇒ reproducible live/general replay.
+        ConvokeTapOrder::Canonical => candidates.sort_by_key(|id| id.0),
+        // CR 702.51a + CR 732.2a: the object-growth loop-detection replay MAY tap any legal
+        // creature (convoke is optional), so it prefers the reproduced fodder tokens it
+        // recreates each period over a stable-partition engine permanent. Tapping a stable
+        // object would drift its `tapped` flag across the period, so
+        // `loop_states_cover_modulo_fodder_growth`'s `object_content_eq` (game_state.rs, the
+        // `tapped` compare) would fail and suppress an otherwise-valid infinite loop — the
+        // exact bug an UNTAPPED lower-ObjectId cost-reducer (e.g. B/G Witherbloom below the
+        // fodder Saprolings) triggered in live 4p play.
+        //
+        // `is_token` is a PROXY for "not in the stable partition": it handles the targeted
+        // class (reproduced token fodder + a nontoken engine) exactly. Out-of-class shapes (a
+        // token that is ITSELF the stable engine, or nontoken fodder) fall outside and stay
+        // fail-CLOSED — the sort merely reorders preference; `pick`'s `.find()` below still
+        // taps the engine when fodder can't cover a colored pip (no payability regression, the
+        // cover check just fails conservatively). Unknown/missing objects sort as nontoken
+        // (stable), the fail-closed direction.
+        ConvokeTapOrder::DetectionFodderFirst => candidates.sort_by_cached_key(|id| {
+            let is_fodder = state.objects.get(id).is_some_and(|o| o.is_token);
+            (!is_fodder, id.0)
+        }),
+    }
 
     let pick =
         |used: &[ObjectId], color: Option<crate::types::mana::ManaColor>| -> Option<ObjectId> {
@@ -4704,7 +4742,7 @@ mod tests {
 /// (canonical lowest-ObjectId-per-color, CR 702.51b) and fail-closed (`None` = UnpayableConvoke).
 #[cfg(test)]
 mod convoke_selection_tests {
-    use super::select_convoke_taps;
+    use super::{select_convoke_taps, ConvokeTapOrder};
     use crate::game::scenario::GameScenario;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
     use crate::types::phase::Phase;
@@ -4740,7 +4778,8 @@ mod convoke_selection_tests {
             shards: vec![ManaCostShard::Green],
             generic: 0,
         };
-        let taps = select_convoke_taps(&state, P0, &cost).expect("payable via convoke");
+        let taps = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical)
+            .expect("payable via convoke");
         assert_eq!(
             taps.len(),
             1,
@@ -4765,7 +4804,8 @@ mod convoke_selection_tests {
             shards: vec![ManaCostShard::Green],
             generic: 1,
         };
-        let taps = select_convoke_taps(&state, P0, &cost).expect("payable via convoke");
+        let taps = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical)
+            .expect("payable via convoke");
         assert_eq!(taps.len(), 2, "{{1}}{{G}} needs two taps");
         assert_eq!(
             taps[0],
@@ -4788,7 +4828,7 @@ mod convoke_selection_tests {
             generic: 0,
         };
         assert!(
-            select_convoke_taps(&state, P0, &cost).is_none(),
+            select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical).is_none(),
             "no untapped green creature ⇒ fail-closed None (UnpayableConvoke)"
         );
     }
@@ -4802,8 +4842,106 @@ mod convoke_selection_tests {
             generic: 2,
         };
         assert!(
-            select_convoke_taps(&state, P0, &cost).is_none(),
+            select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical).is_none(),
             "one creature can't cover {{2}} ⇒ fail-closed None"
+        );
+    }
+
+    /// Build P0 with one NONTOKEN green creature (added first ⇒ lowest ObjectId) plus
+    /// `n_tokens` green TOKEN creatures (added after ⇒ higher ids). Returns
+    /// `(state, nontoken_id, token_ids ascending)`. The is_token asymmetry is what the two
+    /// `ConvokeTapOrder` modes discriminate on.
+    fn mixed_token_board(
+        n_tokens: usize,
+    ) -> (
+        crate::types::game_state::GameState,
+        crate::types::identifiers::ObjectId,
+        Vec<crate::types::identifiers::ObjectId>,
+    ) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // The stable "engine" permanent — added first, so it holds the LOWEST ObjectId.
+        let nontoken = scenario.add_creature(P0, "Engine Creature", 1, 1).id();
+        let token_ids: Vec<_> = (0..n_tokens)
+            .map(|_| scenario.add_creature(P0, "Saproling", 1, 1).id())
+            .collect();
+        let mut runner = scenario.build();
+        {
+            let o = runner.state_mut().objects.get_mut(&nontoken).unwrap();
+            o.color = vec![ManaColor::Green];
+            o.is_token = false;
+        }
+        for &id in &token_ids {
+            let o = runner.state_mut().objects.get_mut(&id).unwrap();
+            o.color = vec![ManaColor::Green];
+            o.is_token = true;
+        }
+        (runner.state().clone(), nontoken, token_ids)
+    }
+
+    /// The MODE DISCRIMINATOR: on a board with a lower-ObjectId nontoken engine and higher-id
+    /// green fodder tokens, `Canonical` taps the nontoken (lowest id) while
+    /// `DetectionFodderFirst` taps a token — proving the enum's two variants diverge. This is
+    /// the seam that suppresses the CR 732.2a object-growth offer when it picks the engine.
+    /// Revert-probe: deleting the `DetectionFodderFirst` sort arm (falling back to lowest-id)
+    /// FLIPS `fodder` from the token to the nontoken ⇒ the `assert_ne!` + fodder assertion fail.
+    #[test]
+    fn fodder_first_prefers_token_over_lower_id_nontoken() {
+        let (state, nontoken, tokens) = mixed_token_board(2);
+        // Non-vacuity self-check: the nontoken engine is the LOWEST id, so the modes MUST
+        // diverge (a same-order fixture would make this discriminator vacuous).
+        assert!(
+            nontoken.0 < tokens[0].0,
+            "fixture: the nontoken engine must hold the lowest ObjectId ({} < {})",
+            nontoken.0,
+            tokens[0].0
+        );
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+
+        // Canonical: lowest ObjectId wins ⇒ taps the NONTOKEN engine (byte-unchanged behavior).
+        let canon = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical)
+            .expect("payable via convoke");
+        assert_eq!(
+            canon,
+            vec![(nontoken, ManaType::Green)],
+            "Canonical taps the lowest-id creature (the nontoken engine)"
+        );
+
+        // DetectionFodderFirst: fodder tokens preferred ⇒ taps the lowest-id TOKEN, never the
+        // lower-id nontoken engine.
+        let fodder = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::DetectionFodderFirst)
+            .expect("payable via convoke");
+        assert_eq!(
+            fodder,
+            vec![(tokens[0], ManaType::Green)],
+            "DetectionFodderFirst prefers a fodder token over the lower-id nontoken engine"
+        );
+        assert_ne!(
+            fodder, canon,
+            "the two modes MUST diverge on a mixed board (the mode discriminator)"
+        );
+    }
+
+    /// Fail-closed / preference-with-fallback: `DetectionFodderFirst` is a preference, not a
+    /// requirement. With ONLY a nontoken green creature (no fodder), it still pays via the
+    /// engine — no payability regression (CR 702.51a: any legal untapped creature may convoke).
+    #[test]
+    fn fodder_first_falls_back_to_nontoken_when_no_fodder() {
+        let (state, nontoken, tokens) = mixed_token_board(0);
+        assert!(tokens.is_empty(), "fixture: no fodder tokens present");
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+        let taps = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::DetectionFodderFirst)
+            .expect("fodder-first is preference-with-fallback: the nontoken still pays");
+        assert_eq!(
+            taps,
+            vec![(nontoken, ManaType::Green)],
+            "no fodder ⇒ fodder-first falls back to the nontoken (fail-closed, no payability loss)"
         );
     }
 }

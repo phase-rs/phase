@@ -183,9 +183,9 @@ pub enum PinnedDecision {
     /// CR 601.2h + CR 702.51a/b: pay a convoke `ManaPayment` by tapping the minimal
     /// deterministic set of untapped creatures matching the live post-affinity color
     /// requirement. State-independent: the concrete creatures are re-bound LIVE each
-    /// iteration (canonical order — lowest ObjectId per needed color) via
-    /// `select_convoke_taps`, a pure function of (live legal untapped set, locked cost)
-    /// per CR 732.2a — so no per-iteration creature is latched here.
+    /// iteration (fodder-first order — reproduced tokens preferred, then lowest ObjectId
+    /// within each class) via `select_convoke_taps`, a pure function of (live legal untapped
+    /// set, locked cost) per CR 732.2a — so no per-iteration creature is latched here.
     ConvokeTaps { slot: DecisionSlot },
 }
 
@@ -333,7 +333,8 @@ pub enum ConcreteDecision {
     },
     /// CR 601.2h + CR 702.51a/b: the live-resolved convoke tap-set for this iteration —
     /// `(creature, mana_type)` pairs to feed as `GameAction::TapForConvoke`. Re-bound each
-    /// iteration by `select_convoke_taps` (lowest-ObjectId-per-color canonical order).
+    /// iteration by `select_convoke_taps` in `DetectionFodderFirst` order (CR 702.51a lets the
+    /// loop replay tap reproduced fodder rather than a stable-partition engine permanent).
     ConvokeTaps {
         slot: DecisionSlot,
         creatures: Vec<(ObjectId, ManaType)>,
@@ -444,8 +445,12 @@ fn resolve_pin(
         // CR 601.2h + CR 702.51a/b: re-bind the convoke tap-set LIVE against this
         // iteration's board. The caster + locked remaining cost come from the live
         // `ManaPayment` prompt (CR 601.2f cost-lock); the single-authority selector
-        // `select_convoke_taps` picks the minimal deterministic set (lowest ObjectId
-        // per needed color). No legal set ⇒ `UnpayableConvoke` (CR 702.51b).
+        // `select_convoke_taps` picks the minimal deterministic set. A `ConvokeTaps` pin is
+        // minted ONLY by the loop-replay template (`build_recast_template`), so this replay
+        // artifact uses `DetectionFodderFirst`: CR 702.51a makes convoke optional, so the
+        // replay MAY tap the reproduced fodder it recreates each period rather than a
+        // stable-partition engine permanent (which would drift the CR 732.2a object-growth
+        // cover check and suppress a valid loop). No legal set ⇒ `UnpayableConvoke` (CR 702.51b).
         PinnedDecision::ConvokeTaps { slot } => {
             let (player, cost) = match (&state.waiting_for, state.pending_cast.as_ref()) {
                 (WaitingFor::ManaPayment { player, .. }, Some(pending)) => {
@@ -453,7 +458,12 @@ fn resolve_pin(
                 }
                 _ => return Err(ReplayFailure::UnpayableConvoke { slot: slot.clone() }),
             };
-            match crate::game::mana_payment::select_convoke_taps(state, player, &cost) {
+            match crate::game::mana_payment::select_convoke_taps(
+                state,
+                player,
+                &cost,
+                crate::game::mana_payment::ConvokeTapOrder::DetectionFodderFirst,
+            ) {
                 Some(creatures) => Ok(ConcreteDecision::ConvokeTaps {
                     slot: slot.clone(),
                     creatures,
@@ -1172,7 +1182,8 @@ mod tests {
     /// Convoke-pin unit (§11): `resolve_pin(ConvokeTaps)` at a live `ManaPayment{Convoke}`
     /// delegates to the single-authority `select_convoke_taps`, pulling the locked cost from
     /// `pending_cast` and the payer from the prompt. Positive: a `{G}` pending cost + two
-    /// green creatures ⇒ `ConcreteDecision::ConvokeTaps` with the minimal lowest-id set.
+    /// green creatures ⇒ `ConcreteDecision::ConvokeTaps` with the minimal set (both nontoken,
+    /// so `DetectionFodderFirst`'s tie-break collapses to lowest-id here).
     /// Negative (revert-failing wiring): away from a `ManaPayment` prompt (no `pending_cast`)
     /// ⇒ `Err(UnpayableConvoke)` — proves the pin never fabricates taps without a live cost.
     #[test]
