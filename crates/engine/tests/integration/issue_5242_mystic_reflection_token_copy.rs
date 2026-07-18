@@ -63,6 +63,56 @@ fn mystic_reflection_makes_next_creature_token_copy_chosen_creature() {
 }
 
 #[test]
+fn mystic_reflection_copies_every_token_in_one_multi_token_entry_event() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let chosen = scenario
+        .add_creature(P0, "Colossal Dreadmaw", 6, 6)
+        .with_subtypes(vec!["Dinosaur"])
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let token_spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Raise the Alarm",
+            true,
+            "Create two 1/1 white Soldier creature tokens.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(mystic).target_object(chosen).resolve();
+    runner.cast(token_spell).resolve();
+
+    // CR 614.12: One replacement effect modifies every permanent entering in
+    // this simultaneous two-token event before the one-shot shield is consumed.
+    assert_eq!(
+        runner.state().last_created_token_ids.len(),
+        2,
+        "the production token pipeline must create both tokens in one event"
+    );
+    for token_id in &runner.state().last_created_token_ids {
+        let obj = runner
+            .state()
+            .objects
+            .get(token_id)
+            .expect("each created token must exist");
+        assert!(obj.is_token, "the entering object must remain a token");
+        assert_eq!(obj.name, "Colossal Dreadmaw");
+        assert_eq!(obj.power, Some(6));
+        assert_eq!(obj.toughness, Some(6));
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+            "every token in the entry event must copy the chosen subtype, got {:?}",
+            obj.card_types.subtypes
+        );
+    }
+}
+
+#[test]
 fn mystic_reflection_makes_next_nontoken_creature_enter_as_chosen_creature() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
