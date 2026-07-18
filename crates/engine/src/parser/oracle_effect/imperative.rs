@@ -4557,21 +4557,52 @@ fn parse_choose_anaphoric(lower: &str) -> Option<(u32, Chooser, CardSelectionMod
 pub(super) fn parse_category_and_sacrifice_rest_pub(
     rest_lower: &str,
 ) -> Option<ChooseImperativeAst> {
-    parse_category_and_sacrifice_rest(rest_lower).map(|ast| match ast {
-        ChooseImperativeAst::CategoryAndSacrificeRest {
-            categories,
-            choose_filter,
-            sacrifice_filter,
-            total_power_cap,
-            ..
-        } => ChooseImperativeAst::CategoryAndSacrificeRest {
-            categories,
-            chooser_scope: CategoryChooserScope::ControllerForAll,
-            choose_filter,
-            sacrifice_filter,
-            total_power_cap,
-        },
-        other => other,
+    parse_single_category_and_sacrifice_rest(rest_lower)
+        .or_else(|| parse_category_and_sacrifice_rest(rest_lower))
+        .map(|ast| match ast {
+            ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                choose_filter,
+                sacrifice_filter,
+                total_power_cap,
+                ..
+            } => ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                chooser_scope: CategoryChooserScope::ControllerForAll,
+                choose_filter,
+                sacrifice_filter,
+                total_power_cap,
+            },
+            other => other,
+        })
+}
+
+/// CR 608.2d + CR 701.21a: Parse the single-category form specific to the
+/// "for each player, you choose" entry point: "a <type> [they/you/that player]
+/// control[s]". Keeping this arm outside the generic `choose` parser prevents
+/// ordinary target-selection text such as "choose a creature they control" from
+/// being misclassified as a choose-and-sacrifice-rest effect.
+fn parse_single_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, core_type) = parse_category_item(rest_lower).ok()?;
+    alt((
+        tag::<_, _, E>(" they control"),
+        tag(" you control"),
+        tag(" that player controls"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let filter = TargetFilter::Typed(TypedFilter::new(
+        super::conditions::core_type_to_type_filter(core_type),
+    ));
+    Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+        categories: vec![core_type],
+        chooser_scope: CategoryChooserScope::EachPlayerSelf,
+        choose_filter: filter.clone(),
+        sacrifice_filter: filter,
+        total_power_cap: None,
     })
 }
 
@@ -4640,38 +4671,6 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
             choose_filter,
             total_power_cap: None,
         });
-    }
-
-    // Pattern 5 (Winnowing): "a <type> [they/you/that player] control[s]" — a
-    // single bare category with a controller phrase, no "from among" and no
-    // enumerated list. CR 608.2d + CR 701.21a: the caller strips "for each
-    // player, you choose " and the pub wrapper sets `ControllerForAll`, so the
-    // spell's controller chooses one <type> each player controls and the rest
-    // (narrowed by a trailing sweep continuation) are sacrificed. Covers the
-    // class "for each player, you choose a <type> that player controls".
-    // Placed before pattern 2 because pattern 2's `parse_category_list_prefix`
-    // also matches the single leading category, then bails with `.ok()?` (no
-    // "from among") — which would abort the whole function before this arm.
-    if let Ok((rest, core_type)) = parse_category_item(rest_lower) {
-        if alt((
-            tag::<_, _, E>(" they control"),
-            tag(" you control"),
-            tag(" that player controls"),
-        ))
-        .parse(rest)
-        .is_ok()
-        {
-            let filter = TargetFilter::Typed(TypedFilter::new(
-                super::conditions::core_type_to_type_filter(core_type),
-            ));
-            return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
-                categories: vec![core_type],
-                chooser_scope: CategoryChooserScope::EachPlayerSelf,
-                choose_filter: filter.clone(),
-                sacrifice_filter: filter,
-                total_power_cap: None,
-            });
-        }
     }
 
     // Pattern 2: "an artifact, a creature, ... from among [the nonland] permanents they control"
