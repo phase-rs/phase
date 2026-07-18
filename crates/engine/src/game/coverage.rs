@@ -2421,9 +2421,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::BeneathTop { .. },
                 }) => d.push(("redirect".into(), "library beneath top X".into())),
+                // Digital-only Alchemy placement (no CR entry): counter-redirect
+                // never emits `RandomWithinTop` (conjure-only), but the arm keeps
+                // the match exhaustive.
                 Some(SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::RandomWithinTop { .. },
-                }) => d.push(("redirect".into(), "library random within top N".into())),
+                }) => d.push(("redirect".into(), "library random within top X".into())),
                 Some(SpellStackToGraveyardReplacement::Hand) => {
                     d.push(("redirect".into(), "hand".into()))
                 }

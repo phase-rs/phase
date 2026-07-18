@@ -7117,8 +7117,32 @@ fn parse_explicit_choose_and_sacrifice_rest_filter(
     ))
     .parse(input)?;
     let (input, _) = tag("all other ").parse(input)?;
-    let (input, filter) =
+    let (input, mut filter) =
         alt((parse_nonland_permanent_domain, parse_creature_domain)).parse(input)?;
+
+    // CR 608.2c: an optional trailing relative qualifier narrows the sweep, e.g.
+    // Winnowing's "that don't share a creature type with the chosen creature
+    // they control". Reuse the shared-quality combinator (the anaphor "the
+    // chosen creature" resolves to `ParentTarget`, which the resolver scopes to
+    // each player's kept creature). The redundant trailing controller phrase on
+    // the reference ("they control") is consumed so `all_consuming` succeeds.
+    let (after_domain, _) = opt(tag::<_, _, OracleError<'_>>(" ")).parse(input)?;
+    if let Ok((rest, prop)) = crate::parser::oracle_target::parse_shared_quality_clause(
+        after_domain,
+        &ParseContext::default(),
+    ) {
+        let (rest, _) = opt(alt((
+            tag::<_, _, OracleError<'_>>(" they control"),
+            tag(" you control"),
+            tag(" that player controls"),
+        )))
+        .parse(rest)?;
+        if let TargetFilter::Typed(ref mut typed) = filter {
+            typed.properties.push(prop);
+        }
+        return Ok((rest, Some(filter)));
+    }
+
     Ok((input, Some(filter)))
 }
 

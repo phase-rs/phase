@@ -1156,7 +1156,7 @@ fn type_filter_to_core_type(tf: &TypeFilter) -> Option<CoreType> {
 /// Inverse of [`type_filter_to_core_type`]: map a `CoreType` to the `TypeFilter`
 /// the engine uses to gate a present-target filter. Total over the card-type
 /// `CoreType` set; mirrors the explicit arms of `type_filter_to_core_type`.
-fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
+pub(super) fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
     match core {
         CoreType::Creature => TypeFilter::Creature,
         CoreType::Land => TypeFilter::Land,

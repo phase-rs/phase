@@ -802,6 +802,7 @@ mod wernog_riders_chaplain_investigate_count;
 mod white_suns_twilight;
 mod who_villainous_choice_scoped_player;
 mod willie_lumpkin_cant_attack;
+mod winnowing;
 mod wise_mothman_milled_trigger;
 mod wise_mothman_target_distinctness;
 mod wolverine_best_there_is_dealt_damage_counter;
