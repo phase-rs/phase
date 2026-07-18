@@ -58,6 +58,7 @@ import {
   DigModal,
   RevealModal,
   ScryModal,
+  ArrangePlanarDeckTopModal,
   SurveilModal,
 } from "./cardChoice/libraryModals.tsx";
 import {
@@ -127,6 +128,9 @@ export function CardChoiceModal() {
     case "ScryChoice":
       if (!canActForWaitingState) return null;
       return <ScryModal data={waitingFor.data} />;
+    case "ArrangePlanarDeckTopChoice":
+      if (!canActForWaitingState) return null;
+      return <ArrangePlanarDeckTopModal data={waitingFor.data} />;
     case "CoinFlipKeepChoice":
       if (!canActForWaitingState) return null;
       return <CoinFlipKeepModal data={waitingFor.data} />;

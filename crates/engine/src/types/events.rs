@@ -8,10 +8,12 @@ use super::ability::{
     AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind, FilterProp, TargetFilter,
     TargetRef, ThisWayCause, TypeFilter, TypedFilter,
 };
-use super::card_type::{CoreType, Supertype};
+use super::card::PrintedCardRef;
+use super::card_type::{CardType, CoreType, Supertype};
 use super::game_state::ZoneChangeRecord;
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::Keyword;
+use super::mana::ManaCost;
 use super::mana::{ManaColor, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -28,6 +30,36 @@ fn default_nth_in_step() -> u32 {
 
 fn default_nth_in_turn() -> u32 {
     1
+}
+
+/// A passive, viewer-safe snapshot of one face seen during a hidden-zone search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibrarySearchCardFaceView {
+    pub name: String,
+    pub mana_cost: ManaCost,
+    pub mana_value: u32,
+    pub colors: Vec<ManaColor>,
+    pub card_type: CardType,
+    pub keywords: Vec<Keyword>,
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+}
+
+/// CR 400.7: search knowledge is bound to the exact incarnation that was
+/// looked at, never merely to a reusable object storage id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibrarySearchCardView {
+    pub owner: PlayerId,
+    pub zone: Zone,
+    pub identity: ObjectIncarnationRef,
+    pub card_id: CardId,
+    pub current_face: LibrarySearchCardFaceView,
+    pub front_face: LibrarySearchCardFaceView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_face: Option<LibrarySearchCardFaceView>,
 }
 
 /// CR 605.1a + CR 605.1b + CR 605.4a: Records whether a `ManaAdded` event was
@@ -440,6 +472,7 @@ impl EventObjectSnapshot {
             // semantics for a nonsensical player-Connives subject rather than inventing one.
             TargetFilter::Player
             | TargetFilter::Controller
+            | TargetFilter::Opponent
             | TargetFilter::Owner
             | TargetFilter::AllPlayers
             | TargetFilter::ScopedPlayer
@@ -630,7 +663,15 @@ impl EventObjectSnapshot {
             // ---- unsupported: needs a live candidate lookup or an unmodeled field ----
             // Not reachable from the subject grammar today. Reaching one fails the gate,
             // which is the designed signal to extend the snapshot + evaluator together.
-            FilterProp::WasPlayed
+            // CR 701.15b/c: goad is a designation on the LIVE permanent (its `goaded_by`
+            // set, read by game/filter.rs `FilterProp::Goaded => !obj.goaded_by.is_empty()`).
+            // Neither EventObjectSnapshot nor ZoneChangeRecord carries a goaded field, and the
+            // runtime already fail-closes it (game/filter.rs zone-change-record matcher).
+            // Classify Unsupported so a future goaded event-subject filter fails the reach gate
+            // LOUDLY rather than silently reading an ungoaded snapshot. Deferred follow-up
+            // (option a): snapshot goaded onto EventObjectSnapshot + ZoneChangeRecord.
+            FilterProp::Goaded
+            | FilterProp::WasPlayed
             // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
             // a nontoken object is a copy, so card representation cannot be reconstructed.
             | FilterProp::RepresentedByCard
@@ -643,6 +684,7 @@ impl EventObjectSnapshot {
             | FilterProp::ManaCostIn { .. }
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::Foretold
+            | FilterProp::HasAdventure
             | FilterProp::AttachedToSource
             | FilterProp::AttachedToRecipient
             | FilterProp::Unpaired
@@ -670,6 +712,14 @@ impl EventObjectSnapshot {
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
     GameStarted,
+    /// CR 400.2 + CR 701.23e: private knowledge captured while searching a
+    /// hidden zone is transported only to its latched audience; it is not a
+    /// public reveal or a searched-a-library marker.
+    HiddenSearchViewed {
+        searcher: PlayerId,
+        cards: Vec<LibrarySearchCardView>,
+        audience: Vec<PlayerId>,
+    },
     TurnStarted {
         player_id: PlayerId,
         turn_number: u32,
@@ -1753,6 +1803,22 @@ mod tests {
             properties: vec![FilterProp::WasKicked],
         });
         assert_eq!(classify(&needs_live), Unsupported);
+    }
+
+    /// CR 701.15b/c: goad is a designation on the LIVE permanent, not a fact the event
+    /// snapshot / zone-change record carries — the runtime fail-closes it. The reach-gate
+    /// classifier must AGREE: a goaded event-subject filter is `Unsupported`, so a future
+    /// card that reaches it fails the gate loudly instead of silently certifying ungoaded.
+    /// Revert-probe: returning Goaded to the Supported group (its state on head e3448a3c3)
+    /// makes classify yield Supported, flipping this assertion.
+    #[test]
+    fn goaded_subject_filter_is_unsupported() {
+        let goaded = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Goaded],
+        });
+        assert_eq!(classify(&goaded), Unsupported);
     }
 
     /// `Unsupported` dominates a composite: if one branch cannot be answered, the whole

@@ -27,7 +27,7 @@ pub const LEGACY_INCARNATION: u64 = u64::MAX;
 /// CR 400.7: an object that changes zones becomes a new object. This pair is the
 /// exact cross-incarnation identity of one object: the stable storage `ObjectId`
 /// plus the monotonic `incarnation` epoch (see `GameObject::incarnation`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(from = "ObjectIncarnationRefCompat")]
 pub struct ObjectIncarnationRef {
     pub object_id: ObjectId,

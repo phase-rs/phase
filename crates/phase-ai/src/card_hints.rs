@@ -1,4 +1,3 @@
-use engine::game::players;
 use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -8,7 +7,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::{cast_facts_for_action, CastFacts};
-use crate::eval::{evaluate_creature, threat_level};
+use crate::eval::opponent_battlefield_creature_threat_value;
 use crate::policies::hand_disruption::disruption_window_score;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
@@ -65,23 +64,10 @@ pub(crate) fn should_play_now_with_facts(
             // Removal: higher priority when opponents have high-value creatures.
             // In multiplayer, prefer targeting highest-threat opponent's best creature.
             if has_destroy || has_damage || (facts.has_direct_removal_text() && has_etb_value) {
-                let opponents = players::opponents(state, player);
                 let max_threat = state
                     .battlefield
                     .iter()
-                    .filter_map(|&id| {
-                        let o = state.objects.get(&id)?;
-                        if opponents.contains(&o.controller)
-                            && o.card_types.core_types.contains(&CoreType::Creature)
-                        {
-                            let creature_val = evaluate_creature(state, id);
-                            // Weight by controller's threat level for multi-opponent focus
-                            let threat_weight = threat_level(state, player, o.controller) + 0.5;
-                            Some(creature_val * threat_weight)
-                        } else {
-                            None
-                        }
-                    })
+                    .filter_map(|&id| opponent_battlefield_creature_threat_value(state, player, id))
                     .fold(0.0_f64, f64::max);
 
                 // Scale 0.5-0.9 based on threat-weighted creature value
@@ -321,6 +307,13 @@ mod tests {
                 payment_mode: CastPaymentMode::Auto,
             },
             PlayerId(0),
+        );
+        let threat =
+            opponent_battlefield_creature_threat_value(&state, PlayerId(0), creature_id).unwrap();
+        let expected = (0.5 + (threat / 30.0).min(0.4)).min(0.9);
+        assert!(
+            (score_with_creature - expected).abs() < f64::EPSILON,
+            "removal priority must use the centralized threat value"
         );
 
         assert!(

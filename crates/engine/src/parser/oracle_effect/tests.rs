@@ -2480,6 +2480,68 @@ fn compound_mass_counter_first_conjunct_stays_put_counter_all() {
     assert!(!matches!(*sub.effect, Effect::Unimplemented { .. }));
 }
 
+/// CR 603.7 + issue #6065: Inspiring Call — "Draw a card for each creature you
+/// control with a +1/+1 counter on it. Those creatures gain indestructible until
+/// end of turn." Unlike Nalia (whose `PutCounterAll` publishes a tracked set),
+/// the `Draw` clause publishes NO tracked set — its target is the drawing player
+/// — so "those creatures" must bind to the Draw's COUNT filter (the counted
+/// creatures), not the `ParentTarget` anaphor (which resolved to the controller
+/// and left the grant inert), and not `TrackedSet(0)` (no publisher).
+#[test]
+fn inspiring_call_those_creatures_bind_to_draw_count_filter() {
+    let def = parse_effect_chain(
+        "draw a card for each creature you control with a +1/+1 counter on it. those creatures gain indestructible until end of turn",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Draw { .. }),
+        "primary clause must be Draw, got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("'those creatures gain indestructible ...' must attach as sub_ability");
+    match &*sub.effect {
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => {
+            // The "those creatures" anaphor may live in the GenericEffect `target`
+            // or the static's `affected` — the binding must land in one of them.
+            let affected = static_abilities.first().and_then(|s| s.affected.as_ref());
+            let bound = target.as_ref().or(affected);
+            assert!(
+                !matches!(target, Some(TargetFilter::ParentTarget))
+                    && !matches!(affected, Some(TargetFilter::ParentTarget)),
+                "no ParentTarget may remain (would resolve to the controller); \
+                 target={target:?} affected={affected:?}"
+            );
+            assert!(
+                matches!(
+                    bound,
+                    Some(TargetFilter::Typed(tf)) if tf.type_filters.contains(&TypeFilter::Creature)
+                ),
+                "grant must bind to the counted Typed creature filter; \
+                 target={target:?} affected={affected:?}"
+            );
+            assert!(
+                static_abilities
+                    .iter()
+                    .any(|s| s.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Indestructible
+                        }
+                    ))),
+                "grant must add Indestructible, got {static_abilities:?}"
+            );
+        }
+        other => panic!("expected GenericEffect grant sub-ability, got {other:?}"),
+    }
+}
+
 /// CR 608.2c + CR 611.2a + CR 613.1f: Nalia de'Arnise's full-party trigger
 /// body. The "and those creatures gain deathtouch until end of turn"
 /// conjunct must split at the chain level so the anaphoric back-reference
@@ -3208,6 +3270,108 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         panic!("base filter should be Or, got {:?}", base_filter);
     };
     assert_eq!(base_filters.len(), 2);
+}
+
+#[test]
+fn knight_errant_of_eos_binds_convoke_count_in_reveal_filter() {
+    let def = parse_effect_chain(
+        "Look at the top six cards of your library. You may reveal up to two creature cards with mana value X or less from among them, where X is the number of creatures that convoked this creature. Put the revealed cards into your hand, then shuffle.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::Dig {
+        count,
+        keep_count,
+        up_to,
+        filter,
+        reveal,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected Knight-Errant's ETB to begin with Dig, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
+    assert_eq!(*keep_count, Some(2));
+    assert!(*up_to);
+    assert!(*reveal);
+    assert!(matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+            if type_filters == &vec![TypeFilter::Creature]
+                && properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref { qty: QuantityRef::ConvokedCreatureCount },
+                    }
+                ))
+    ));
+
+    let mut node = Some(&def);
+    while let Some(current) = node {
+        assert!(
+            !matches!(current.effect.as_ref(), Effect::Unimplemented { .. }),
+            "Knight-Errant's ETB contains an Unimplemented effect: {def:#?}"
+        );
+        node = current.sub_ability.as_deref();
+    }
+}
+
+#[test]
+fn jace_perfected_mind_draws_three_only_when_a_graveyard_reaches_twenty() {
+    let def = parse_effect_chain(
+        "Target player mills three cards. Then if a graveyard has twenty or more cards in it, you draw three cards. Otherwise, you draw a card.",
+        AbilityKind::Activated,
+    );
+
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+    let draw_three = def
+        .sub_ability
+        .as_deref()
+        .expect("Jace's mill must chain into the conditional draw");
+    assert!(matches!(
+        draw_three.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 3 },
+            ..
+        }
+    ));
+    assert!(matches!(
+        draw_three.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::GraveyardSize {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 20 },
+        })
+    ));
+    let draw_one = draw_three
+        .else_ability
+        .as_deref()
+        .expect("Jace's otherwise branch must be attached to the conditional draw");
+    assert!(matches!(
+        draw_one.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    ));
+    assert!(draw_one.sub_ability.is_none());
 }
 
 #[test]
@@ -9893,6 +10057,7 @@ fn effect_mirror_match_copy_blockers_and_delayed_exile() {
         .sub_ability
         .as_ref()
         .expect("delayed end-of-combat exile sub_ability present");
+    assert_eq!(sub.sub_link, SubAbilityLink::ContinuationStep);
     match &*sub.effect {
         Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase },
@@ -12144,6 +12309,38 @@ fn demolition_field_you_clause_routes_search_to_activator_not_opponent() {
     );
 }
 
+#[test]
+fn field_of_ruin_each_player_search_has_one_battlefield_move() {
+    use crate::types::ability::AbilityKind;
+
+    let def = parse_effect_chain(
+        "Destroy target nonbasic land an opponent controls. Each player searches their library for a basic land card, puts it onto the battlefield, then shuffles.",
+        AbilityKind::Activated,
+    );
+    let mut moves = Vec::new();
+    let mut node = Some(&def);
+    while let Some(current) = node {
+        if let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = &*current.effect
+        {
+            moves.push((origin, destination, target));
+        }
+        node = current.sub_ability.as_deref();
+    }
+
+    assert_eq!(
+        moves.len(),
+        1,
+        "the search result must move exactly once; an extra ParentTarget move can return the sacrificed Field of Ruin: {moves:?}"
+    );
+    assert_eq!(*moves[0].0, Some(Zone::Library));
+    assert_eq!(*moves[0].1, Zone::Battlefield);
+}
+
 /// CR 608.2c + CR 109.5 + CR 701.23a (issue #900): card-agnostic regression
 /// for the caster-subject anchor reset using the NON-optional caster form
 /// ("You search your library …"). This exercises the
@@ -13928,19 +14125,21 @@ fn effect_target_graveyard_card_gains_escape_compound_cost() {
 /// (flashback/embalm/harmonize) so they keep flowing through their existing
 /// absorber — the two mechanisms partition the class by cost shape.
 #[test]
-fn grant_graveyard_keyword_front_door_declines_self_mana_cost_siblings() {
+fn grant_graveyard_keyword_ir_declines_self_mana_cost_siblings() {
     assert!(
-            try_parse_grant_graveyard_keyword_to_target(
+            parse_grant_graveyard_keyword_to_target_ir(
                 "target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.",
                 AbilityKind::Spell,
+                &ParseContext::default(),
             )
             .is_none(),
             "flashback (self-mana-cost) must not be claimed by the compound-cost front door"
         );
     assert!(
-            try_parse_grant_graveyard_keyword_to_target(
+            parse_grant_graveyard_keyword_to_target_ir(
                 "target creature card in your graveyard gains embalm until end of turn. The embalm cost is equal to its mana cost.",
                 AbilityKind::Spell,
+                &ParseContext::default(),
             )
             .is_none(),
             "embalm (self-mana-cost) must not be claimed by the compound-cost front door"
@@ -13951,6 +14150,29 @@ fn grant_graveyard_keyword_front_door_declines_self_mana_cost_siblings() {
             AbilityKind::Spell,
         );
     assert!(matches!(&*def.effect, Effect::GenericEffect { .. }));
+    assert!(def.sub_ability.is_none());
+}
+
+#[test]
+fn conditional_protection_grant_routes_through_ability_ir() {
+    let def = parse_effect_chain(
+        "Until end of turn, creatures you control gain protection from white if you control a Plains, from blue if you control an Island, from black if you control a Swamp, from red if you control a Mountain, and from green if you control a Forest.",
+        AbilityKind::Spell,
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected conditional protection grant, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(static_abilities.len(), 5);
     assert!(def.sub_ability.is_none());
 }
 
@@ -14715,7 +14937,7 @@ fn distribute_x_counters_among_any_number_allows_zero_targets() {
 }
 
 #[test]
-fn distribute_fixed_counters_among_any_number_requires_one_target() {
+fn distribute_fixed_counters_among_any_number_allows_zero_targets() {
     let clause = parse_effect_clause(
         "distribute two +1/+1 counters among any number of target creatures you control",
         &mut ParseContext::default(),
@@ -14724,7 +14946,7 @@ fn distribute_fixed_counters_among_any_number_requires_one_target() {
     assert_eq!(
         clause.multi_target,
         Some(MultiTargetSpec::bounded_expr(
-            QuantityExpr::Fixed { value: 1 },
+            QuantityExpr::Fixed { value: 0 },
             QuantityExpr::Fixed { value: 2 },
         ))
     );
@@ -19302,6 +19524,7 @@ fn cant_be_activated_effect_standalone_targets_creature() {
                         who: ProhibitionScope::AllPlayers,
                         source_filter: TargetFilter::SelfRef,
                         exemption: ActivationExemption::None,
+                        kind: None,
                     }
                 ),
                 "expected CantBeActivated(AllPlayers), got {:?}",
@@ -22357,6 +22580,45 @@ fn parse_optional_reveal_hand_choice_marks_choice_optional() {
 }
 
 #[test]
+fn parse_optional_exile_from_revealed_hand_preserves_nonland_filter() {
+    let def = parse_effect_chain(
+        "Look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::RevealHand {
+        card_filter,
+        choice_optional,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("Expected RevealHand, got {:?}", def.effect);
+    };
+    assert!(*choice_optional);
+    assert!(matches!(
+        card_filter,
+        TargetFilter::Typed(filter)
+            if filter.type_filters.iter().any(|kind| matches!(
+                kind,
+                TypeFilter::Non(inner) if **inner == TypeFilter::Land
+            ))
+    ));
+
+    let exile = def
+        .sub_ability
+        .as_deref()
+        .expect("expected exile continuation");
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: crate::types::zones::Zone::Exile,
+            ..
+        }
+    ));
+    assert!(!exile.optional);
+}
+
+#[test]
 fn parse_reveal_a_card_from_your_hand_sets_any_card_filter() {
     let def = parse_effect_chain("Reveal a card from your hand.", AbilityKind::Spell);
 
@@ -25288,6 +25550,28 @@ fn strip_each_scope_who_cant_subject_rejects_non_matches() {
         strip_each_scope_who_cant_subject("for each opponent who can't, you draw a card").is_none(),
         "prepositional shape belongs to strip_for_each_opponent_who_doesnt"
     );
+}
+
+#[test]
+fn strip_each_scope_who_didnt_discard_filter_this_way_is_exact() {
+    let (scope, filter, body) = strip_each_scope_who_didnt_verb_filter_this_way_subject(
+        "each opponent who didn't discard a nonland card this way loses 3 life",
+    )
+    .expect("Kroxa-class decline tail");
+    assert_eq!(scope, PlayerFilter::Opponent);
+    assert!(matches!(filter, TargetFilter::Typed(_)));
+    assert_eq!(body, "loses 3 life");
+
+    for unrelated in [
+        "each player who didn't sacrifice a creature loses 3 life",
+        "each player who didn't choose the lowest number discards their hand",
+        "each opponent who didn't draws a card",
+    ] {
+        assert!(
+            strip_each_scope_who_didnt_verb_filter_this_way_subject(unrelated).is_none(),
+            "only the supported discard-a/an-filter-this-way grammar may reserve: {unrelated}",
+        );
+    }
 }
 
 /// CR 118.12 + CR 608.2d + CR 109.5: `strip_each_scope_who_does_subject`
@@ -29214,6 +29498,223 @@ fn render_silent_its_controller_cant_cast_spells() {
         }
     }
     assert_no_unimplemented(&def);
+}
+
+/// CR 305.1 + CR 101.2 + CR 201.2: Conjurer's Ban's compound restriction —
+/// "Until your next turn, spells with the chosen name can't be cast and lands
+/// with the chosen name can't be played." The PASSIVE-voice, card-scoped
+/// sibling of `cant_cast_spells_this_turn_opponents` (Silence's active-voice,
+/// player-scoped form). Both halves must produce their own `AddRestriction`,
+/// chained via `sub_ability`, sharing the same `UntilNextTurnOf` duration —
+/// the filter-scoped CR 305.1 land-play axis (`ProhibitedActivity::PlayLands`)
+/// has no other coverage anywhere in the parser today.
+#[test]
+fn conjurers_ban_compound_cant_be_cast_and_cant_be_played() {
+    let def = parse_effect_chain(
+        "Until your next turn, spells with the chosen name can't be cast and lands with the chosen name can't be played.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::AllPlayers,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        ),
+        "spell half got {:?}",
+        def.effect
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        }),
+        "spell half must carry the shared 'until your next turn' duration"
+    );
+
+    let land_sub = def
+        .sub_ability
+        .as_deref()
+        .expect("the compound must chain a land-play restriction sub-ability");
+    assert!(
+        matches!(
+            &*land_sub.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::AllPlayers,
+                    activity: ProhibitedActivity::PlayLands {
+                        land_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        ),
+        "land half got {:?}",
+        land_sub.effect
+    );
+    assert_eq!(
+        land_sub.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        }),
+        "the land sub-ability must inherit the SAME duration as the spell half — \
+         AddRestriction resolution reads `ability.duration` per sub-ability \
+         independently, so an unset child duration would silently fall back to \
+         end-of-turn instead of 'until your next turn'"
+    );
+    assert!(
+        land_sub.sub_ability.is_none(),
+        "the land clause is the end of the modeled sentence; no further chaining here"
+    );
+}
+
+/// No-regression companion to [`conjurers_ban_compound_cant_be_cast_and_cant_be_played`]:
+/// a bare single-clause passive cast prohibition (no "and lands ...") must NOT
+/// grow a dangling land sub-ability, and must still parse via the same
+/// passive-voice recognizer (unlocking any future card printed as just
+/// "Spells with the chosen name can't be cast.").
+#[test]
+fn passive_cant_be_cast_single_clause_has_no_land_sub_ability() {
+    let def = parse_effect_chain(
+        "Spells with the chosen name can't be cast.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::AllPlayers,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "a single-clause passive prohibition must not fabricate a land sub-ability"
+    );
+}
+
+/// Pattern-coverage companion: the land-play axis is not limited to "chosen
+/// name" — `parse_type_phrase` resolves any type-phrase subject, so a
+/// hypothetical type-scoped land-play ban parses the same way (building for
+/// the class, not the single card).
+#[test]
+fn passive_cant_be_played_land_type_filter() {
+    let def = parse_effect_chain(
+        "Until end of turn, Merfolk lands can't be played.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::AddRestriction {
+            restriction:
+                GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::AllPlayers,
+                    activity:
+                        ProhibitedActivity::PlayLands {
+                            land_filter: Some(TargetFilter::Typed(tf)),
+                        },
+                    ..
+                },
+        } => {
+            assert!(
+                !tf.type_filters.is_empty(),
+                "expected a concrete type filter (Merfolk), got {tf:?}"
+            );
+        }
+        other => panic!("expected a typed PlayLands restriction, got {other:?}"),
+    }
+    assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+}
+
+/// Full-oracle regression: Conjurer's Ban must lower with NO residual
+/// `Effect::Unimplemented` anywhere in its ability chain (Choose the name →
+/// cast prohibition → land-play prohibition → Draw a card) — previously the
+/// whole restriction sentence collapsed into one `Unimplemented` node and the
+/// card did nothing but choose a name and draw a card.
+#[test]
+fn conjurers_ban_full_oracle_has_no_unimplemented() {
+    let parsed = parse_oracle_text(
+        "Choose a card name. Until your next turn, spells with the chosen name can't be cast and lands with the chosen name can't be played.\nDraw a card.",
+        "Conjurer's Ban",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "expected one top-level ability");
+
+    fn collect_effects<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        out: &mut Vec<&'a Effect>,
+    ) {
+        out.push(&def.effect);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect_effects(sub, out);
+        }
+    }
+    let mut effects = Vec::new();
+    collect_effects(&parsed.abilities[0], &mut effects);
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "Conjurer's Ban must have no Unimplemented residual: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::CardName,
+                ..
+            }
+        )),
+        "expected a CardName Choose effect: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        )),
+        "expected a chosen-name CastSpells restriction: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::PlayLands {
+                        land_filter: Some(TargetFilter::HasChosenName),
+                    },
+                    ..
+                }
+            }
+        )),
+        "expected a chosen-name PlayLands restriction: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+        "expected the trailing Draw a card: {effects:?}"
+    );
 }
 
 #[test]
@@ -40197,6 +40698,55 @@ fn put_zone_change_any_number_from_hand_sets_resolution_choice_count() {
         .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })));
 }
 
+#[test]
+fn worldsouls_rage_puts_lands_from_hand_or_graveyard() {
+    let def = parse_effect_chain(
+        "~ deals X damage to any target. Put up to X land cards from your hand and/or graveyard onto the battlefield tapped.",
+        AbilityKind::Spell,
+    );
+    let put_lands = def
+        .sub_ability
+        .as_ref()
+        .expect("Worldsoul's Rage must retain its land-return instruction");
+    assert_eq!(
+        put_lands.target_choice_timing,
+        TargetChoiceTiming::Resolution
+    );
+    assert_eq!(
+        put_lands.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }))
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enter_tapped,
+        up_to,
+        ..
+    } = &*put_lands.effect
+    else {
+        panic!("expected ChangeZone, got {:?}", put_lands.effect);
+    };
+    assert_eq!(*origin, None, "a two-zone move cannot use one fixed origin");
+    assert_eq!(*destination, Zone::Battlefield);
+    assert!(enter_tapped.is_tapped());
+    assert!(*up_to);
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected typed land filter, got {target:?}");
+    };
+    assert!(typed.type_filters.contains(&TypeFilter::Land));
+    assert_eq!(typed.controller, Some(ControllerRef::You));
+    assert!(typed.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::InAnyZone { zones }
+            if zones.contains(&Zone::Hand) && zones.contains(&Zone::Graveyard)
+    )));
+}
+
 /// CR 400.1 + CR 108.3 — Aether Vial class: "put a creature card ... from
 /// your hand onto the battlefield" must scope the candidate set to the
 /// controller's hand (`controller == Some(ControllerRef::You)`), not to
@@ -45066,6 +45616,10 @@ fn expose_the_culprit_mode2_lowers_to_choose_shuffle_cloak_chain() {
     assert_eq!(*chooser, TargetFilter::Controller);
     assert_eq!((*min, *max), (0, None));
     assert!(
+        head.multi_target.is_none(),
+        "tracked-set selection owns its cardinality in the effect, not multi_target"
+    );
+    assert!(
         matches!(filter, TargetFilter::Typed(t)
         if t.properties.iter().any(|p| matches!(
             p,
@@ -45102,6 +45656,34 @@ fn expose_the_culprit_mode2_lowers_to_choose_shuffle_cloak_chain() {
         ),
         "sub-sub must be Cloak{{object_source: Some(TrackedSet)}}, got {:?}",
         cloak.effect
+    );
+}
+
+/// The legacy bypass exposed the pile/shuffle/cloak recognizer only to the
+/// WithContext entry point. U3c routes it through `AbilityIr`, but retains that
+/// entry-point gate rather than making die-result (`Standalone`) callers newly
+/// recognize the card.
+#[test]
+fn exile_pile_shuffle_cloak_remains_with_context_only() {
+    let text = "Exile any number of face-up creatures you control with disguise in a face-down pile, shuffle that pile, then cloak them.";
+
+    let standalone = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        !matches!(
+            &*standalone.effect,
+            Effect::ChooseObjectsIntoTrackedSet { .. }
+        ),
+        "Standalone must not reach the WithContext-only pile recognizer: {standalone:?}"
+    );
+
+    let with_context =
+        parse_effect_chain_with_context(text, AbilityKind::Spell, &mut ParseContext::default());
+    assert!(
+        matches!(
+            &*with_context.effect,
+            Effect::ChooseObjectsIntoTrackedSet { .. }
+        ),
+        "WithContext must reach the pile recognizer: {with_context:?}"
     );
 }
 
@@ -45810,6 +46392,8 @@ fn drawn_this_turn_followup_overwrites_prior_life_payment() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: false,
@@ -46271,12 +46855,22 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
     };
     assert_eq!(choose_filter, sacrifice_filter);
     assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    assert_eq!(
+        def.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "the keeper instruction continues into the scoped search"
+    );
 
     let search = def
         .sub_ability
         .as_deref()
         .expect("exact keeper must continue to the scoped search");
     assert!(search.optional);
+    assert_eq!(
+        search.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "the search's intrinsic delivery remains a continuation"
+    );
     assert!(matches!(
         &search.player_scope,
         Some(PlayerFilter::ControlsCount {
@@ -46313,6 +46907,11 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
         .sub_ability
         .as_deref()
         .expect("search must carry a result-delivery continuation");
+    assert_eq!(
+        delivery.sub_link,
+        crate::types::ability::SubAbilityLink::ContinuationStep,
+        "delivery remains the search result continuation"
+    );
     assert!(matches!(
         delivery.effect.as_ref(),
         Effect::ChangeZone {
@@ -46340,6 +46939,11 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
         })
     ));
+    assert_eq!(
+        shuffle.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling,
+        "the final searched-this-way shuffle remains an independent instruction"
+    );
 }
 
 /// The dedicated whole-line grammar must fail closed when the independently
@@ -46481,5 +47085,160 @@ fn bandits_talent_level3_draw_counts_hellbent_opponents() {
         )),
         "the DynamicQty swallow warning must be cleared: {:?}",
         parsed.parse_warnings
+    );
+}
+
+/// CR 111.3 + CR 122.1 + CR 608.2c (issue #5844) — production-path regression for
+/// Alien Invasion. The token's quoted granted ability ends the first sentence
+/// (`able."`); the following imperative sentence pumps the created token. Before
+/// the sentence-splitter fix, the whole remainder was swallowed into the token
+/// clause: the token COUNT became `CountersOn(invasion)` (creating one token per
+/// invasion counter) and the "+1/+1 counter on it for each invasion counter"
+/// pump was dropped entirely. The corrected parse creates exactly ONE token and
+/// keeps the pump as a sibling `PutCounter` on the last-created token.
+#[test]
+fn alien_invasion_creates_one_token_and_pumps_it_per_counter() {
+    use crate::types::ability::{
+        AbilityDefinition, Effect, ObjectScope, QuantityExpr, QuantityRef,
+    };
+    use crate::types::counter::CounterType;
+
+    // Flatten the trigger's execute chain (def -> sub_ability -> ...).
+    fn collect_effects(def: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*def.effect).clone());
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect_effects(sub, out);
+        }
+    }
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\" Put a +1/+1 counter on it for each invasion counter on this enchantment, then put an invasion counter on this enchantment.",
+        "Alien Invasion",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Alien Invasion must lower to a combat trigger with an execute chain");
+    let mut effects = Vec::new();
+    collect_effects(trigger, &mut effects);
+
+    // 1) Exactly one token is created (count is a literal 1, NOT CountersOn).
+    let token_count = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Token { count, .. } => Some(count.clone()),
+            _ => None,
+        })
+        .expect("must emit a Token effect");
+    assert_eq!(
+        token_count,
+        QuantityExpr::Fixed { value: 1 },
+        "the token count must be a literal 1, not scaled by invasion counters: {token_count:?}"
+    );
+
+    // 2) The "+1/+1 counter on it for each invasion counter" pump survives as a
+    //    PutCounter on the last-created token, counted by the enchantment's
+    //    invasion counters.
+    let has_pump = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::PutCounter {
+                target: TargetFilter::LastCreated,
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(inner),
+                    },
+                },
+            } if *inner == CounterType::Generic("invasion".to_string())
+        )
+    });
+    assert!(
+        has_pump,
+        "the '+1/+1 counter on it for each invasion counter' pump must survive: {effects:#?}"
+    );
+
+    // 3) The enchantment still accrues one invasion counter.
+    let has_self_counter = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: ct,
+                count: QuantityExpr::Fixed { value: 1 },
+            } if *ct == CounterType::Generic("invasion".to_string())
+        )
+    });
+    assert!(
+        has_self_counter,
+        "the enchantment must still gain one invasion counter: {effects:#?}"
+    );
+}
+
+/// CR 121.1 + CR 601.2c (issue #5998) — Stone of Erech. "Exile target player's
+/// graveyard. Draw a card." is a bare IMPERATIVE second sentence: the ability's
+/// CONTROLLER draws. The player anchor from the preceding "target player's
+/// graveyard" clause must not leak into it, which previously both drew for the
+/// targeted opponent and surfaced a second target slot.
+#[test]
+fn bare_imperative_draw_after_player_target_keeps_controller() {
+    use super::parse_effect_chain;
+    use crate::types::ability::Effect;
+
+    for text in [
+        "exile target player's graveyard. draw a card",
+        "exile target opponent's graveyard. draw a card",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let draw = def
+            .sub_ability
+            .as_deref()
+            .expect("the draw must chain off the exile");
+        let Effect::Draw { target, .. } = &*draw.effect else {
+            panic!("expected a Draw sub-ability, got {:?}", draw.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::Controller,
+            "a bare imperative \"draw a card\" must draw for the controller, not the \
+             anchored player ({text:?})"
+        );
+    }
+}
+
+/// CR 121.1 (issue #5998, the inclusion side): a subject-less CONJUGATED
+/// continuation ("…, then draws …") DOES inherit the anchored player — the
+/// acting player draws, not the source's controller. Canonical: The End /
+/// Deadly Cover-Up / Teferi's Puzzle Box. This pins that the imperative gate
+/// does not regress the case the anchor arm exists for.
+#[test]
+fn conjugated_draw_continuation_still_inherits_player_anchor() {
+    use super::parse_effect_chain;
+    use crate::types::ability::Effect;
+
+    let def = parse_effect_chain(
+        "target player shuffles their library, then draws a card",
+        AbilityKind::Spell,
+    );
+    let mut found = None;
+    let mut next = Some(&def);
+    while let Some(d) = next {
+        if let Effect::Draw { target, .. } = &*d.effect {
+            found = Some(target.clone());
+            break;
+        }
+        next = d.sub_ability.as_deref();
+    }
+    let target = found.expect("expected a Draw in the chain");
+    assert_ne!(
+        target,
+        TargetFilter::Controller,
+        "a conjugated \"then draws\" continuation must inherit the anchored player, \
+         not fall back to the controller"
     );
 }

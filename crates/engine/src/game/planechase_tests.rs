@@ -1060,11 +1060,11 @@ fn start_next_turn_syncs_planar_controller() {
     // The active plane's "you"-scoped (Controller) trigger now matches p1, not p0.
     let trig = &state.objects.get(&active_id).unwrap().trigger_definitions[0];
     assert!(
-        super::trigger_matchers::valid_player_matches(trig, &state, p1, active_id),
+        super::trigger_matchers::valid_player_matches(&trig.definition, &state, p1, active_id),
         "Controller-scoped trigger must now match the NEW controller p1"
     );
     assert!(
-        !super::trigger_matchers::valid_player_matches(trig, &state, p0, active_id),
+        !super::trigger_matchers::valid_player_matches(&trig.definition, &state, p0, active_id),
         "Controller-scoped trigger must no longer match the OLD controller p0"
     );
 }
@@ -1381,9 +1381,10 @@ fn fixed_point_does_not_replace_direct_planeswalk() {
     );
 }
 
-/// C (card-instruction planeswalk NOT replaced): resolving `Effect::Planeswalk`
-/// with a real (non-sentinel) source is a CR 701.31c ability-instructed
-/// planeswalk, not the planar-die one — it rotates and never triggers chaos.
+/// C (card-instruction planeswalk NOT replaced by Fixed Point): resolving
+/// `Effect::Planeswalk` with a real (non-sentinel) source routes through the
+/// replacement pipeline, but Fixed Point's planar-die-only scope does not
+/// match — the plane rotates and no chaos ensues.
 #[test]
 fn fixed_point_does_not_replace_card_instruction_planeswalk() {
     let mut state = GameState::new_two_player(7);
@@ -1412,7 +1413,7 @@ fn fixed_point_does_not_replace_card_instruction_planeswalk() {
     assert_eq!(
         active_plane(&state),
         Some(next_id),
-        "CR 701.31c: an ability-instructed planeswalk is never replaced"
+        "ability-instructed planeswalk executes after replacement consult"
     );
     assert_eq!(
         count_chaos_ensued(&events),

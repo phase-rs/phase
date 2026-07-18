@@ -62,6 +62,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -193,6 +194,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::InZone { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -216,6 +218,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation (reads only the
+        // object's own `goaded_by` set), so the board population is irrelevant.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::Modified
@@ -290,6 +295,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -433,6 +439,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::InZone { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -456,6 +463,9 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: an entering object cannot perturb a candidate-local goad
+        // designation (reads only the object's own `goaded_by` set).
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::Modified
@@ -980,7 +990,20 @@ pub(crate) fn matches_stack_target_filter(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
-    let Some(entry) = state.stack.iter().find(|entry| entry.id == stack_obj_id) else {
+    let Some(entry) = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == stack_obj_id)
+        .or_else(|| {
+            state.resolving_stack_entry.as_ref().filter(|entry| {
+                entry.id == stack_obj_id
+                    && state
+                        .objects
+                        .get(&entry.id)
+                        .is_some_and(|obj| obj.zone == Zone::Stack)
+            })
+        })
+    else {
         return false;
     };
     match filter {
@@ -1669,6 +1692,9 @@ fn filter_inner_for_object(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false, // Controller is a player, not an object
+        // CR 102.3: Opponent is a player reference (used only as a slot announcer),
+        // never an object.
+        TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
         // CR 607.2d + CR 608.2c: SourceChosenPlayer is a player reference, not an object.
@@ -2215,6 +2241,8 @@ fn zone_change_filter_inner(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false,
+        // CR 102.3: Opponent is a player reference, never an object.
+        TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
         // CR 607.2d + CR 608.2c: SourceChosenPlayer is a player reference, not an object.
@@ -2667,6 +2695,8 @@ pub fn spell_record_matches_filter(
         // CR 118.12a: unless-payer population, never an object filter.
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
+        // CR 102.3: Opponent is a player reference, never a spell-record filter.
+        | TargetFilter::Opponent
         | TargetFilter::OriginalController
         // CR 201.5a: source-relative object ref, concretized to SpecificObject
         // before runtime — inapplicable to a spell-cast history record.
@@ -2977,6 +3007,8 @@ fn spell_object_matches_filter_inner(
         // CR 118.12a: unless-payer population, never an object filter.
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
+        // CR 102.3: Opponent is a player reference, never a spell-record filter.
+        | TargetFilter::Opponent
         | TargetFilter::OriginalController
         // CR 201.5a: source-relative object ref, concretized to SpecificObject
         // before runtime — inapplicable to a spell-cast history record.
@@ -3317,6 +3349,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Counters { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -3336,6 +3369,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: a spell on the stack carries no goad designation. Fail closed.
+        | FilterProp::Goaded
         // CR 700.9: Modified requires on-battlefield attachments/counters,
         // unavailable from a stack-snapshot record.
         | FilterProp::Modified
@@ -3837,6 +3872,11 @@ fn matches_filter_prop(
         // CR 702.143c-d: Foretold is a designation of a card in exile, tracked
         // directly on the object. It is not equivalent to `KeywordKind::Foretell`.
         FilterProp::Foretold => obj.foretold,
+        // CR 715.2: A card has an Adventure when its stored alternate face is
+        // an Adventure face; the front face is normally a permanent card.
+        FilterProp::HasAdventure => obj.back_face.as_ref().is_some_and(|face| {
+            face.layout_kind == Some(crate::types::card::LayoutKind::Adventure)
+        }),
         // CR 107.3 + CR 202.1: "spell with {X} in its mana cost" — inspects the
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
@@ -4276,6 +4316,8 @@ fn matches_filter_prop(
         FilterProp::Suspected => obj.is_suspected,
         // CR 702.112b: Match permanents with the renowned designation.
         FilterProp::Renowned => obj.is_renowned,
+        // CR 701.15b/c: a creature is goaded iff at least one player has goaded it.
+        FilterProp::Goaded => !obj.goaded_by.is_empty(),
         // CR 700.9: A permanent is modified if it has one or more counters on
         // it (CR 122), is equipped (CR 301.5), or is enchanted by an Aura
         // controlled by its controller (CR 303.4).
@@ -4987,6 +5029,7 @@ fn zone_change_record_matches_property(
         | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
         // — a zone-change snapshot cannot represent it. Fail closed.
         | FilterProp::NameMatchesAnyPermanent { .. } => false,
@@ -5016,6 +5059,9 @@ fn zone_change_record_matches_property(
         // evaluated on the live stack object, not the snapshot).
         | FilterProp::Modal
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is not snapshotted onto the zone-change record
+        // (unlike Suspected's `record.is_suspected`). Fail closed.
+        | FilterProp::Goaded
         // CR 700.9: Modified is a live-battlefield predicate (counters +
         // attachments) — a zone-change snapshot cannot represent it.
         | FilterProp::Modified
@@ -8035,10 +8081,10 @@ mod tests {
         };
 
         let trigger = &runner.state().objects[&mana_echoes].trigger_definitions[0];
-        let execute = trigger.execute.as_ref().expect("execute");
+        let execute = trigger.definition.execute.as_ref().expect("execute");
         let ability = crate::game::triggers::build_triggered_ability(
             runner.state(),
-            trigger,
+            &trigger.definition,
             mana_echoes,
             P0,
         );

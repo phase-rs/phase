@@ -1469,6 +1469,25 @@ export function MyDecks({
   const wrapperClass = bare
     ? "flex w-full min-w-0 flex-col items-center gap-4"
     : "flex w-full min-w-0 max-w-5xl flex-col items-center gap-6 px-4 py-5";
+  const importDeckTile = (
+    <AddDeckTile
+      label={t("myDecks.importDeckTile")}
+      onClick={() => setShowImport(true)}
+      icon={
+        <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
+      }
+    />
+  );
+  const preconstructedDeckTile = (
+    <AddDeckTile
+      label={t("myDecks.preconstructedTile")}
+      onClick={() => setShowPrecon(true)}
+      icon={
+        <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5v13a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 16.5v-13Zm11.25.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-1.5 0V4.75a.75.75 0 0 1 .75-.75Zm2.5 1.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-1.5 0v-8.5a.75.75 0 0 1 .75-.75Z" />
+      }
+    />
+  );
+  const deckEntryTiles = <>{importDeckTile}{preconstructedDeckTile}</>;
 
   return (
     <Wrapper className={wrapperClass}>
@@ -1718,21 +1737,26 @@ export function MyDecks({
       )}
 
       {visibleDeckCount === 0 ? (
-        <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
-          <div className="text-lg font-medium text-white">{t("myDecks.empty.title")}</div>
-          <div className="max-w-md text-sm leading-6 text-slate-400">
-            {mode === "select"
-              ? t("myDecks.empty.selectHint")
-              : t("myDecks.empty.manageHint")}
-          </div>
+        <div className="flex w-full flex-col gap-6">
           {mode === "manage" && (
-            <button
-              onClick={() => setActiveFilter("all")}
-              className={menuButtonClass({ tone: "neutral", size: "sm" })}
-            >
-              {t("myDecks.showAllDecksButton")}
-            </button>
+            <div className={DECK_GRID_CLASS}>{deckEntryTiles}</div>
           )}
+          <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
+            <div className="text-lg font-medium text-white">{t("myDecks.empty.title")}</div>
+            <div className="max-w-md text-sm leading-6 text-slate-400">
+              {mode === "select"
+                ? t("myDecks.empty.selectHint")
+                : t("myDecks.empty.manageHint")}
+            </div>
+            {mode === "manage" && (
+              <button
+                onClick={() => setActiveFilter("all")}
+                className={menuButtonClass({ tone: "neutral", size: "sm" })}
+              >
+                {t("myDecks.showAllDecksButton")}
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="flex w-full flex-col gap-6">
@@ -1779,20 +1803,7 @@ export function MyDecks({
                   }
                 />
               )}
-              <AddDeckTile
-                label={t("myDecks.importDeckTile")}
-                onClick={() => setShowImport(true)}
-                icon={
-                  <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
-                }
-              />
-              <AddDeckTile
-                label={t("myDecks.preconstructedTile")}
-                onClick={() => setShowPrecon(true)}
-                icon={
-                  <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5v13a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 16.5v-13Zm11.25.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-1.5 0V4.75a.75.75 0 0 1 .75-.75Zm2.5 1.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-1.5 0v-8.5a.75.75 0 0 1 .75-.75Z" />
-                }
-              />
+              {deckEntryTiles}
             </div>
           </div>
 

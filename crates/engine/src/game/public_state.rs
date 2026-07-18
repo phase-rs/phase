@@ -402,6 +402,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // field `derive_display_state` computes. Grouped explicitly (never
             // `_ => {}`) so a new event variant must be classified to compile.
             GameEvent::GameStarted
+            | GameEvent::HiddenSearchViewed { .. }
             | GameEvent::PhaseChanged { .. }
             | GameEvent::PriorityPassed { .. }
             | GameEvent::SpellCast { .. }
@@ -510,6 +511,7 @@ mod tests {
                 kind: CastOfferKind::Discover {
                     hit_card: ObjectId(10),
                     exiled_misses: Vec::new(),
+                    source_id: ObjectId(11),
                     discover_value: 0,
                 },
             },
@@ -527,6 +529,7 @@ mod tests {
             kind: CastOfferKind::Discover {
                 hit_card: ObjectId(10),
                 exiled_misses: Vec::new(),
+                source_id: ObjectId(11),
                 discover_value: 0,
             },
         };

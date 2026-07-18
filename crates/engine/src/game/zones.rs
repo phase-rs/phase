@@ -168,6 +168,7 @@ pub(crate) fn apply_zone_exit_cleanup(
     // from exile they will be None (no layer computation), which is correct.
     if from == Zone::Battlefield || from == Zone::Exile {
         if let Some(obj) = state.objects.get(&object_id) {
+            let incarnation = obj.incarnation;
             let lki = crate::types::game_state::LKISnapshot {
                 name: obj.name.clone(),
                 token_image_ref: obj.token_image_ref.clone(),
@@ -208,7 +209,12 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // Supplied by the caller: the sever already ran by the time we get here.
                 attachments,
             };
-            state.lki_cache.insert(object_id, lki);
+            state.lki_cache.insert(object_id, lki.clone());
+            state
+                .lki_by_incarnation
+                .entry(object_id)
+                .or_default()
+                .insert(incarnation, lki);
         }
     }
 

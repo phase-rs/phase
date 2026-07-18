@@ -298,6 +298,17 @@ fn natural_balance_collects_two_local_x_searches_before_one_shuffle_each() {
         .act(GameAction::DecideOptionalEffect { accept: true })
         .expect("P1 may accept the scoped library search");
 
+    let WaitingFor::OptionalEffectChoice { player, .. } = runner.state().waiting_for else {
+        panic!(
+            "every optional answer must be collected before any hidden library is exposed, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P2);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("P2 may accept the scoped library search");
+
     let WaitingFor::SearchChoice {
         player,
         cards,
@@ -337,17 +348,6 @@ fn natural_balance_collects_two_local_x_searches_before_one_shuffle_each() {
         "P1's found land must remain in its library until P2 has made the later APNAP choice"
     );
 
-    let WaitingFor::OptionalEffectChoice { player, .. } = runner.state().waiting_for else {
-        panic!(
-            "P2 must receive a separate optional local-X search after P1 selects, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(player, P2);
-    runner
-        .act(GameAction::DecideOptionalEffect { accept: true })
-        .expect("P2 may accept the scoped library search");
-
     let WaitingFor::SearchChoice {
         player,
         cards,
@@ -357,7 +357,7 @@ fn natural_balance_collects_two_local_x_searches_before_one_shuffle_each() {
     } = &runner.state().waiting_for
     else {
         panic!(
-            "accepting P2's optional search must open P2's private choice, got {:?}",
+            "P1's completed selection must advance to P2's prepared private choice, got {:?}",
             runner.state().waiting_for
         );
     };
@@ -369,29 +369,36 @@ fn natural_balance_collects_two_local_x_searches_before_one_shuffle_each() {
     // P1's submitted library id must remain private while P2 sees its current
     // candidates; P0 sees neither player's private library objects.
     let p2_view = filter_state_for_viewer(runner.state(), P2);
-    assert_eq!(
-        p2_view
-            .pending_scoped_library_search
-            .as_ref()
-            .expect("scoped search remains pending until P2 selects")
-            .selections,
-        vec![(P1, vec![ObjectId(0)])],
-        "P2 must not receive P1's private found-card id"
-    );
+    let p2_pending = p2_view
+        .pending_scoped_library_search
+        .as_ref()
+        .expect("scoped search remains pending until P2 selects");
+    let engine::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+        selections: p2_selections,
+        ..
+    } = &p2_pending.phase
+    else {
+        panic!("expected CollectSelections")
+    };
+    assert_eq!(p2_selections[0].1[0].object_id, ObjectId(0));
     assert!(matches!(
         p2_view.waiting_for,
         WaitingFor::SearchChoice { cards, .. }
             if cards.contains(&p2_forest_a) && cards.contains(&p2_forest_b)
     ));
     let p0_view = filter_state_for_viewer(runner.state(), P0);
-    assert_eq!(
-        p0_view
-            .pending_scoped_library_search
-            .as_ref()
-            .expect("non-searcher keeps the public pending-state shape")
-            .selections,
-        vec![(P1, vec![ObjectId(0)])]
-    );
+    let p0_pending = p0_view
+        .pending_scoped_library_search
+        .as_ref()
+        .expect("non-searcher keeps the public pending-state shape");
+    let engine::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+        selections: p0_selections,
+        ..
+    } = &p0_pending.phase
+    else {
+        panic!("expected CollectSelections")
+    };
+    assert_eq!(p0_selections[0].1[0].object_id, ObjectId(0));
     assert!(matches!(
         p0_view.waiting_for,
         WaitingFor::SearchChoice { cards, .. } if cards == vec![ObjectId(0), ObjectId(0)]

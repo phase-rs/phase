@@ -33,10 +33,11 @@ TESTS_DIR = REPO_ROOT / "crates/engine/tests"
 SRC_DIR = REPO_ROOT / "crates/engine/src"
 FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json"
 
-# This fixture must exercise Witherbloom Apprentice through the raw-MTGJSON
-# parser, not a hand-maintained card-data export entry. Keep the set narrow:
-# every other referenced card is selected from the production export below.
-PARSER_BACKED_FIXTURE_CARDS = {"witherbloom apprentice"}
+# This fixture must exercise Witherbloom Apprentice and Sakashima of a
+# Thousand Faces through the raw-MTGJSON parser, not a hand-maintained
+# card-data export entry. Keep the set narrow: every other referenced card is
+# selected from the production export below.
+PARSER_BACKED_FIXTURE_CARDS = {"witherbloom apprentice", "sakashima of a thousand faces"}
 
 # A few non-test-named source files contain test-only card references or corpus
 # rows consumed by tests that load the curated fixture.

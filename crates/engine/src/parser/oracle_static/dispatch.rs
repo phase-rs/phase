@@ -1059,6 +1059,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 118.9 + CR 601.2b: "[Once during each of your turns, ]you may cast
+    // [filter] by paying life equal to its mana value rather than paying its
+    // mana cost." Demon of Fate's Design class. Must precede the free-cast
+    // handler below because both match "you may cast" prefix, but this shape
+    // has "by paying" (alternative cost) not "without paying" (free cast).
+    if let Some(result) = parse_cast_by_paying_life_alt_cost(&text) {
+        return Some(result);
+    }
+
     // CR 601.2b + CR 118.9a + CR 601.2: Omniscience-class restricted free-cast
     // static. Optional " from your hand" zone qualifier — Dracogenesis's
     // "you may cast Dragon spells without paying their mana costs" relies on
@@ -2321,6 +2330,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "<subject> can't activate <type>s' loyalty abilities" ---
+    // CR 602.5 + CR 606.2: The Immortal Sun — subject-first loyalty-activation
+    // prohibition. Distinct prefix from the "activated abilities of <filter>"
+    // form above; narrows to loyalty abilities via `kind = Some(Loyalty)`.
+    if let Some(def) = parse_subject_cant_activate_loyalty(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "~ can be attached only to {filter}" ---
     // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction on an
     // Aura/Equipment — the source can only attach to a host matching the parsed
@@ -2335,6 +2352,13 @@ pub(crate) fn parse_static_line_inner(
     // prohibition — the "can't" effect takes precedence over any effect directing
     // a search — where `cause` identifies whose spells/abilities are muzzled.
     if let Some(def) = parse_cant_search_library(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 723.1a + CR 723.5: search-scoped player control is a non-layer static;
+    // its runtime consumer snapshots the newest applicable authority when the
+    // search begins.
+    if let Some(def) = parse_control_players_during_own_library_search(&tp, &text) {
         return Some(def);
     }
 
@@ -2373,6 +2397,8 @@ pub(crate) fn parse_static_line_inner(
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
             exemption,
+            // CR 606.2: self-reference form blocks any activated ability.
+            kind: None,
         })
         .affected(TargetFilter::SelfRef)
         .description(text.to_string());
@@ -2947,7 +2973,7 @@ pub(crate) fn parse_static_line_inner(
     // runtime gate matches `keyword == "loyalty"` against a loyalty ability's cost.
     // Combinator: prefix → subject → " cost {N} " → direction. The subject is
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
-    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword), _)) =
+    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword, exemption), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
             // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
             // this-turn form, which lowers to a `GenericEffect` carrying this same
@@ -2958,6 +2984,10 @@ pub(crate) fn parse_static_line_inner(
             // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
             // ("where X is ~'s power", Agatha).
             let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
+            // CR 605.1a: consume the optional mana-ability carve-out at the
+            // source-scoped grammar boundary, accepting both apostrophe forms.
+            let (i, exemption) =
+                opt(super::shared::parse_mana_ability_exemption_suffix).parse(i)?;
             Ok((
                 i,
                 (
@@ -2967,6 +2997,7 @@ pub(crate) fn parse_static_line_inner(
                     subject.to_string(),
                     dynamic_count,
                     keyword,
+                    exemption,
                 ),
             ))
         })
@@ -2996,7 +3027,11 @@ pub(crate) fn parse_static_line_inner(
                     amount,
                     minimum_mana,
                     dynamic_count,
-                    exemption: ActivationExemption::None,
+                    exemption: if exemption.is_some() {
+                        ActivationExemption::ManaAbilities
+                    } else {
+                        ActivationExemption::None
+                    },
                     // Source-scoped ("Activated/Loyalty abilities of <filter>"):
                     // scope is the `affected` filter below; no activator gate.
                     activator: None,

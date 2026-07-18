@@ -12,8 +12,9 @@ proptest = ["dep:proptest"]
 # Exposes raw zone placement for test crates; never enabled by production consumers.
 test-support = []
 # Compiles the shared combo corpus (`analysis::corpus`) into the lib + the
-# `combo-verify` tool bin. Excluded from the default lib / WASM surface.
-combo-verify = []
+# `combo-verify` tool bin, including the scenario harness it drives. Excluded
+# from the default lib / WASM surface.
+combo-verify = ["test-support"]
 
 [dependencies]
 serde = { workspace = true }

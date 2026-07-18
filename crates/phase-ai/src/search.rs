@@ -11,8 +11,8 @@ use engine::types::ability::{
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CostResume, GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase,
-    PendingMulliganAction, WaitingFor,
+    CastOfferKind, CompanionDeclaration, CostResume, GameState, ManaChoice, ManaChoicePrompt,
+    MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -963,6 +963,25 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
+        // CR 901.15: Planar deck arrange requires exactly `keep_on_top` cards
+        // on top — pick the highest-valued looked-at planes.
+        WaitingFor::ArrangePlanarDeckTopChoice {
+            cards, keep_on_top, ..
+        } => {
+            let mut scored: Vec<_> = cards
+                .iter()
+                .map(|&id| (id, evaluate_card_value(state, id)))
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            Some(GameAction::SelectCards {
+                cards: scored
+                    .iter()
+                    .take(*keep_on_top)
+                    .map(|(id, _)| *id)
+                    .collect(),
+            })
+        }
+
         // Multi-target selection: zero targets is valid when min == 0.
         WaitingFor::MultiTargetSelection { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
@@ -1184,6 +1203,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
             .first()
             .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
+
+        // CR 601.2c + CR 115.1: "of an opponent's choice" announcer — the
+        // controller picks which opponent announces; fall back to the first.
+        WaitingFor::ChooseAnnouncingOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseAnnouncingOpponent { opponent }),
 
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::CastOffer {
@@ -1483,9 +1508,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         }),
 
         // Companion reveal: decline.
-        WaitingFor::CompanionReveal { .. } => {
-            Some(GameAction::DeclareCompanion { card_index: None })
-        }
+        WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {
+            choice: CompanionDeclaration::Decline,
+        }),
 
         // Explore choice: pick the first choosable creature.
         WaitingFor::ExploreChoice { choosable, .. } => {
@@ -2346,6 +2371,23 @@ pub(crate) fn deterministic_choice(
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let keep_count = scored.len() / 2;
         let top_cards: Vec<_> = scored.iter().take(keep_count).map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: top_cards });
+    }
+
+    if let WaitingFor::ArrangePlanarDeckTopChoice {
+        cards, keep_on_top, ..
+    } = &state.waiting_for
+    {
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_cards: Vec<_> = scored
+            .iter()
+            .take(*keep_on_top)
+            .map(|(id, _)| *id)
+            .collect();
         return Some(GameAction::SelectCards { cards: top_cards });
     }
 
@@ -3309,6 +3351,52 @@ mod tests {
             },
         }
     }
+    fn add_cycler_to_hand(
+        state: &mut GameState,
+        core_type: CoreType,
+        keyword: engine::types::keywords::Keyword,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            "Cycler".to_string(),
+            Zone::Hand,
+        );
+        let ability = engine::database::synthesis::cycling_ability_for_keyword(&keyword)
+            .expect("cycling keyword must synthesize an activated ability");
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(core_type);
+        object.base_card_types = object.card_types.clone();
+        Arc::make_mut(&mut object.abilities).push(ability);
+        id
+    }
+
+    fn add_plain_land(state: &mut GameState, zone: Zone) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, PlayerId(0), "Land".to_string(), zone);
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.base_card_types = object.card_types.clone();
+        id
+    }
+
+    fn priority_on_opponent_end_step(state: &mut GameState) {
+        state.phase = Phase::End;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+    }
+
+    fn action_score(scored: &[(GameAction, f64)], expected: &GameAction) -> f64 {
+        scored
+            .iter()
+            .find_map(|(action, score)| (action == expected).then_some(*score))
+            .unwrap_or_else(|| panic!("expected scored action {expected:?}"))
+    }
 
     fn temporary_combat_modifier_effect() -> Effect {
         Effect::GenericEffect {
@@ -3460,6 +3548,131 @@ mod tests {
             "with X >= 1 affordable the gate stands down; activation must score finite"
         );
     }
+    #[test]
+    fn ordinary_cycling_is_finite_and_scored_below_pass_at_root() {
+        // Production regression for the generic "always cycle" report. Cycling
+        // replaces itself, so without the registered patience policy its generic
+        // activation prior beats Pass at this otherwise-neutral end-step window.
+        let mut state = make_state();
+        priority_on_opponent_end_step(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+        create_object(
+            &mut state,
+            CardId(9_000),
+            PlayerId(0),
+            "Replacement".to_string(),
+            Zone::Library,
+        );
+        let cycler = add_cycler_to_hand(
+            &mut state,
+            CoreType::Creature,
+            engine::types::keywords::Keyword::Cycling(engine::types::keywords::CyclingCost::Mana(
+                engine::types::mana::ManaCost::generic(2),
+            )),
+        );
+        let activation = GameAction::ActivateAbility {
+            source_id: cycler,
+            ability_index: 0,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(1);
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        let cycling_score = action_score(&scored, &activation);
+        let pass_score = action_score(&scored, &GameAction::PassPriority);
+
+        assert!(
+            cycling_score.is_finite(),
+            "cycling must remain a finite option"
+        );
+        assert!(pass_score.is_finite(), "Pass must reach registered scoring");
+        assert!(
+            cycling_score < pass_score,
+            "registered cycling patience must make neutral cycling wait: cycle={cycling_score}, pass={pass_score}"
+        );
+    }
+
+    #[test]
+    fn printed_typecycling_is_not_rejected_by_self_cost_policy() {
+        // Nonland Typecycling searches rather than draws. SelfCostValue used to
+        // classify that SearchLibrary payoff as trivial and hard-reject the
+        // discard; the exact Cycling tag now delegates to finite patience.
+        let mut state = make_state();
+        priority_on_opponent_end_step(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        let cycler = add_cycler_to_hand(
+            &mut state,
+            CoreType::Creature,
+            engine::types::keywords::Keyword::Typecycling {
+                cost: engine::types::mana::ManaCost::generic(1),
+                subtype: "Wizard".to_string(),
+            },
+        );
+        let activation = GameAction::ActivateAbility {
+            source_id: cycler,
+            ability_index: 0,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(2);
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+
+        assert!(
+            action_score(&scored, &activation).is_finite(),
+            "printed Typecycling must reach finite registered scoring"
+        );
+    }
+
+    #[test]
+    fn sole_planned_cycling_land_waits_but_remains_finite() {
+        let mut state = make_state();
+        priority_on_opponent_end_step(&mut state);
+        for _ in 0..5 {
+            add_plain_land(&mut state, Zone::Battlefield);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+        create_object(
+            &mut state,
+            CardId(9_001),
+            PlayerId(0),
+            "Replacement".to_string(),
+            Zone::Library,
+        );
+        let cycler = add_cycler_to_hand(
+            &mut state,
+            CoreType::Land,
+            engine::types::keywords::Keyword::Cycling(engine::types::keywords::CyclingCost::Mana(
+                engine::types::mana::ManaCost::generic(2),
+            )),
+        );
+        let activation = GameAction::ActivateAbility {
+            source_id: cycler,
+            ability_index: 0,
+        };
+
+        let mut ai_session = AiSession::empty();
+        ai_session.plan.insert(
+            PlayerId(0),
+            PlanSnapshot {
+                expected_lands: [1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+                ..PlanSnapshot::default()
+            },
+        );
+        let session = Arc::new(ai_session);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(3);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        let cycling_score = action_score(&scored, &activation);
+        let pass_score = action_score(&scored, &GameAction::PassPriority);
+
+        assert!(
+            cycling_score.is_finite(),
+            "needed-land patience is not a veto"
+        );
+        assert!(
+            cycling_score < pass_score,
+            "the sole next planned land must wait: cycle={cycling_score}, pass={pass_score}"
+        );
+    }
 
     #[test]
     fn determinization_candidate_set_stable_over_resampled_opponent_hand() {
@@ -3488,6 +3701,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(opp_creature)],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4511,6 +4725,7 @@ mod tests {
             .push(CoreType::Land);
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: vec![titan, land],
             count: 1,
             reveal: false,
@@ -4603,6 +4818,7 @@ mod tests {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4641,6 +4857,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: Vec::new(),
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4830,6 +5047,7 @@ mod tests {
 
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards,
             count: 4,
             reveal: true,

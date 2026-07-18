@@ -632,9 +632,10 @@ fn heist_full_production_path_grenzo_cast_etb_end_to_end() {
         .trigger_definitions
         .as_slice()
         .iter()
-        .find(|t| t.mode == TriggerMode::ChangesZone)
+        .find(|t| t.definition.mode == TriggerMode::ChangesZone)
         .expect("Grenzo must have a ChangesZone (ETB) trigger");
     let etb_effect = etb_trigger
+        .definition
         .execute
         .as_ref()
         .expect("ETB trigger must have an execute body");
