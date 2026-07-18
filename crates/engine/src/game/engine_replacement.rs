@@ -3480,6 +3480,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -5264,6 +5265,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -5467,6 +5469,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -5586,6 +5589,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -5899,6 +5903,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };

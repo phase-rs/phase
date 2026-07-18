@@ -4,6 +4,8 @@
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::move_to_zone;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -57,6 +59,141 @@ fn mystic_reflection_makes_next_creature_token_copy_chosen_creature() {
         obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
         "token must copy chosen creature subtype, got {:?}",
         obj.card_types.subtypes
+    );
+}
+
+#[test]
+fn mystic_reflection_makes_next_nontoken_creature_enter_as_chosen_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let chosen = scenario
+        .add_creature(P0, "Colossal Dreadmaw", 6, 6)
+        .with_subtypes(vec!["Dinosaur"])
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let entering = scenario
+        .add_creature_to_hand(P0, "Runeclaw Bear", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let follow_up = scenario
+        .add_creature_to_hand(P0, "Silvercoat Lion", 2, 2)
+        .with_subtypes(vec!["Cat"])
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(mystic).target_object(chosen).resolve();
+    runner.cast(entering).resolve();
+
+    let obj = runner
+        .state()
+        .objects
+        .get(&entering)
+        .expect("creature card must enter the battlefield");
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(!obj.is_token, "copied entering card must remain non-token");
+    assert_eq!(obj.name, "Colossal Dreadmaw");
+    assert_eq!(obj.power, Some(6));
+    assert_eq!(obj.toughness, Some(6));
+    assert!(
+        obj.card_types.core_types.contains(&CoreType::Creature),
+        "copied entering card must be a creature, got {:?}",
+        obj.card_types.core_types
+    );
+    assert!(
+        obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+        "copied entering card must copy subtype, got {:?}",
+        obj.card_types.subtypes
+    );
+
+    runner.cast(follow_up).resolve();
+    let second = runner
+        .state()
+        .objects
+        .get(&follow_up)
+        .expect("follow-up creature must enter the battlefield");
+    assert_eq!(second.name, "Silvercoat Lion");
+    assert_eq!(second.power, Some(2));
+    assert_eq!(second.toughness, Some(2));
+    assert!(
+        second.card_types.subtypes.iter().any(|s| s == "Cat"),
+        "one-shot replacement must be consumed before the next entry"
+    );
+}
+
+#[test]
+fn mystic_reflection_makes_next_planeswalker_enter_as_chosen_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let chosen = scenario
+        .add_creature(P0, "Colossal Dreadmaw", 6, 6)
+        .with_subtypes(vec!["Dinosaur"])
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let entering = scenario
+        .add_creature_to_hand(P0, "Jace Beleren", 0, 0)
+        .as_planeswalker_with_loyalty("Jace", 3)
+        .id();
+    let follow_up = scenario
+        .add_creature_to_hand(P0, "Mesa Lynx", 2, 1)
+        .with_subtypes(vec!["Cat"])
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(mystic).target_object(chosen).resolve();
+    runner.cast(entering).resolve();
+
+    let obj = runner
+        .state()
+        .objects
+        .get(&entering)
+        .expect("planeswalker card must enter the battlefield");
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(!obj.is_token, "copied entering card must remain non-token");
+    assert_eq!(obj.name, "Colossal Dreadmaw");
+    assert_eq!(obj.power, Some(6));
+    assert_eq!(obj.toughness, Some(6));
+    assert!(
+        obj.card_types.core_types.contains(&CoreType::Creature),
+        "planeswalker entry must copy creature card type, got {:?}",
+        obj.card_types.core_types
+    );
+    assert!(
+        !obj.card_types.core_types.contains(&CoreType::Planeswalker),
+        "planeswalker entry must not retain its original card type"
+    );
+    assert!(
+        obj.card_types.subtypes.iter().any(|s| s == "Dinosaur"),
+        "planeswalker entry must copy subtype, got {:?}",
+        obj.card_types.subtypes
+    );
+    assert_eq!(
+        obj.loyalty, None,
+        "copied creature characteristics have no loyalty"
+    );
+    assert_eq!(
+        obj.counters.get(&CounterType::Loyalty).copied(),
+        None,
+        "intrinsic planeswalker counters must be retargeted to copied characteristics"
+    );
+
+    runner.cast(follow_up).resolve();
+    let second = runner
+        .state()
+        .objects
+        .get(&follow_up)
+        .expect("follow-up creature must enter the battlefield");
+    assert_eq!(second.name, "Mesa Lynx");
+    assert_eq!(second.power, Some(2));
+    assert_eq!(second.toughness, Some(1));
+    assert!(
+        second.card_types.subtypes.iter().any(|s| s == "Cat"),
+        "one-shot replacement must be consumed before the next entry"
     );
 }
 

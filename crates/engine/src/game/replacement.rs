@@ -1084,6 +1084,7 @@ fn discard_applier(
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            enter_as_copy: None,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -3122,10 +3123,10 @@ fn create_token_applier(
     }
 }
 
-// CR 608.2h + CR 707.2: A Mystic Reflection-style token entry reads the
-// chosen source's current copiable values if it still exists, otherwise its
+// CR 608.2h + CR 707.2: A Mystic Reflection-style entry reads the chosen
+// source's current copiable values if it still exists, otherwise its
 // last-known copiable values from the public-zone exit snapshot.
-fn create_token_copy_spec_for_replacement(
+fn create_entry_copy_spec_for_replacement(
     state: &GameState,
     repl_def: &ReplacementDefinition,
     replacement_source: ObjectId,
@@ -3180,6 +3181,27 @@ fn create_token_copy_spec_for_replacement(
         source_id: replacement_source,
         controller,
     })
+}
+
+fn retarget_intrinsic_entry_counters_to_copy(
+    enter_with_counters: &mut Vec<(CounterType, u32)>,
+    copy_spec: &CopyTokenSpec,
+) {
+    // CR 306.5b + CR 310.4b + CR 614.12a: "enters as a copy" changes the
+    // characteristics used for intrinsic loyalty/defense/lore entry counters.
+    enter_with_counters.retain(|(counter, _)| {
+        !matches!(
+            counter,
+            CounterType::Loyalty | CounterType::Defense | CounterType::Lore
+        )
+    });
+    enter_with_counters.extend(
+        crate::game::printed_cards::intrinsic_entry_counters_for_face(
+            copy_spec.values.loyalty,
+            None,
+            &copy_spec.values.card_types,
+        ),
+    );
 }
 
 // CR 614.6 + CR 707.2: A copy replacement modifies how the token-entry event
@@ -6344,7 +6366,7 @@ fn apply_single_replacement(
     // the same resolution step, right after the ZoneChange completes. Without this,
     // the chooser would never be prompted. Optional replacements set
     // `post_replacement_continuation` in `continue_replacement` when the player accepts.
-    let (event_key, modifiers, mandatory_post_effect, consume_on_apply, create_token_copy) =
+    let (event_key, modifiers, mandatory_post_effect, consume_on_apply, entry_copy) =
         match repl_def_ref {
             Some(repl_def) => {
                 let replacement_controller = if rid.source == ObjectId(0) {
@@ -6356,7 +6378,7 @@ fn apply_single_replacement(
                         .map(|obj| obj.controller)
                         .unwrap_or(state.active_player)
                 };
-                let create_token_copy = create_token_copy_spec_for_replacement(
+                let entry_copy = create_entry_copy_spec_for_replacement(
                     state,
                     repl_def,
                     rid.source,
@@ -6576,8 +6598,10 @@ fn apply_single_replacement(
                 let post_effect =
                     post_effect.filter(|_| !matches!(proposed, ProposedEvent::Explore { .. }));
                 let post_effect = post_effect.filter(|_| {
-                    !(matches!(proposed, ProposedEvent::CreateToken { .. })
-                        && create_token_copy.is_some())
+                    !(matches!(
+                        proposed,
+                        ProposedEvent::CreateToken { .. } | ProposedEvent::ZoneChange { .. }
+                    ) && entry_copy.is_some())
                 });
                 let mut modifiers =
                     event_modifiers_for_ability(ability, state, rid.source, &proposed);
@@ -6591,7 +6615,7 @@ fn apply_single_replacement(
                     modifiers,
                     post_effect,
                     repl_def.consume_on_apply,
-                    create_token_copy,
+                    entry_copy,
                 )
             }
             None => return Ok(proposed),
@@ -6669,9 +6693,22 @@ fn apply_single_replacement(
                     }
                 }
                 if let (Some(copy_spec), ProposedEvent::CreateToken { copy, .. }) =
-                    (create_token_copy.clone(), &mut new_event)
+                    (entry_copy.clone(), &mut new_event)
                 {
                     *copy = Some(Box::new(copy_spec));
+                }
+                if let (
+                    Some(copy_spec),
+                    ProposedEvent::ZoneChange {
+                        to: Zone::Battlefield,
+                        enter_as_copy,
+                        enter_with_counters,
+                        ..
+                    },
+                ) = (entry_copy.clone(), &mut new_event)
+                {
+                    retarget_intrinsic_entry_counters_to_copy(enter_with_counters, &copy_spec);
+                    *enter_as_copy = Some(Box::new(copy_spec));
                 }
                 // CR 614.1c: Applied branch carries ETB counter data; add to the zone change.
                 if !modifiers.etb_counters.is_empty() {
@@ -8896,6 +8933,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -11058,6 +11096,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -12104,6 +12143,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -15117,6 +15157,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             face_down_profile: None,
             applied: HashSet::new(),
         };
@@ -15161,6 +15202,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             face_down_profile: None,
             applied: HashSet::new(),
         };

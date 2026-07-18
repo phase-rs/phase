@@ -10,7 +10,8 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
     AdditionalCostInstancePayment, CastTimingPermission, CostPaidObjectSnapshot, Duration, Effect,
-    KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    EffectKind, KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter,
+    TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -1672,6 +1673,7 @@ pub(crate) fn deliver_replaced_zone_change(
         enter_with_counters,
         controller_override: ctrl_override,
         face_down_profile,
+        enter_as_copy,
         applied,
         ..
     } = event
@@ -1895,6 +1897,31 @@ pub(crate) fn deliver_replaced_zone_change(
         if entered_battlefield {
             if let Some(profile) = &face_down_profile {
                 apply_face_down_entry_profile(state, object_id, profile);
+            }
+        }
+        // CR 614.12a + CR 616.1c + CR 707.2: An enter-as-copy replacement
+        // selected its copy source before this delivery and carried those
+        // copiable values on the proposed event. Install the copy effect before
+        // ETB counters/triggers run so the permanent is observed as the copied
+        // object as it enters, without overwriting its printed/base identity.
+        if entered_battlefield {
+            if let Some(copy) = enter_as_copy {
+                let copy = *copy;
+                let _ = crate::game::effects::become_copy::apply_precomputed_copy_values(
+                    state,
+                    object_id,
+                    copy.source_id,
+                    copy.controller,
+                    copy.source_id,
+                    copy.sacrifice_at.unwrap_or(Duration::Permanent),
+                    *copy.values,
+                    copy.display_source,
+                    copy.printed_ref,
+                    copy.token_image_ref,
+                    copy.additional_modifications,
+                    EffectKind::BecomeCopy,
+                    events,
+                );
             }
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
