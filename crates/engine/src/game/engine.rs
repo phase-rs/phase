@@ -1795,6 +1795,44 @@ fn derived_fodder_class(
     after.objects.get(&id).cloned()
 }
 
+/// CR 732.2a / CR 111.10: re-derive the reproduced fodder class of the accepted
+/// object-growth period by driving ONE iteration of `last_loop_action_sequence` on a
+/// clone. `None` when the sequence is empty or the period reproduces no single new
+/// battlefield object (a multi-activation mana engine → no fodder pile to display).
+/// Mirrors the detection drive: same `SimulationProbeGuard` re-entrancy guard, same
+/// `drive_loop_sequence_iteration`, same `derived_fodder_class` single-new-object rule.
+/// Called at materialize (with the sequence still intact) to snapshot the ∞ pile.
+///
+/// The accept beat's `waiting_for` is `RespondToShortcut`, NOT `Priority`, so the recast
+/// cannot proceed from `state` as-is — seed a `Priority{controller}` window on the driven
+/// frame exactly as `apply_until_lethal_shortcut` does before its identical drive.
+///
+/// INV (clone-only): takes `&GameState` (SHARED borrow) ⇒ a live write is TYPE-IMPOSSIBLE.
+/// The `Priority{controller}` seed and the drive both mutate `before`/`after`, which are
+/// THROWAWAY clones (`state.clone()` → `before.clone()`); live `state.waiting_for` is never
+/// touched, so this class-derivation cannot corrupt the real accept flow (INV-1, mirrors
+/// `try_offer_object_growth_shortcut`).
+fn current_period_fodder_class(state: &GameState) -> Option<crate::game::game_object::GameObject> {
+    let seq = state.last_loop_action_sequence.clone();
+    if seq.is_empty() {
+        return None;
+    }
+    let controller = seq[0].controller;
+    let expected_defs: Vec<Option<crate::types::ability::AbilityDefinition>> = seq
+        .iter()
+        .map(|c| loop_action_expected_def(state, c))
+        .collect();
+    let _probe = SimulationProbeGuard::enter();
+    // Seed + drive on THROWAWAY clones only (never `state`): `before` is the pre-drive frame,
+    // `after` the post-one-period frame; `derived_fodder_class` diffs the two clones.
+    let mut before = state.clone();
+    priority::reset_priority(&mut before);
+    before.waiting_for = WaitingFor::Priority { player: controller };
+    let mut after = before.clone();
+    drive_loop_sequence_iteration(&mut after, &seq, 0, &expected_defs).ok()?;
+    derived_fodder_class(&before, &after)
+}
+
 /// CR 732.2a: detect an object-growth recast loop by driving TWO iterations on a clone;
 /// on success returns the offer certificate for the CALLER to install. Takes a SHARED
 /// `&GameState` ⇒ a live write is TYPE-IMPOSSIBLE (INV-1); the sole live write
@@ -1995,6 +2033,15 @@ fn materialize_object_growth_shortcut(
     // CR 732.2a: reuse the single `unbounded_resources` writer (never mutate the map inline). The
     // proposer is the loop controller (the offer required the whole period to be theirs).
     state.mark_unbounded_loop(proposal.proposer, &proposal.unbounded);
+    // CR 732.2a / CR 110.1: snapshot the ∞ pile — the proposer's tapped fodder-class members —
+    // for `DerivedViews::unbounded_pile`. Re-derive the fodder class HERE (the sequence is still
+    // intact; the `.clear()` below wipes it) by driving one period on a clone. A mana-engine loop
+    // reproduces no token ⇒ `current_period_fodder_class` is `None` ⇒ no pile (correct).
+    if let Some(class) = current_period_fodder_class(state) {
+        let pile =
+            crate::analysis::resource::tapped_fodder_members(state, proposal.proposer, &class);
+        state.register_unbounded_loop_pile(proposal.proposer, pile);
+    }
     state.loop_detect_ring.clear();
     state.last_loop_action_sequence.clear();
     priority::reset_priority(state);

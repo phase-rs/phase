@@ -432,6 +432,17 @@ pub(crate) fn select_convoke_taps(
     let mut used: Vec<ObjectId> = Vec::new();
 
     // Canonical candidate order: lowest ObjectId first ⇒ reproducible replay.
+    //
+    // KNOWN GAP (CR 732.2a object-growth detection): this lowest-ObjectId-per-color pick is used
+    // by the DETERMINISTIC loop-detection replay (`try_offer_object_growth_shortcut` →
+    // `drive_loop_sequence_iteration`), not just live casts. When an UNTAPPED green cost-reducer
+    // (e.g. B/G Witherbloom) has a lower ObjectId than the reproduced fodder tokens, the replay
+    // convoke-taps that STABLE permanent instead of a fodder token. Tapping a stable-partition
+    // object drifts it across the period, so `board_covers_modulo_fodder`'s `objects_content_eq`
+    // fails and an otherwise-valid infinite object-growth loop is NOT offered. It only bites when
+    // the cost-reducer is untapped at cast time; the real game had Witherbloom already tapped, so
+    // it never triggered there. A robust fix (prefer the reproduced fodder class over stable
+    // permanents in the detection replay) belongs in the detection drive, not the ∞-pile display.
     let mut candidates: Vec<ObjectId> = state
         .battlefield
         .iter()

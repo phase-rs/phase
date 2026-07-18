@@ -513,6 +513,57 @@ fn mana_engine_accept_marks_infinite_mana_independent_of_count() {
     );
 }
 
+/// DESIGN STEP 4 (∞-pile) — MANA-ENGINE PAIRED NEGATIVE: accepting a MANA loop marks the
+/// `Mana(_)` axis (reach-guard proving the accept genuinely materialized) but writes NO
+/// `unbounded_loop_pile` — a mana engine reproduces no fodder token, so
+/// `current_period_fodder_class` returns `None` and no pile is snapshotted. This proves the
+/// fodder gate in `materialize_object_growth_shortcut` discriminates object-growth from mana.
+///
+/// DISCRIMINATING: the Mana-axis assertion is the positive reach-guard (the accept ran and
+/// marked ∞); the empty-pile assertion is the fodder-gate discriminator. Its object-growth
+/// counterpart (`combo_infinite_pile.rs`) writes a NON-empty pile from the same accept seam.
+#[test]
+fn mana_engine_accept_writes_no_pile_but_marks_mana() {
+    let Some(db) = shared_card_db() else { return };
+    let mut rig = setup(true, LoopDetectionMode::Interactive, db);
+    let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    drive_one_period(&mut rig, mana_idx, untap_idx);
+    assert!(
+        matches!(
+            rig.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "precondition: the mana-engine offer must fire before acceptance"
+    );
+    rig.runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1),
+            template: None,
+        })
+        .expect("declare shortcut");
+    rig.runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("opponent accepts");
+
+    // Positive reach-guard: the accept materialized and marked the Mana axis.
+    assert!(
+        rig.runner
+            .state()
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))),
+        "the mana-engine accept must mark a Mana(_) axis (reach-guard)"
+    );
+    // Fodder-gate discriminator: a mana engine reproduces no token ⇒ no ∞ pile.
+    assert!(
+        rig.runner.state().unbounded_loop_pile.is_empty(),
+        "a mana engine has no fodder class ⇒ no unbounded_loop_pile is written"
+    );
+}
+
 /// T5-analog — `Off` byte-identity (#4603). Under `LoopDetectionMode::Off` the mana engine NEVER
 /// arms the sequence (the `samples()` gate) and NEVER offers, while the game plays normally (Basalt
 /// untaps, mana is in the pool). Revert-failing: dropping the `samples()` gate on the mana-arm /

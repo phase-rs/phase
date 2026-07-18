@@ -21,7 +21,7 @@
 //! [`ResourceVector`] is the typed catalogue of those monotone axes;
 //! [`loop_states_equal_modulo_resources`] is the projected comparison.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -1007,6 +1007,30 @@ fn is_fodder(state: &GameState, id: &ObjectId, class: &GameObject) -> bool {
         .objects
         .get(id)
         .is_some_and(|o| fodder_content_eq(o, class))
+}
+
+/// CR 110.1 / CR 732.2a: the winning controller's *tapped* fodder-class members —
+/// the objects forming the visible "∞ pile" for an accepted object-growth loop
+/// shortcut. Filters `state.battlefield` to permanents that `controller` controls,
+/// are tapped, and match the fodder `class` by content (via [`fodder_content_eq`]).
+///
+/// Raw-vs-raw content compare is exact here: the fodder class is inert
+/// (`object_content_eq` omits summoning-sickness / timestamp / entered-this-turn),
+/// so no projection is needed. Only *tapped* members are the pile: a convoke/affinity
+/// loop taps the fodder to pay, so the ever-growing tapped multiset is what the
+/// display should show as ∞.
+pub(crate) fn tapped_fodder_members(
+    state: &GameState,
+    controller: PlayerId,
+    class: &GameObject,
+) -> BTreeSet<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|o| (id, o)))
+        .filter(|(_, o)| o.controller == controller && o.tapped && fodder_content_eq(o, class))
+        .map(|(id, _)| *id)
+        .collect()
 }
 
 /// CR 110.1 / CR 732.2a: the fodder-axis board cover. Partitions the battlefield by
@@ -3029,6 +3053,61 @@ mod tests {
         );
         object.tapped = tapped;
         state.objects.insert(oid, object);
+    }
+
+    /// Insert a named battlefield permanent with a chosen `tapped` state AND push it
+    /// onto `state.battlefield` (fodder-pile fixtures iterate the battlefield vector).
+    fn named_bf(
+        state: &mut GameState,
+        id: u64,
+        controller: u8,
+        name: &str,
+        tapped: bool,
+    ) -> ObjectId {
+        let oid = ObjectId(id);
+        let mut object = GameObject::new(
+            oid,
+            CardId(id),
+            PlayerId(controller),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        object.tapped = tapped;
+        state.objects.insert(oid, object);
+        state.battlefield.push_back(oid);
+        oid
+    }
+
+    /// DESIGN STEP 4 (∞-pile): `tapped_fodder_members` returns exactly the winning
+    /// controller's *tapped* fodder-class members — not untapped fodder, not
+    /// non-fodder permanents, not an opponent's tapped fodder.
+    ///
+    /// REVERT-PROBE: drop the `o.tapped` conjunct in `tapped_fodder_members` → the
+    /// untapped P0 Saproling (id 3) leaks into the set → `assert_eq` below fails.
+    #[test]
+    fn tapped_fodder_members_returns_only_controllers_tapped_fodder() {
+        let mut state = GameState::new_two_player(7);
+        let t1 = named_bf(&mut state, 1, 0, "Saproling", true); // P0 tapped fodder
+        let t2 = named_bf(&mut state, 2, 0, "Saproling", true); // P0 tapped fodder
+        let _untapped = named_bf(&mut state, 3, 0, "Saproling", false); // P0 UNtapped fodder
+        let _land = named_bf(&mut state, 4, 0, "Forest", true); // P0 tapped NON-fodder
+        let _opp = named_bf(&mut state, 5, 1, "Saproling", true); // opponent tapped fodder
+
+        // Fodder class: content-equal (modulo tapped) to the P0 Saprolings.
+        let class = GameObject::new(
+            ObjectId(999),
+            CardId(999),
+            PlayerId(0),
+            "Saproling".to_string(),
+            Zone::Battlefield,
+        );
+
+        let pile = tapped_fodder_members(&state, pid(0), &class);
+        assert_eq!(
+            pile,
+            BTreeSet::from([t1, t2]),
+            "only P0's tapped Saprolings; untapped/non-fodder/opponent excluded"
+        );
     }
 
     /// T10 (B4 core): `board_delta` isolates the one untapped seed a net-object-progress

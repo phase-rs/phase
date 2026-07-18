@@ -2625,6 +2625,14 @@ export interface DerivedViews {
    * Mirrors `engine::game::derived_views::DerivedViews::unbounded_resources`.
    */
   unbounded_resources?: UnboundedResourceView[];
+  /**
+   * CR 732.2a / CR 110.1: battlefield object IDs forming an accepted object-growth
+   * loop's "∞ pile" (the winning controller's tapped fodder-class members). Engine-
+   * authored membership — the FE renders `∞` (not `×N`) on any battlefield group
+   * whose members are all in this set, and never re-derives which objects are the pile.
+   * Mirrors `engine::game::derived_views::DerivedViews::unbounded_pile`.
+   */
+  unbounded_pile?: ObjectId[];
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

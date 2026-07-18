@@ -11412,6 +11412,23 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_loop_enablers: BTreeMap<PlayerId, BTreeSet<ObjectId>>,
 
+    /// CR 732.2a display state: for the winning controller of an accepted
+    /// object-growth loop shortcut, the set of that controller's *tapped*
+    /// fodder-class members (CR 110.1 permanents) forming the visible "∞ pile".
+    /// Re-derived once at loop materialization by `register_unbounded_loop_pile`
+    /// and projected to `DerivedViews::unbounded_pile`; the frontend renders ∞
+    /// (vs ×N) on any battlefield group whose members are all pile members.
+    /// Written ONLY by `register_unbounded_loop_pile`; cleared (in lockstep with
+    /// `unbounded_resources` / `unbounded_loop_enablers`) by `clear_unbounded_loop`.
+    ///
+    /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same family as `unbounded_resources` /
+    /// `unbounded_loop_enablers`): display state, not rules state for equality —
+    /// a populated live state must still compare equal to the empty-pile ring
+    /// snapshots, or CR 104.4b/CR 732.2a loop detection yields false negatives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unbounded_loop_pile: BTreeMap<PlayerId, BTreeSet<ObjectId>>,
+
     /// Oracle ids (fallback: object names) of cards whose abilities hit
     /// `Effect::Unimplemented` at resolution this game. Diagnostics only —
     /// records *runtime resolution hits*, is game-scoped, and survives zone
@@ -14460,6 +14477,7 @@ impl GameState {
             debug_permitted: BTreeSet::new(),
             unbounded_resources: BTreeMap::new(),
             unbounded_loop_enablers: BTreeMap::new(),
+            unbounded_loop_pile: BTreeMap::new(),
             unimplemented_oracle_ids: BTreeSet::new(),
             pending_trigger_abandons: Vec::new(),
             loop_detection: LoopDetectionMode::Off,
@@ -15178,13 +15196,26 @@ impl GameState {
         self.unbounded_loop_enablers.insert(controller, enablers);
     }
 
+    /// CR 732.2a / CR 110.1: single write authority for `unbounded_loop_pile` —
+    /// only `game::engine::materialize_object_growth_shortcut` calls this, with the
+    /// winning controller's tapped fodder-class members (the visible "∞ pile").
+    /// Overwrites (idempotent re-registration). A no-op for an empty set (a
+    /// mana-engine loop has no fodder class → no pile to display).
+    pub fn register_unbounded_loop_pile(&mut self, controller: PlayerId, pile: BTreeSet<ObjectId>) {
+        if pile.is_empty() {
+            return;
+        }
+        self.unbounded_loop_pile.insert(controller, pile);
+    }
+
     /// CR 732.2a: clear every unbounded-resource axis recorded for `controller`.
     /// Whole-player clear: with the infinite-mana toggle as the only PR-6 producer
     /// this matches today's all-or-nothing disable; an axis-scoped clear can be
     /// added when multiple producers coexist on one controller.
     pub fn clear_unbounded_loop(&mut self, controller: PlayerId) {
         self.unbounded_resources.remove(&controller);
-        self.unbounded_loop_enablers.remove(&controller); // keep the two maps in lockstep
+        self.unbounded_loop_enablers.remove(&controller); // keep the three maps in lockstep
+        self.unbounded_loop_pile.remove(&controller);
     }
 }
 
@@ -15400,6 +15431,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         debug_permitted: _,
         unbounded_resources: _,
         unbounded_loop_enablers: _,
+        unbounded_loop_pile: _,
         unimplemented_oracle_ids: _,
         pending_trigger_abandons: _,
         loop_detection: _,
@@ -17108,10 +17140,44 @@ mod tests {
         );
     }
 
-    /// PR-7 Phase 4c (B5 defuse): `clear_unbounded_loop` must remove BOTH
-    /// `unbounded_resources` and `unbounded_loop_enablers` for the controller in
-    /// lockstep — the `zones.rs` defuse hook relies on a single call revoking the
-    /// whole capability.
+    /// PR-7 DESIGN STEP 4 (∞-pile display): sibling of
+    /// `unbounded_loop_enablers_excluded_from_loop_equality` — the new
+    /// `unbounded_loop_pile` field follows the identical exclusion-by-omission
+    /// discipline (never appears in the `impl PartialEq` `&&` chain).
+    ///
+    /// REVERT-PROBE: add `&& self.unbounded_loop_pile == other.unbounded_loop_pile`
+    /// to the manual `impl PartialEq for GameState` → all three assertions below fail.
+    #[test]
+    fn unbounded_loop_pile_excluded_from_loop_equality() {
+        use crate::analysis::resource::loop_states_equal_modulo_resources;
+
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
+        // Sanity: the populated field really does differ between the two states.
+        assert_ne!(
+            a.unbounded_loop_pile, b.unbounded_loop_pile,
+            "fixture must actually differ in unbounded_loop_pile"
+        );
+
+        assert!(
+            a == b,
+            "manual PartialEq must exclude unbounded_loop_pile (display state)"
+        );
+        assert!(
+            loop_states_equal(&a, &b),
+            "loop_states_equal (CR 104.4b/732.2a) must exclude unbounded_loop_pile"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "the PR-0/PR-2 modulo path must exclude unbounded_loop_pile"
+        );
+    }
+
+    /// PR-7 Phase 4c (B5 defuse): `clear_unbounded_loop` must remove ALL THREE
+    /// `unbounded_resources` / `unbounded_loop_enablers` / `unbounded_loop_pile`
+    /// maps for the controller in lockstep — the `zones.rs` defuse hook relies on
+    /// a single call revoking the whole capability.
     #[test]
     fn clear_unbounded_loop_removes_both_maps_in_lockstep() {
         let mut state = GameState::new_two_player(7);
@@ -17120,8 +17186,10 @@ mod tests {
             &[crate::analysis::resource::ResourceAxis::Life(PlayerId(0))],
         );
         state.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(1)]));
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
         assert!(state.unbounded_resources.contains_key(&PlayerId(0)));
         assert!(state.unbounded_loop_enablers.contains_key(&PlayerId(0)));
+        assert!(state.unbounded_loop_pile.contains_key(&PlayerId(0)));
 
         state.clear_unbounded_loop(PlayerId(0));
 
@@ -17132,6 +17200,10 @@ mod tests {
         assert!(
             !state.unbounded_loop_enablers.contains_key(&PlayerId(0)),
             "clear_unbounded_loop must remove the unbounded_loop_enablers entry"
+        );
+        assert!(
+            !state.unbounded_loop_pile.contains_key(&PlayerId(0)),
+            "clear_unbounded_loop must remove the unbounded_loop_pile entry"
         );
     }
 
