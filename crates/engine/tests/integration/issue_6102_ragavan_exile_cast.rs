@@ -99,34 +99,43 @@ fn ragavan_exiles_damaged_players_top_card_and_grants_cast_permission() {
 
     drain_until_ragavan_trigger_resolves(&mut runner, opponent_top);
 
-    let state = runner.state();
-    assert_eq!(
-        treasure_count(state, P0),
-        1,
-        "Ragavan must create one Treasure token for its controller"
-    );
-    assert_eq!(
-        state.objects[&opponent_top].zone,
-        Zone::Exile,
-        "Ragavan must exile the damaged player's top card"
-    );
-    assert_eq!(
-        state.objects[&controller_top].zone,
-        Zone::Library,
-        "Ragavan must not exile from its controller's library"
-    );
+    {
+        let state = runner.state();
+        assert_eq!(
+            treasure_count(state, P0),
+            1,
+            "Ragavan must create one Treasure token for its controller"
+        );
+        assert_eq!(
+            state.objects[&opponent_top].zone,
+            Zone::Exile,
+            "Ragavan must exile the damaged player's top card"
+        );
+        assert_eq!(
+            state.objects[&controller_top].zone,
+            Zone::Library,
+            "Ragavan must not exile from its controller's library"
+        );
+        assert!(
+            state.objects[&opponent_top]
+                .casting_permissions
+                .iter()
+                .any(|permission| matches!(
+                    permission,
+                    CastingPermission::PlayFromExile { granted_to: P0, .. }
+                )),
+            "the exiled card must receive a PlayFromExile grant for Ragavan's controller"
+        );
+        assert!(
+            spell_objects_available_to_cast(state, P0).contains(&opponent_top),
+            "the granted spell must surface on P0's cast path"
+        );
+    }
+
+    let cast_outcome = runner.cast(opponent_top).resolve();
+    cast_outcome.assert_zone(&[opponent_top], Zone::Graveyard);
     assert!(
-        state.objects[&opponent_top]
-            .casting_permissions
-            .iter()
-            .any(|permission| matches!(
-                permission,
-                CastingPermission::PlayFromExile { granted_to: P0, .. }
-            )),
-        "the exiled card must receive a PlayFromExile grant for Ragavan's controller"
-    );
-    assert!(
-        spell_objects_available_to_cast(state, P0).contains(&opponent_top),
-        "the granted spell must surface on P0's cast path"
+        !spell_objects_available_to_cast(cast_outcome.state(), P0).contains(&opponent_top),
+        "casting the granted spell must consume the exile-cast path"
     );
 }
