@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Bloquée",
+    "cantBeActivated": "Cette capacité ne peut pas être activée",
+    "cantActivateDuring": "Ne peut pas être activée pour l'instant",
+    "prohibited": "L'activation de cette capacité est interdite"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",

@@ -2517,6 +2517,45 @@ pub enum ProhibitedActivity {
     },
 }
 
+/// Why a specific activated ability is currently blocked from activation.
+///
+/// Display read-out only (populated by the derive sweep): carries no enforcement
+/// authority. The three arms mirror the three enforcement predicates in
+/// `game::casting`, in the same order those gates consult them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AbilityBlockKind {
+    /// CR 602.5: A static ability prohibits this ability from being activated at
+    /// all (Pithing Needle's named source, Immortal Sun's loyalty abilities).
+    CantBeActivated,
+    /// CR 602.5 + CR 117.1b: A timing restriction forbids activation right now
+    /// (City of Solitude — only during the affected player's own turn).
+    CantActivateDuring,
+    /// CR 602.5: A temporary continuous effect prohibits this activity axis for
+    /// the affected players (Kang-class `ProhibitActivity`).
+    Prohibited,
+}
+
+/// A block reason paired with the prohibiting source object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AbilityBlockReason {
+    /// The permanent whose static/effect imposes the block (Needle, City, Kang).
+    pub source: ObjectId,
+    #[serde(flatten)]
+    pub kind: AbilityBlockKind,
+}
+
+/// A single blocked-ability read-out entry: which ability index is blocked and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbilityBlockEntry {
+    /// Index into the object's activated-ability definition space
+    /// (`activated_ability_definitions`): `0..printed_len` for printed abilities,
+    /// `printed_len + offset` for runtime-granted ones.
+    pub ability_index: usize,
+    #[serde(flatten)]
+    pub reason: AbilityBlockReason,
+}
+
 /// When a game restriction expires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]

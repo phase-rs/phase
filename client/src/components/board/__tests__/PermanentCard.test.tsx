@@ -1248,4 +1248,54 @@ describe("PermanentCard", () => {
     expect(dispatchAction).toHaveBeenCalledWith(abilityAction);
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
   });
+
+  // Issue #6092: the engine-derived `blocked_abilities` read-out renders as a
+  // badge with a localized reason. The frontend performs no game logic — it
+  // reads the entries verbatim.
+  it("renders the blocked-ability badge and localized reason from blocked_abilities", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "Tap ability",
+          effect: { type: "Draw" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, source: 1, type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Badge label (t("abilityBlock.badge")) and the localized CantBeActivated
+    // reason both render.
+    expect(screen.getAllByText("Blocked").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/This ability can't be activated/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a blocked-ability reason without throwing when the source is departed", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [],
+      // source 999 is not present in objects — the departed-source guard must
+      // render the reason alone and never dereference a missing object.
+      blocked_abilities: [
+        { ability_index: 5, source: 999, type: "Prohibited" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    expect(() => renderPermanent()).not.toThrow();
+    expect(
+      screen.getByText(/Activating this ability is prohibited/),
+    ).toBeInTheDocument();
+  });
 });

@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
-    AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
-    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
-    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
-    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
-    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
-    TriggerOccurrenceState,
+    AbilityBlockEntry, AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment,
+    AdditionalCostOrigin, BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission,
+    CastingRestriction, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
+    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -791,6 +791,14 @@ pub struct GameObject {
     #[serde(skip_deserializing, default)]
     pub available_mana_pips: Vec<ManaPip>,
 
+    // CR 602.5: Derived read-out of which activated abilities on this object are
+    // currently blocked from activation, and by what. Display-only — carries no
+    // enforcement authority (the gates in `game::casting` remain the sole
+    // authority). Recomputed per-tick by the `derived.rs` block sweep; omitted
+    // from the wire when empty.
+    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_abilities: Vec<AbilityBlockEntry>,
+
     /// CR 606.3 + CR 606.1: Per-permanent loyalty-ability activation count for
     /// the current turn. Default cap is 1 (CR 606.3 "once per turn"); raised
     /// for the controller by `GameState::extra_loyalty_activations_this_turn`
@@ -1179,6 +1187,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         has_mana_ability: _,
         mana_ability_index: _,
         available_mana_pips: _,
+        blocked_abilities: _,
         loyalty_activations_this_turn: _,
         is_commander: _,
         signature_spell: _,
@@ -1922,6 +1931,7 @@ impl GameObject {
             mana_ability_index: None,
             devotion: None,
             available_mana_pips: Vec::new(),
+            blocked_abilities: Vec::new(),
             loyalty_activations_this_turn: 0,
             is_commander: false,
             signature_spell: None,

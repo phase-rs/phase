@@ -854,6 +854,30 @@ export type PhaseStatus =
   | { status: "PhasedIn" }
   | { status: "PhasedOut"; cause: "Directly" | "Indirectly" };
 
+/**
+ * CR 602.5: Why one of an object's activated abilities is blocked from
+ * activation. Mirrors the Rust `AbilityBlockKind` (serde `tag = "type"`).
+ * Display only.
+ */
+export type AbilityBlockKind =
+  | "CantBeActivated"
+  | "CantActivateDuring"
+  | "Prohibited";
+
+/**
+ * CR 602.5: A single blocked-ability read-out entry. `ability_index` indexes the
+ * object's activated-ability definition space (`0..abilities.length` for printed
+ * abilities; `>= abilities.length` for runtime-granted ones — render the reason
+ * text alone in that case). `source` is the prohibiting permanent's object id
+ * (may be absent from `gameState.objects` if it has since left play).
+ * Mirrors the Rust `AbilityBlockEntry` (flattened reason).
+ */
+export interface AbilityBlockEntry {
+  ability_index: number;
+  source: number;
+  type: AbilityBlockKind;
+}
+
 export interface GameObject {
   id: ObjectId;
   card_id: CardId;
@@ -908,6 +932,13 @@ export interface GameObject {
   class_level?: number;
   devotion?: number;
   available_mana_pips?: ManaPip[];
+  /**
+   * CR 602.5: Display-only read-out of which of this object's activated abilities
+   * are currently blocked from activation, and by what source. Populated by the
+   * engine derive sweep; omitted when empty. The frontend renders a badge/tooltip
+   * from this — it MUST NOT infer block state from any other field.
+   */
+  blocked_abilities?: AbilityBlockEntry[];
   /** CR 701.15c: players who have goaded this creature (it must attack a
    *  player other than them, if able). Empty/omitted when not goaded. */
   goaded_by?: PlayerId[];
