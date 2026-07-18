@@ -19,12 +19,8 @@
 //!    Mastery falls to the graveyard instead of exile — the overload
 //!    "ends in exile" assertions flip.
 //!
-//! CR 707.12a per-copy optionality is covered by the overload test (offer two
-//! copies, cast exactly one → `+3` not `+6`, proving the second was declined). A
-//! zero-copy "decline all" on a single-card tracked set is a pre-existing
-//! `CastCopyOfCard` runtime limitation shared by all 9 such cards (an empty
-//! `ChooseFromZoneChoice` selection re-binds to the tracked set), so it is not
-//! asserted here — see the implementation report's stop-and-return note.
+//! CR 707.12a per-copy optionality is covered both by declining the only normal
+//! cast copy and by accepting one of two overload copies (`+3`, not `+6`).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::TargetRef;
@@ -183,6 +179,39 @@ fn normal_cast_accepts_and_casts_the_copy_then_self_exiles() {
         Some(Zone::Exile),
         "Mizzix's Mastery exiles itself, not to the graveyard"
     );
+}
+
+#[test]
+fn normal_cast_can_decline_its_only_copy() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mizzix = add_mizzix(&mut scenario);
+    let gy = add_gain_life_spell(&mut scenario, "Test Bolt", /* instant */ true);
+    let mut runner = scenario.build();
+    with_p0_priority(&mut runner);
+    let life0 = p0_life(&runner);
+
+    cast_normal_to_copy_choice(&mut runner, mizzix, gy);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseFromZoneChoice { up_to: true, .. }
+    ));
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("decline the only copy");
+    settle(&mut runner);
+
+    // CR 707.12a: each produced copy is independently optional. With one
+    // offered copy, selecting none must leave life unchanged and must not
+    // rebind the continuation to the tracked source card.
+    assert_eq!(
+        p0_life(&runner),
+        life0,
+        "declining the only copy must not cast it"
+    );
+    assert_eq!(zone_of(&runner, gy), Some(Zone::Exile));
+    assert_eq!(zone_of(&runner, mizzix), Some(Zone::Exile));
 }
 
 #[test]
