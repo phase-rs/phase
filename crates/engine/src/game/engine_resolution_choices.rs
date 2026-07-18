@@ -1451,7 +1451,17 @@ pub(super) fn handle_resolution_choice(
                     },
                     events,
                 )?;
-                ResolutionChoiceOutcome::WaitingFor(result)
+                state.waiting_for = result;
+                // CR 608.2g + CR 701.57c: casting the discovered card happens
+                // DURING this discover's resolution and no player gets priority
+                // for it yet, so the discover spell must FINISH resolving now —
+                // running any stashed follow-up (Hit the Mother Lode's tapped
+                // Treasure creation) before the freshly-cast hit sits on the stack
+                // awaiting priority. The to-hand branch reaches the same drain via
+                // `finish_with_continuation`; the free-cast branch has no such
+                // completion batch, so drain the parked continuation explicitly.
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
                 // CR 701.57a: decline — hit goes to the discovering player's
                 // hand; the misses go to the library bottom in a random order.

@@ -24092,7 +24092,7 @@ pub(crate) fn difference_anaphor_placeholder() -> QuantityExpr {
 }
 
 /// True when `expr` is the deferred "the difference" count placeholder awaiting
-/// a trigger-level bind (see [`DIFFERENCE_ANAPHOR_VARIABLE`]).
+/// a bind (see [`DIFFERENCE_ANAPHOR_VARIABLE`]).
 pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
     matches!(
         expr,
@@ -24100,6 +24100,77 @@ pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
             qty: QuantityRef::Variable { name },
         } if name == DIFFERENCE_ANAPHOR_VARIABLE
     )
+}
+
+/// CR 608.2c: Resolve every deferred "the difference" count-anaphor placeholder
+/// anywhere in an ability's effect tree — the single authority for both the
+/// trigger seam (`lower_trigger_ir`, Drizzt Do'Urden) and the spell clause
+/// seam (`parse_effect_chain_ir`, Hit the Mother Lode).
+///
+/// A count parser emits `difference_anaphor_placeholder()` for a bare anaphoric
+/// "equal to the difference" because the two operands live on the enclosing
+/// ability's condition, not the effect clause. `Effect::count_expr_mut` only
+/// reaches the top-level effect, so a placeholder nested under a clause-level
+/// conditional `sub_ability` / `else_ability` / single-`Box<Effect>` wrapper
+/// would otherwise escape both the bind and the guard. This walks the full tree
+/// so that:
+///   * with a bound `Difference` (`bound = Some`), each placeholder binds to it, and
+///   * with none to bind (`bound = None`), the carrying effect is downgraded to
+///     an explicit `Effect::Unimplemented` — an honest coverage gap rather than a
+///     silently-zero effect that reads as supported.
+pub(crate) fn resolve_difference_anaphor_in_ability(
+    def: &mut AbilityDefinition,
+    bound: Option<&QuantityExpr>,
+) {
+    resolve_difference_anaphor_in_effect(&mut def.effect, bound);
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        resolve_difference_anaphor_in_ability(sub, bound);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        resolve_difference_anaphor_in_ability(els, bound);
+    }
+}
+
+fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&QuantityExpr>) {
+    // Recurse into the single-`Box<Effect>` wrapper (the draw-replacement
+    // substitute) so a placeholder nested inside it is reached. This is the only
+    // `Effect` variant that wraps a heterogeneous sub-`Effect`; every other
+    // nesting is via `AbilityDefinition` (`sub_ability`/`else_ability`), walked
+    // by the caller.
+    if let Effect::CreateDrawReplacement {
+        replacement_effect: inner,
+    } = effect
+    {
+        resolve_difference_anaphor_in_effect(inner, bound);
+    }
+
+    // Only effects a count parser can emit the deferred placeholder onto ever
+    // carry it. Restrict both bind and downgrade to them, and pick an
+    // effect-appropriate `Unimplemented` name/description so the downgrade reads
+    // honestly per effect kind.
+    let downgrade: (&str, &str) = match effect {
+        Effect::PutCounter { .. } | Effect::PutCounterAll { .. } => {
+            ("put", "counters equal to the difference")
+        }
+        Effect::Token { .. } => ("create", "tokens equal to the difference"),
+        _ => return,
+    };
+    let is_placeholder = effect
+        .count_expr_mut()
+        .is_some_and(|slot| is_difference_anaphor_placeholder(slot));
+    if !is_placeholder {
+        return;
+    }
+    match bound {
+        Some(count) => {
+            if let Some(slot) = effect.count_expr_mut() {
+                *slot = count.clone();
+            }
+        }
+        None => {
+            *effect = Effect::unimplemented(downgrade.0, downgrade.1);
+        }
+    }
 }
 
 /// True when a trigger's intervening-if references the controller gaining life
@@ -28413,6 +28484,35 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        // CR 608.2c: Bind a bare anaphoric "the difference" count placeholder in
+        // this clause against the two operands its own leading `QuantityCheck`
+        // condition established ("If the discovered card's mana value is less than
+        // 10, create a number of tapped Treasure tokens equal to the difference"
+        // — Hit the Mother Lode). Unlike the trigger seam — where the comparison
+        // is hoisted onto the trigger and bound in `lower_trigger_ir` — a spell's
+        // condition rides the same clause as the effect, so this is the single
+        // authority for the spell case. `difference_expr` returns `None` for a
+        // non-comparison condition (or no condition), so an unbindable placeholder
+        // is downgraded to an honest `Unimplemented` rather than a silently-zero
+        // effect. The condition may live on the chunk (`condition`) or on the
+        // clause itself (`clause.condition`) — read whichever is set.
+        {
+            let effective_condition = condition.as_ref().or(clause.condition.as_ref());
+            // ONLY bind here (never downgrade). A bare "the difference" whose
+            // operands are NOT on this clause's condition belongs to the trigger
+            // seam (`lower_trigger_ir`, Drizzt Do'Urden) — the trigger's hoisted
+            // intervening-if binds it there, or downgrades it if unbindable.
+            // Downgrading it here (bound = None) would clobber that placeholder
+            // before the trigger seam runs, breaking every difference-counter
+            // trigger. A spell's difference operands always ride the same clause
+            // (Hit the Mother Lode), so `Some(bound)` is the only case to handle.
+            if let Some(bound) = effective_condition.and_then(conditions::difference_expr) {
+                resolve_difference_anaphor_in_effect(&mut clause.effect, Some(&bound));
+                if let Some(sub) = clause.sub_ability.as_deref_mut() {
+                    resolve_difference_anaphor_in_ability(sub, Some(&bound));
+                }
+            }
+        }
         // CR 508.4 + CR 701.42: the shared leading-condition pass owns the live
         // attacking/ownership predicates, while the bare Meld body parser owns
         // the effect. Join those independently parsed building blocks here at
