@@ -10057,6 +10057,7 @@ fn effect_mirror_match_copy_blockers_and_delayed_exile() {
         .sub_ability
         .as_ref()
         .expect("delayed end-of-combat exile sub_ability present");
+    assert_eq!(sub.sub_link, SubAbilityLink::ContinuationStep);
     match &*sub.effect {
         Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase },

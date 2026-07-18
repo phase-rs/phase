@@ -25169,7 +25169,7 @@ pub(crate) enum ChainLoweringMode {
     WithContext,
 }
 
-/// U3 completion seam: dispatch any remaining whole-body recognizers in order.
+/// U3 migration seam: dispatch any remaining whole-body recognizers in order.
 ///
 /// The shared list is intentionally retained until U6 removes this escape hatch.
 /// Returns `None` when the text falls through to the ordinary IR pipeline.
@@ -25179,10 +25179,8 @@ fn try_parse_chain_bypass(
     mode: ChainLoweringMode,
     _ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    // The remaining shared bypasses do not consult `ctx`.
-    if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
-        return Some(def);
-    }
+    // The shared bypass list is empty after U3c's third conversion. The
+    // mode-exclusive cloak recognizer remains until its ordered conversion.
     match mode {
         ChainLoweringMode::Standalone => None,
         ChainLoweringMode::WithContext => try_parse_exile_pile_shuffle_cloak(text, kind),
@@ -25229,6 +25227,13 @@ fn parse_ability_ir(
         ChainLoweringMode::WithContext => parse_conditional_protection_grant_ir(text, kind, ctx),
     };
     if let Some(body) = conditional_protection {
+        return AbilityIr {
+            source_text: text.to_string(),
+            body,
+            shell: AbilityShellIr::default(),
+        };
+    }
+    if let Some(body) = parse_for_each_attacker_copy_blocker_ir(text, kind, ctx) {
         return AbilityIr {
             source_text: text.to_string(),
             body,
@@ -25442,10 +25447,11 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
 /// player is the controller — which the engine records as the controller of an
 /// attacked planeswalker/battle too, so "attacking you" and "or a planeswalker
 /// you control" collapse onto the one predicate.
-fn try_parse_for_each_attacker_copy_blocker(
+fn parse_for_each_attacker_copy_blocker_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     // Optional leading casting-restriction sentence, if not pre-stripped.
     let i = opt(tag::<_, _, OracleError<'_>>(
@@ -25506,46 +25512,83 @@ fn try_parse_for_each_attacker_copy_blocker(
                 defender: Some(ControllerRef::You),
             }]),
         );
-    let mut def = AbilityDefinition::new(
+    let copy = Effect::CopyTokenBlockingAttacker {
+        source_filter,
+        owner: TargetFilter::Controller,
+    };
+    if !exiles_tokens {
+        return Some(EffectChainIr::single_clause(
+            text,
+            kind,
+            parsed_clause(copy),
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        ));
+    }
+
+    // CR 603.7c: "those tokens" → the tokens created above, snapshotted at
+    // delayed-trigger creation via `TargetFilter::LastCreated`.
+    let exile = AbilityDefinition::new(
         kind,
-        Effect::CopyTokenBlockingAttacker {
-            source_filter,
-            owner: TargetFilter::Controller,
+        Effect::ChangeZone {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target: TargetFilter::LastCreated,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
         },
     );
-    if exiles_tokens {
-        // CR 603.7c + CR 701.36a: "those tokens" → the tokens created above,
-        // snapshotted at delayed-trigger creation via `TargetFilter::LastCreated`.
-        let exile = AbilityDefinition::new(
-            kind,
-            Effect::ChangeZone {
-                origin: Some(Zone::Battlefield),
-                destination: Zone::Exile,
-                target: TargetFilter::LastCreated,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
+    let delayed_exile = Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::AtNextPhase {
+            phase: Phase::EndCombat,
+        },
+        effect: Box::new(exile),
+        uses_tracked_set: false,
+    };
+    let copy_source = text.get(..text.len().checked_sub(i.len())?)?;
+    let delayed_source = text.get(copy_source.len()..)?.trim_start();
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            copy_source,
+            parsed_clause(copy),
+            Some(ClauseBoundary::Then),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
             },
-        );
-        def.sub_ability = Some(Box::new(AbilityDefinition::new(
-            kind,
-            Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::AtNextPhase {
-                    phase: Phase::EndCombat,
-                },
-                effect: Box::new(exile),
-                uses_tracked_set: false,
+        )
+        .push();
+    builder
+        .clause(
+            delayed_source,
+            parsed_clause(delayed_exile),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
             },
-        )));
-    }
-    Some(def)
+        )
+        .push();
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 fn parse_return_target_and_same_name_from_your_graveyard_ir(
