@@ -9253,6 +9253,17 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(effect));
     }
 
+    // CR 614.1a + CR 614.12 + CR 707.2: One-shot "the next time one or more
+    // creatures or planeswalkers enter this turn, they enter as copies of the
+    // chosen creature" replacement (Mystic Reflection). Like the damage/draw
+    // one-shot replacements, this starts with "the next time" rather than an
+    // imperative verb, so it must be intercepted before first-word dispatch.
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_oneshot_enter_as_copy_replacement(lower)
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(effect));
+    }
+
     // CR 708.5: "[Until end of turn,] you may look at face-down [permanents] you
     // don't control any time" (Lumbering Laundry's `{2}:` activated ability).
     // This is the duration-bound form of Found Footage's continuous look

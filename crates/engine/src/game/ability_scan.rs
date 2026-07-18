@@ -1651,6 +1651,15 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             acc = acc.or(scan_player_filter(filter));
             acc
         }
+        QuantityRef::EventContextPlayerCount { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_player_filter(filter));
+            acc
+        }
         QuantityRef::CountersOn { scope, .. } => {
             let mut acc = Axes {
                 event: false,

@@ -2062,6 +2062,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::Aggregate { .. }
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -5667,6 +5668,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             property: _,
         } => board_value_aggregate_read(filter, StateKind::ObjectPt),
         QuantityRef::PlayerCount { filter: _ } => RwProfile::empty(),
+        QuantityRef::EventContextPlayerCount { filter: _ } => reads_event_live(),
         QuantityRef::CountersOn { scope, .. } | QuantityRef::Intensity { scope, .. } => {
             read_object_scope(scope, StateKind::ObjectCounters)
         }

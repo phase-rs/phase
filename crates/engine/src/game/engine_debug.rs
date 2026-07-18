@@ -702,6 +702,7 @@ pub fn route_debug_create_to_battlefield(
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        enter_as_copy: None,
         applied: HashSet::new(),
     };
 

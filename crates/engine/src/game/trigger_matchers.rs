@@ -655,7 +655,11 @@ fn player_matches_filter(
     let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
     match filter {
         TargetFilter::Player => true,
+        TargetFilter::AllPlayers => true,
         TargetFilter::Controller => trigger_controller == Some(player_id),
+        TargetFilter::Opponent => {
+            trigger_controller.is_some_and(|controller| controller != player_id)
+        }
         TargetFilter::Typed(TypedFilter {
             controller: Some(ControllerRef::You),
             ..
@@ -706,7 +710,10 @@ fn player_matches_filter(
 /// filter (e.g. "to a creature an opponent controls") and is excluded here.
 fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Player | TargetFilter::Controller => true,
+        TargetFilter::Player
+        | TargetFilter::AllPlayers
+        | TargetFilter::Controller
+        | TargetFilter::Opponent => true,
         TargetFilter::Typed(TypedFilter {
             type_filters,
             controller: Some(_),
@@ -1231,6 +1238,25 @@ fn matching_combat_damage_to_player_sources(
         .collect()
 }
 
+/// CR 120.2a + CR 120.2b: damage events are classified as combat damage or
+/// damage dealt by a spell/ability effect; trigger filters may require either
+/// class or accept both.
+fn damage_kind_matches(filter: DamageKindFilter, is_combat: bool) -> bool {
+    match filter {
+        DamageKindFilter::Any => true,
+        DamageKindFilter::CombatOnly => is_combat,
+        DamageKindFilter::NoncombatOnly => !is_combat,
+    }
+}
+
+/// CR 120.1 + CR 603.2c: an amount-qualified damage trigger evaluates the
+/// amount carried by the individual triggering damage event.
+fn damage_amount_matches(trigger: &TriggerDefinition, amount: u32) -> bool {
+    trigger
+        .damage_amount
+        .is_none_or(|(cmp, threshold)| cmp.evaluate(amount as i32, threshold as i32))
+}
+
 pub(super) fn match_damage_done(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -1255,22 +1281,18 @@ pub(super) fn match_damage_done(
         if !valid_source_matches(trigger, state, *dmg_source, source_id) {
             return false;
         }
-        // CR 120.3: Check damage kind filter (combat/noncombat/any)
-        match trigger.damage_kind {
-            DamageKindFilter::Any => {}
-            DamageKindFilter::CombatOnly if !is_combat => return false,
-            DamageKindFilter::NoncombatOnly if *is_combat => return false,
-            _ => {}
+        // CR 120.2a + CR 120.2b: Check damage kind filter
+        // (combat/noncombat/any).
+        if !damage_kind_matches(trigger.damage_kind, *is_combat) {
+            return false;
         }
         // CR 603.2 + CR 120.1: Optional per-event damage-amount threshold
         // ("…deals 5 or more damage to a player"). When set, only damage events
         // whose amount satisfies the comparator vs the threshold fire the
         // trigger. CR 120.1 events carry a single nonnegative amount, so the
         // u32→i32 widening here cannot truncate.
-        if let Some((cmp, threshold)) = trigger.damage_amount {
-            if !cmp.evaluate(*amount as i32, threshold as i32) {
-                return false;
-            }
+        if !damage_amount_matches(trigger, *amount) {
+            return false;
         }
         // Check valid_target for damage target filtering (e.g. "to an opponent")
         if let Some(ref vt) = trigger.valid_target {
@@ -1385,45 +1407,98 @@ pub(super) fn match_damage_done_once_by_controller(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    let GameEvent::CombatDamageDealtToPlayer {
-        player_id,
-        source_amounts,
-        ..
-    } = event
-    else {
-        return false;
-    };
+    match event {
+        GameEvent::CombatDamageDealtToPlayer {
+            player_id,
+            source_amounts,
+            ..
+        } => {
+            if !damage_kind_matches(trigger.damage_kind, true) {
+                return false;
+            }
+            matching_combat_damage_once_by_controller_sources(
+                trigger,
+                source_id,
+                state,
+                *player_id,
+                source_amounts,
+            )
+            .next()
+            .is_some()
+        }
+        // CR 120.1 + CR 603.2c: Unqualified "deal damage" controller-batch
+        // triggers (Malcolm, Keen-Eyed Navigator) can fire from noncombat
+        // `DamageDealt` events as well as combat aggregates.
+        GameEvent::DamageDealt {
+            source_id: damage_source,
+            target: TargetRef::Player(player_id),
+            amount,
+            is_combat,
+            ..
+        } => {
+            if *is_combat
+                || !damage_kind_matches(trigger.damage_kind, *is_combat)
+                || !damage_amount_matches(trigger, *amount)
+                || !valid_damage_done_once_player_target(trigger, state, *player_id, source_id)
+                || !damage_done_once_source_matches(trigger, state, *damage_source, source_id)
+            {
+                return false;
+            }
+            true
+        }
+        _ => false,
+    }
+}
 
+/// CR 120.1 + CR 603.2c: a player-recipient damage trigger must match its
+/// target filter against the player dealt the triggering damage.
+fn valid_damage_done_once_player_target(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    player_id: PlayerId,
+    source_id: ObjectId,
+) -> bool {
     if let Some(ref vt) = trigger.valid_target {
-        let trigger_controller = state.objects.get(&source_id).map(|o| o.controller);
-        match vt {
-            TargetFilter::Controller if trigger_controller != Some(*player_id) => {
-                return false;
-            }
-            TargetFilter::Typed(TypedFilter {
-                controller: Some(ControllerRef::You),
-                ..
-            }) if trigger_controller != Some(*player_id) => {
-                return false;
-            }
-            TargetFilter::Typed(TypedFilter {
-                controller: Some(ControllerRef::Opponent),
-                ..
-            }) if trigger_controller == Some(*player_id) => {
-                return false;
-            }
-            TargetFilter::Player => {}
-            _ => {}
+        if !damage_recipient_filter_can_match_player(vt) {
+            return false;
         }
     }
+    valid_player_matches(trigger, state, player_id, source_id)
+}
 
+/// CR 120.1 + CR 603.2c: a controller-batched damage trigger admits only a
+/// source that satisfies its source filter for the triggering event.
+fn damage_done_once_source_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    damage_source: ObjectId,
+    source_id: ObjectId,
+) -> bool {
     if let Some(filter) = &trigger.valid_source {
-        return source_amounts
-            .iter()
-            .any(|(source, _)| target_filter_matches_object(state, *source, filter, source_id));
+        target_filter_matches_object(state, damage_source, filter, source_id)
+    } else {
+        damage_source == source_id
     }
+}
 
-    source_amounts.iter().any(|(id, _)| *id == source_id)
+/// CR 120.1 + CR 603.2c: filters the aggregate combat event to the sources
+/// that actually caused this controller-batched trigger to trigger.
+fn matching_combat_damage_once_by_controller_sources<'a>(
+    trigger: &'a TriggerDefinition,
+    source_id: ObjectId,
+    state: &'a GameState,
+    player_id: PlayerId,
+    source_amounts: &'a [(ObjectId, u32)],
+) -> impl Iterator<Item = (ObjectId, u32)> + 'a {
+    let player_matches = valid_damage_done_once_player_target(trigger, state, player_id, source_id);
+    source_amounts
+        .iter()
+        .copied()
+        .filter(move |(source, amount)| {
+            player_matches
+                && damage_amount_matches(trigger, *amount)
+                && damage_done_once_source_matches(trigger, state, *source, source_id)
+        })
 }
 
 pub(super) fn matching_damage_done_once_by_controller_event(
@@ -1432,53 +1507,69 @@ pub(super) fn matching_damage_done_once_by_controller_event(
     source_id: ObjectId,
     state: &GameState,
 ) -> Option<GameEvent> {
-    // CR 603.2c + CR 608.2c: Preserve the single aggregate combat-damage
-    // trigger event while narrowing its source set to the objects that
-    // satisfied this trigger's source filter. Downstream "those creatures"
-    // effects read this filtered event context.
-    let GameEvent::CombatDamageDealtToPlayer {
-        player_id,
-        source_amounts,
-        ..
-    } = event
-    else {
-        return None;
-    };
+    match event {
+        // CR 603.2c + CR 608.2c: Preserve the single aggregate combat-damage
+        // trigger event while narrowing its source set to the objects that
+        // satisfied this trigger's source filter. Downstream "those creatures"
+        // effects read this filtered event context.
+        GameEvent::CombatDamageDealtToPlayer {
+            player_id,
+            source_amounts,
+            ..
+        } => {
+            if !damage_kind_matches(trigger.damage_kind, true) {
+                return None;
+            }
+            // CR 120.1 + CR 510.2 + CR 608.2c: Filter to matching sources using
+            // the step-local per-source amounts carried by the event (the
+            // resolving ability reads its triggering-event context per the
+            // function header above). This avoids summing
+            // `damage_dealt_this_turn` which accumulates across combat damage
+            // steps and would inflate the total on double-strike / extra-combat.
+            let matching_sources: Vec<(ObjectId, u32)> =
+                matching_combat_damage_once_by_controller_sources(
+                    trigger,
+                    source_id,
+                    state,
+                    *player_id,
+                    source_amounts,
+                )
+                .collect();
 
-    if !valid_player_matches(trigger, state, *player_id, source_id) {
-        return None;
-    }
-
-    // CR 120.1 + CR 510.2 + CR 608.2c: Filter to matching sources using the
-    // step-local per-source amounts carried by the event (the resolving ability
-    // reads its triggering-event context per the function header above). This
-    // avoids summing `damage_dealt_this_turn` which accumulates across combat
-    // damage steps and would inflate the total on double-strike / extra-combat.
-    let matching_sources: Vec<(ObjectId, u32)> = if let Some(filter) = &trigger.valid_source {
-        source_amounts
-            .iter()
-            .filter(|(src, _)| target_filter_matches_object(state, *src, filter, source_id))
-            .copied()
-            .collect()
-    } else if source_amounts.iter().any(|(id, _)| *id == source_id) {
-        source_amounts
-            .iter()
-            .filter(|(id, _)| *id == source_id)
-            .copied()
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    if matching_sources.is_empty() {
-        None
-    } else {
-        let filtered_total: u32 = matching_sources.iter().map(|(_, amt)| amt).sum();
-        Some(GameEvent::CombatDamageDealtToPlayer {
-            player_id: *player_id,
-            source_amounts: matching_sources,
-            total_damage: filtered_total,
-        })
+            if matching_sources.is_empty() {
+                None
+            } else {
+                let filtered_total: u32 = matching_sources.iter().map(|(_, amt)| amt).sum();
+                Some(GameEvent::CombatDamageDealtToPlayer {
+                    player_id: *player_id,
+                    source_amounts: matching_sources,
+                    total_damage: filtered_total,
+                })
+            }
+        }
+        // CR 120.1 + CR 603.2c + CR 608.2c: Noncombat damage reaches this
+        // one-or-more trigger family as per-damage `DamageDealt` events; combat
+        // player damage is handled exclusively by the aggregate event above to
+        // avoid firing once per source and once for the batch.
+        GameEvent::DamageDealt {
+            source_id: damage_source,
+            target: TargetRef::Player(player_id),
+            amount,
+            is_combat,
+            ..
+        } => {
+            if !is_combat
+                && damage_kind_matches(trigger.damage_kind, *is_combat)
+                && damage_amount_matches(trigger, *amount)
+                && valid_damage_done_once_player_target(trigger, state, *player_id, source_id)
+                && damage_done_once_source_matches(trigger, state, *damage_source, source_id)
+            {
+                Some(event.clone())
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -7914,6 +8005,184 @@ mod tests {
             trigger_source,
             &state
         ));
+    }
+
+    #[test]
+    fn damage_done_once_by_controller_matches_noncombat_player_damage() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Malcolm, Keen-Eyed Navigator".to_string(),
+            Zone::Battlefield,
+        );
+        let pirate = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Pirate Pinger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pirate).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Pirate".to_string());
+        }
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .subtype("Pirate".to_string()),
+        ));
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![],
+        }));
+        trigger.damage_kind = DamageKindFilter::Any;
+
+        let event = GameEvent::DamageDealt {
+            source_id: pirate,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        };
+
+        assert!(match_damage_done_once_by_controller(
+            &event,
+            &trigger,
+            trigger_source,
+            &state,
+        ));
+        assert!(matches!(
+            matching_damage_done_once_by_controller_event(
+                &event,
+                &trigger,
+                trigger_source,
+                &state,
+            ),
+            Some(GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 1,
+                is_combat: false,
+                ..
+            }) if source_id == pirate
+        ));
+    }
+
+    #[test]
+    fn damage_done_once_by_controller_combat_only_rejects_noncombat_damage() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Combat Damage Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let event = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        };
+
+        assert!(!match_damage_done_once_by_controller(
+            &event,
+            &trigger,
+            trigger_source,
+            &state,
+        ));
+        assert!(matching_damage_done_once_by_controller_event(
+            &event,
+            &trigger,
+            trigger_source,
+            &state,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn damage_done_once_by_controller_ignores_per_source_combat_player_damage() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Combat Damage Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::DamageDoneOnceByController);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::Any;
+
+        let event = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        };
+
+        assert!(!match_damage_done_once_by_controller(
+            &event,
+            &trigger,
+            trigger_source,
+            &state,
+        ));
+        assert!(matching_damage_done_once_by_controller_event(
+            &event,
+            &trigger,
+            trigger_source,
+            &state,
+        )
+        .is_none());
     }
 
     #[test]

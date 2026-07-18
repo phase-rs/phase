@@ -1597,6 +1597,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             resume: CostResume::ManaAbility { .. },
             ..
         } => Some(GameAction::SelectCards { cards: Vec::new() }),
+        WaitingFor::PayCost {
+            resume: CostResume::Resolution,
+            ..
+        } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::SelectCards { .. })),
 
         // CR 101.4 + CR 701.21a: Category choice — pick one permanent
         // per type category, the rest are sacrificed. A permanent that belongs
