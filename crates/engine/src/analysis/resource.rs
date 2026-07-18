@@ -1462,6 +1462,21 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
     for obj in state.objects.values() {
         for active in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
             let def = active.definition;
+            // CR 603.4 / CR 113.6: only a trigger that FUNCTIONS in its source's
+            // current zone can fire during the loop and read the growing class.
+            // `active_trigger_definitions` does NOT zone-gate (it returns a card's
+            // printed triggers in any zone), so a permanent's "another permanent
+            // enters" trigger on a card sitting in the library / hand / graveyard
+            // (empty `trigger_zones` ⇒ battlefield-only) would be scanned as a live
+            // observer of the loop's token creation — a false positive that
+            // suppresses the offer (regression test
+            // `object_growth_library_observer_does_not_suppress_offer`: Kodama of the
+            // East Tree in P0's library). Gate on the SAME zone-of-function predicate
+            // the trigger pipeline uses; block (5b)'s `granted_keyword_triggers_in_zone`
+            // already applies it.
+            if !crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone) {
+                continue;
+            }
             // The trigger CONDITION stays CONSERVATIVE: an intervening-if reads the
             // triggering EVENT (never a growing-class census in scope), so promoting
             // it would not help and only widens the Conservative surface.
@@ -1510,7 +1525,16 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
         }
     }
     // (3) Replacement conditions AND bodies (CR 614.1).
-    for (_, _, def) in crate::game::functioning_abilities::active_replacements(state) {
+    for (_, obj, def) in crate::game::functioning_abilities::active_replacements(state) {
+        // CR 614.1 / CR 113.6: `active_replacements` is deliberately all-zones (its
+        // callers restrict); a replacement that watches other permanents entering
+        // the battlefield functions from the battlefield (or a command-zone emblem),
+        // never from a card in the library / hand / graveyard. Scanning an off-zone
+        // card's replacement as a loop observer is the same false positive as block
+        // (1); restrict to the zones a battlefield-event replacement functions in.
+        if !matches!(obj.zone, Zone::Battlefield | Zone::Command) {
+            continue;
+        }
         if def
             .condition
             .as_ref()
@@ -1541,6 +1565,18 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
             continue;
         }
         for def in obj.static_definitions.iter_all() {
+            // CR 113.6 / CR 604.3: only a static that FUNCTIONS in its source's
+            // current zone applies continuously during the loop. `iter_all()` is
+            // deliberately condition-agnostic (to catch dormant defs), but it is NOT
+            // zone-gated — a battlefield-default static (`active_zones` empty) on a
+            // card in the library / hand / graveyard never applies and must not be
+            // scanned as a loop observer (same false positive as block (1)). The
+            // canonical `static_functions_in_zone` predicate keeps genuinely
+            // off-battlefield-functional statics (`active_zones = [Graveyard]`, …)
+            // and command-zone emblems while dropping the inert deck/hand cards.
+            if !crate::game::functioning_abilities::static_functions_in_zone(obj, def) {
+                continue;
+            }
             if def
                 .condition
                 .as_ref()
@@ -1650,6 +1686,18 @@ fn stack_entry_reads_growing_class(entry: &StackEntry) -> bool {
 fn cost_surface_references_growing_class(state: &GameState) -> bool {
     use crate::game::ability_scan as scan;
     for obj in state.objects.values() {
+        // CR 601.2f / CR 602.5a / CR 113.6: a cost surface is only a live loop
+        // affordability factor where it can actually be PAID. A card in the LIBRARY
+        // is never a cost source — a recast loop returns its spell to hand /
+        // graveyard / exile (never the library), and no activated ability or cast
+        // cost functions from the library. Scanning a bystander deck card's convoke /
+        // affinity / delve keyword there is the same all-zones false-reject class as
+        // the observer firewalls above (a Commander deck's library holds ~90 cards).
+        // The off-battlefield HAND surface is deliberately kept — the loop's own
+        // recast spell rides there (see `object_growth_r_e_cost_keyword_family`).
+        if obj.zone == Zone::Library {
+            continue;
+        }
         // (1) printed cost-keyword family.
         if obj
             .keywords
@@ -1659,8 +1707,14 @@ fn cost_surface_references_growing_class(state: &GameState) -> bool {
             return true;
         }
         // (1b) granted cost-keyword family (AddKeyword / AddKeywordWithDerivedCost)
-        // + (2) the STATIC cost surface (`StaticDefinition::mode`, CR 601.2f).
+        // + (2) the STATIC cost surface (`StaticDefinition::mode`, CR 601.2f). A
+        // static cost-mod only bites where the static FUNCTIONS (CR 113.6) — gate it
+        // so a non-functioning static (e.g. on a hand card) is not read as a live
+        // cost modifier.
         for def in obj.static_definitions.iter_all() {
+            if !crate::game::functioning_abilities::static_functions_in_zone(obj, def) {
+                continue;
+            }
             if def
                 .modifications
                 .iter()
@@ -2178,6 +2232,13 @@ fn fire_time_conditions_read_projected_resource(state: &GameState) -> bool {
     for obj in state.objects.values() {
         for active in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
             let def = active.definition;
+            // CR 603.4 / CR 113.6: gate on zone-of-function — a permanent trigger on
+            // a card in the library / hand / graveyard never fires during the loop
+            // (mirror of the growing-class firewall's block (1) fix; the drain path
+            // has the identical all-zones defect).
+            if !crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone) {
+                continue;
+            }
             if def
                 .condition
                 .as_ref()
@@ -2192,7 +2253,13 @@ fn fire_time_conditions_read_projected_resource(state: &GameState) -> bool {
     // The condition + runtime continuation have C0-walker predicates; body payloads
     // without one (an `execute` `AbilityDefinition`, a state-reading damage-amount
     // modification) are treated fail-closed — conservative, fail-safe (no shortcut).
-    for (_, _, def) in crate::game::functioning_abilities::active_replacements(state) {
+    for (_, obj, def) in crate::game::functioning_abilities::active_replacements(state) {
+        // CR 614.1 / CR 113.6: `active_replacements` is all-zones; restrict to the
+        // zones a battlefield-event replacement functions in (mirror of the
+        // growing-class firewall's block (3) fix).
+        if !matches!(obj.zone, Zone::Battlefield | Zone::Command) {
+            continue;
+        }
         if def
             .condition
             .as_ref()
@@ -2220,6 +2287,12 @@ fn fire_time_conditions_read_projected_resource(state: &GameState) -> bool {
             continue;
         }
         for def in obj.static_definitions.iter_all() {
+            // CR 113.6 / CR 604.3: gate on zone-of-function (mirror of the
+            // growing-class firewall's block (4) fix; keeps graveyard/exile-
+            // functional statics and command emblems, drops inert deck/hand cards).
+            if !crate::game::functioning_abilities::static_functions_in_zone(obj, def) {
+                continue;
+            }
             if def
                 .condition
                 .as_ref()
@@ -2378,8 +2451,15 @@ fn replacement_event_matches_life(event: &ReplacementEvent) -> Option<LifeEventC
 ///     quantity-mod def with no body (Bloodletter / Rhox Faithmender class)
 ///     trips NONE of these and resolves deterministically (replacement.rs:6250-6261).
 fn life_event_replacements_may_prompt(state: &GameState) -> bool {
-    let object_defs =
-        crate::game::functioning_abilities::active_replacements(state).map(|(_, _, def)| def);
+    // CR 614.1 / CR 113.6: `active_replacements` is all-zones (its callers restrict).
+    // `find_applicable_replacements` — the real pipeline this over-approximates —
+    // scans [Battlefield, Command] (plus the entering/discarded card, irrelevant to a
+    // life event). A life-class replacement on a card in the library / hand /
+    // graveyard cannot apply during the loop; scanning it is the same all-zones
+    // false-reject class as the observer firewalls, so match the pipeline's scope.
+    let object_defs = crate::game::functioning_abilities::active_replacements(state)
+        .filter(|(_, obj, _)| matches!(obj.zone, Zone::Battlefield | Zone::Command))
+        .map(|(_, _, def)| def);
     let floating_defs = state
         .pending_damage_replacements
         .iter()

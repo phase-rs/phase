@@ -1619,7 +1619,7 @@ fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone
     })
 }
 
-fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
+pub(crate) fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
     if def.trigger_zones.is_empty() {
         zone == Zone::Battlefield
     } else {

@@ -2693,6 +2693,107 @@ fn object_growth_51st_sprout_swarm_covers_and_offers() {
     );
 }
 
+/// Kodama of the East Tree's growing-class-reading trigger (Scryfall / card-data).
+/// Its body puts a permanent "with equal or lesser mana value" from hand onto the
+/// battlefield — a `ChangeZone` whose target filter reads a mutable board aggregate,
+/// so `fire_time_conditions_read_growing_class` flags it IF it is scanned.
+const KODAMA_TRIGGER_ORACLE: &str = "Whenever another permanent you control enters, if it wasn't put onto the battlefield with this ability, you may put a permanent card with equal or lesser mana value from your hand onto the battlefield.";
+
+/// REGRESSION (user 2026-07-18): a growing-class-reading trigger sitting in a zone
+/// where it CANNOT function (here P0's LIBRARY) must NOT suppress the loop-shortcut
+/// offer. This reproduces the real 4-player game where Witherbloom + Sprout Swarm
+/// failed to prompt because Kodama of the East Tree — a deck card in the library —
+/// was scanned by the object-growth cover's `fire_time_conditions_read_growing_class`
+/// firewall as if it were a live observer (CR 603.4 / CR 113.6: a permanent trigger
+/// functions only on the battlefield). The board is otherwise the passing 51st
+/// fixture, so the ONLY variable is the inert library observer.
+///
+/// DISCRIMINATING (revert-probe verified): reverting the block-(1) zone gate in
+/// `fire_time_conditions_read_growing_class` flips this to NO offer — Kodama's
+/// library trigger is re-scanned, `cover_ok` goes false, and `final_waiting_for`
+/// stays `Priority`. So this fails without the fix.
+#[test]
+fn object_growth_library_observer_does_not_suppress_offer() {
+    use engine::types::zones::Zone;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Witherbloom, the Balancer",
+        5,
+        5,
+        WITHERBLOOM_AFFINITY_ORACLE,
+    );
+    // Kodama parses ON the battlefield (so its trigger is a real parsed def), then we
+    // relocate it into the library below — where it cannot function.
+    let kodama = scenario
+        .add_creature_from_oracle(P0, "Kodama of the East Tree", 6, 6, KODAMA_TRIGGER_ORACLE)
+        .id();
+    let mut fodder = Vec::new();
+    for _ in 0..4 {
+        fodder.push(scenario.add_creature(P0, "Saproling", 1, 1).id());
+    }
+    let sprout = {
+        let mut b =
+            scenario.add_spell_to_hand_from_oracle(P0, "Sprout Swarm", true, SPROUT_SWARM_ORACLE);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        b.id()
+    };
+    let mut runner = scenario.build();
+    {
+        let st = runner.state_mut();
+        st.loop_detection = LoopDetectionMode::Interactive;
+        for &id in &fodder {
+            st.objects.get_mut(&id).unwrap().color = vec![ManaColor::Green];
+        }
+        // Move Kodama from the battlefield into P0's LIBRARY (CR 603.4: its
+        // "another permanent enters" trigger no longer functions there).
+        st.battlefield.retain(|&id| id != kodama);
+        let obj = st.objects.get_mut(&kodama).unwrap();
+        obj.zone = Zone::Library;
+        let p0 = st.players.iter_mut().find(|p| p.id == P0).unwrap();
+        p0.library.insert(0, kodama);
+    }
+
+    // Sanity: Kodama really is in the library (not the battlefield), so any offer
+    // must come from correctly IGNORING it, not from it having been removed.
+    assert_eq!(
+        runner.state().objects.get(&kodama).unwrap().zone,
+        Zone::Library,
+        "the growing-class observer must sit in the library for this to discriminate",
+    );
+
+    let outcome = runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder[0]])
+        .commit()
+        .resolve();
+
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+        ),
+        "a growing-class trigger in the LIBRARY must not suppress the offer, got {:?}",
+        outcome.final_waiting_for()
+    );
+    // The offer still names the token-growth axis (the loop is genuinely detected,
+    // not an unrelated fall-through).
+    let WaitingFor::LoopShortcut { certificate, .. } = outcome.final_waiting_for() else {
+        unreachable!()
+    };
+    assert!(
+        certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+        "the detected loop's unbounded axis must be TokensCreated, got {:?}",
+        certificate.unbounded
+    );
+}
+
 /// Find the (single) object named `name` controlled by `player` in `zone`.
 fn object_named_in_zone(
     state: &GameState,
