@@ -11,8 +11,10 @@ use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
     try_parse_reanimator_aura_etb_effect, try_parse_reanimator_aura_grant_etb_effect,
 };
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
+use super::oracle_ir::effect_chain::EffectChainIr;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_modal::try_parse_inline_modal;
 use super::oracle_nom::condition::parse_inner_condition;
@@ -1397,13 +1399,17 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
         if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
-            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
+            Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
+                &effect_for_parse,
                 AbilityKind::Spell,
-                Effect::Unimplemented {
-                    name: "Unsupported monarch turn-began condition".to_string(),
-                    description: Some(effect_for_parse.clone()),
-                },
-            ))))
+                parsed_clause(Effect::unimplemented(
+                    "Unsupported monarch turn-began condition",
+                    &effect_for_parse,
+                )),
+                None,
+                effect_ctx.actor.clone(),
+                effect_ctx.in_trigger,
+            )))
         // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
         } else if let Some(vote_def) =
             crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
