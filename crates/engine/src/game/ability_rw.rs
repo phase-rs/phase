@@ -1339,6 +1339,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::Typed(..)
         | TargetFilter::Not { .. }
         | TargetFilter::Or { .. }
@@ -1372,8 +1373,10 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -1525,6 +1528,9 @@ fn census_of_typed(tf: &TypedFilter) -> Census {
             }
             FilterProp::NonToken => {
                 tags.insert("nontoken".into());
+            }
+            FilterProp::RepresentedByCard => {
+                tags.insert("represented-card".into());
             }
             _ => {}
         }
@@ -1879,6 +1885,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         AbilityCondition::ObjectsShareQuality { .. }
         | AbilityCondition::TargetMatchesFilter { .. }
         | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::SourceIsTapped
         | AbilityCondition::ControllerControlsMatching { .. }
         | AbilityCondition::TriggeringSpellTargetsFilter { .. }
@@ -2113,6 +2120,11 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
+        // CR 700.2: NOT a frozen legacy event-context tag (the frozen 12 are the
+        // EventContextAmount / EventContextSourceCostX / ManaSpentToCast group
+        // above → true); classified with the newer event-live
+        // TimesCostPaidThisResolution twin → false.
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::TimesCostPaidThisResolution => false,
     }
 }
@@ -2222,13 +2234,16 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -2308,6 +2323,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => false,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2329,6 +2345,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -2351,10 +2368,14 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation, not a legacy
+        // event-context or per-source member-bound referent.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -2434,6 +2455,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ParentTargetSlot { .. }
@@ -2482,6 +2504,10 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        // CR 615: controller-relative compound recipient — uniformity-invariant
+        // (one shared controller `c0`), not per-member-bound.
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -2565,6 +2591,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => true,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2586,6 +2613,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -2608,10 +2636,14 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation, not a legacy
+        // event-context or per-source member-bound referent.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -2693,7 +2725,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
+        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
@@ -2713,6 +2745,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
@@ -3297,11 +3330,12 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::SolveCase
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
@@ -3607,13 +3641,15 @@ fn walk_ability(
         optional_for: _,
         target_choice_timing: _,
         description: _,
-        min_x_value: _, // u32, no read
+        selected_mode_labels: _, // display snapshots, no game-state read/write
+        min_x_value: _,          // u32, no read
         cant_be_copied: _,
         copy_count_status: _,
         forward_result: _,
         distribution: _,
         chosen_x: _,
         cost_paid_object: _,
+        cost_paid_object_ids: _,
         effect_context_object: _,
         amassed_army_object: _,
         ability_index: _,
@@ -3622,8 +3658,7 @@ fn walk_ability(
         chosen_players: _,
         sub_link: _,
         replacement_applied: _,
-        dig_found_nothing_for_parent_target: _,
-        choose_from_zone_found_nothing_for_parent_target: _,
+        parent_target_missing_reason: _,
     } = a;
 
     // §4.3.2: a definition's own `player_scope` overrides the inherited scope for
@@ -4124,6 +4159,12 @@ fn rw_effect(
         Effect::Surveil { count, target: _ } => {
             let mut p = ext_write(StateKind::HandLibrary);
             p.merge(rw_quantity_expr(count));
+            (p, None)
+        }
+        Effect::ArrangePlanarDeckTop { count, keep_on_top } => {
+            let mut p = ext_write(StateKind::Other);
+            p.merge(rw_quantity_expr(count));
+            p.merge(rw_quantity_expr(keep_on_top));
             (p, None)
         }
         Effect::Shuffle { target: _ } => (ext_write(StateKind::HandLibrary), None),
@@ -4652,10 +4693,15 @@ fn rw_effect(
             source: _,
             partner: _,
             result: _,
+            source_filter,
+            partner_filter,
+            entry: _,
         } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_target_filter(source_filter));
+            p.merge(rw_target_filter(partner_filter));
             (p, None)
         }
         Effect::PhaseOut { target } => obj_membership_scope(target, chain_root),
@@ -5019,7 +5065,9 @@ fn rw_effect(
             p.writes_external.set(StateKind::StackShape);
             (p, None)
         }
-        Effect::ExileResolvingSpellInsteadOfGraveyard => (ext_write(StateKind::StackShape), None),
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => {
+            (ext_write(StateKind::StackShape), None)
+        }
 
         // ---- Pool ----
         Effect::Mana {
@@ -5770,6 +5818,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::UnspentMana { color: _ } => reads_player_of(StateKind::PlayerLife),
         QuantityRef::AttachmentsOnLeavingObject { .. } => reads_event_live(),
         QuantityRef::TimesCostPaidThisResolution => reads_event_live(),
+        // CR 700.2: reads the live triggering-spell object like the
+        // TimesCostPaidThisResolution twin — event-live, NOT a frozen D5 carrier,
+        // so no `legacy_batch_prompt` (that would be `legacy_ref()`).
+        QuantityRef::EventContextSourceModesChosen => reads_event_live(),
         // D5 carriers.
         QuantityRef::EventContextAmount
         | QuantityRef::EventContextSourceCostX
@@ -5855,6 +5907,8 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         AbilityCondition::TriggeringSpellTargetsFilter { filter: _ }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
         | AbilityCondition::ZoneChangedThisWay { filter: _ }
+        // CR 615.5: reads the prevented event's live damage-source object.
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter: _ }
         | AbilityCondition::CostPaidObjectMatchesFilter { filter: _ } => reads_event_live(),
         AbilityCondition::EventOutcomeWon => reads_event_live(),
         // CR 705.2: reads resolution-local `state.resolution_coin_flip` — a live
@@ -6169,6 +6223,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ChosenDamageSource { .. } => reads_event_live(),
@@ -6199,6 +6254,9 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        // CR 615: controller-relative compound recipient — a read-free selector.
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }

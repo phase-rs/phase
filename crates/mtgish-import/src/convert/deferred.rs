@@ -122,7 +122,7 @@
 //!
 //! - ~~**`Rule::ActivatedAbilityEffect`**~~ — **CLOSED (round 6, partial)**.
 //!   `CantBeActivated` (16 of 26 corpus occurrences) maps onto engine
-//!   `StaticMode::CantBeActivated { who, source_filter, exemption }`.
+//!   `StaticMode::CantBeActivated { who, source_filter, exemption, kind }`.
 //!   `IncreaseManaCost` / `AdditionalCost` /
 //!   `ReduceManaCostNotLessThanOne` still strict-fail — engine has
 //!   `ReduceAbilityCost` keyed on keyword name only, not on a generic

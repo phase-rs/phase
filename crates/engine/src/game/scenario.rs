@@ -187,11 +187,24 @@ impl GameScenario {
         }
     }
 
+    /// Create a scenario with an explicit `FormatConfig` (the format axis), a
+    /// player count, and a seed. This is the general constructor; `new_n_player`
+    /// is its standard-format specialization. Enables team formats — e.g.
+    /// `FormatConfig::two_headed_giant()` — in scenario-driven tests so team
+    /// combat (CR 805.10) can be exercised through the production apply pipeline.
+    pub fn new_with_format(
+        format_config: crate::types::format::FormatConfig,
+        player_count: u8,
+        seed: u64,
+    ) -> Self {
+        GameScenario {
+            state: GameState::new(format_config, player_count, seed),
+        }
+    }
+
     /// Create a scenario with N players using the default format config (20 life each).
     pub fn new_n_player(count: u8, seed: u64) -> Self {
-        GameScenario {
-            state: GameState::new(crate::types::format::FormatConfig::standard(), count, seed),
-        }
+        Self::new_with_format(crate::types::format::FormatConfig::standard(), count, seed)
     }
 
     /// Set the game phase. Also sets `waiting_for`, `priority_player`, `active_player`,
@@ -532,6 +545,38 @@ impl GameScenario {
             player,
             name.to_string(),
             Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
+    /// Add a creature card to a player's exile. Returns a `CardBuilder` for
+    /// fluent chaining. Used to stage cards tracked by source-linked exile
+    /// effects.
+    pub fn add_creature_to_exile(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Exile,
         );
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
@@ -897,18 +942,18 @@ impl<'a> CardBuilder<'a> {
 
     /// Attach a trigger definition (mode only, no execute).
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
-        let trigger = TriggerDefinition::new(mode);
-        let obj = self.obj();
-        obj.trigger_definitions.push(trigger.clone());
-        Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
-        self
+        self.with_trigger_definition(TriggerDefinition::new(mode))
     }
 
     /// Attach a fully constructed trigger definition (with execute, zones, etc.).
+    ///
+    /// Appends to the printed base set and re-materializes so the live entry
+    /// carries a real `Printed` occurrence ref — never the `Unmaterialized`
+    /// fixture sentinel, which is unserializable by design.
     pub fn with_trigger_definition(&mut self, trigger: TriggerDefinition) -> &mut Self {
         let obj = self.obj();
-        obj.trigger_definitions.push(trigger.clone());
         Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        obj.materialize_base_trigger_definitions();
         self
     }
 
@@ -1522,6 +1567,8 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
+            WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
@@ -1540,6 +1587,7 @@ impl GameRunner {
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
@@ -1698,11 +1746,13 @@ impl GameRunner {
             WaitingFor::SpecializeColor { .. } => "SpecializeColor",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
             WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
             WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
+            WaitingFor::KeepExactPermanentsChoice { .. } => "KeepExactPermanentsChoice",
             WaitingFor::ChooseXValue { .. } => "ChooseXValue",
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
@@ -2490,6 +2540,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::Priority { .. } => "Priority",
         WaitingFor::OrderTriggers { .. } => "OrderTriggers",
         WaitingFor::ScryChoice { .. } => "ScryChoice",
+        WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
         WaitingFor::SearchChoice { .. } => "SearchChoice",
         WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
         WaitingFor::CastOffer { .. } => "CastOffer",
@@ -2963,6 +3014,12 @@ fn drive_resolution(
             WaitingFor::ScryChoice { cards, .. } => {
                 let cards = cards.clone();
                 act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
+            }
+            WaitingFor::ArrangePlanarDeckTopChoice {
+                cards, keep_on_top, ..
+            } => {
+                let keep: Vec<_> = cards.iter().take(*keep_on_top).copied().collect();
+                act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
             }
             // CR 701.25a: default surveil policy keeps all looked-at cards on
             // top, mirroring the scry default.
@@ -4383,7 +4440,10 @@ mod tests {
         let obj = &runner.state().objects[&id];
 
         assert!(!obj.trigger_definitions.is_empty());
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(
+            obj.trigger_definitions[0].definition.mode,
+            TriggerMode::ChangesZone
+        );
     }
 
     #[test]
@@ -4448,12 +4508,13 @@ mod tests {
             .trigger_definitions
             .iter_all()
             .find(|t| {
-                t.description
+                t.definition
+                    .description
                     .as_deref()
                     .is_some_and(|d| d.contains("poison counters"))
             })
             .expect("ixhel end-step trigger");
-        let execute = trigger.execute.as_ref().expect("execute");
+        let execute = trigger.definition.execute.as_ref().expect("execute");
         assert!(
             matches!(
                 &*execute.effect,

@@ -36,6 +36,7 @@ import init, {
   replay_header_js,
   replay_seek_js,
   clear_replay_playback,
+  preview_mana_payment_js,
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
@@ -57,6 +58,7 @@ type EngineRequest =
       firstPlayer?: number;
     }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
+  | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
   | { type: "getLegalActions"; id: number }
@@ -252,6 +254,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           events: actionResult.events ?? [],
           log_entries: actionResult.log_entries ?? [],
         });
+        break;
+      }
+
+      case "previewManaPayment": {
+        const sources = preview_mana_payment_js(msg.actor, msg.action);
+        if (typeof sources === "string") {
+          error(msg.id, sources);
+          break;
+        }
+        result(msg.id, sources);
         break;
       }
 

@@ -94,13 +94,13 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
     CountScope, Duration, EachDamageRecipient, Effect, FilterProp, ForEachCategoryAction,
-    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition, ResolvedAbility,
-    StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource, TriggerCondition,
-    TypedFilter,
+    GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReplacementCondition,
+    ResolvedAbility, StaticCondition, TargetChoiceTiming, TargetFilter, TrackedAnaphorSource,
+    TriggerCondition, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{DisguiseCost, Keyword};
 
 /// The three independent classification axes, accumulated over one AST walk.
 /// `true` on an axis means "reads (or may read) that dimension"; the fail-safe
@@ -187,6 +187,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         optional_for: _,          // OpponentMayScope: AnyOpponent/AnyPlayer, no read
         target_choice_timing: _,  // Stack/Resolution tag
         description: _,           // display string
+        selected_mode_labels: _,  // display strings, no dynamic read
         min_x_value: _,           // u32
         cant_be_copied: _,        // bool
         copy_count_status: _,     // status tag
@@ -194,6 +195,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         distribution: _,          // concrete pre-assigned (TargetRef, u32) portions
         chosen_x: _,              // concrete cast-time X
         cost_paid_object: _,      // concrete captured-object snapshot
+        cost_paid_object_ids: _,  // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _,   // concrete captured-object snapshot
         ability_index: _,         // usize provenance
@@ -202,8 +204,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         chosen_players: _,        // concrete chosen player ids
         replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
-        dig_found_nothing_for_parent_target: _, // bool seam flag
-        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
+        parent_target_missing_reason: _, // seam flag
     } = a;
 
     let mut acc = scan_effect(effect);
@@ -739,7 +740,10 @@ fn scan_effect(x: &Effect) -> Axes {
             source: _,
             partner: _,
             result: _,
-        } => Axes::NONE,
+            source_filter,
+            partner_filter,
+            entry: _,
+        } => scan_target_filter(source_filter).or(scan_target_filter(partner_filter)),
         Effect::ExileHaunting { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target));
@@ -1067,7 +1071,10 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
-        Effect::ExileResolvingSpellInsteadOfGraveyard => Axes::NONE,
+        // The `on_exile` rider is fixed at parse time and only read by the
+        // stack-resolution router when the replacement applies — no game-state
+        // read happens at scan time, so NONE stays correct.
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => Axes::NONE,
         Effect::PreventDamage {
             amount_dynamic,
             target,
@@ -1117,6 +1124,7 @@ fn scan_effect(x: &Effect) -> Axes {
         Effect::VentureIntoDungeon => Axes::NONE,
         Effect::VentureInto { dungeon: _ } => Axes::NONE,
         Effect::TakeTheInitiative => Axes::NONE,
+        Effect::ArrangePlanarDeckTop { .. } => Axes::NONE,
         Effect::Planeswalk => Axes::NONE,
         Effect::OpenAttractions { count: _ } => Axes::NONE,
         Effect::RollToVisitAttractions => Axes::NONE,
@@ -1225,6 +1233,7 @@ fn scan_effect(x: &Effect) -> Axes {
             choose_filter,
             sacrifice_filter,
             total_power_cap,
+            keeper_constraint,
             categories: _,
             chooser_scope: _,
         } => {
@@ -1233,6 +1242,9 @@ fn scan_effect(x: &Effect) -> Axes {
             acc = acc.or(scan_target_filter(sacrifice_filter));
             if let Some(x) = total_power_cap {
                 acc = acc.or(scan_quantity_expr(x));
+            }
+            if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
+                acc = acc.or(scan_quantity_expr(count));
             }
             acc
         }
@@ -1877,6 +1889,13 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 700.2: reads the triggering-spell object (same event axis as
+        // EventContextSourceCostX and TimesCostPaidThisResolution).
+        QuantityRef::EventContextSourceModesChosen => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         QuantityRef::SpellsCastThisTurn { scope, filter } => {
             let mut acc = Axes {
                 event: false,
@@ -2280,6 +2299,16 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
+        // CR 615.5: gates on the prevented event's damage source — an event read.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_target_filter(filter));
+            acc
+        }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             filter,
             origin: _,
@@ -2402,6 +2431,7 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         TargetFilter::Any => Axes::NONE,
         TargetFilter::Player => Axes::NONE,
         TargetFilter::Controller => Axes::NONE,
+        TargetFilter::Opponent => Axes::NONE,
         TargetFilter::SelfRef => Axes::NONE,
         // CR 201.5a: a source-relative object ref (the granting object), like
         // SelfRef — no event/sibling/projected resource axis.
@@ -2530,6 +2560,12 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 615.5: resolves the prevented event's damage source — an event read.
+        TargetFilter::PostReplacementDamageSource => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TargetFilter::PostReplacementDamageTarget => Axes {
             event: true,
             sibling: false,
@@ -2556,6 +2592,8 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         TargetFilter::Named { name: _ } => Axes::NONE,
         TargetFilter::Owner => Axes::NONE,
         TargetFilter::AllPlayers => Axes::NONE,
+        // CR 615: controller-relative compound recipient — no event/sibling axes.
+        TargetFilter::ControllerAndControlledPermanents { .. } => Axes::NONE,
     }
 }
 
@@ -3099,6 +3137,7 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         // Their drift breaks the board-equality gate (item 1), not the item-4 scan.
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -3120,6 +3159,7 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -3142,6 +3182,9 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation read; it scans no
+        // board/object axis.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -3234,6 +3277,11 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         // has `damage_marked == 0` yet a persistent journal record, so gate (1) cannot
         // backstop this read — PROVEN projected, fail closed.
         FilterProp::WasDealtDamageThisTurn => Axes::CONSERVATIVE,
+        // CR 120.1: reads `state.damage_dealt_this_turn`, the same append-only
+        // per-turn journal a loop pumps and `project_out_resources` clears — a
+        // projected-resource read, PROVEN projected, fail closed (mirrors the
+        // passive `WasDealtDamageThisTurn` arm above).
+        FilterProp::DealtDamageThisTurn => Axes::CONSERVATIVE,
         // CR 400 / CR 603.6a: runtime eval reads `state.zone_changes_this_turn`, an
         // append-only event journal a loop pumps, cleared by `project_out_resources`
         // and strict-compared by nothing in gate (1). A flicker/blink loop keeps the
@@ -3886,6 +3934,8 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Casualty(_)
         | Keyword::Assist => true,
 
+        Keyword::Disguise(DisguiseCost::Reduced { .. }) => true,
+
         // SAFE: no casting/activation cost that reads a growing board/graveyard class.
         Keyword::Flying
         | Keyword::FirstStrike
@@ -3977,7 +4027,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Morph(_)
         | Keyword::Megamorph(_)
         | Keyword::Madness(_)
-        | Keyword::Disguise(_)
+        | Keyword::Disguise(DisguiseCost::Mana(_))
         | Keyword::Mayhem(_)
         | Keyword::Suspend { .. }
         | Keyword::Blitz(_)
@@ -4290,7 +4340,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -4304,6 +4354,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
@@ -4553,7 +4604,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -4563,6 +4614,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::AssembleContraptions { .. }
@@ -4706,12 +4758,14 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         kind: _,      // AbilityKind tag (no payload)
         context: _,   // SpellContext: cast-time fact snapshot, not a live choice
         description: _, // display string
+        selected_mode_labels: _, // display strings, no resolution-time choice
         min_x_value: _, // u32
         cant_be_copied: _, // bool
         copy_count_status: _, // status tag
         forward_result: _, // bool
         chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
+        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance
@@ -4720,8 +4774,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
-        dig_found_nothing_for_parent_target: _, // bool seam flag
-        choose_from_zone_found_nothing_for_parent_target: _, // bool seam flag
+        parent_target_missing_reason: _, // seam flag
     } = a;
 
     // CR 608.2d: an optional effect / optional targeting / opponent-may

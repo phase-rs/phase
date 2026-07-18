@@ -195,6 +195,7 @@ fn token_storm_declare_attackers_gate() {
         player: active,
         valid_attacker_ids,
         valid_attack_targets,
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 

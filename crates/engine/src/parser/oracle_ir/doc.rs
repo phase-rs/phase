@@ -45,8 +45,15 @@ use crate::types::mana::ManaCost;
 ///
 /// Reserved by `OracleDocBuilder::begin_item` *before* branch parsing, so a
 /// nested parser can name its owning item without the item existing yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
-pub(crate) struct OracleItemId(pub(crate) u32);
+///
+/// `Deserialize` + `pub`: this id is part of the `OracleDiagnostic::SwallowedClause`
+/// wire payload (`CardFace::parse_warnings` → `card-data.json`), so it must survive a
+/// round-trip through the card DB loaders. Re-exported from `oracle_ir::diagnostic`
+/// so consumers outside this crate-private module can name it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct OracleItemId(pub u32);
 
 /// Document-global identity for one independently auditable unit: an item, a
 /// clause, a modal mode, a trigger/static/replacement execute body, a granted
@@ -71,8 +78,8 @@ pub(crate) struct OracleUnitId {
 /// known, byte range not) is an enum value, not a second flag.
 // No `Ord`: `Exact < ChainRelative` would be a meaningless magnitude claim on a
 // qualifier this enum's own docs call orthogonal to containment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-pub(crate) enum SpanPrecision {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SpanPrecision {
     /// The span is the unit's exact byte/line extent. Safe to render.
     Exact,
     /// The span's byte range is exact **within the effect chain** it was parsed
@@ -106,21 +113,36 @@ pub(crate) enum SpanPrecision {
 // the item map is keyed by an explicit `(usize, u32)` tuple, not by this type.
 // If a future unit needs ordering, hand-implement it over
 // `(start_byte, end_byte, ordinal_within_span)` and never over `precision`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
-pub(crate) struct OracleSourceSpan {
-    pub(crate) first_line: usize,
-    pub(crate) last_line: usize,
-    pub(crate) start_byte: usize,
-    pub(crate) end_byte: usize,
+///
+/// `Deserialize` + `pub`: a span is part of the `OracleDiagnostic::SwallowedClause` wire
+/// payload (`CardFace::parse_warnings` → `card-data.json`), so it must survive a
+/// round-trip through the card DB loaders. Re-exported from `oracle_ir::diagnostic`.
+///
+/// # The span an audit diagnostic carries is a UNIT span, and it is LINE-GRANULAR
+///
+/// `Exact` on a diagnostic's `unit_span` means the bounds locate **the audit unit**
+/// exactly — not a clause within it. No producer mints a sub-line ITEM span:
+/// `DocEmitter::exact_span` hands every item on a line the whole line's byte range
+/// (`byte_range(line)`), so two clauses on one physical line are addressed by the same
+/// bytes and are distinguished only by `ordinal_within_span`. `audit_units` therefore
+/// groups them into ONE unit, and both share one `unit_span` — the line-granularity
+/// ceiling `feature.rs` documents. A renderer must not present a `unit_span` as a
+/// *clause* position. When the recognizer bring-up gives items real sub-line spans, the
+/// units subdivide on their own and this narrows with no change here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct OracleSourceSpan {
+    pub first_line: usize,
+    pub last_line: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
     /// Whether the bounds above locate this unit exactly. See `SpanPrecision`.
-    pub(crate) precision: SpanPrecision,
-    pub(crate) ordinal_within_span: u32,
+    pub precision: SpanPrecision,
+    pub ordinal_within_span: u32,
 }
 
 impl OracleSourceSpan {
     /// An exactly-located span. The constructor unit 3b uses once emission moves
     /// into the dispatch loop and the real line/byte range is in hand.
-    #[allow(dead_code)] // production caller lands in unit 3b.
     pub(crate) fn exact(
         first_line: usize,
         last_line: usize,
@@ -203,7 +225,6 @@ impl OracleSourceSpan {
     }
 
     /// True when `self` lies entirely within `other`'s byte range.
-    #[allow(dead_code)] // production caller lands in unit 3b.
     pub(crate) fn is_contained_by(&self, other: &Self) -> bool {
         self.start_byte >= other.start_byte && self.end_byte <= other.end_byte
     }
@@ -290,16 +311,16 @@ pub(crate) enum OracleNodeIr {
     /// Unit 3b replaces this payload with `AbilityIr { source, body, shell }` so
     /// the activation metadata the router currently applies around the chain
     /// becomes typed IR rather than a pre-lowered `AbilityDefinition`.
-    #[allow(dead_code)] // constructed by ordinary dispatch in unit 3b.
     Spell(EffectChainIr),
     /// Triggered ability.
-    #[allow(dead_code)] // constructed by ordinary dispatch in unit 3b.
+    // PLAN-05 DEBT (2026-07-17, post-U2): constructed only by the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
     Trigger(TriggerIr),
     /// Static ability.
-    #[allow(dead_code)] // constructed by ordinary dispatch in unit 3b.
+    // PLAN-05 DEBT (2026-07-17, post-U2): constructed only by the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
     Static(StaticIr),
     /// Replacement effect.
-    #[allow(dead_code)] // constructed by ordinary dispatch in unit 3b.
     Replacement(ReplacementIr),
     /// Keyword ability from a keyword line.
     Keyword(Keyword),
@@ -317,21 +338,16 @@ pub(crate) enum OracleNodeIr {
     StriveCost(ManaCost),
 
     // -----------------------------------------------------------------------
-    // UNIT-4 DEBT — pre-lowered escape hatches.
+    // PLAN-05 DEBT — pre-lowered escape hatches.
     //
     // These four variants carry already-assembled engine definitions rather
-    // than IR. They exist for exactly one reason: the five preprocessors
-    // (`parse_saga_chapters`, `parse_attraction_visit_triggers`,
-    // `parse_level_blocks`, `parse_spacecraft_threshold_lines`,
-    // `parse_class_oracle_text`) return lowered engine types and have nowhere
-    // else to go. Converting them is unit 4, whose file set is disjoint from
-    // unit 3's.
+    // than typed IR. Unit 4 wired the preprocessors through the document
+    // builder, but it did not remove these variants; ordinary dispatch also
+    // still emits them. The IR-native `Spell`/`Trigger`/`Static`/`Replacement`
+    // siblings are dead-coded pending Plan 05 U2's document-seam hoist.
     //
-    // Until unit 4 lands, ordinary dispatch ALSO routes through these (unit 3b
-    // converts ordinary dispatch to `Spell`/`Trigger`/`Static`/`Replacement`).
-    //
-    // Removal gate 4 ("grep finds no `PreLowered*`") is satisfied only after
-    // unit 4. Do not add a new producer of these variants.
+    // Plan 05, not unit 4, removes these variants after U2--U4 have made every
+    // producer IR-native. Do not add a new producer of these variants.
     // -----------------------------------------------------------------------
     /// Pre-lowered trigger from a preprocessor. UNIT-4 DEBT.
     PreLoweredTrigger(TriggerDefinition),
@@ -375,13 +391,6 @@ macro_rules! printed_index_impl {
                 self.0
             }
 
-            /// The slot `n` positions after this one. Compound splitting emits
-            /// several definitions from one line and needs each one's own slot.
-            #[allow(dead_code)] // ability side gains a caller in unit 3b.
-            pub(crate) fn offset(self, n: usize) -> Self {
-                Self(self.0 + n)
-            }
-
             /// A parse-time placeholder printed slot (always `0`).
             ///
             /// CR 707.9a: an "…except it has this ability" clause must resolve to
@@ -406,6 +415,24 @@ macro_rules! printed_index_impl {
 
 printed_index_impl!(PrintedAbilityIndex);
 printed_index_impl!(PrintedTriggerIndex);
+
+impl PrintedAbilityIndex {
+    /// The slot `n` positions after this one. Compound splitting emits several
+    /// definitions from one line and needs each one's own slot.
+    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the printed-index consumers in the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
+    pub(crate) fn offset(self, n: usize) -> Self {
+        Self(self.0 + n)
+    }
+}
+
+impl PrintedTriggerIndex {
+    /// The slot `n` positions after this one. Compound splitting emits several
+    /// definitions from one line and needs each one's own slot.
+    pub(crate) fn offset(self, n: usize) -> Self {
+        Self(self.0 + n)
+    }
+}
 
 /// Test-only constructors. Kept behind `cfg(test)` so production code cannot
 /// mint a printed index out of a bare integer: the only production producers are
@@ -446,7 +473,8 @@ pub(crate) struct OracleDocIr {
 impl OracleDocIr {
     /// Look up an item by its stable id. Cross-item lowering binds through this,
     /// never by scanning category vectors for a matching shape.
-    #[allow(dead_code)] // production caller lands in unit 3b.
+    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the source-context consumers in the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
     pub(crate) fn item(&self, id: OracleItemId) -> Option<&OracleItemIr> {
         self.items.iter().find(|item| item.id == id)
     }
@@ -459,7 +487,6 @@ impl OracleDocIr {
 /// Reason an item or unit was rejected by the builder. These are contract
 /// violations in the parser, not Oracle-text problems.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // production caller lands in unit 3b.
 pub(crate) enum DocBuilderError {
     DuplicateItemPosition {
         span: OracleSourceSpan,
@@ -484,7 +511,6 @@ pub(crate) enum DocBuilderError {
 /// Handed to nested clause/mode/body parsers through `ParseContext`. A nested
 /// parser may allocate child units but can never invent an `OracleItemId`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // production caller lands in unit 3b.
 pub(crate) struct UnitAllocator {
     item: OracleItemId,
     /// The owning item's span. Held here, not on `ItemSlot`, because the
@@ -495,7 +521,6 @@ pub(crate) struct UnitAllocator {
     issued: Vec<u32>,
 }
 
-#[allow(dead_code)] // production caller lands in unit 3b.
 impl UnitAllocator {
     fn new(item: OracleItemId, parent_span: OracleSourceSpan) -> Self {
         // Ordinal 0 is reserved for the item's own header unit.
@@ -534,6 +559,8 @@ impl UnitAllocator {
         Ok(source)
     }
 
+    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the source-context consumers in the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
     pub(crate) fn item(&self) -> OracleItemId {
         self.item
     }
@@ -600,7 +627,6 @@ pub(crate) struct OracleDocBuilder {
     /// a new ordinal from here — it reuses the popped item's ORIGINAL span+ordinal
     /// (the key it just freed), which is position-preserving; so this allocator only
     /// ever hands out fresh ordinals to genuinely new emissions.
-    #[allow(dead_code)] // wired by the unit-4 dispatch-loop/preprocessor cutover.
     next_ordinal_by_line: BTreeMap<usize, u32>,
     /// CR 707.9a printed-**trigger** index: the slot the next emitted trigger
     /// occupies.
@@ -652,12 +678,15 @@ pub(crate) struct ItemSlot {
     allocator: UnitAllocator,
 }
 
-#[allow(dead_code)] // production caller lands in unit 3b.
 impl ItemSlot {
+    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the source-context consumers in the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
     pub(crate) fn id(&self) -> OracleItemId {
         self.id
     }
 
+    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the source-context consumers in the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
     pub(crate) fn source(&self) -> &OracleUnitSource {
         &self.source
     }
@@ -681,7 +710,6 @@ impl OracleDocBuilder {
     /// `take_last_spell` re-emit does NOT call this — it reuses the popped item's
     /// ORIGINAL span+ordinal (the freed key), which is position-preserving — so this
     /// allocator only ever advances for genuinely new emissions.
-    #[allow(dead_code)] // wired by the unit-4 dispatch-loop/preprocessor cutover.
     pub(crate) fn next_ordinal_for_line(&mut self, first_line: usize) -> u32 {
         let slot = self.next_ordinal_by_line.entry(first_line).or_insert(0);
         let ordinal = *slot;
@@ -705,13 +733,15 @@ impl OracleDocBuilder {
     /// source-ordered item map after all emission is done. These accessors remain
     /// only as the read-before-emission form; anything that needs a *true* printed
     /// slot must go through `finish()`.
-    #[allow(dead_code)] // becomes the sole index authority in unit 3b.
+    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the printed-index consumers in the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
     pub(crate) fn ability_index(&self) -> PrintedAbilityIndex {
         PrintedAbilityIndex(self.spells_emitted.len())
     }
 
     /// The next trigger's printed index (CR 707.9a). Read before emission.
-    #[allow(dead_code)] // becomes the sole index authority in unit 3b.
+    // PLAN-05 DEBT (2026-07-17, post-U2): used only by the printed-index consumers in the Class-B bring-up (unit 3); retire this allow there.
+    #[allow(dead_code)]
     pub(crate) fn trigger_index(&self) -> PrintedTriggerIndex {
         PrintedTriggerIndex(self.trigger_index)
     }
@@ -852,24 +882,17 @@ impl OracleDocBuilder {
         self.items.remove(&key)
     }
 
-    /// Peek the most-recently-EMITTED spell's definition without removing it —
-    /// INSERTION recency, via the `spells_emitted` stack. This is the pop-aware
-    /// source of truth for the old `result.abilities.last()` read: `take_last_spell`
-    /// pops this stack and the "instead"/min_x re-emit re-pushes, so a peek derived
-    /// from it is correct across any pop/re-emit interleave — unlike a clone-on-emit
-    /// mirror, which a pop would not revert. Deliberately NOT a `self.items` span
-    /// maximum: a preprocessor may emit a higher-line spell before the dispatch loop
-    /// emits a lower-line one, and the reader wants the JUST-emitted (loop) spell.
-    #[allow(dead_code)] // used by the dispatch-loop reader in unit 4.
-    pub(crate) fn peek_last_spell(&self) -> Option<&AbilityDefinition> {
+    /// Peek the most-recently-EMITTED spell node without removing it — insertion
+    /// recency, via the `spells_emitted` stack. This is the pop-aware source of
+    /// truth for the old `result.abilities.last()` read: `take_last_spell` pops this
+    /// stack and the "instead"/min_x re-emit re-pushes, so a peek derived from it is
+    /// correct across any pop/re-emit interleave — unlike a clone-on-emit mirror,
+    /// which a pop would not revert. Deliberately NOT a `self.items` span maximum:
+    /// a preprocessor may emit a higher-line spell before the dispatch loop emits a
+    /// lower-line one, and the reader wants the just-emitted loop spell.
+    pub(crate) fn peek_last_spell_node(&self) -> Option<&OracleNodeIr> {
         let id = *self.spells_emitted.last()?;
-        self.items
-            .values()
-            .find(|i| i.id == id)
-            .and_then(|i| match &i.node {
-                OracleNodeIr::PreLoweredSpell(def) => Some(def),
-                _ => None,
-            })
+        self.items.values().find(|i| i.id == id).map(|i| &i.node)
     }
 
     /// Finish, producing items already in Oracle source order.
@@ -1285,7 +1308,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::PayCost { .. } => {}
         Effect::CastFromZone { .. } => {}
         Effect::FreeCastFromZones { .. } => {}
-        Effect::ExileResolvingSpellInsteadOfGraveyard => {}
+        Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {}
         Effect::PreventDamage { .. } => {}
         Effect::CreateDamageReplacement { .. } => {}
         // Nested-definition boundary — intentionally NOT recursed. Both carry a
@@ -1310,6 +1333,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::VentureIntoDungeon => {}
         Effect::VentureInto { .. } => {}
         Effect::TakeTheInitiative => {}
+        Effect::ArrangePlanarDeckTop { .. } => {}
         Effect::Planeswalk => {}
         Effect::ChaosEnsues => {}
         Effect::ReverseTurnOrder => {}

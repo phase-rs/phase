@@ -19,7 +19,8 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind, PendingMulliganAction, WaitingFor,
+    AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind,
+    PendingMulliganAction, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -56,7 +57,13 @@ pub fn validated_candidate_actions_with_probe(
     probe: Option<&crate::game::casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let pipeline = FilterPipeline::default_pipeline();
-    pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe)
+    let mut actions =
+        pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe);
+    // Issue #4878: candidate enumeration must not depend on HashSet/HashMap
+    // iteration order leaking into AI tie-breaking downstream. Ordered via the
+    // allocation-free `GameAction::cmp_stable` total order (not `Debug` strings).
+    actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
+    actions
 }
 
 /// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
@@ -413,8 +420,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (
             WaitingFor::ScryChoice { player: _, cards },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => selection_mismatch(chosen, cards, None),
+        (
+            WaitingFor::ArrangePlanarDeckTopChoice {
+                player: _,
+                cards,
+                keep_on_top,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(*keep_on_top)),
+        (
             WaitingFor::SurveilChoice { player: _, cards },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, None),
@@ -520,10 +535,11 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { .. },
         ) => true,
-        // CR 118.3: Sacrifice honors the [min_count, count] range.
+        // CR 118.3: Sacrifice and optional zone-exile costs honor the
+        // [min_count, count] range.
         (
             WaitingFor::PayCost {
-                kind: PayCostKind::Sacrifice,
+                kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
                 choices,
                 count,
                 min_count,
@@ -750,7 +766,8 @@ fn activate_ability_is_meaningful_priority(
     state.objects.get(&source_id).is_some_and(|obj| {
         obj.abilities.get(ability_index).is_some_and(|ability| {
             !mana_abilities::is_mana_ability(ability)
-                || mana_sources::mana_ability_penalty(ability).is_meaningful_priority_activation()
+                || mana_sources::object_mana_ability_penalty(state, source_id, ability)
+                    .is_meaningful_priority_activation()
         })
     })
 }
@@ -1119,7 +1136,7 @@ fn sacrifice_for_mana_enables_followup(state: &GameState, player: PlayerId) -> b
         let case3 = obj
             .trigger_definitions
             .iter_all()
-            .any(trigger_fires_on_leaving_battlefield);
+            .any(|entry| trigger_fires_on_leaving_battlefield(entry.definition()));
         case2 || case3
     })
 }
@@ -1204,6 +1221,7 @@ fn beneficial_mana_tap_trigger_hold(
                 return false;
             };
             obj.trigger_definitions.iter_all().any(|trigger| {
+                let trigger = trigger.definition();
                 if !mana_sources::is_non_mana_tap_trigger(trigger)
                     || !mana_sources::trigger_chain_benefits_controller(trigger)
                 {
@@ -1372,9 +1390,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // `activatable_object_mana_actions` proxy while dropping the false HOLD.
     // Meaningful non-mana activated abilities, grouped mana that would queue
     // non-mana triggers, and issue #544 sac-for-mana on an opponent's turn are
-    // still held below by the meaningful-action/sac gates; a dedicated
-    // `has_feasibly_activatable_ability` opponent-turn seam (the ability
-    // analogue of this predicate) is deferred as future work.
+    // held below by the same engine-authoritative legality predicates.
     if state.active_player != player {
         let probe: &_ = cast_probe.get_or_insert_with(|| {
             crate::game::casting::PriorityCastProbe::from_flushed_state(state.clone(), player)
@@ -1579,8 +1595,29 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         _ => (state, None),
     };
 
-    let actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
+    let mut actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
         .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe));
+
+    // This preference-setting action is intentionally excluded from AI candidate
+    // generation: it changes future prompt behavior rather than making a tactical
+    // game decision. It remains a legal player action, however, and must be present
+    // in the engine snapshot so a queued UI choice is not discarded as stale.
+    if matches!(
+        &state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            may_trigger_key: Some(_),
+            ..
+        }
+    ) {
+        actions.extend([
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Accept,
+            },
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Decline,
+            },
+        ]);
+    }
 
     // Build spell costs map. The frontend display layer needs the
     // engine-effective cost (after Affinity / ReduceCost / commander tax / etc.)
@@ -2212,6 +2249,7 @@ mod tests {
             player: PlayerId(1),
             valid_attacker_ids: Vec::new(),
             valid_attack_targets: Vec::new(),
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
         // Acting player gets the full result (matches `legal_actions_full`).
@@ -2913,6 +2951,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2952,6 +2991,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2982,6 +3022,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -3334,6 +3375,104 @@ mod tests {
                 &super::flat_priority_actions(runner.state())
             ),
             "castable instant on your own turn → hold via own-turn castability rung"
+        );
+    }
+
+    /// Issue #4387: The Unbeatable Squirrel Girl's controller-owned,
+    /// mana-costed non-mana activated ability is a meaningful opponent-turn
+    /// priority action. The production action surfaces must expose it, auto-pass
+    /// must hold from that exposed action, and the submitted activation must
+    /// resolve through the public pipeline.
+    #[test]
+    fn squirrel_girl_activation_submits_and_resolves_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        const SQUIRREL_GIRL_ORACLE: &str = "Do You Like Squirrels? — Whenever The Unbeatable Squirrel Girl enters or attacks, create a 1/1 green Squirrel creature token.\nI LOVE Squirrels! — {1}{G}{G}{G}: Create X 1/1 green Squirrel creature tokens, where X is the number of Squirrels you control.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+        let source = scenario
+            .add_creature(P0, "The Unbeatable Squirrel Girl", 4, 4)
+            .as_legendary()
+            .with_subtypes(vec!["Squirrel", "Human", "Hero"])
+            .from_oracle_text(SQUIRREL_GIRL_ORACLE)
+            .id();
+
+        let mut runner = scenario.build();
+        let ability_index = runner.state().objects[&source]
+            .abilities
+            .iter()
+            .position(|ability| ability.kind == AbilityKind::Activated)
+            .expect("Squirrel Girl must parse its activated ability");
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+
+        let action = GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        };
+        let flat = super::flat_priority_actions(runner.state());
+        assert!(
+            flat.contains(&action),
+            "controller-owned Squirrel Girl activation must appear in the flat action list"
+        );
+        assert!(
+            bucket_has(&legal_actions_full(runner.state()).2, source, &action),
+            "controller-owned Squirrel Girl activation must appear in legal_actions_by_object"
+        );
+        assert!(
+            !super::auto_pass_recommended(runner.state(), &flat),
+            "mana-costed non-mana activation on opponent's turn -> hold"
+        );
+
+        let before = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Squirrel")
+            })
+            .count();
+        let outcome = runner.activate(source, ability_index).resolve();
+        let after = outcome
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Squirrel")
+            })
+            .count();
+        assert_eq!(
+            after,
+            before + 1,
+            "submitted opponent-turn activation must resolve and create one Squirrel token"
         );
     }
 
@@ -4833,6 +4972,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![target.clone()],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -4883,6 +5023,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: targets.clone(),
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -4985,6 +5126,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![target],
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -5094,6 +5236,66 @@ mod tests {
             clones < 5,
             "delve validation should not clone state per graveyard card (got {clones} clones)"
         );
+    }
+
+    /// Issue #4878: `validated_candidate_actions` must return candidates in the
+    /// canonical `GameAction::cmp_stable` order, independent of the upstream
+    /// enumeration order (which walks `state.objects`, an `im::HashMap`, in
+    /// hash order — not sorted for this id set). Reverting the
+    /// `sort_by(cmp_stable)` guard returns the candidates in that hash order,
+    /// which differs from the canonical order below, flipping this assertion.
+    #[test]
+    fn validated_candidates_are_cmp_stable_sorted() {
+        let mut state = setup_priority();
+        // CR 305.2 + CR 505: land drop available in the precombat main phase so
+        // each land in hand survives the simulation filter as a `PlayLand`.
+        state.phase = Phase::PreCombatMain;
+        state.lands_played_this_turn = 0;
+        for _ in 0..10 {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+
+        let actions: Vec<GameAction> = validated_candidate_actions(&state)
+            .iter()
+            .map(|c| c.action.clone())
+            .collect();
+
+        // Reach guard: the scenario must actually offer several distinct actions
+        // (multiple `PlayLand` + `PassPriority`), otherwise a single-element list
+        // would be trivially "sorted" and the assertion vacuous.
+        assert!(
+            actions.len() >= 3,
+            "expected several candidate actions to canonicalize, got {}",
+            actions.len()
+        );
+
+        // Canonical order: identical to an independent `cmp_stable` sort.
+        let mut expected = actions.clone();
+        expected.sort_by(|a, b| a.cmp_stable(b));
+        assert_eq!(
+            actions, expected,
+            "validated_candidate_actions must emit cmp_stable-canonical order"
+        );
+
+        // Determinism: a second call over the same state yields the same order.
+        let again: Vec<GameAction> = validated_candidate_actions(&state)
+            .iter()
+            .map(|c| c.action.clone())
+            .collect();
+        assert_eq!(actions, again, "candidate order must be deterministic");
     }
 
     /// CR 117.3d: a matching priority yield for the top-of-stack trigger makes

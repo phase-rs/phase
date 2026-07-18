@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
-    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterCostChoice,
-    CounterMoveChoice, CounterRemoveChoice, MayTriggerAutoChoiceKey, ShardChoice, YieldScope,
-    YieldTarget,
+    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
+    CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
+    MayTriggerAutoChoiceKey, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -21,7 +21,7 @@ use crate::game::game_object::AttachTarget;
 /// shortcut. This intentionally does not reuse the legacy loop-shortcut
 /// vocabulary: the route is an engine-proved finite reducer transcript, not a
 /// general loop certificate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PrecastCopyShortcutResponse {
     Propose { route_id: u64 },
@@ -35,7 +35,7 @@ pub enum PrecastCopyShortcutResponse {
 /// Bool flags are not composable — this enum can grow new branches (e.g.,
 /// "Cast face-down", "Put into hand" already exists for Discover) without
 /// changing call sites that already exhaustively match.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CastChoice {
     /// CR 701.57a + CR 702.85a: Cast the offered card without paying its mana
@@ -61,7 +61,7 @@ pub enum CastChoice {
 ///   Only available when `object_id` references a card named "Serum Powder" in
 ///   the actor's hand (CR 103.5b and Serum Powder Oracle text). The player
 ///   remains pending and may keep, mulligan, or use another Serum Powder next.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MulliganChoice {
     Keep,
@@ -82,7 +82,7 @@ pub enum MulliganChoice {
 /// state, not on this action — the decision is structurally identical across
 /// keywords; only post-payment semantics diverge (per CR 702.74a Evoke,
 /// CR 702.96a Overload, CR 702.103a Bestow, and the custom Warp keyword).
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AlternativeCastDecision {
     /// Pay the spell's printed mana cost. Resolution proceeds normally.
@@ -100,7 +100,7 @@ pub enum AlternativeCastDecision {
 /// `Pay { index }` selects the sub-cost by its position in
 /// `WaitingFor::UnlessPaymentChooseCost::costs` and routes back into the
 /// standard single-cost `handle_unless_payment` path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum UnlessCostBranch {
     Decline,
@@ -110,7 +110,7 @@ pub enum UnlessCostBranch {
 /// CR 400.11 + CR 406.3: One discriminated selection committed for an
 /// outside-game choice. The two source pools (sideboard and face-up exile) are
 /// expressed as parallel variants so the action wire format is uniform.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum OutsideGameSelection {
     /// CR 400.11a: A copy from the player's sideboard, identified by its slot.
@@ -119,10 +119,27 @@ pub enum OutsideGameSelection {
     FaceUpExile { object_id: ObjectId },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr, strum::EnumDiscriminants,
+)]
 #[serde(tag = "type", content = "data")]
+// Issue #4878: `GameActionKind` is the allocation-free discriminant used by
+// `GameAction::cmp_stable` to order actions by variant before comparing
+// payloads, so deterministic AI/legal-action sorting never depends on
+// `HashSet`/`HashMap` iteration order (previously ordered via `Debug` strings).
+#[strum_discriminants(name(GameActionKind), derive(PartialOrd, Ord))]
 pub enum GameAction {
     PassPriority,
+    /// CR 608.2d + CR 701.42: select the exact pair to process for meld.
+    ChooseMeldPair {
+        source_id: ObjectId,
+        partner_id: ObjectId,
+    },
+    /// CR 508.4a: select the engine-enumerated destination for a permanent
+    /// entering the battlefield attacking.
+    ChooseEntryAttackTarget {
+        target: AttackTarget,
+    },
     PlayLand {
         object_id: ObjectId,
         card_id: CardId,
@@ -185,6 +202,13 @@ pub enum GameAction {
     /// CR 608.2d + CR 700.3: "An opponent separates" — the controller's answer
     /// to `WaitingFor::SeparatePilesChooseOpponent`.
     ChoosePileOpponent {
+        opponent: PlayerId,
+    },
+    /// CR 601.2c + CR 115.1: The spell controller's answer to
+    /// `WaitingFor::ChooseAnnouncingOpponent` — which opponent announces the
+    /// "of an opponent's choice" target slot. `opponent` must be one of that
+    /// prompt's `candidates`.
+    ChooseAnnouncingOpponent {
         opponent: PlayerId,
     },
     /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
@@ -576,8 +600,9 @@ pub enum GameAction {
     },
     /// CR 702.139a: Declare a companion during pre-game reveal (or decline).
     DeclareCompanion {
-        /// Index into the eligible_companions list, or None to decline.
-        card_index: Option<usize>,
+        /// An explicit reveal choice or an explicit decline. This cannot be
+        /// optional: missing fields must reject rather than silently decline.
+        choice: CompanionDeclaration,
     },
     /// CR 702.139a: Pay {3} to put companion into hand (special action, see rule 116.2g).
     CompanionToHand,
@@ -735,6 +760,13 @@ pub enum GameAction {
     ChooseKeptCreatures {
         kept: Vec<ObjectId>,
     },
+    /// CR 101.4 + CR 701.21a: Answer to an exact keeper-cardinality choice.
+    /// Every object must be eligible and the submitted set must contain the
+    /// required number of distinct objects (or every eligible object when the
+    /// required number exceeds availability).
+    ChooseKeptPermanents {
+        kept: Vec<ObjectId>,
+    },
     /// CR 107.1b + CR 601.2f: Choose the value of X for a spell or activated
     /// ability whose cost contains X. Chosen as part of determining total cost,
     /// before mana is paid.
@@ -861,7 +893,7 @@ pub enum GameAction {
 /// reading the identity latched on that source's trigger (CR 400.7), so the
 /// frontend never constructs an incarnation or card id. `Remove` echoes a
 /// stored `YieldTarget` verbatim; `ClearAll` drops every yield for the actor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PriorityYieldOp {
     Add {
@@ -878,34 +910,25 @@ pub enum PriorityYieldOp {
 /// acting player's stored "don't ask again" auto-choices for optional ("may")
 /// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every stored
 /// auto-choice belonging to the acting player.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum MayTriggerAutoChoiceOp {
     Remove { key: MayTriggerAutoChoiceKey },
     ClearAll,
 }
 
-/// CR 603.3b: The mutation a `GameAction::SetTriggerOrderTemplate` performs on the
-/// acting player's saved trigger-ordering templates. `Save` echoes the just-prompted
-/// group's source object ids plus the submitted permutation (the engine resolves each
-/// id to its card identity, mirroring `PriorityYieldOp::Add` — no frontend game-state
-/// computation); `Remove` echoes a stored key verbatim; `ClearAll` drops every saved
-/// (persistent) ordering template belonging to the acting player.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// CR 603.3b: The only public mutation of the acting player's saved
+/// trigger-ordering preferences. A live `OrderTriggers` response is the sole
+/// authority that records a preference; clients may only forget all of their
+/// saved preferences.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerOrderTemplateOp {
-    Save {
-        sources: Vec<ObjectId>,
-        order: Vec<usize>,
-    },
-    Remove {
-        key: crate::analysis::decision_template::DecisionGroupKey,
-    },
     ClearAll,
 }
 
 /// CR 701.48a: Learn choice — rummage a specific card, or skip entirely.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LearnOption {
     /// Discard the specified card, then draw one.
@@ -1397,6 +1420,16 @@ impl GameAction {
         self.into()
     }
 
+    /// Issue #4878: allocation-free total order over `GameAction`, used for
+    /// deterministic AI candidate / legal-action sorting. Orders by the
+    /// `GameActionKind` discriminant first, then by payload fields, so equal
+    /// scores never depend on `HashSet`/`HashMap` allocation-order iteration.
+    /// Replaces the previous `format!("{:?}", action)` sort keys — no `Debug`
+    /// formatting is used for ordering.
+    pub fn cmp_stable(&self, other: &Self) -> std::cmp::Ordering {
+        super::action_stable_order::cmp_game_actions(self, other)
+    }
+
     /// CR 605.3a: Whether this action is a mana ability activation.
     ///
     /// Mana abilities are excluded from the flat `legal_actions()` result
@@ -1432,6 +1465,8 @@ impl GameAction {
     /// without updating this method is a compile-time error.
     pub fn source_object(&self) -> Option<ObjectId> {
         match self {
+            GameAction::ChooseMeldPair { source_id, .. } => Some(*source_id),
+            GameAction::ChooseEntryAttackTarget { .. } => None,
             GameAction::PlayLand { object_id, .. } => Some(*object_id),
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::Foretell { object_id, .. } => Some(*object_id),
@@ -1522,6 +1557,7 @@ impl GameAction {
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChoosePileOpponent { .. }
+            | GameAction::ChooseAnnouncingOpponent { .. }
             | GameAction::ChooseAssistPlayer { .. }
             | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
@@ -1541,6 +1577,7 @@ impl GameAction {
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }
             | GameAction::ChooseKeptCreatures { .. }
+            | GameAction::ChooseKeptPermanents { .. }
             | GameAction::ChooseX { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }
@@ -1570,6 +1607,21 @@ mod tests {
         let json = serde_json::to_value(&action).unwrap();
         assert_eq!(json["type"], "PassPriority");
         assert!(json.get("data").is_none());
+    }
+
+    #[test]
+    fn companion_declaration_requires_an_explicit_response() {
+        let action = GameAction::DeclareCompanion {
+            choice: crate::types::game_state::CompanionDeclaration::Decline,
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(json["data"]["choice"]["type"], "Decline");
+
+        let legacy = r#"{
+            "type":"DeclareCompanion",
+            "data":{"card_index":0}
+        }"#;
+        assert!(serde_json::from_str::<GameAction>(legacy).is_err());
     }
 
     #[test]

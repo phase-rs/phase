@@ -771,6 +771,8 @@ pub(super) fn target_filter_matches_object(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false,
+        // CR 102.3: Opponent is a player reference, never an object.
+        TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false,
@@ -795,8 +797,10 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,
@@ -1030,7 +1034,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DebugPermissionRevoked { .. }
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::Foretold { .. }
-        | GameEvent::BecameForetold { .. } => 0,
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::HiddenSearchViewed { .. } => 0,
     }
 }
 

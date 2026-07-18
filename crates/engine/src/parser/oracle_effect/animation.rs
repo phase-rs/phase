@@ -637,7 +637,12 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
 /// variant. Returns `None` if the marker is absent. Uses `take_until` to
 /// locate the marker, then [`parse_in_addition_other_types_marker`] to consume
 /// and recognize the variant.
-fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
+///
+/// `pub(crate)` so `try_parse_become_choice` (`oracle_effect/subject.rs`) can
+/// share this exact split rather than reimplementing it: the "of your choice"
+/// forms (Navigator's Compass) carry the same trailing marker as the fixed-type
+/// forms (Possessed Goat) this was built for.
+pub(crate) fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
     type VE<'a> = OracleError<'a>;
     let (_, prefix) =
         nom::bytes::complete::take_until::<_, _, VE<'_>>(" in addition to ")(input).ok()?;

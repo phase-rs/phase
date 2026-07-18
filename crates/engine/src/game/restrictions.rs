@@ -1115,6 +1115,9 @@ fn casting_restriction_applies(
         CastingRestriction::RequiresCondition { condition } => condition
             .as_ref()
             .is_none_or(|cond| evaluate_condition(state, player, source_id, cond)),
+        // Not a timing gate: "can't spend mana" restricts how the cost is paid,
+        // never when. Always satisfied here; enforced in the mana-payment path.
+        CastingRestriction::CantSpendMana => true,
     }
 }
 
@@ -4475,5 +4478,68 @@ mod tests {
                 "opponent's turn {phase:?} must be illegal (DuringYourTurn gate)"
             );
         }
+    }
+
+    #[test]
+    fn parsed_combat_window_activation_gates_reach_production_enforcement() {
+        let check_window = |oracle: &str,
+                            expected: &[ActivationRestriction],
+                            legal_phase: Phase,
+                            illegal_phase: Phase| {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                "Combat Window Test",
+                &[],
+                &["Artifact".to_string()],
+                &[],
+            );
+            let restrictions = &parsed.abilities[0].activation_restrictions;
+            assert_eq!(
+                restrictions, expected,
+                "parser must expose the enforced gate"
+            );
+
+            let mut state = crate::types::game_state::GameState::new_two_player(42);
+            let player = PlayerId(0);
+            state.active_player = player;
+            state.priority_player = player;
+            state.waiting_for = WaitingFor::Priority { player };
+
+            state.phase = legal_phase;
+            assert!(
+                check_activation_restrictions(&state, player, ObjectId(10), 0, restrictions)
+                    .is_ok(),
+                "activation must be legal in {legal_phase:?}"
+            );
+
+            state.phase = illegal_phase;
+            assert!(
+                check_activation_restrictions(&state, player, ObjectId(10), 0, restrictions)
+                    .is_err(),
+                "activation must be illegal in {illegal_phase:?}"
+            );
+        };
+
+        check_window(
+            "{T}: Draw a card. Activate only before attackers are declared.",
+            &[ActivationRestriction::BeforeAttackersDeclared],
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+        );
+        check_window(
+            "{T}: Draw a card. Activate only before combat damage has been dealt.",
+            &[ActivationRestriction::BeforeCombatDamage],
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+        );
+        check_window(
+            "{T}: Draw a card. Activate only during combat before combat damage has been dealt.",
+            &[
+                ActivationRestriction::DuringCombat,
+                ActivationRestriction::BeforeCombatDamage,
+            ],
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+        );
     }
 }

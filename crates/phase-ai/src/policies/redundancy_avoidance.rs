@@ -383,6 +383,7 @@ fn redundancy_delta(
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }
         | Effect::Scry { .. }
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::PumpAll { .. }
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }
@@ -442,7 +443,7 @@ fn redundancy_delta(
         // spell with an exile-instead/linked-source rider. Its value is realized
         // by the stack resolution replacement path, so this policy has no static
         // redundancy signal to score.
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }

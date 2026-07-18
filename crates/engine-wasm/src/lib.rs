@@ -13,12 +13,13 @@ use engine::game::engine::{
     apply, apply_for_simulation, resolve_all_fast_forward, ResolveAllCallbackDecision,
     ResolveAllFastForwardResult as BatchResolveResult,
 };
-use engine::game::preview::compute_preview_diff;
+use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
 use engine::game::{
-    can_pair_commanders, deck_copy_limit_for, estimate_bracket, evaluate_deck_compatibility,
-    filter_state_for_viewer, finalize_public_state, is_brawl_commander_eligible,
-    is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks,
-    rehydrate_game_from_card_db, resolve_deck_list, start_game, start_game_with_starting_player,
+    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
+    evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
+    signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
@@ -572,6 +573,38 @@ pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsVal
     })
 }
 
+/// Returns the engine-authored Oathbreaker signature-spell selection policy.
+#[wasm_bindgen(js_name = signatureSpellSelectionPolicy)]
+pub fn signature_spell_selection_policy_js(request: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&signature_spell_selection_policy(db, &request)))
+    })
+}
+
+/// Returns legal Commander-family companion candidates from the main deck.
+#[wasm_bindgen(js_name = companionCandidates)]
+pub fn companion_candidates_js(request: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&companion_candidates(db, &request)))
+    })
+}
+
 /// Estimates a Commander deck's bracket without touching `GAME_STATE`.
 /// Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
 /// deck has no commander or the card database is not loaded.
@@ -709,6 +742,7 @@ pub fn initialize_game(
                         &deck.main_deck,
                         &deck.sideboard,
                         &deck.commander,
+                        &deck.companion,
                         &deck.planar_deck,
                         &deck.scheme_deck,
                         &deck.signature_spell,
@@ -731,6 +765,7 @@ pub fn initialize_game(
                         &deck.main_deck,
                         &deck.sideboard,
                         &deck.commander,
+                        &deck.companion,
                         &deck.planar_deck,
                         &deck.scheme_deck,
                         &deck.signature_spell,
@@ -1017,13 +1052,8 @@ fn handle_debug_create_card_inner(
             zone
         };
         let card_id = engine::types::identifiers::CardId(state.next_object_id);
-        let obj_id = engine::game::zones::create_object(
-            state,
-            card_id,
-            owner,
-            face.name.clone(),
-            staging_zone,
-        );
+        let obj_id =
+            engine::game::create_object(state, card_id, owner, face.name.clone(), staging_zone);
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
         state.layers_dirty.mark_full();
@@ -1124,10 +1154,13 @@ pub fn get_game_state() -> JsValue {
 pub fn get_filtered_game_state(viewer: u8) -> JsValue {
     match with_state(|state| {
         let filtered = filter_state_for_viewer(state, PlayerId(viewer));
-        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
-            &filtered,
-            Some(PlayerId(viewer)),
-        ))
+        to_js(
+            &engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                state,
+                &filtered,
+                Some(PlayerId(viewer)),
+            ),
+        )
     }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
@@ -1302,6 +1335,31 @@ pub fn preview_action_js(actor: u8, action: JsValue) -> JsValue {
         Ok(Ok(diff)) => to_js(&diff),
         Ok(Err(msg)) => JsValue::from_str(&msg),
         Err(e) => e,
+    }
+}
+
+/// Non-mutating automatic spell-payment preview. The engine simulates the
+/// exact, currently legal `CastSpell` action and returns the permanent ids that
+/// produced mana before that spell was committed to the stack. It returns an
+/// empty array when the cast needs another choice before payment can be final.
+#[wasm_bindgen]
+pub fn preview_mana_payment_js(actor: u8, action: JsValue) -> JsValue {
+    let action: GameAction = match serde_wasm_bindgen::from_value(action) {
+        Ok(action) => action,
+        Err(error) => {
+            return JsValue::from_str(&format!(
+                "Engine error: failed to deserialize action: {error}"
+            ));
+        }
+    };
+
+    match with_state(|state| {
+        preview_auto_payment_sources(state, PlayerId(actor), &action)
+            .map_err(|error| format!("Engine error: {error}"))
+    }) {
+        Ok(Ok(sources)) => to_js(&sources),
+        Ok(Err(message)) => JsValue::from_str(&message),
+        Err(error) => error,
     }
 }
 
@@ -1800,6 +1858,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 main_deck: deck_data.main_deck,
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
+                companion: deck_data.companion,
                 attraction_deck: deck_data.attraction_deck,
                 planar_deck: deck_data.planar_deck,
                 scheme_deck: deck_data.scheme_deck,

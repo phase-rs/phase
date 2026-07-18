@@ -245,10 +245,14 @@
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_one": "Afficher {{count}} carte attachée masquée",
+    "hiddenAttachmentsAria_other": "Afficher {{count}} cartes attachées masquées",
     "fanPick": "Choisir",
     "fanConfirm": "Confirmer ({{count}})",
     "viewAttachments_one": "Voir la carte attachée",
     "viewAttachments_other": "Voir {{count}} cartes attachées",
+    "viewAttachmentsFor_one": "Voir la carte attachée de {{name}}",
+    "viewAttachmentsFor_other": "Voir les {{count}} cartes attachées de {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -289,6 +293,11 @@
     "creatureFallback": "Créature n°{{id}}",
     "planeswalkerFallback": "Planeswalker n°{{id}}",
     "objectFallback": "Object #{{id}}",
+    "playerTarget": "{{name}} (Joueur — {{life}} points de vie)",
+    "playerTargetProjected": "{{name}} (Joueur — {{life}} → {{projectedLife}})",
+    "playerTargetLethal": "{{name}} (Joueur — {{life}} → {{projectedLife}} · Létal)",
+    "planeswalkerTarget": "{{name}} (Planeswalker)",
+    "battleTarget": "{{name}} (Bataille)",
     "you": "Vous",
     "ally": "Allié",
     "restoreDialog": "Restaurer la boîte de dialogue",
@@ -312,7 +321,7 @@
     "assignRemaining_other": "Assigner {{count}} de plus",
     "confirmDistribute_one": "Déclarer {{count}} attaquant",
     "confirmDistribute_other": "Déclarer {{count}} attaquants",
-    "mustAttackPlayer": "{{creature}} doit attaquer {{player}}"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Contrôle",
@@ -497,6 +506,11 @@
     "castCommander": "Lancer {{name}} — double-cliquez ou glissez pour jouer",
     "castCommanderTax": "Lancer {{name}} (Taxe : +{{tax}}) — double-cliquez ou glissez pour jouer",
     "ninjutsuCommander": "Ninjutsu de commandant : {{name}} — cliquez pour renvoyer un attaquant non bloqué en main et mettre ce commandant sur le champ de bataille engagé et attaquant",
+    "signatureSpell": "Sort signature",
+    "signatureSpellTitle": "Sort signature : {{name}}",
+    "signatureSpellTitleTax": "Sort signature : {{name}} (Taxe : +{{tax}})",
+    "castSignatureSpell": "Lancer {{name}} — double-cliquez ou glissez pour jouer",
+    "castSignatureSpellTax": "Lancer {{name}} (Taxe : +{{tax}}) — double-cliquez ou glissez pour jouer",
     "tax": "Taxe : +{{tax}}",
     "companion": "Compagnon",
     "companionTitle": "Compagnon : {{name}}",
@@ -619,8 +633,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Assigner {{amount}} blessures de combat",
@@ -639,6 +651,7 @@
     "dockLeft": "Ancrer la pile à gauche",
     "dockRight": "Ancrer la pile à droite",
     "casting": "Lancement…",
+    "selectedModes": "Modes sélectionnés",
     "next": "Suivant",
     "activated": "Activée",
     "triggered": "Déclenchée",
@@ -703,6 +716,7 @@
     "confirmTap": "Confirmer l'engagement ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conserver les cibles actuelles",
     "skip": "Ignorer",
+    "opponentChoice": "(au choix de l'adversaire)",
     "chooseNewTarget": "Choisissez la nouvelle cible du sort",
     "chooseNewTargetForSpell": "Choisissez une nouvelle cible pour {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1026,6 +1040,13 @@
     "activationCost": {
       "title": "Choisir le coût d'activation"
     },
+    "meld": {
+      "choosePair": "Choisissez les cartes à assimiler",
+      "into": "Assimiler en {{result}}",
+      "chooseAttackTarget": "Choisissez ce qu’il attaque",
+      "player": "Joueur {{id}}",
+      "permanent": "Permanent {{id}}"
+    },
     "debug": {
       "modeBanner": "MODE DÉBOGAGE - Cliquez sur n'importe quelle carte",
       "modeButtonOff": "MODE CLIC DÉSACTIVÉ"
@@ -1242,6 +1263,7 @@
       "titleTopdeck": "Mettre sur la bibliothèque",
       "titleBattlefield": "Mettre sur le champ de bataille",
       "titleHand": "Renvoyer",
+      "titleExile": "Exiler",
       "titleUntap": "Dégager",
       "titleTap": "Engager",
       "titleAttach": "Attach",
@@ -1263,6 +1285,12 @@
       "subtitleBattlefieldUpTo_other": "Choisissez jusqu'à {{count}} cartes à mettre sur le champ de bataille",
       "subtitleBattlefieldRange_one": "Choisissez {{min}}-{{count}} carte à mettre sur le champ de bataille",
       "subtitleBattlefieldRange_other": "Choisissez {{min}}-{{count}} cartes à mettre sur le champ de bataille",
+      "subtitleExileExact_one": "Choisissez {{count}} carte à exiler",
+      "subtitleExileExact_other": "Choisissez {{count}} cartes à exiler",
+      "subtitleExileUpTo_one": "Choisissez jusqu'à {{count}} carte à exiler",
+      "subtitleExileUpTo_other": "Choisissez jusqu'à {{count}} cartes à exiler",
+      "subtitleExileRange_one": "Choisissez {{min}}-{{count}} carte à exiler",
+      "subtitleExileRange_other": "Choisissez {{min}}-{{count}} cartes à exiler",
       "subtitleHandExact_one": "Choisissez {{count}} permanent à renvoyer dans la main de son propriétaire",
       "subtitleHandExact_other": "Choisissez {{count}} permanents à renvoyer dans la main de leur propriétaire",
       "subtitleHandUpTo_one": "Choisissez jusqu'à {{count}} permanent à renvoyer dans la main de son propriétaire",
@@ -1294,6 +1322,7 @@
       "labelTop": "Dessus ({{selected}}/{{count}})",
       "labelPut": "Placer ({{selected}}/{{count}})",
       "labelReturn": "Renvoyer ({{selected}}/{{count}})",
+      "labelExile": "Exiler ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Dessus"
     },
@@ -1505,7 +1534,11 @@
     "manaCombination": {
       "title": "Choisir la combinaison de mana",
       "subtitleAny": "Sélectionnez chaque couleur de mana à produire",
-      "subtitle": "Sélectionnez quelle combinaison de mana produire"
+      "subtitle": "Sélectionnez quelle combinaison de mana produire",
+      "amount": "{{selected}} / {{count}} manas sélectionnés",
+      "decrease": "Retirer du mana {{color}}",
+      "increase": "Ajouter du mana {{color}}",
+      "quantity": "Mana {{color}} : {{count}}"
     },
     "untapSubset": {
       "title": "Choose permanents to untap",
@@ -1637,6 +1670,13 @@
     "title": "Choisir un protecteur",
     "battleFallback": "Bataille",
     "subtitle": "{{name}} a besoin d'un nouveau protecteur. Choisissez quel adversaire la défendra."
+  },
+  "announcingOpponent": {
+    "title": "Choisir l'adversaire qui annonce ({{current}} sur {{total}})",
+    "subtitle": "Choisissez quel adversaire annonce {{target}} ({{current}} sur {{total}}).",
+    "targetLand": "la cible de terrain",
+    "targetCreature": "la cible de créature",
+    "targetChoice": "ce choix de cible"
   },
   "clashOpponent": {
     "title": "Choisir l'adversaire pour la confrontation",

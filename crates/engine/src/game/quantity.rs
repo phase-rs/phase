@@ -279,6 +279,114 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
     }
 }
 
+/// CR 701.57c: True when `scope` is a resolution-only object scope whose referent
+/// is genuinely absent — no snapshot, event-source, or target object is bound to
+/// it. Mirrors the referent-lookup priority in `resolve_object_mana_value` /
+/// `resolve_object_pt` so presence here is exactly "resolution would find an
+/// object" (rather than fall through to `.unwrap_or(0)`).
+fn resolution_only_scope_referent_present(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: &ResolvedAbility,
+) -> bool {
+    match scope {
+        // Not resolution-only — always bound to the ability's own permanent /
+        // recipient. Never reached via the classifier, answered `true` for safety.
+        ObjectScope::Source | ObjectScope::Recipient => true,
+        ObjectScope::Target => targets.iter().any(|t| matches!(t, TargetRef::Object(_))),
+        ObjectScope::EventSource => {
+            object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
+        }
+        ObjectScope::EventTarget => {
+            object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets).is_some()
+        }
+        // CR 608.2k + CR 400.7j: cost referent, then effect-context referent, then
+        // trigger-event source — the same fallback chain resolution reads.
+        ObjectScope::CostPaidObject => {
+            ability.cost_paid_object.is_some()
+                || ability.effect_context_object.is_some()
+                || object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
+        }
+        // CR 608.2c: earlier-instruction referent, then trigger-event source, then
+        // cost referent (the `Anaphoric`/`Demonstrative` fallback order).
+        ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+            ability.effect_context_object.is_some()
+                || object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
+                || ability.cost_paid_object.is_some()
+        }
+        // CR 608.2c: the "other" revealed card exists only when a `last_revealed_ids`
+        // entry differs from this iteration's own revealed card.
+        ObjectScope::OtherRevealedCard => {
+            let own = ability.effect_context_object.as_ref().map(|s| s.object_id);
+            state.last_revealed_ids.iter().any(|id| Some(*id) != own)
+        }
+        ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
+    }
+}
+
+/// CR 701.57c: True when `expr` reads any resolution-only object scope whose
+/// referent is genuinely absent. Resolution of such an operand silently falls to
+/// `.unwrap_or(0)`, conflating "no referent" with "referent whose value is 0", so
+/// a comparison over a missing referent is meaningless — the caller treats the
+/// whole comparison as false. (Hit the Mother Lode: when the final exiled card's
+/// mana value exceeds N, nothing is discovered — "the discovered card's mana
+/// value" has no object to read, so the follow-up token clause does nothing.)
+pub(crate) fn quantity_expr_missing_resolution_only_referent(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> bool {
+    fn leaf_scope_missing(
+        state: &GameState,
+        scope: ObjectScope,
+        ability: &ResolvedAbility,
+    ) -> bool {
+        let ctx = QuantityContext {
+            entering: None,
+            source: ability.source_id,
+            recipient: None,
+            scoped_player: ability.scoped_player,
+        };
+        !resolution_only_scope_referent_present(state, scope, ctx, &ability.targets, ability)
+    }
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::Power { scope }
+            | QuantityRef::Toughness { scope }
+            | QuantityRef::ObjectManaValue { scope }
+            | QuantityRef::ObjectColorCount { scope }
+            | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::ObjectTypelineComponentCount { scope }
+            | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+                leaf_scope_missing(state, *scope, ability)
+            }
+            _ => false,
+        },
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            quantity_expr_missing_resolution_only_referent(state, inner, ability)
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
+            .iter()
+            .any(|e| quantity_expr_missing_resolution_only_referent(state, e, ability)),
+        QuantityExpr::UpTo { max } => {
+            quantity_expr_missing_resolution_only_referent(state, max, ability)
+        }
+        QuantityExpr::Power { exponent, .. } => {
+            quantity_expr_missing_resolution_only_referent(state, exponent, ability)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_missing_resolution_only_referent(state, left, ability)
+                || quantity_expr_missing_resolution_only_referent(state, right, ability)
+        }
+    }
+}
+
 /// True when the QuantityExpr's magnitude depends on the population of objects
 /// on the battlefield (a count/aggregate over a board-wide object set).
 ///
@@ -391,6 +499,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -487,7 +596,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
+        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
@@ -504,6 +613,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::RemoveManaCost => None,
@@ -660,6 +770,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -855,6 +966,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -1105,6 +1217,70 @@ fn with_detection_trigger_event<R>(
 /// dual-path).
 pub fn detection_trigger_event() -> Option<crate::types::events::GameEvent> {
     DETECTION_TRIGGER_EVENT.with(|slot| slot.borrow().clone())
+}
+
+// CR 603.12: A reflexive triggered ability's own "that many" (an
+// `EventContextAmount`) is resolution-local to the ability that CREATED it —
+// never the enclosing trigger whose event/context is still live on
+// `GameState` while that enclosing ability's resolution is paused mid-flight
+// (e.g. a `PendingContinuation` resume restores the enclosing trigger's event
+// before the reflexive's own target slots are built). This suppresses every
+// enclosing-trigger tier of the cascade: the batched match count,
+// `current_trigger_event`, and its detection-time fallback
+// `detection_trigger_event()`, for the duration of
+// `try_begin_reflexive_target_selection`'s entire body — covering target-slot
+// construction (`build_target_slots`) and subject-count freezing
+// (`freeze_reflexive_event_count`) in one shot, regardless of which of the
+// ~7 `resolve_quantity*` entry points either path happens to use, because the
+// gate lives in `resolve_ref`'s `EventContextAmount` arm — the single shared
+// consumption point all of them funnel into.
+std::thread_local! {
+    static SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// CR 603.12: Run `f` with the enclosing trigger's own event context
+/// suppressed from the `EventContextAmount` cascade. Mirrors
+/// `with_detection_trigger_event`'s save/restore-previous-value discipline
+/// (not a hard reset to `false`) so nested reflexive-in-reflexive
+/// construction, if it ever occurs, composes correctly.
+pub(crate) fn with_reflexive_resolution_scope<R>(f: impl FnOnce() -> R) -> R {
+    let prev = SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.replace(true));
+    let result = f();
+    SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.set(prev));
+    result
+}
+
+fn enclosing_trigger_event_amount_suppressed() -> bool {
+    SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.get())
+}
+
+/// CR 603.12 + CR 603.2c: The enclosing trigger's filtered subject count.
+/// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
+/// cannot inherit its enclosing trigger's batched-event count.
+fn enclosing_trigger_match_count(state: &GameState) -> Option<i32> {
+    if enclosing_trigger_event_amount_suppressed() {
+        return None;
+    }
+    state.current_trigger_match_count.map(u32_to_i32_saturating)
+}
+
+/// CR 603.12 + CR 603.2c/603.4: The enclosing trigger's scalar event amount.
+/// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
+/// falls through to the action that created it.
+fn enclosing_trigger_event_amount(state: &GameState) -> Option<i32> {
+    if enclosing_trigger_event_amount_suppressed() {
+        return None;
+    }
+    state
+        .current_trigger_event
+        .as_ref()
+        .and_then(crate::game::targeting::extract_amount_from_event)
+        .or_else(|| {
+            detection_trigger_event()
+                .as_ref()
+                .and_then(crate::game::targeting::extract_amount_from_event)
+        })
 }
 
 /// CR 603.2 + CR 109.4: Resolve the player identified by the current
@@ -2515,30 +2691,20 @@ fn resolve_ref(
             // continuation resolves (Moonlit Meditation); `None` otherwise, so it
             // falls straight through to the existing trigger/effect cascade.
             .post_replacement_token_substitution_count
-            .or(state.current_trigger_match_count.map(u32_to_i32_saturating))
+            .or_else(|| enclosing_trigger_match_count(state))
             // CR 706.4: Die results recorded earlier in THIS resolution
             // outrank the triggering event's own amount, so "roll one or more
             // dice. <effect> equal to the result(s)" consumes the roll total,
             // not the combat damage / life change that triggered it.
             .or(state.die_result_this_resolution)
-            .or_else(|| {
-                state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_amount_from_event)
-            })
-            // CR 603.4: An intervening-`if` condition is checked at trigger
-            // *detection* (when `current_trigger_event` is still `None`) and
-            // re-checked at resolution. `EventContextAmount` must resolve at
-            // both times, so fall back to the detection-time event the same way
-            // `object_id_for_scope`'s `EventSource` arm does — otherwise the
-            // damage==toughness gate (Taii Wakeen) reads 0 at detection and
-            // never triggers.
-            .or_else(|| {
-                detection_trigger_event()
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_amount_from_event)
-            })
+            // CR 603.2c: The triggering event's own scalar amount (damage,
+            // life change, cards drawn, counters, die results), plus the CR
+            // 603.4 detection-time fallback for intervening-`if` re-checks
+            // where `current_trigger_event` is still `None`. Both tiers are
+            // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
+            // a reflexive ability's "that many" never reads the enclosing
+            // trigger's event while that trigger's resolution is paused.
+            .or_else(|| enclosing_trigger_event_amount(state))
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -2597,6 +2763,16 @@ fn resolve_ref(
             .and_then(|id| state.objects.get(&id))
             .and_then(|obj| obj.cost_x_paid)
             .map(u32_to_i32_saturating)
+            .unwrap_or(0),
+        // CR 700.2d + CR 601.2b: modes chosen for the triggering modal spell (see
+        // the variant doc). Reads `chosen_modes.len()` off the `SpellCast` event's
+        // source object, mirroring `EventContextSourceCostX`.
+        QuantityRef::EventContextSourceModesChosen => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| state.objects.get(&id))
+            .map(|obj| usize_to_i32_saturating(obj.chosen_modes.len()))
             .unwrap_or(0),
         // CR 106.3 + CR 601.2h: Mana spent to cast a spell, parameterized by
         // scope and metric. Source-qualified metrics read one payment-time
@@ -4029,11 +4205,93 @@ where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
+    read_object_pt_by_id_for_incarnation(state, id, None, obj_extract, lki_extract)
+}
+
+/// CR 400.7 + CR 608.2h: read P/T for one exact incarnation when the triggering
+/// zone-change record identifies it. A leave and re-entry can reuse the same
+/// `ObjectId`, but the re-entered permanent is a new object; it must not replace
+/// the original entrant's LKI for an already-pending trigger.
+fn read_object_pt_by_id_for_incarnation<F, G>(
+    state: &GameState,
+    id: ObjectId,
+    expected_incarnation: Option<u64>,
+    obj_extract: &F,
+    lki_extract: &G,
+) -> Option<i32>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
     let live = state.objects.get(&id);
-    live.filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-        .and_then(obj_extract)
-        .or_else(|| state.lki_cache.get(&id).and_then(lki_extract))
-        .or_else(|| live.and_then(obj_extract))
+    live.filter(|obj| {
+        obj.zone == crate::types::zones::Zone::Battlefield
+            && expected_incarnation.is_none_or(|expected| obj.incarnation == expected)
+    })
+    .and_then(obj_extract)
+    .or_else(|| match expected_incarnation {
+        Some(expected) => state
+            .lki_by_incarnation
+            .get(&id)
+            .and_then(|history| history.get(&expected).and_then(lki_extract))
+            .or_else(|| {
+                // Saves written before incarnation-versioned LKI have only
+                // the legacy cache. Once any versioned history exists for
+                // this ObjectId, fail closed instead of reading a different
+                // incarnation through the overwritten legacy slot.
+                if state.lki_by_incarnation.contains_key(&id) {
+                    None
+                } else {
+                    state.lki_cache.get(&id).and_then(lki_extract)
+                }
+            }),
+        None => state.lki_cache.get(&id).and_then(lki_extract),
+    })
+    .or_else(|| {
+        if expected_incarnation.is_none() {
+            live.and_then(obj_extract)
+        } else {
+            None
+        }
+    })
+}
+
+fn trigger_event_source_identity(state: &GameState) -> Option<(ObjectId, Option<u64>)> {
+    let event = state
+        .current_trigger_event
+        .as_ref()
+        .cloned()
+        .or_else(detection_trigger_event)?;
+    let object_id = crate::game::targeting::extract_source_from_event(&event)?;
+    let expected_incarnation = match &event {
+        crate::types::events::GameEvent::ZoneChanged {
+            object_id: event_object,
+            record,
+            ..
+        } if *event_object == object_id => record.entered_incarnation,
+        _ => None,
+    };
+    Some((object_id, expected_incarnation))
+}
+
+fn read_trigger_event_source_pt<F, G>(
+    state: &GameState,
+    obj_extract: &F,
+    lki_extract: &G,
+) -> Option<i32>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+{
+    trigger_event_source_identity(state).and_then(|(id, expected_incarnation)| {
+        read_object_pt_by_id_for_incarnation(
+            state,
+            id,
+            expected_incarnation,
+            obj_extract,
+            lki_extract,
+        )
+    })
 }
 
 fn resolve_object_pt<F, G>(
@@ -4114,12 +4372,7 @@ where
         // dies, ... its power"). When the source has left the battlefield, prefer
         // its buffed LKI over a base-only live read via the shared guarded read.
         ObjectScope::EventSource => {
-            let Some(object_id) =
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-            else {
-                return 0;
-            };
-            read_object_pt_by_id(state, object_id, &obj_extract, &lki_extract).unwrap_or(0)
+            read_trigger_event_source_pt(state, &obj_extract, &lki_extract).unwrap_or(0)
         }
         // CR 603.2 + CR 208.1: the power/toughness of the object that received
         // the triggering damage ("that creature's toughness"). Same guarded
@@ -4165,11 +4418,11 @@ where
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
             })
             .or_else(|| {
-                // CR 608.2h: trigger-event source fallback; guarded live-then-LKI
-                // read so a buffed source that left the battlefield reports its
-                // last-known P/T. Slots 1 and 2 (snapshot-only) are unchanged.
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
+                // CR 400.7 + CR 608.2h: trigger-event source fallback. An ETB
+                // record's incarnation prevents a blinked object from reading
+                // the re-entered permanent's live P/T instead of original LKI.
+                // Slots 1 and 2 (snapshot-only) are unchanged.
+                read_trigger_event_source_pt(state, &obj_extract, &lki_extract)
             })
             .unwrap_or(0),
         // CR 608.2c: A demonstrative noun phrase ("that creature's toughness")
@@ -4184,10 +4437,9 @@ where
             .and_then(|a| a.effect_context_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
-                // CR 608.2h: slot 2 trigger-event source; guarded live-then-LKI
-                // read. Slots 1 and 3 (snapshot-only) are unchanged.
-                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
-                    .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
+                // CR 400.7 + CR 608.2h: slot 2 trigger-event source uses exact
+                // ETB incarnation identity. Slots 1 and 3 are unchanged.
+                read_trigger_event_source_pt(state, &obj_extract, &lki_extract)
             })
             .or_else(|| {
                 ability
@@ -11225,6 +11477,85 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 6);
     }
 
+    /// CR 603.12: A reflexive triggered ability's own "that many" is
+    /// resolution-local — it must NOT read the enclosing trigger's own event
+    /// amount while that enclosing trigger's resolution is paused mid-flight
+    /// (Swashbuckler Extraordinaire: "Whenever you attack, you may sacrifice
+    /// one or more Treasures. When you do, up to that many target creatures
+    /// gain double strike"). This is the exact hostile fixture the bug
+    /// exercises: BOTH an enclosing-trigger event amount (1 attacker) and a
+    /// resolution-local `last_effect_count` (2 Treasures sacrificed) are
+    /// simultaneously live. Outside `with_reflexive_resolution_scope` the
+    /// enclosing event wins (1); inside it is suppressed and the cascade falls
+    /// through to `last_effect_count` (2) — the actual sacrifice count that
+    /// bounds "up to that many target creatures".
+    #[test]
+    fn event_context_amount_suppressed_inside_reflexive_scope_falls_through_to_last_effect_count() {
+        let mut state = GameState::new_two_player(42);
+        // Enclosing trigger's own event: "Whenever you attack" with one
+        // attacker declared. `extract_amount_from_event` yields 1.
+        state.current_trigger_event = Some(crate::types::events::GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(1)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        });
+        // Resolution-local subject count: two Treasures sacrificed for the
+        // "may sacrifice one or more" cost, recorded by the reflexive's
+        // `EffectZoneChoice` handler.
+        state.last_effect_count = Some(2);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+
+        // Outside the reflexive scope: the enclosing trigger's event amount
+        // (1 attacker) is read first and wins.
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            1,
+            "outside reflexive scope the enclosing trigger event amount wins"
+        );
+
+        // Inside the reflexive scope: the enclosing-event tiers are suppressed,
+        // so the cascade falls through to the resolution-local sacrifice count.
+        let inner = with_reflexive_resolution_scope(|| {
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1))
+        });
+        assert_eq!(
+            inner, 2,
+            "inside reflexive scope the enclosing event is suppressed and \
+             last_effect_count (the sacrifice count) is read instead"
+        );
+    }
+
+    /// CR 603.2c + CR 603.12: A reflexive ability created while a batched
+    /// enclosing trigger is resolving must not inherit that outer trigger's
+    /// subject count. Its "that many" instead refers to the action that caused
+    /// the reflexive trigger, represented here by `last_effect_count`.
+    #[test]
+    fn event_context_amount_suppressed_inside_reflexive_scope_ignores_enclosing_match_count() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(1);
+        state.last_effect_count = Some(2);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            1,
+            "outside reflexive scope the enclosing batched trigger count wins"
+        );
+
+        let inner = with_reflexive_resolution_scope(|| {
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1))
+        });
+        assert_eq!(
+            inner, 2,
+            "inside reflexive scope the enclosing batched trigger count must not \
+             shadow the count from the reflexive action"
+        );
+    }
+
     /// CR 603.2c + CR 706.2: The batched-trigger match-count still outranks a
     /// die result — the die slot is inserted BELOW match-count in the cascade,
     /// so a "one or more <FILTER>" batched trigger keeps its filtered-subject
@@ -11879,10 +12210,12 @@ mod tests {
         );
     }
 
-    /// CR 608.2c — `ObjectScope::Anaphoric` power reads `effect_context_object`
-    /// as slot 1 (the `resolve_object_pt` analogue of the mana-value test).
+    /// CR 608.2c — anaphoric and demonstrative P/T reads use the object from the
+    /// preceding effect instruction before a cost-paid referent. The typed
+    /// difference assertion is the non-card-specific runtime pin for bare
+    /// "that creature's power and toughness" grammar.
     #[test]
-    fn resolve_object_pt_anaphoric_reads_effect_context_object() {
+    fn resolve_object_pt_demonstrative_prefers_effect_context_over_cost_paid() {
         use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
         use crate::types::game_state::LKISnapshot;
 
@@ -11896,15 +12229,15 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
-        let snapshot = |name: &str, power: i32| CostPaidObjectSnapshot {
+        let snapshot = |name: &str, power: i32, toughness: i32| CostPaidObjectSnapshot {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
                 token_image_ref: None,
                 power: Some(power),
-                toughness: Some(power),
+                toughness: Some(toughness),
                 base_power: Some(power),
-                base_toughness: Some(power),
+                base_toughness: Some(toughness),
                 mana_value: 0,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -11920,18 +12253,36 @@ mod tests {
                 attachments: Vec::new(),
             },
         };
-        ability.set_effect_context_object_recursive(snapshot("Effect Context", 5));
-        ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 2));
+        ability.set_effect_context_object_recursive(snapshot("Effect Context", 7, 2));
+        ability.set_cost_paid_object_recursive(snapshot("Cost Paid", 3, 3));
 
-        let expr = QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Anaphoric,
-            },
+        for scope in [ObjectScope::Anaphoric, ObjectScope::Demonstrative] {
+            let power = QuantityExpr::Ref {
+                qty: QuantityRef::Power { scope },
+            };
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &power, &ability),
+                7,
+                "{scope:?} power must read effect_context_object (CR 608.2c slot 1)"
+            );
+        }
+
+        let difference = QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Demonstrative,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Demonstrative,
+                },
+            }),
         };
         assert_eq!(
-            resolve_quantity_with_targets(&state, &expr, &ability),
+            resolve_quantity_with_targets(&state, &difference, &ability),
             5,
-            "Anaphoric power must read effect_context_object (CR 608.2c slot 1)"
+            "Demonstrative P/T difference must use effect context 7/2, not cost-paid 3/3"
         );
     }
 

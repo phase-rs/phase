@@ -22,10 +22,16 @@ export function MayTriggerAutoChoiceList() {
 
   if (!choices || choices.length === 0) return null;
 
-  const rowKey = (key: MayTriggerAutoChoiceKey) =>
-    key.origin.type === "Printed"
-      ? `${key.player}-${key.source_id}-p${key.origin.trigger_index}`
-      : `${key.player}-${key.source_id}-k${key.origin.keyword}`;
+  const rowKey = (key: MayTriggerAutoChoiceKey) => {
+    switch (key.origin.type) {
+      case "Printed":
+        return `${key.player}-${key.source_id}-p${key.origin.trigger_index}`;
+      case "Keyword":
+        return `${key.player}-${key.source_id}-k${key.origin.keyword}`;
+      case "Definition":
+        return `${key.player}-${key.source_id}-d${JSON.stringify(key.origin.definition_ref)}`;
+    }
+  };
 
   return (
     <PopoverMenu

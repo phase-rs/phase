@@ -928,7 +928,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::AddPendingEntersModifications { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::CreateDrawReplacement { .. }
@@ -943,6 +943,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals

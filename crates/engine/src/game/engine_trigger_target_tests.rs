@@ -127,12 +127,14 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
         target_slots: vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: legal_targets.clone(),
             optional: false,
+            chooser: None,
         }],
         target_constraints: Vec::new(),
         selection: crate::game::ability_utils::begin_target_selection(
             &[crate::types::game_state::TargetSelectionSlot {
                 legal_targets: legal_targets.clone(),
                 optional: false,
+                chooser: None,
             }],
             &[],
         )
@@ -235,6 +237,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         target_slots: vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: vec![TargetRef::Object(legal_target)],
             optional: false,
+            chooser: None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -368,6 +371,20 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
     assert_eq!(state.stack.len(), 1);
     assert!(state.pending_trigger.is_some());
     assert!(state.pending_trigger_entry.is_some());
+    assert_eq!(
+        state
+            .stack
+            .back()
+            .unwrap()
+            .ability()
+            .unwrap()
+            .selected_mode_labels,
+        [
+            "Deal 1 damage to target player.",
+            "Deal 1 damage to target player.",
+        ],
+        "triggered modal choice retains repeated selected labels while target selection is pending",
+    );
 }
 
 fn vindictive_lich_modal() -> ModalChoice {
@@ -803,6 +820,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             },
             crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![
@@ -810,6 +828,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             },
         ],
         mode_labels: Vec::new(),
@@ -870,6 +889,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
                 TargetRef::Player(PlayerId(1)),
             ],
             optional: false,
+            chooser: None,
         },
         crate::types::game_state::TargetSelectionSlot {
             legal_targets: vec![
@@ -877,6 +897,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
                 TargetRef::Player(PlayerId(1)),
             ],
             optional: false,
+            chooser: None,
         },
     ];
     let target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];

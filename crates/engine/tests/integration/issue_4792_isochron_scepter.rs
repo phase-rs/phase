@@ -130,6 +130,7 @@ fn resolve_real_imprint(
 ) {
     let trigger = &runner.state().objects[&scepter].trigger_definitions[0];
     let execute = trigger
+        .definition
         .execute
         .as_ref()
         .expect("Isochron Scepter's Imprint trigger must carry an execute ability");

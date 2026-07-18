@@ -4,7 +4,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, Effect, EffectError, EffectKind, ForEachCategoryAction,
-    ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
+    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -79,7 +79,7 @@ pub fn resolve(
     // CR 608.2d: If there are no objects to choose from, skip the choice
     // (a player can't choose an option that's illegal or impossible).
     if cards.is_empty() || count == 0 {
-        state.last_choose_from_zone_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -100,17 +100,10 @@ pub fn resolve(
     // `EventContextAmount` ("that many") sub_ability continuation resolves the
     // triggering event's amount after the pause (Amy Pond). Restored by the
     // `ChooseFromZoneChoice` handler around the continuation drain. Set
-    // unconditionally on every single-pool raise: the `.then` yields `None` for a
+    // unconditionally on every single-pool raise: `capture` yields `None` for a
     // non-trigger ChooseFromZone (activated/spell), so a stale value from a prior
     // resolution can never carry over; consumed by `.take()` in the handler.
-    state.pending_choose_zone_trigger_context = (state.current_trigger_event.is_some()
-        || state.current_trigger_match_count.is_some()
-        || state.die_result_this_resolution.is_some())
-    .then(|| ResolvingTriggerContext {
-        event: state.current_trigger_event.clone(),
-        match_count: state.current_trigger_match_count,
-        die_result: state.die_result_this_resolution,
-    });
+    state.pending_choose_zone_trigger_context = ResolvingTriggerContext::capture(state);
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: choosing_player,
@@ -290,9 +283,9 @@ pub(crate) fn drain_pending_per_category_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
-) {
+) -> crate::game::zone_pipeline::BatchMoveResult {
     let Some(pending) = state.pending_per_category_zone_choice.take() else {
-        return;
+        return crate::game::zone_pipeline::BatchMoveResult::Done;
     };
     let crate::types::game_state::PendingPerCategoryZoneChoice {
         ability,
@@ -300,47 +293,87 @@ pub(crate) fn drain_pending_per_category_zone_choice(
         remaining_member_filters,
     } = pending;
 
-    match &ability.effect {
+    if matches!(
+        &ability.effect,
         Effect::ForEachCategory {
             action: ForEachCategoryAction::ExileFromPool { .. },
             ..
-        } => {
-            for &card_id in chosen {
-                crate::game::zones::move_to_zone(state, card_id, Zone::Exile, events);
-            }
-            if !chosen.is_empty() {
-                super::publish_tracked_set(state, chosen.to_vec());
-            }
         }
-        Effect::ForEachCategory {
-            action:
-                ForEachCategoryAction::PutCounter {
-                    counter_type,
-                    count,
-                    ..
-                },
-            ..
-        } => {
-            let count_val =
-                crate::game::quantity::resolve_quantity_with_targets(state, count, &ability).max(0)
-                    as u32;
-            for &card_id in chosen {
-                crate::game::effects::counters::apply_counter_addition(
-                    state,
-                    ability.controller,
+    ) {
+        // CR 701.13a + CR 614.1 + CR 616.1: Each chosen card's exile is an
+        // effect-owned zone-change event. Keep the tracked-set extension and
+        // next-member prompt on the batch tail so neither can run before a
+        // replacement choice settles the exile.
+        let requests = chosen
+            .iter()
+            .map(|&card_id| {
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(
                     card_id,
-                    counter_type.clone(),
-                    count_val,
-                    events,
-                );
-            }
-            if !chosen.is_empty() {
-                publish_tracked_set_unique(state, chosen);
-            }
-        }
-        _ => {}
+                    Zone::Exile,
+                    ability.source_id,
+                )
+            })
+            .collect();
+        return crate::game::zone_pipeline::move_objects_simultaneously_then(
+            state,
+            requests,
+            Some(
+                crate::types::game_state::BatchCompletion::ForEachCategoryExileComplete {
+                    ability,
+                    pool,
+                    remaining_member_filters,
+                    chosen: chosen.to_vec(),
+                },
+            ),
+            events,
+        );
     }
 
+    if let Effect::ForEachCategory {
+        action:
+            ForEachCategoryAction::PutCounter {
+                counter_type,
+                count,
+                ..
+            },
+        ..
+    } = &ability.effect
+    {
+        let count_val = crate::game::quantity::resolve_quantity_with_targets(state, count, &ability)
+            .max(0) as u32;
+        for &card_id in chosen {
+            crate::game::effects::counters::apply_counter_addition(
+                state,
+                ability.controller,
+                card_id,
+                counter_type.clone(),
+                count_val,
+                events,
+            );
+        }
+        if !chosen.is_empty() {
+            publish_tracked_set_unique(state, chosen);
+        }
+    }
+
+    let _ = prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events);
+    crate::game::zone_pipeline::BatchMoveResult::Done
+}
+
+/// CR 608.2c: Complete one settled `ForEachCategoryExile` member. The typed
+/// batch tail owns both the tracked-set extension and the next-member prompt so
+/// a CR 616.1 replacement choice resolves before the iteration advances.
+pub(crate) fn complete_per_category_exile(
+    state: &mut GameState,
+    ability: Box<ResolvedAbility>,
+    pool: Vec<ObjectId>,
+    remaining_member_filters: Vec<TargetFilter>,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) {
+    if !chosen.is_empty() {
+        super::publish_tracked_set(state, chosen);
+    }
     let _ = prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events);
 }
 
@@ -460,7 +493,7 @@ pub(crate) fn resolve_random_in_chain(
     // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
     // any continuation that depends on the missing pick.
     if cards.is_empty() || count == 0 {
-        state.last_choose_from_zone_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -663,7 +696,7 @@ fn collect_player_zone_cards(
 /// tracked-set pick.
 ///
 /// Priority order:
-/// 1. The current resolution chain's tracked set (if non-empty).
+/// 1. The current resolution chain's tracked set, including an empty set.
 /// 2. The latest non-empty tracked set from any prior publish in this game.
 /// 3. Explicit `TargetRef::Object` targets on the ability.
 /// 4. Direct zone scan (`zone` + `additional_zones`).
@@ -703,8 +736,7 @@ fn resolve_candidate_cards(
 
 fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
     let chain_id = state.chain_tracked_set_id?;
-    let cards = state.tracked_object_sets.get(&chain_id)?;
-    (!cards.is_empty()).then(|| cards.clone())
+    state.tracked_object_sets.get(&chain_id).cloned()
 }
 
 fn collect_direct_zone_cards(
@@ -1849,6 +1881,226 @@ mod tests {
         }
     }
 
+    /// CR 608.2c-d: an empty reveal is still the current resolution's
+    /// authoritative set. Atraxa must not offer cards left over from an older
+    /// reveal when its controller's library is empty.
+    #[test]
+    fn atraxa_style_empty_reveal_does_not_reuse_a_stale_tracked_set() {
+        use super::super::resolve_ability_chain;
+        use crate::types::ability::TargetFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Atraxa, Grand Unifier".to_string(),
+            Zone::Battlefield,
+        );
+        let stale = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(1),
+            "Stale Revealed Card".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&stale).unwrap().card_types.core_types = vec![CoreType::Creature];
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(5), vec![stale]);
+        state.next_tracked_set_id = 6;
+        assert!(state.players[0].library.is_empty());
+
+        let categories = vec![
+            CoreType::Artifact,
+            CoreType::Battle,
+            CoreType::Creature,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Land,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
+        ];
+        let choose = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: categories.len() as u32,
+                zone: Zone::Library,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: true,
+                constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let reveal = ResolvedAbility {
+            sub_ability: Some(Box::new(choose)),
+            ..ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 10,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reveal, &mut events, 0).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+            "an empty reveal must not create a choice from an older tracked set"
+        );
+        assert_eq!(
+            state.last_parent_target_missing_reason,
+            Some(crate::types::ability::ParentTargetMissingReason::ChooseFromZone)
+        );
+        assert_eq!(state.objects[&stale].zone, Zone::Library);
+    }
+
+    #[test]
+    fn atraxa_style_choice_puts_all_unchosen_cards_on_bottom() {
+        use super::super::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::types::ability::{LibraryPosition, QuantityExpr, TargetFilter};
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Atraxa, Grand Unifier".to_string(),
+            Zone::Battlefield,
+        );
+        let mut revealed = Vec::new();
+        for i in 0..10 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Revealed Card {i}"),
+                Zone::Library,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![match i % 3 {
+                0 => CoreType::Creature,
+                1 => CoreType::Instant,
+                _ => CoreType::Land,
+            }];
+            revealed.push(id);
+        }
+        let padding = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Library Padding".to_string(),
+            Zone::Library,
+        );
+        let mut ordered_library = revealed.clone();
+        ordered_library.push(padding);
+        state.players[0].library = ordered_library.into();
+
+        let bottom = Box::new(ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ));
+        let change_zone = Box::new(ResolvedAbility {
+            sub_ability: Some(bottom),
+            ..ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Hand,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        });
+        let choose = ResolvedAbility {
+            sub_ability: Some(change_zone),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 8,
+                    zone: Zone::Library,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::Controller,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: true,
+                    constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes {
+                        categories: vec![CoreType::Creature, CoreType::Instant, CoreType::Land],
+                    }),
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+        let reveal = ResolvedAbility {
+            sub_ability: Some(Box::new(choose)),
+            ..ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 10,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reveal, &mut events, 0).unwrap();
+        let chosen = vec![revealed[0], revealed[1], revealed[2]];
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: chosen.clone(),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        for id in &chosen {
+            assert_eq!(state.objects[id].zone, Zone::Hand);
+        }
+        let mut bottom_cards: Vec<_> = state.players[0].library.iter().skip(1).copied().collect();
+        let mut unchosen: Vec<_> = revealed
+            .iter()
+            .filter(|id| !chosen.contains(id))
+            .copied()
+            .collect();
+        bottom_cards.sort_by_key(|id| id.0);
+        unchosen.sort_by_key(|id| id.0);
+        assert_eq!(state.players[0].library[0], padding);
+        assert_eq!(bottom_cards, unchosen);
+    }
+
     /// CR 608.2d (override): a random `ChooseFromZone` picks the card(s) itself
     /// (no interactive prompt) and writes them onto the ability's `targets` so
     /// the chain forwards them to the sub-ability. Deterministic under seed.
@@ -2443,7 +2695,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), &state));
 
         let ability = ResolvedAbility::new(
             Effect::ForEachCategory {

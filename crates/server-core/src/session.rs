@@ -8,6 +8,7 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::game::finalize_public_state;
+use engine::game::preview::preview_auto_payment_sources;
 use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -408,6 +409,7 @@ impl GameSession {
                 main_deck: deck.main_deck.clone(),
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
+                companion: deck.companion.clone(),
                 planar_deck: deck.planar_deck.clone(),
                 scheme_deck: deck.scheme_deck.clone(),
                 attraction_deck: deck.attraction_deck.clone(),
@@ -984,6 +986,26 @@ impl SessionManager {
             .expect("start_game in tests should not hit cEDH validation");
 
         (game_code, player_token)
+    }
+
+    /// Returns the exact mana sources automatic payment would use without
+    /// changing the authenticated game session.
+    pub fn preview_mana_payment(
+        &self,
+        game_code: &str,
+        player_token: &str,
+        action: &GameAction,
+    ) -> Result<Vec<ObjectId>, String> {
+        let session = self
+            .sessions
+            .get(game_code)
+            .ok_or_else(|| format!("Game not found: {game_code}"))?;
+        let player = session
+            .player_for_token(player_token)
+            .ok_or_else(|| "Invalid player token".to_string())?;
+
+        preview_auto_payment_sources(&session.state, player, action)
+            .map_err(|error| format!("Engine error: {error}"))
     }
 
     /// Handle a game action from a player.
