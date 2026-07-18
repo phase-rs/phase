@@ -696,61 +696,6 @@ fn rewrite_cost_x_in_ability(def: &mut crate::types::ability::AbilityDefinition)
     }
 }
 
-fn rewrite_that_player_controls_filter(filter: &mut TargetFilter, scope: &ControllerRef) {
-    match filter {
-        TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You) => {
-            typed.controller = Some(scope.clone());
-        }
-        TargetFilter::Not { filter } => rewrite_that_player_controls_filter(filter, scope),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            for filter in filters {
-                rewrite_that_player_controls_filter(filter, scope);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn rewrite_that_player_controls_generic_effect_target(
-    def: &mut crate::types::ability::AbilityDefinition,
-    scope: &ControllerRef,
-) {
-    if let Effect::GenericEffect {
-        target: Some(target),
-        ..
-    } = def.effect.as_mut()
-    {
-        rewrite_that_player_controls_filter(target, scope);
-    }
-    if let Some(sub) = def.sub_ability.as_mut() {
-        rewrite_that_player_controls_generic_effect_target(sub, scope);
-    }
-    if let Some(else_ability) = def.else_ability.as_mut() {
-        rewrite_that_player_controls_generic_effect_target(else_ability, scope);
-    }
-    for mode_ability in &mut def.mode_abilities {
-        rewrite_that_player_controls_generic_effect_target(mode_ability, scope);
-    }
-}
-
-fn mentions_that_player_controls(effect_text: &str) -> bool {
-    let lower = effect_text.to_lowercase();
-    let mut remaining = lower.as_str();
-    while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("that player controls")
-            .parse(remaining)
-            .is_ok()
-        {
-            return true;
-        }
-        remaining = match remaining.find(' ') {
-            Some(i) => remaining[i + 1..].trim_start(),
-            None => "",
-        };
-    }
-    false
-}
-
 /// Decide whether a trigger's execute body should have its bare `X`
 /// references rewritten to read the entering permanent's `cost_x_paid`.
 ///
@@ -1461,14 +1406,6 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 parse_effect_chain_ir(&reflexive_effect_text, AbilityKind::Spell, &mut effect_ctx);
             let mut reflexive_ability = lower_effect_chain_ir(&reflexive_ir);
             crate::parser::oracle_effect::finalize_effect_chain(&mut reflexive_ability);
-            if mentions_that_player_controls(&reflexive_effect_text) {
-                if let Some(scope) = relative_player_scope.as_ref() {
-                    rewrite_that_player_controls_generic_effect_target(
-                        &mut reflexive_ability,
-                        scope,
-                    );
-                }
-            }
             reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
 
             let mut pay_ability = AbilityDefinition::new(

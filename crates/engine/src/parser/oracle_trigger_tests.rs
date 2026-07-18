@@ -13933,6 +13933,56 @@ fn kitt_kanto_reflexive_tap_two_cost_targets_active_player_creature() {
     }
 }
 
+/// CR 118.12 + CR 603.12 + CR 102.1: Reflexive optional-payment parsing must
+/// let exact target phrases bind themselves. Seeing one "that player controls"
+/// clause must not rewrite a separate "you control" target in the same body.
+#[test]
+fn reflexive_optional_payment_does_not_rewrite_separate_you_control_target() {
+    let def = parse_trigger_line(
+        "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature you control gets +1/+1 until end of turn. Target creature that player controls gets +1/+1 until end of turn.",
+        "Reflexive Mixed Controller Test",
+    );
+
+    let execute = def.execute.as_ref().expect("execute");
+    let first = execute
+        .sub_ability
+        .as_ref()
+        .expect("PayCost must have WhenYouDo body");
+    match first.effect.as_ref() {
+        Effect::Pump {
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "the exact 'you control' target must remain controller-scoped"
+            );
+        }
+        other => panic!("expected first targeted Pump, got {other:?}"),
+    }
+
+    let second = first
+        .sub_ability
+        .as_ref()
+        .expect("reflexive chain must include the second target");
+    match second.effect.as_ref() {
+        Effect::Pump {
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "the exact 'that player controls' target must bind to the active/scoped turn player"
+            );
+        }
+        other => panic!("expected second targeted Pump, got {other:?}"),
+    }
+}
+
 /// CR 118.12 + CR 603.12: the generic reflexive optional-cost splitter only
 /// supports straight-line resolution costs. Disjunctive `OneOf` costs require a
 /// branch-choice payment flow, so they must not be exported as a supported
