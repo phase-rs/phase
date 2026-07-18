@@ -2,7 +2,7 @@ use crate::types::ability::{
     ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TriggerSourceContext};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
@@ -1673,6 +1673,26 @@ pub(crate) fn stack_entry_matches_filter(
         entry,
         filter,
         source_controller,
+        source_id,
+        &target_ctx,
+    )
+}
+
+/// Matches a stack entry from a triggered source without rebinding source-relative
+/// filters to a later object at the same storage id.
+pub(crate) fn stack_entry_matches_filter_for_trigger_source(
+    state: &GameState,
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_context: &TriggerSourceContext,
+) -> bool {
+    let source_id = source_context.identity.reference.object_id;
+    let target_ctx = super::filter::FilterContext::from_trigger_source(source_context);
+    stack_entry_matches_filter_with_context(
+        state,
+        entry,
+        filter,
+        source_context.source_read(state).controller(),
         source_id,
         &target_ctx,
     )

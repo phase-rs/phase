@@ -32,6 +32,7 @@ use crate::types::TriggerMode;
 use super::mana_abilities;
 use super::mana_payment;
 use super::restrictions;
+use super::triggers::trigger_source_context_for_latch;
 
 /// CR 605.3b — Complete classification of a mana ability's penalty axis.
 ///
@@ -474,6 +475,7 @@ pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePen
 /// the object carries no self-referential harmful `Taps` trigger.
 fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option<Option<u16>> {
     let obj = state.objects.get(&object_id)?;
+    let source_context = trigger_source_context_for_latch(state, obj);
     let mut harm_amounts = obj
         .trigger_definitions
         .iter_all()
@@ -482,7 +484,10 @@ fn object_self_tap_harm_amount(state: &GameState, object_id: ObjectId) -> Option
         .filter(|trigger| {
             trigger.valid_card.as_ref().is_none_or(|filter| {
                 super::trigger_matchers::target_filter_matches_object(
-                    state, object_id, filter, object_id,
+                    state,
+                    object_id,
+                    filter,
+                    &source_context,
                 )
             })
         })
@@ -2304,6 +2309,7 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
+        let source_context = trigger_source_context_for_latch(state, obj);
         // Intentionally NOT filtering by obj.controller: an opponent can
         // control an aura attached to your land (e.g., via Aura Theft), and
         // the trigger still fires for the tapping player when the land is
@@ -2314,7 +2320,10 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
                 continue;
             }
             if !super::trigger_matchers::taps_for_mana_card_matches(
-                trigger, state, land_id, object_id,
+                trigger,
+                state,
+                land_id,
+                &source_context,
             ) {
                 continue;
             }
@@ -2363,6 +2372,7 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
+        let source_context = trigger_source_context_for_latch(state, obj);
         if obj.controller != controller {
             continue;
         }
@@ -2377,7 +2387,10 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
             // self-tapping land case (already refunded by the land's own
             // `source_id`, but kept here for completeness).
             if super::trigger_matchers::taps_for_mana_card_matches(
-                trigger, state, land_id, object_id,
+                trigger,
+                state,
+                land_id,
+                &source_context,
             ) && object_id != land_id
                 && !sources.contains(&object_id)
             {

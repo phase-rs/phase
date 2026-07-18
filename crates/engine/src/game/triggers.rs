@@ -54,7 +54,7 @@ pub use super::trigger_matchers::{build_trigger_registry, trigger_matcher, trigg
 pub type TriggerMatcher = fn(
     event: &GameEvent,
     trigger: &TriggerDefinition,
-    source_id: ObjectId,
+    source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool;
 
@@ -305,7 +305,6 @@ fn matching_batched_trigger_events(
     matcher: TriggerMatcher,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
 ) -> Vec<GameEvent> {
-    let obj_id = source_context.identity.reference.object_id;
     event_batch
         .iter()
         .filter(|candidate| {
@@ -315,7 +314,7 @@ fn matching_batched_trigger_events(
                 active_suppress_triggers,
             )
         })
-        .filter(|candidate| matcher(candidate, trig_def, obj_id, state))
+        .filter(|candidate| matcher(candidate, trig_def, source_context, state))
         .filter(|candidate| {
             trig_def.condition.as_ref().is_none_or(|condition| {
                 check_trigger_condition_with_source(
@@ -328,7 +327,7 @@ fn matching_batched_trigger_events(
             })
         })
         .filter_map(|candidate| {
-            contextual_batched_trigger_event(state, candidate, trig_def, obj_id)
+            contextual_batched_trigger_event(state, candidate, trig_def, source_context)
         })
         .collect()
 }
@@ -337,7 +336,7 @@ fn contextual_batched_trigger_event(
     state: &GameState,
     event: &GameEvent,
     trig_def: &TriggerDefinition,
-    obj_id: ObjectId,
+    source_context: &TriggerSourceContext,
 ) -> Option<GameEvent> {
     let (defending_player, matching_attacks) = match (event, trig_def.mode.clone()) {
         (
@@ -347,7 +346,7 @@ fn contextual_batched_trigger_event(
             TriggerMode::Attacks,
         ) => (
             *defending_player,
-            super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
+            super::trigger_matchers::matching_attack_events(event, trig_def, source_context, state)
                 .into_iter()
                 .flat_map(|event| match event {
                     GameEvent::AttackersDeclared { attacks, .. } => attacks,
@@ -362,17 +361,21 @@ fn contextual_batched_trigger_event(
             TriggerMode::YouAttack,
         ) => (
             *defending_player,
-            super::trigger_matchers::matching_you_attack_pairs(event, trig_def, obj_id, state),
+            super::trigger_matchers::matching_you_attack_pairs(
+                event,
+                trig_def,
+                source_context,
+                state,
+            ),
         ),
         (GameEvent::BlockersDeclared { .. }, TriggerMode::YouAttackUnblocked) => {
             let matching = super::trigger_matchers::matching_you_attack_unblocked_pairs(
-                event, trig_def, obj_id, state,
+                event,
+                trig_def,
+                source_context,
+                state,
             );
-            let fallback = state
-                .objects
-                .get(&obj_id)
-                .map(|o| o.controller)
-                .unwrap_or(PlayerId(0));
+            let fallback = source_context.source_read(state).controller();
             let defending_player = matching
                 .first()
                 .map(|(_, target)| {
@@ -555,7 +558,7 @@ fn reconcile_off_zone_keyword_triggers(state: &mut GameState) {
 /// never emitted as an event; it only lets the existing snapshot constructor
 /// preserve the source's exact current zone without rebuilding trigger-entry
 /// provenance at a collection site.
-pub(super) fn trigger_source_context_for_latch(
+pub fn trigger_source_context_for_latch(
     state: &GameState,
     source: &GameObject,
 ) -> TriggerSourceContext {
@@ -575,6 +578,34 @@ pub(super) fn trigger_source_context_for_latch(
         .cloned()
         .unwrap_or_default();
     source_context
+}
+
+/// Selects a trigger source's event-time authority for one matching pass.
+///
+/// CR 603.10a: when the source itself changed zones, its record is the
+/// immediately-before authority. Re-snapshotting the same object after the
+/// move would bind a different incarnation under CR 400.7.
+fn trigger_source_context_for_event(
+    state: &GameState,
+    source: &GameObject,
+    event: &GameEvent,
+) -> TriggerSourceContext {
+    if let GameEvent::ZoneChanged {
+        object_id,
+        to,
+        record,
+        ..
+    } = event
+    {
+        // Enters-the-battlefield triggers observe the post-entry object; only
+        // a source leaving its observed zone needs the record's pre-move view.
+        if *object_id == source.id && *to != Zone::Battlefield {
+            if let Some(source_context) = record.trigger_source_context() {
+                return source_context.clone();
+            }
+        }
+    }
+    trigger_source_context_for_latch(state, source)
 }
 
 /// CR 603.10: Capture the full immediately-before authority for a logical
@@ -975,8 +1006,16 @@ fn collect_matching_triggers_inner(
 ) -> Vec<MatchedTrigger> {
     let mut pending = Vec::new();
     let source_context = match source {
-        TriggerSource::Live(source_obj) => trigger_source_context_for_latch(state, source_obj),
+        TriggerSource::Live(source_obj) => {
+            trigger_source_context_for_event(state, source_obj, event)
+        }
         TriggerSource::Context(source_context) => source_context.clone(),
+    };
+    let use_latched_trigger_entries = match source {
+        TriggerSource::Live(source_obj) => {
+            ObjectIncarnationRef::from_object(source_obj) != source_context.identity.reference
+        }
+        TriggerSource::Context(_) => true,
     };
     let obj_id = source_context.identity.reference.object_id;
     let controller = source_context.lki.controller;
@@ -1041,48 +1080,21 @@ fn collect_matching_triggers_inner(
     // Synthesized granted-keyword triggers are appended after the printed set
     // with indices offset past `obj.trigger_definitions.len()` so the
     // `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
-    let printed_trigger_count = match source {
-        TriggerSource::Live(source_obj) => source_obj.trigger_definitions.len(),
-        TriggerSource::Context(source_context) => source_context.trigger_entries.len(),
+    let printed_trigger_count = if use_latched_trigger_entries {
+        source_context.trigger_entries.len()
+    } else {
+        match source {
+            TriggerSource::Live(source_obj) => source_obj.trigger_definitions.len(),
+            TriggerSource::Context(_) => unreachable!("context sources use latched entries"),
+        }
     };
     let printed_triggers: Vec<(
         usize,
         Option<TriggerDefinitionRef>,
         &TriggerDefinition,
         Option<crate::types::keywords::KeywordKind>,
-    )> = match source {
-        TriggerSource::Live(source_obj) if source_phase_out_event => source_obj
-            .trigger_definitions
-            .iter_all()
-            .enumerate()
-            .filter(|(_, entry)| {
-                matches!(
-                    &entry.definition().mode,
-                    TriggerMode::PhaseOut | TriggerMode::PhaseOutAll
-                )
-            })
-            .map(|(idx, entry)| {
-                (
-                    idx,
-                    Some(source_obj.trigger_definition_ref(entry)),
-                    entry.definition(),
-                    None,
-                )
-            })
-            .collect(),
-        TriggerSource::Live(source_obj) => {
-            super::functioning_abilities::active_trigger_definitions(state, source_obj)
-                .map(|active| {
-                    (
-                        active.live_index,
-                        Some(active.definition_ref),
-                        active.definition,
-                        None,
-                    )
-                })
-                .collect()
-        }
-        TriggerSource::Context(source_context) => source_context
+    )> = if use_latched_trigger_entries {
+        source_context
             .trigger_entries
             .iter()
             .enumerate()
@@ -1094,7 +1106,42 @@ fn collect_matching_triggers_inner(
                     None,
                 )
             })
-            .collect(),
+            .collect()
+    } else {
+        match source {
+            TriggerSource::Live(source_obj) if source_phase_out_event => source_obj
+                .trigger_definitions
+                .iter_all()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    matches!(
+                        &entry.definition().mode,
+                        TriggerMode::PhaseOut | TriggerMode::PhaseOutAll
+                    )
+                })
+                .map(|(idx, entry)| {
+                    (
+                        idx,
+                        Some(source_obj.trigger_definition_ref(entry)),
+                        entry.definition(),
+                        None,
+                    )
+                })
+                .collect(),
+            TriggerSource::Live(source_obj) => {
+                super::functioning_abilities::active_trigger_definitions(state, source_obj)
+                    .map(|active| {
+                        (
+                            active.live_index,
+                            Some(active.definition_ref),
+                            active.definition,
+                            None,
+                        )
+                    })
+                    .collect()
+            }
+            TriggerSource::Context(_) => unreachable!("context sources use latched entries"),
+        }
     };
     let all_triggers = printed_triggers.into_iter().chain(
         granted_keyword_triggers
@@ -1117,13 +1164,12 @@ fn collect_matching_triggers_inner(
                 trig_def.trigger_zones.contains(&zone)
             };
             if !zones_match {
-                if let (
-                    TriggerSource::Context(source_context),
-                    GameEvent::ZoneChanged { record, to, .. },
-                ) = (source, event)
-                {
-                    zones_match = record.from_zone == Some(source_context.identity.expected_zone)
-                        && trig_def.trigger_zones.contains(to);
+                if use_latched_trigger_entries {
+                    if let GameEvent::ZoneChanged { record, to, .. } = event {
+                        zones_match = record.from_zone
+                            == Some(source_context.identity.expected_zone)
+                            && trig_def.trigger_zones.contains(to);
+                    }
                 }
             }
             if !zones_match {
@@ -1151,7 +1197,7 @@ fn collect_matching_triggers_inner(
             continue;
         }
         if let Some(matcher) = trigger_matcher(trig_def.mode.clone()) {
-            if !matcher(event, trig_def, obj_id, state) {
+            if !matcher(event, trig_def, &source_context, state) {
                 continue;
             }
             if !check_trigger_constraint_with_ref(
@@ -1234,18 +1280,31 @@ fn collect_matching_triggers_inner(
                 }
                 vec![trigger_events]
             } else if matches!(trig_def.mode, TriggerMode::Attacks) {
-                super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
-                    .into_iter()
-                    .map(|trigger_event| vec![trigger_event])
-                    .collect()
+                super::trigger_matchers::matching_attack_events(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::Blocks) {
-                super::trigger_matchers::matching_block_events(event, trig_def, obj_id, state)
-                    .into_iter()
-                    .map(|trigger_event| vec![trigger_event])
-                    .collect()
+                super::trigger_matchers::matching_block_events(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::BecomesBlocked) {
                 super::trigger_matchers::matching_becomes_blocked_events(
-                    event, trig_def, obj_id, state,
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
                 )
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
@@ -1256,7 +1315,10 @@ fn collect_matching_triggers_inner(
                 // creature" resolves per-firing, matching the atomic
                 // `Blocks`/`BecomesBlocked` arms above.
                 super::trigger_matchers::matching_blocks_or_becomes_blocked_events(
-                    event, trig_def, obj_id, state,
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
                 )
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
@@ -1266,7 +1328,10 @@ fn collect_matching_triggers_inner(
                 // trigger once, while CR 608.2c makes the filtered source set
                 // available to later "those creatures" instructions.
                 super::trigger_matchers::matching_damage_done_once_by_controller_event(
-                    event, trig_def, obj_id, state,
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
                 )
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
@@ -1274,10 +1339,15 @@ fn collect_matching_triggers_inner(
             } else if super::trigger_matchers::listens_on_aggregate_combat_damage_done(trig_def)
                 && matches!(event, GameEvent::CombatDamageDealtToPlayer { .. })
             {
-                super::trigger_matchers::matching_damage_done_events(event, trig_def, obj_id, state)
-                    .into_iter()
-                    .map(|trigger_event| vec![trigger_event])
-                    .collect()
+                super::trigger_matchers::matching_damage_done_events(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else {
                 vec![vec![event.clone()]]
             };
@@ -1323,7 +1393,7 @@ fn collect_matching_triggers_inner(
                     super::trigger_matchers::count_trigger_subjects_in_batch(
                         state,
                         trig_def.valid_card.as_ref(),
-                        obj_id,
+                        &source_context,
                         &trigger_events,
                     )
                 } else {
@@ -1672,7 +1742,7 @@ pub(super) fn resolve_tap_mana_triggers_inline(
         // predicate the post-action scan's skip guard uses, so "resolved here"
         // and "skipped there" cannot diverge.
         let mut coupled: Vec<ResolvedAbility> = Vec::new();
-        for (&obj_id, obj) in state.objects.iter() {
+        for obj in state.objects.values() {
             if obj.zone != Zone::Battlefield {
                 continue;
             }
@@ -1682,12 +1752,15 @@ pub(super) fn resolve_tap_mana_triggers_inline(
                 if !matches!(trig_def.mode, TriggerMode::TapsForMana) {
                     continue;
                 }
+                let source_context = trigger_source_context_for_latch(state, obj);
                 if !super::trigger_matchers::match_taps_for_mana(
-                    &tap_event, trig_def, obj_id, state,
+                    &tap_event,
+                    trig_def,
+                    &source_context,
+                    state,
                 ) {
                     continue;
                 }
-                let source_context = trigger_source_context_for_latch(state, obj);
                 let mut ability = build_triggered_ability_from_context(
                     state,
                     trig_def,
@@ -6438,7 +6511,7 @@ fn collect_matching_delayed_triggers(
                     &delayed.condition,
                     events,
                     state,
-                    delayed.source_id,
+                    delayed.ability.trigger_source.as_ref(),
                 )
             }
         } {
@@ -6670,7 +6743,7 @@ fn reflexive_coin_flip_resolved_without_match(
     condition: &crate::types::ability::DelayedTriggerCondition,
     events: &[GameEvent],
     state: &GameState,
-    source_id: ObjectId,
+    source_context: Option<&TriggerSourceContext>,
 ) -> bool {
     use crate::types::ability::DelayedTriggerCondition;
     let DelayedTriggerCondition::WhenNextEvent {
@@ -6693,7 +6766,14 @@ fn reflexive_coin_flip_resolved_without_match(
     flipper_only.coin_flip_result = None;
     events.iter().any(|event| {
         matches!(event, GameEvent::CoinFlipped { .. })
-            && super::trigger_matchers::match_flipped_coin(event, &flipper_only, source_id, state)
+            && source_context.is_some_and(|source_context| {
+                super::trigger_matchers::match_flipped_coin(
+                    event,
+                    &flipper_only,
+                    source_context,
+                    state,
+                )
+            })
     })
 }
 
@@ -6846,11 +6926,12 @@ fn delayed_trigger_event_with_index(
             .map(|(idx, event)| (idx, event.clone())),
         // CR 603.7c: "Whenever [event] this turn" — delegate to trigger matcher registry.
         DelayedTriggerCondition::WheneverEvent { trigger } => {
+            let source_context = source_context?;
             if let Some(matcher) = super::trigger_matchers::trigger_matcher(trigger.mode.clone()) {
                 events
                     .iter()
                     .enumerate()
-                    .find(|(_, event)| matcher(event, trigger, source_id, state))
+                    .find(|(_, event)| matcher(event, trigger, source_context, state))
                     .map(|(idx, event)| (idx, event.clone()))
             } else {
                 None
@@ -6865,10 +6946,11 @@ fn delayed_trigger_event_with_index(
             or_trigger,
             ..
         } => events.iter().enumerate().rev().find_map(|(idx, event)| {
+            let source_context = source_context?;
             for t in std::iter::once(trigger.as_ref()).chain(or_trigger.iter().map(|b| b.as_ref()))
             {
                 if let Some(matcher) = super::trigger_matchers::trigger_matcher(t.mode.clone()) {
-                    if matcher(event, t, source_id, state) {
+                    if matcher(event, t, source_context, state) {
                         return Some((idx, event.clone()));
                     }
                 }
