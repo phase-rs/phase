@@ -4790,10 +4790,11 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // CR 608.2d: An optional exact "cast/play that card" instruction is
             // impossible when its parent hand-off records that no object was
             // produced. Neither a lingering permission nor `Play` mode can make
-            // the missing referent actionable. Concrete targets and ordinary
-            // zone selections carry no such provenance and remain eligible.
+            // the missing referent actionable, and unrelated inherited targets
+            // cannot supply the exact referent. Concrete parent targets and
+            // ordinary zone selections carry no such provenance and remain
+            // eligible.
             if matches!(target, TargetFilter::ParentTarget)
-                && ability.targets.is_empty()
                 && ability.parent_target_missing_reason.is_some()
             {
                 return true;
@@ -23761,6 +23762,45 @@ mod tests {
                     "missing ParentTarget must suppress {mode:?}/{driver:?} even with a duration, constraint, and alternative cost"
                 );
             }
+        }
+    }
+
+    /// CR 608.2d: explicit missing-parent provenance remains authoritative when
+    /// normal chain hand-off also inherits a player or unrelated object target.
+    #[test]
+    fn inherited_unrelated_targets_do_not_restore_a_missing_exact_parent() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver, ParentTargetMissingReason};
+
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+
+        for inherited_targets in [
+            vec![TargetRef::Player(PlayerId(1))],
+            vec![TargetRef::Object(ObjectId(901))],
+        ] {
+            ability.targets = inherited_targets;
+            assert!(
+                optional_effect_is_infeasible(&state, &ability),
+                "unrelated inherited targets must not satisfy a missing exact ParentTarget: {:?}",
+                ability.targets
+            );
         }
     }
 
