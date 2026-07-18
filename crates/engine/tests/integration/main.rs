@@ -64,6 +64,7 @@ mod claim_jumper_repeat;
 mod cleave_text_changing_cost;
 mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
+mod colorless_spell_cost_reduction;
 mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;
 mod companion_special_action;

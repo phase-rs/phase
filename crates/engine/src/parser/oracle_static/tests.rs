@@ -1716,6 +1716,84 @@ fn cost_mod_no_mana_value_gate_unchanged() {
     );
 }
 
+/// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: a BARE-word spell-subject filter
+/// for a cost modifier resolves the full color-CATEGORY axis (colorless /
+/// monocolored / multicolored → `ColorCount`), "historic" (→ `Historic`), a named
+/// color (→ `HasColor`), and a supertype (→ `HasSupertype`) — routed through the
+/// single `parse_color_property` authority. Before the fix, the bare-word fallback
+/// hand-rolled only the five named colors, so "Colorless"/"Multicolored"/
+/// "Historic" spell subjects dropped the whole restriction (`spell_filter: None`)
+/// and the modifier (mis)applied to EVERY spell (Herald of Kozilek, Ugin, Urza's
+/// Filter, It That Heralds the End, Jhoira's Familiar).
+#[test]
+fn cost_mod_bare_color_category_and_historic_subject() {
+    fn props(line: &str) -> Vec<FilterProp> {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
+        let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+            panic!("expected ModifyCost for {line}");
+        };
+        match spell_filter.unwrap_or_else(|| panic!("{line} dropped its spell filter")) {
+            TargetFilter::Typed(tf) => tf.properties,
+            other => panic!("expected Typed for {line}, got {other:?}"),
+        }
+    }
+
+    // Color-category axis (the fix): each maps to the same ColorCount the
+    // noun-bearing path already produced.
+    assert_eq!(
+        props("Colorless spells you cast cost {1} less to cast."),
+        vec![FilterProp::ColorCount {
+            comparator: Comparator::EQ,
+            count: 0,
+        }],
+    );
+    assert_eq!(
+        props("Multicolored spells cost {2} less to cast."),
+        vec![FilterProp::ColorCount {
+            comparator: Comparator::GE,
+            count: 2,
+        }],
+    );
+    assert_eq!(
+        props("Monocolored spells cost {1} more to cast."),
+        vec![FilterProp::ColorCount {
+            comparator: Comparator::EQ,
+            count: 1,
+        }],
+    );
+    assert_eq!(
+        props("Historic spells you cast cost {1} less to cast."),
+        vec![FilterProp::Historic],
+    );
+    // Composes with a trailing mana-value qualifier (It That Heralds the End).
+    assert_eq!(
+        props("Colorless spells you cast with mana value 7 or greater cost {1} less to cast."),
+        vec![
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 },
+            },
+        ],
+    );
+    // Regression: named-color and supertype paths are unchanged.
+    assert_eq!(
+        props("White spells your opponents cast cost {1} more to cast."),
+        vec![FilterProp::HasColor {
+            color: crate::types::mana::ManaColor::White,
+        }],
+    );
+    assert_eq!(
+        props("Legendary spells you cast cost {1} less to cast."),
+        vec![FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Legendary,
+        }],
+    );
+}
+
 /// CR 508.1c + CR 509.1b: Grant + dual-gated restrictions emit the pump grant
 /// plus both gated combat statics on the enchanted/equipped host.
 #[test]
