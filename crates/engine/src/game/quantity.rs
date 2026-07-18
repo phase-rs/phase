@@ -27,6 +27,7 @@ use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// Scope information for quantity resolution.
 ///
@@ -4480,10 +4481,33 @@ fn resolve_object_mana_value(
                 return 0;
             };
             let controller = ability.original_controller.unwrap_or(ability.controller);
-            crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+            let linked =
+                crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+            // CR 607.2a + CR 608.2c: When a same-resolution linked-exile grant
+            // materializes candidate cards into `ability.targets`, read "the
+            // card you own exiled this way" from that current set before the
+            // source's persistent linked-exile history.
+            ability
+                .targets
                 .iter()
-                .find(|link| link.owner == controller)
-                .map(|link| u32_to_i32_saturating(link.mana_value))
+                .find_map(|target| {
+                    let TargetRef::Object(id) = target else {
+                        return None;
+                    };
+                    if !linked.iter().any(|link| link.exiled_id == *id) {
+                        return None;
+                    }
+                    state.objects.get(id).and_then(|obj| {
+                        (obj.zone == Zone::Exile && obj.owner == controller)
+                            .then(|| u32_to_i32_saturating(obj.effective_mana_value()))
+                    })
+                })
+                .or_else(|| {
+                    linked
+                        .iter()
+                        .find(|link| link.owner == controller)
+                        .map(|link| u32_to_i32_saturating(link.mana_value))
+                })
                 .unwrap_or(0)
         }
     }

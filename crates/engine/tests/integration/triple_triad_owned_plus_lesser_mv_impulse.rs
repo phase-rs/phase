@@ -17,22 +17,21 @@
 //! `Or[ And[ExiledBySource, Owned{You}], And[ExiledBySource, Cmc{LT,
 //! OwnedLinkedExileCard MV}] ]`.
 //!
-//! This test seeds the source's linked-exile pile directly (the upstream "each
-//! player exiles the top card" clause is a separate, pre-existing exile step,
-//! outside the grant THIS change owns), then drives the grant through the same
-//! production resolver the runtime uses (`resolve_ability_chain` ->
+//! This test seeds the source's linked-exile pile directly, including an older
+//! P0-owned card from a prior resolution, and binds the current resolution's
+//! exiled set through `last_zone_changed_ids`. It then drives the grant through
+//! the same production resolver the runtime uses (`resolve_ability_chain` ->
 //! `cast_from_zone::resolve` -> `grant_lingering_permissions`).
 //!
 //! DISCRIMINATOR: with a P0-owned MV-3 card, a P1-owned MV-1 card, a P1-owned
 //! MV-3 card, and a P1-owned MV-4 card all in the exile-by-source pile, after
-//! resolution the MV-3 (owned) and MV-1 (< 3) cards carry P0's `ExileWithAltCost`
-//! free-cast permission, but neither the P1-owned MV-3 (== 3, not *lesser*) nor
-//! the MV-4 (> 3) card carries any. The equal-MV opponent card is the
-//! `Comparator::LT`-vs-`LE` boundary: "each *other* card ... with *lesser* mana
-//! value" excludes it, and only strict `<` makes this assertion hold end-to-end.
-//! Reverting the fix collapses the target to `TargetFilter::Any`, which no longer
-//! references `ExiledBySource` and grants the pile no scoped permission — every
-//! one of these assertions flips.
+//! resolution the current MV-3 (owned) and MV-1 (< 3) cards carry P0's
+//! `ExileWithAltCost` free-cast permission, but neither the stale P0-owned MV-5
+//! card, the P1-owned MV-3 (== 3, not *lesser*), nor the MV-4 (> 3) card carries
+//! any. The stale MV-5 card is the review regression: if `OwnedLinkedExileCard`
+//! reads the persistent source pile instead of the current resolution's set, the
+//! MV-4 card is incorrectly treated as lesser. The equal-MV opponent card is the
+//! `Comparator::LT`-vs-`LE` boundary.
 //!
 //! CR 118.9 + 118.9b (cast without paying mana cost), CR 601.3 (permission),
 //! CR 607.2a (exiled this way), CR 108.3 (the card you own), CR 202.3
@@ -107,10 +106,17 @@ fn triple_triad_grants_free_play_to_owned_and_lesser_mv_exiled_cards_only() {
     let mut runner = scenario.build();
     let state = runner.state_mut();
 
-    // The linked-exile pile the "each player exiles the top card" step would have
-    // produced: the controller (P0) owns one card (MV 3); the opponent (P1) owns
-    // a strictly-cheaper card (MV 1), an EQUAL-MV card (MV 3, the LT-vs-LE
-    // boundary), and a costlier card (MV 4).
+    // The linked-exile pile contains an older P0-owned card (MV 5) plus the
+    // current "each player exiles the top card" set: the controller (P0) owns
+    // one card (MV 3); the opponent (P1) owns a strictly-cheaper card (MV 1),
+    // an EQUAL-MV card (MV 3, the LT-vs-LE boundary), and a costlier card (MV 4).
+    let stale_owned_mv5 = create_object(
+        state,
+        CardId(899),
+        P0,
+        "Stale Owned MV5".to_string(),
+        Zone::Exile,
+    );
     let owned_mv3 = create_object(state, CardId(900), P0, "Owned MV3".to_string(), Zone::Exile);
     let opp_mv1 = create_object(state, CardId(901), P1, "Opp MV1".to_string(), Zone::Exile);
     let opp_mv4 = create_object(state, CardId(902), P1, "Opp MV4".to_string(), Zone::Exile);
@@ -121,6 +127,7 @@ fn triple_triad_grants_free_play_to_owned_and_lesser_mv_exiled_cards_only() {
     let unrelated = create_object(state, CardId(903), P1, "Unrelated".to_string(), Zone::Exile);
 
     for (id, mv) in [
+        (stale_owned_mv5, 5u32),
         (owned_mv3, 3u32),
         (opp_mv1, 1),
         (opp_mv3, 3),
@@ -129,18 +136,21 @@ fn triple_triad_grants_free_play_to_owned_and_lesser_mv_exiled_cards_only() {
     ] {
         state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::generic(mv);
     }
-    for &id in &[owned_mv3, opp_mv1, opp_mv3, opp_mv4] {
+    for &id in &[stale_owned_mv5, owned_mv3, opp_mv1, opp_mv3, opp_mv4] {
         state.exile_links.push(ExileLink {
             exiled_id: id,
             source_id: source,
             kind: ExileLinkKind::TrackedBySource,
         });
     }
+    state.last_zone_changed_ids = vec![owned_mv3, opp_mv1, opp_mv3, opp_mv4];
 
-    // Resolve the grant through the production resolver.
+    // Resolve the grant through the production sub-chain seam. Depth 0 is the
+    // top-level ability boundary and clears resolution-local zone-change ids;
+    // the real ExileTop -> CastFromZone chain reaches this grant at depth 1.
     let ability = build_resolved_from_def(&cast_def, source, P0);
     let mut events = Vec::new();
-    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 1)
         .expect("the play-permission grant must resolve");
 
     let perms_of = |id: ObjectId| runner.state().objects[&id].casting_permissions.clone();
@@ -156,6 +166,13 @@ fn triple_triad_grants_free_play_to_owned_and_lesser_mv_exiled_cards_only() {
         has_p0_free_cast(&perms_of(opp_mv1)),
         "a lesser-mana-value (MV 1 < owned MV 3) linked-exiled card must carry the free-cast permission, got {:?}",
         perms_of(opp_mv1)
+    );
+    // REGRESSION: the stale P0-owned MV-5 card belongs to a prior resolution and
+    // must not receive this upkeep's permission or supply the "than it" threshold.
+    assert!(
+        !has_p0_free_cast(&perms_of(stale_owned_mv5)),
+        "a stale linked card from a prior resolution must not receive this grant, got {:?}",
+        perms_of(stale_owned_mv5)
     );
     // DISCRIMINATOR / NEGATIVE (LT vs LE boundary): an opponent's card with MV 3
     // EQUAL to the owned card's MV is not *lesser*, so it must NOT be playable.
