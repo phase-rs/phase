@@ -46,7 +46,7 @@ use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
 
-use crate::game::game_object::{AttachTarget, GameObject, PhaseStatus};
+use crate::game::game_object::{AttachTarget, CaseState, GameObject, PhaseStatus};
 
 fn default_rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(0)
@@ -352,7 +352,7 @@ pub struct LKISnapshot {
 /// is captured by `GameObject::snapshot_for_zone_change` before reset/move and
 /// then completed with the record's relationship, link, and combat snapshots
 /// at the zone-change authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerSourceContext {
     /// The exact source incarnation and the public zone in which it was observed.
     pub identity: ObjectIdentityBinding,
@@ -372,6 +372,20 @@ pub struct TriggerSourceContext {
     pub is_renowned: bool,
     #[serde(default)]
     pub is_saddled: bool,
+    /// Source-only turn state needed by filters and intervening-if conditions
+    /// after the observed object has left its expected zone. These are copied
+    /// from the exact source at observation time; they never authorize a later
+    /// same-id object to answer a source-relative question.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub echo_due: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub harnessed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saddled_by: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub convoked_creatures: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_state: Option<CaseState>,
     /// Class level is a source characteristic used by "becomes level N"
     /// trigger constraints and must not be rebound by object id after a move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,6 +411,11 @@ pub struct TriggerSourceContext {
     pub attachments: Vec<AttachmentSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_exile_snapshot: Vec<LinkedExileSnapshot>,
+    /// CR 607.2a: Ordered cards this source exiled during the current turn.
+    /// This separate projection preserves ordinal references such as "the first
+    /// card exiled with it" after the source leaves its observed zone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cards_exiled_this_turn: Vec<ObjectId>,
     #[serde(default)]
     pub combat_status: ZoneChangeCombatStatus,
     /// Cast and as-cast facts are source facts, not a reason to read a later
@@ -405,6 +424,8 @@ pub struct TriggerSourceContext {
     pub cast_from_zone: Option<Zone>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub played_from_zone: Option<Zone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entered_via_ability_source: Option<ObjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_controller: Option<PlayerId>,
     #[serde(default)]
@@ -433,6 +454,78 @@ pub struct TriggerSourceContext {
     pub cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
 }
 
+impl std::fmt::Debug for TriggerSourceContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("TriggerSourceContext");
+        debug
+            .field("identity", &self.identity)
+            .field("lki", &self.lki)
+            .field("card_id", &self.card_id)
+            .field("printed_ref", &self.printed_ref)
+            .field("is_token", &self.is_token)
+            .field("face_down", &self.face_down)
+            .field("transformed", &self.transformed)
+            .field("is_renowned", &self.is_renowned)
+            .field("is_saddled", &self.is_saddled);
+        if self.echo_due {
+            debug.field("echo_due", &self.echo_due);
+        }
+        if self.harnessed {
+            debug.field("harnessed", &self.harnessed);
+        }
+        if !self.saddled_by.is_empty() {
+            debug.field("saddled_by", &self.saddled_by);
+        }
+        if !self.convoked_creatures.is_empty() {
+            debug.field("convoked_creatures", &self.convoked_creatures);
+        }
+        if self.case_state.is_some() {
+            debug.field("case_state", &self.case_state);
+        }
+        debug
+            .field("class_level", &self.class_level)
+            .field("trigger_entries", &self.trigger_entries)
+            .field("timestamp", &self.timestamp)
+            .field("entered_battlefield_turn", &self.entered_battlefield_turn)
+            .field("paired_with", &self.paired_with)
+            .field("pair_controller", &self.pair_controller)
+            .field("attached_to", &self.attached_to)
+            .field("attachments", &self.attachments)
+            .field("linked_exile_snapshot", &self.linked_exile_snapshot);
+        if !self.cards_exiled_this_turn.is_empty() {
+            debug.field("cards_exiled_this_turn", &self.cards_exiled_this_turn);
+        }
+        debug
+            .field("combat_status", &self.combat_status)
+            .field("cast_from_zone", &self.cast_from_zone)
+            .field("played_from_zone", &self.played_from_zone);
+        if self.entered_via_ability_source.is_some() {
+            debug.field(
+                "entered_via_ability_source",
+                &self.entered_via_ability_source,
+            );
+        }
+        debug
+            .field("cast_controller", &self.cast_controller)
+            .field("phase_status", &self.phase_status)
+            .field("cast_variant_paid", &self.cast_variant_paid)
+            .field("cast_timing_permission", &self.cast_timing_permission)
+            .field("cost_x_paid", &self.cost_x_paid)
+            .field("cast_spell_keywords", &self.cast_spell_keywords)
+            .field("mana_spent_to_cast", &self.mana_spent_to_cast)
+            .field("colors_spent_to_cast", &self.colors_spent_to_cast)
+            .field("mana_spent_to_cast_amount", &self.mana_spent_to_cast_amount)
+            .field("kickers_paid", &self.kickers_paid)
+            .field(
+                "additional_cost_payment_count",
+                &self.additional_cost_payment_count,
+            )
+            .field("additional_cost_payments", &self.additional_cost_payments)
+            .field("cast_cost_paid_object", &self.cast_cost_paid_object)
+            .finish()
+    }
+}
+
 impl TriggerSourceContext {
     /// Returns the exact definition reference for an entry captured with this
     /// source. No caller may infer provenance from definition payload bytes.
@@ -448,7 +541,10 @@ impl TriggerSourceContext {
     /// A current object is usable only when both its incarnation and expected
     /// public zone still agree with this context. A same-id return is never a
     /// substitute for the captured source.
-    pub fn source_read<'a>(&'a self, state: &'a GameState) -> TriggerSourceRead<'a> {
+    pub fn source_read<'context, 'state>(
+        &'context self,
+        state: &'state GameState,
+    ) -> TriggerSourceRead<'context, 'state> {
         state
             .objects
             .get(&self.identity.reference.object_id)
@@ -506,12 +602,12 @@ impl TriggerSourceContext {
 /// specifically so a departed source never falls back to a later object with
 /// the same storage id.
 #[derive(Debug, Clone, Copy)]
-pub enum TriggerSourceRead<'a> {
-    ExactLive(&'a GameObject),
-    Latched(&'a TriggerSourceContext),
+pub enum TriggerSourceRead<'context, 'state> {
+    ExactLive(&'state GameObject),
+    Latched(&'context TriggerSourceContext),
 }
 
-impl TriggerSourceRead<'_> {
+impl<'context, 'state> TriggerSourceRead<'context, 'state> {
     pub fn controller(self) -> PlayerId {
         match self {
             Self::ExactLive(object) => object.controller,
@@ -533,6 +629,13 @@ impl TriggerSourceRead<'_> {
         }
     }
 
+    pub fn is_token(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.is_token,
+            Self::Latched(context) => context.is_token,
+        }
+    }
+
     pub fn class_level(self) -> Option<u8> {
         match self {
             Self::ExactLive(object) => object.class_level,
@@ -545,6 +648,178 @@ impl TriggerSourceRead<'_> {
             Self::ExactLive(object) => object.snapshot_public_characteristics(),
             Self::Latched(context) => context.lki.clone(),
         }
+    }
+
+    pub fn attached_to(self) -> Option<AttachTarget> {
+        match self {
+            Self::ExactLive(object) => object.attached_to,
+            Self::Latched(context) => context.attached_to,
+        }
+    }
+
+    pub fn paired_with(self) -> Option<ObjectId> {
+        match self {
+            Self::ExactLive(object) => object.paired_with,
+            Self::Latched(context) => context.paired_with,
+        }
+    }
+
+    pub fn echo_due(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.echo_due,
+            Self::Latched(context) => context.echo_due,
+        }
+    }
+
+    pub fn harnessed(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.harnessed,
+            Self::Latched(context) => context.harnessed,
+        }
+    }
+
+    pub fn saddled_by(self) -> Vec<ObjectId> {
+        match self {
+            Self::ExactLive(object) => object.saddled_by.clone(),
+            Self::Latched(context) => context.saddled_by.clone(),
+        }
+    }
+
+    pub fn convoked_creatures(self) -> Vec<ObjectId> {
+        match self {
+            Self::ExactLive(object) => object.convoked_creatures.clone(),
+            Self::Latched(context) => context.convoked_creatures.clone(),
+        }
+    }
+
+    pub fn case_state(self) -> Option<CaseState> {
+        match self {
+            Self::ExactLive(object) => object.case_state.clone(),
+            Self::Latched(context) => context.case_state.clone(),
+        }
+    }
+
+    pub fn entered_battlefield_turn(self) -> Option<u32> {
+        match self {
+            Self::ExactLive(object) => object.entered_battlefield_turn,
+            Self::Latched(context) => context.entered_battlefield_turn,
+        }
+    }
+
+    pub fn zone(self) -> Zone {
+        match self {
+            Self::ExactLive(object) => object.zone,
+            Self::Latched(context) => context.identity.expected_zone,
+        }
+    }
+
+    pub fn transformed(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.transformed,
+            Self::Latched(context) => context.transformed,
+        }
+    }
+
+    pub fn face_down(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.face_down,
+            Self::Latched(context) => context.face_down,
+        }
+    }
+
+    pub fn is_renowned(self) -> bool {
+        match self {
+            Self::ExactLive(object) => object.is_renowned,
+            Self::Latched(context) => context.is_renowned,
+        }
+    }
+
+    pub fn cast_from_zone(self) -> Option<Zone> {
+        match self {
+            Self::ExactLive(object) => object.cast_from_zone,
+            Self::Latched(context) => context.cast_from_zone,
+        }
+    }
+
+    pub fn played_from_zone(self) -> Option<Zone> {
+        match self {
+            Self::ExactLive(object) => object.played_from_zone,
+            Self::Latched(context) => context.played_from_zone,
+        }
+    }
+
+    pub fn entered_via_ability_source(self) -> Option<ObjectId> {
+        match self {
+            Self::ExactLive(object) => object.entered_via_ability_source,
+            Self::Latched(context) => context.entered_via_ability_source,
+        }
+    }
+
+    pub fn cast_controller(self) -> Option<PlayerId> {
+        match self {
+            Self::ExactLive(object) => object.cast_controller,
+            Self::Latched(context) => context.cast_controller,
+        }
+    }
+
+    pub fn cast_variant_paid(self) -> Option<(CastVariantPaid, u32)> {
+        match self {
+            Self::ExactLive(object) => object.cast_variant_paid,
+            Self::Latched(context) => context.cast_variant_paid,
+        }
+    }
+
+    pub fn cast_timing_permission(self) -> Option<(CastTimingPermission, u32)> {
+        match self {
+            Self::ExactLive(object) => object.cast_timing_permission,
+            Self::Latched(context) => context.cast_timing_permission,
+        }
+    }
+
+    pub fn cost_x_paid(self) -> Option<u32> {
+        match self {
+            Self::ExactLive(object) => object.cost_x_paid,
+            Self::Latched(context) => context.cost_x_paid,
+        }
+    }
+
+    pub fn mana_spent_to_cast_amount(self) -> u32 {
+        match self {
+            Self::ExactLive(object) => object.mana_spent_to_cast_amount,
+            Self::Latched(context) => context.mana_spent_to_cast_amount,
+        }
+    }
+
+    pub fn colors_spent_to_cast(self) -> ColoredManaCount {
+        match self {
+            Self::ExactLive(object) => object.colors_spent_to_cast.clone(),
+            Self::Latched(context) => context.colors_spent_to_cast.clone(),
+        }
+    }
+
+    pub fn kickers_paid(self) -> Vec<KickerVariant> {
+        match self {
+            Self::ExactLive(object) => object.kickers_paid.clone(),
+            Self::Latched(context) => context.kickers_paid.clone(),
+        }
+    }
+
+    pub fn additional_cost_payment_count(self) -> u32 {
+        match self {
+            Self::ExactLive(object) => object.additional_cost_payment_count,
+            Self::Latched(context) => context.additional_cost_payment_count,
+        }
+    }
+
+    pub fn additional_cost_payments(self) -> Vec<AdditionalCostInstancePayment> {
+        match self {
+            Self::ExactLive(object) => object.additional_cost_payments.clone(),
+            Self::Latched(context) => context.additional_cost_payments.clone(),
+        }
+    }
+
+    pub fn is_exact_live(self) -> bool {
+        matches!(self, Self::ExactLive(_))
     }
 }
 
@@ -888,6 +1163,14 @@ impl ZoneChangeRecord {
         };
         context.sync_zone_change_projections(self);
         self.trigger_source_context = Some(context);
+    }
+
+    /// Completes the source's ordered current-turn exile projection at the
+    /// zone-change authority, before the old source can be replaced.
+    pub(crate) fn sync_trigger_source_exiled_cards(&mut self, cards: Vec<ObjectId>) {
+        if let Some(context) = &mut self.trigger_source_context {
+            context.cards_exiled_this_turn = cards;
+        }
     }
 }
 

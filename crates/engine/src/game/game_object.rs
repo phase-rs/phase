@@ -211,7 +211,7 @@ pub struct BackFaceData {
 }
 
 /// CR 719.3b: Tracks the solve state of a Case enchantment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseState {
     pub is_solved: bool,
     pub solve_condition: SolveCondition,
@@ -1718,6 +1718,11 @@ impl GameObject {
                 transformed: self.transformed,
                 is_renowned: self.is_renowned,
                 is_saddled: self.is_saddled,
+                echo_due: self.echo_due,
+                harnessed: self.harnessed,
+                saddled_by: self.saddled_by.clone(),
+                convoked_creatures: self.convoked_creatures.clone(),
+                case_state: self.case_state.clone(),
                 class_level: self.class_level,
                 trigger_entries: self.trigger_definitions.iter_all().cloned().collect(),
                 timestamp: self.timestamp,
@@ -1727,9 +1732,11 @@ impl GameObject {
                 attached_to: self.attached_to,
                 attachments: Vec::new(),
                 linked_exile_snapshot: Vec::new(),
+                cards_exiled_this_turn: Vec::new(),
                 combat_status: Default::default(),
                 cast_from_zone: self.cast_from_zone,
                 played_from_zone: self.played_from_zone,
+                entered_via_ability_source: self.entered_via_ability_source,
                 cast_controller: self.cast_controller,
                 phase_status: self.phase_status,
                 cast_variant_paid: self.cast_variant_paid,

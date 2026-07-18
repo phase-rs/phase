@@ -33,9 +33,8 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
 use super::conditions::{
-    counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
-    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn,
-    eval_source_in_zone, eval_source_is_attacking, eval_source_is_tapped,
+    counter_condition_matches_lki, eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
+    eval_no_monarch, eval_source_is_attacking,
 };
 use super::filter::{
     matches_target_filter, matches_target_filter_on_damage_record_source,
@@ -301,11 +300,12 @@ fn matching_batched_trigger_events(
     state: &GameState,
     event_batch: &[GameEvent],
     trig_def: &TriggerDefinition,
-    obj_id: ObjectId,
+    source_context: &TriggerSourceContext,
     controller: PlayerId,
     matcher: TriggerMatcher,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
 ) -> Vec<GameEvent> {
+    let obj_id = source_context.identity.reference.object_id;
     event_batch
         .iter()
         .filter(|candidate| {
@@ -318,7 +318,13 @@ fn matching_batched_trigger_events(
         .filter(|candidate| matcher(candidate, trig_def, obj_id, state))
         .filter(|candidate| {
             trig_def.condition.as_ref().is_none_or(|condition| {
-                check_trigger_condition(state, condition, controller, Some(obj_id), Some(candidate))
+                check_trigger_condition_with_source(
+                    state,
+                    condition,
+                    controller,
+                    Some(source_context),
+                    Some(candidate),
+                )
             })
         })
         .filter_map(|candidate| {
@@ -559,10 +565,16 @@ pub(super) fn trigger_source_context_for_latch(
         super::zones::capture_linked_exile_snapshot(state, source.id, source.zone);
     record.combat_status = super::zones::capture_combat_status(state, source.id);
     record.sync_trigger_source_context();
-    record
+    let mut source_context = record
         .trigger_source_context()
         .cloned()
-        .expect("zone-change source snapshot always owns its trigger source context")
+        .expect("zone-change source snapshot always owns its trigger source context");
+    source_context.cards_exiled_this_turn = state
+        .cards_exiled_with_source_this_turn
+        .get(&source.id)
+        .cloned()
+        .unwrap_or_default();
+    source_context
 }
 
 /// CR 603.10: Capture the full immediately-before authority for a logical
@@ -1159,11 +1171,11 @@ fn collect_matching_triggers_inner(
                     // event — the batch-level event is the wrong context.
                     let skip_early_condition = matches!(trig_def.mode, TriggerMode::Attacks);
                     if !skip_early_condition
-                        && !check_trigger_condition(
+                        && !check_trigger_condition_with_source(
                             state,
                             condition,
                             controller,
-                            Some(obj_id),
+                            Some(&source_context),
                             Some(event),
                         )
                     {
@@ -1212,7 +1224,7 @@ fn collect_matching_triggers_inner(
                     state,
                     event_batch,
                     trig_def,
-                    obj_id,
+                    &source_context,
                     controller,
                     matcher,
                     active_suppress_triggers,
@@ -1290,11 +1302,11 @@ fn collect_matching_triggers_inner(
                 // instead of the declaration that caused the trigger.
                 if !trig_def.batched {
                     if let Some(ref condition) = trig_def.condition {
-                        if !check_trigger_condition(
+                        if !check_trigger_condition_with_source(
                             state,
                             condition,
                             controller,
-                            Some(obj_id),
+                            Some(&source_context),
                             Some(&trigger_event),
                         ) {
                             continue;
@@ -1421,6 +1433,9 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     }
 }
 
+/// Candidate discovery at the collector's current observation boundary. This
+/// does not answer a source-relative trigger fact; every matched candidate is
+/// immediately converted to its owned `TriggerSourceContext` before matching.
 fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone) -> bool {
     state.objects.get(&source_id).is_some_and(|obj| {
         super::functioning_abilities::active_trigger_definitions(state, obj)
@@ -2017,7 +2032,7 @@ fn collect_pending_triggers(
                 record_trigger_fired_with_ref(
                     state,
                     matched.constraint.as_ref(),
-                    obj_id,
+                    matched.pending.ability.trigger_source.as_ref(),
                     matched.definition_ref.as_ref(),
                     event,
                 );
@@ -2433,7 +2448,7 @@ fn collect_pending_triggers(
                     record_trigger_fired_with_ref(
                         state,
                         matched.constraint.as_ref(),
-                        *moved_id,
+                        matched.pending.ability.trigger_source.as_ref(),
                         matched.definition_ref.as_ref(),
                         event,
                     );
@@ -2483,7 +2498,7 @@ fn collect_pending_triggers(
                     record_trigger_fired_with_ref(
                         state,
                         matched.constraint.as_ref(),
-                        *exploiter,
+                        matched.pending.ability.trigger_source.as_ref(),
                         matched.definition_ref.as_ref(),
                         event,
                     );
@@ -2588,7 +2603,7 @@ fn collect_pending_triggers(
                     record_trigger_fired_with_ref(
                         state,
                         matched.constraint.as_ref(),
-                        observer_id,
+                        matched.pending.ability.trigger_source.as_ref(),
                         matched.definition_ref.as_ref(),
                         event,
                     );
@@ -2648,7 +2663,7 @@ fn collect_pending_triggers(
                     record_trigger_fired_with_ref(
                         state,
                         matched.constraint.as_ref(),
-                        obj_id,
+                        matched.pending.ability.trigger_source.as_ref(),
                         matched.definition_ref.as_ref(),
                         event,
                     );
@@ -2683,6 +2698,15 @@ fn collect_pending_triggers(
             ..
         } = event
         {
+            // Every synthesized cast trigger inherits the exact spell
+            // observation from this SpellCast event. Its source may leave the
+            // stack before the trigger resolves, but must never rebind to a
+            // later object that reuses this storage id.
+            let cast_source_context = state
+                .objects
+                .get(cast_obj_id)
+                .map(|source| trigger_source_context_for_latch(state, source));
+
             // CR 702.102b: NOT-PRE-PAYMENT — this reacts to `GameEvent::SpellCast`,
             // emitted after payment, so the `fused_split_spell` marker is already
             // set and the non-fuse-aware collector's marker OR-gate yields the
@@ -2710,6 +2734,9 @@ fn collect_pending_triggers(
                         *caster,
                     );
                     storm_ability.repeat_for = Some(QuantityExpr::Fixed { value: copy_count });
+                    if let Some(source_context) = &cast_source_context {
+                        storm_ability.set_trigger_source_recursive(source_context.clone());
+                    }
                     let storm_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
                         .description("Storm".to_string());
                     // CR 702.40a: Storm fires when the spell is cast. The
@@ -2774,8 +2801,11 @@ fn collect_pending_triggers(
                         controller: None,
                         owner: None,
                     });
-                let cascade_ability =
+                let mut cascade_ability =
                     ResolvedAbility::new(Effect::Cascade, Vec::new(), *cast_obj_id, controller);
+                if let Some(source_context) = &cast_source_context {
+                    cascade_ability.set_trigger_source_recursive(source_context.clone());
+                }
                 let timestamp = state.next_timestamp() as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
@@ -2819,12 +2849,15 @@ fn collect_pending_triggers(
                         controller: None,
                         owner: None,
                     });
-                let ripple_ability = ResolvedAbility::new(
+                let mut ripple_ability = ResolvedAbility::new(
                     Effect::Ripple { count: n },
                     Vec::new(),
                     *cast_obj_id,
                     ripple_controller,
                 );
+                if let Some(source_context) = &cast_source_context {
+                    ripple_ability.set_trigger_source_recursive(source_context.clone());
+                }
                 let timestamp = state.next_timestamp() as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
@@ -2937,6 +2970,9 @@ fn collect_pending_triggers(
                 casualty_ability
                     .context
                     .record_additional_cost_payment(AdditionalCostOrigin::Casualty, 1);
+                if let Some(source_context) = &cast_source_context {
+                    casualty_ability.set_trigger_source_recursive(source_context.clone());
+                }
                 let timestamp = state.next_timestamp() as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
@@ -3011,6 +3047,9 @@ fn collect_pending_triggers(
                 // (re-evaluated at resolution against this copy, not the source
                 // spell) passes. Omitting this fizzles every granted-Conspire copy.
                 conspire_ability.context.additional_cost_paid = true;
+                if let Some(source_context) = &cast_source_context {
+                    conspire_ability.set_trigger_source_recursive(source_context.clone());
+                }
                 let timestamp = state.next_timestamp() as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
@@ -3080,6 +3119,9 @@ fn collect_pending_triggers(
                             replicate_ordinal,
                             payment_count,
                         );
+                    if let Some(source_context) = &cast_source_context {
+                        replicate_ability.set_trigger_source_recursive(source_context.clone());
+                    }
                     let timestamp = state.next_timestamp() as u32;
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: *cast_obj_id,
@@ -3130,11 +3172,14 @@ fn collect_pending_triggers(
                 })
                 .unwrap_or((0, PlayerId(0)));
             for _ in 0..dynamically_granted_demonstrate_instances.0 {
-                let demonstrate_ability = build_resolved_from_def(
+                let mut demonstrate_ability = build_resolved_from_def(
                     &crate::database::synthesis::demonstrate_copy_ability_definition(),
                     *cast_obj_id,
                     dynamically_granted_demonstrate_instances.1,
                 );
+                if let Some(source_context) = &cast_source_context {
+                    demonstrate_ability.set_trigger_source_recursive(source_context.clone());
+                }
                 let timestamp = state.next_timestamp() as u32;
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
@@ -3237,6 +3282,9 @@ fn collect_pending_triggers(
             ..
         } = event
         {
+            // This is event-global damage attribution, not a triggered-source
+            // read: snapshot the damage source at this event boundary before
+            // recording the independent casting-permission ledger.
             if let Some(source_obj) = state.objects.get(source_id) {
                 let is_assassin_creature = source_obj
                     .card_types
@@ -3285,12 +3333,14 @@ fn collect_pending_triggers(
                     let new_monarch = attacker.controller;
                     if new_monarch != *target_player {
                         let become_effect = Effect::BecomeMonarch;
-                        let become_ability = ResolvedAbility::new(
+                        let source_context = trigger_source_context_for_latch(state, attacker);
+                        let mut become_ability = ResolvedAbility::new(
                             become_effect,
                             Vec::new(),
                             *source_id,
                             new_monarch,
                         );
+                        become_ability.set_trigger_source_recursive(source_context);
                         let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
                             .description("Monarch steal (CR 725.2)".to_string());
                         pending.push(PendingTriggerContext::single(PendingTrigger {
@@ -3327,12 +3377,14 @@ fn collect_pending_triggers(
                 if let Some(attacker) = state.objects.get(source_id) {
                     let new_holder = attacker.controller;
                     if new_holder != *target_player {
-                        let take_init = ResolvedAbility::new(
+                        let source_context = trigger_source_context_for_latch(state, attacker);
+                        let mut take_init = ResolvedAbility::new(
                             Effect::TakeTheInitiative,
                             Vec::new(),
                             *source_id,
                             new_holder,
                         );
+                        take_init.set_trigger_source_recursive(source_context);
                         let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
                             .description("Initiative steal (CR 725.2)".to_string());
                         pending.push(PendingTriggerContext::single(PendingTrigger {
@@ -3580,6 +3632,7 @@ fn collect_ring_emblem_triggers(
                 if let GameEvent::AttackersDeclared { attacker_ids, .. } = event {
                     if attacker_ids.contains(&bearer_id) {
                         pending.push(ring_pending_trigger(
+                            state,
                             bearer_id,
                             player,
                             player,
@@ -3608,6 +3661,7 @@ fn collect_ring_emblem_triggers(
                             continue;
                         }
                         pending.push(ring_pending_trigger(
+                            state,
                             bearer_id,
                             player,
                             player,
@@ -3631,6 +3685,7 @@ fn collect_ring_emblem_triggers(
                 if let GameEvent::CombatDamageDealtToPlayer { source_amounts, .. } = event {
                     if source_amounts.iter().any(|(id, _)| *id == bearer_id) {
                         pending.push(ring_pending_trigger(
+                            state,
                             bearer_id,
                             player,
                             player,
@@ -3646,6 +3701,7 @@ fn collect_ring_emblem_triggers(
 }
 
 fn ring_pending_trigger(
+    state: &GameState,
     source_id: ObjectId,
     trigger_controller: PlayerId,
     ability_controller: PlayerId,
@@ -3654,6 +3710,12 @@ fn ring_pending_trigger(
     description: &str,
 ) -> PendingTriggerContext {
     ability.controller = ability_controller;
+    // The Ring grants this triggered ability to the physical Ring-bearer.
+    // Preserve that exact bearer rather than letting a later same-id object
+    // answer its source-relative effects or filters.
+    if let Some(source) = state.objects.get(&source_id) {
+        ability.set_trigger_source_recursive(trigger_source_context_for_latch(state, source));
+    }
     PendingTriggerContext::single(PendingTrigger {
         source_id,
         controller: trigger_controller,
@@ -4041,28 +4103,30 @@ fn trigger_has_no_ordering_input(t: &PendingTrigger) -> bool {
         && t.ability.distribution.is_none()
 }
 
-/// CR 205: The union of the group's LIVE source objects' type census — core
+/// CR 205: The union of the group's exact trigger-source type census — core
 /// types + subtypes + token-ness, lowercased into the tag space `ability_rw`'s
-/// membership-overlap row compares against. A member whose source object is
-/// missing from `state.objects` ⇒ census unknown ⇒ overlap assumed (fail-closed).
-/// Read ONCE here at the ordering chokepoint (the same atomic-ordering-window
-/// assumption the shipped classifier already makes).
+/// membership-overlap row compares against. A source without its captured
+/// authority ⇒ census unknown ⇒ overlap assumed (fail-closed). The snapshot is
+/// required here because ordering may happen after the source changed zones or
+/// a later object reused its storage id.
 fn group_source_census(
     state: &GameState,
     group: &[PendingTriggerContext],
 ) -> crate::game::ability_rw::SourceCensus {
     let mut tags: Vec<String> = Vec::new();
     for ctx in group {
-        let Some(obj) = state.objects.get(&ctx.pending.source_id) else {
+        let Some(source) = ctx.pending.ability.trigger_source.as_ref() else {
             return crate::game::ability_rw::SourceCensus::unknown();
         };
-        for ct in &obj.card_types.core_types {
+        let read = source.source_read(state);
+        let lki = read.lki();
+        for ct in &lki.card_types {
             tags.push(ct.to_string());
         }
-        for st in &obj.card_types.subtypes {
+        for st in &lki.subtypes {
             tags.push(st.clone());
         }
-        tags.push(if obj.is_token { "token" } else { "nontoken" }.to_string());
+        tags.push(if read.is_token() { "token" } else { "nontoken" }.to_string());
     }
     crate::game::ability_rw::SourceCensus::from_tags(tags)
 }
@@ -4164,13 +4228,14 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
     let source_census = group_source_census(state, group);
 
     // PR-6.75 (CR 603.3b + CR 110.2 + CR 108.3 + CR 805.7): the group's controller
-    // structure, computed LIVE from `state.objects` (mirrors `group_source_census`).
+    // structure, computed from each exact trigger source (mirrors
+    // `group_source_census`).
     // `Uniform` iff every member's pending controller is one shared `c0` (CR 109.5
-    // triggered-ability "you"); `UniformAligned` iff additionally each live source
-    // object is controlled AND owned by `c0` (CR 108.3) — the precondition for
+    // triggered-ability "you"); `UniformAligned` iff additionally each captured source
+    // is controlled AND owned by `c0` (CR 108.3) — the precondition for
     // owner-keyed self-write destinations (CR 400.3 hand/graveyard) to be
     // controller-resolvable. A missing object or any drift between the pending
-    // controller and the live object's controller/owner fails closed (never upgrades
+    // controller and the captured source controller/owner fails closed (never upgrades
     // past `Uniform`), closing the fire-vs-ordering control-change race. `Mixed`
     // (divergent pending controllers) is reachable only via team-pooled placement
     // (CR 805.7).
@@ -4179,10 +4244,14 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
         if !group.iter().all(|ctx| ctx.pending.controller == c0) {
             crate::game::ability_rw::ControllerUniformity::Mixed
         } else if group.iter().all(|ctx| {
-            state
-                .objects
-                .get(&ctx.pending.source_id)
-                .is_some_and(|o| o.controller == c0 && o.owner == c0)
+            ctx.pending
+                .ability
+                .trigger_source
+                .as_ref()
+                .is_some_and(|source| {
+                    let read = source.source_read(state);
+                    read.controller() == c0 && read.owner() == c0
+                })
         }) {
             crate::game::ability_rw::ControllerUniformity::UniformAligned
         } else {
@@ -5118,16 +5187,13 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
             .stack_trigger_event_batches
             .insert(entry_id, trigger_events);
     }
-    // Capture the source's display name at stack-push time so viewers can
-    // render "From <name>" without rederiving from `objects` (display-layer
-    // logic belongs in the engine per CLAUDE.md). Synthetic game-rule triggers
-    // (monarch draw, rad counters) use `ObjectId(0)`, which has no object —
-    // `source_name` is left empty in that case.
-    let source_name = state
-        .objects
-        .get(&source_id)
-        .map(|o| o.name.clone())
-        .or_else(|| state.lki_cache.get(&source_id).map(|lki| lki.name.clone()))
+    // Capture the observed source name at stack-push time so viewers can render
+    // "From <name>" without rebinding an old trigger to a reused id. Synthetic
+    // game-rule triggers carry no trigger source and deliberately display no name.
+    let source_name = ability
+        .trigger_source
+        .as_ref()
+        .map(|source| source.source_read(state).lki().name)
         .unwrap_or_default();
     let entry = StackEntry {
         id: entry_id,
@@ -6157,9 +6223,21 @@ pub fn check_state_triggers(state: &mut GameState) {
                 continue;
             }
 
-            // Evaluate the condition
+            let Some(source) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            let source_context = trigger_source_context_for_latch(state, source);
+
+            // Evaluate the condition and build the pending ability from this
+            // same observation; a state-trigger source must not later rebind.
             let condition_met = trigger.condition.as_ref().is_some_and(|cond| {
-                check_trigger_condition(state, cond, controller, Some(obj_id), None)
+                check_trigger_condition_with_source(
+                    state,
+                    cond,
+                    controller,
+                    Some(&source_context),
+                    None,
+                )
             });
 
             if condition_met {
@@ -6174,7 +6252,8 @@ pub fn check_state_triggers(state: &mut GameState) {
                 });
 
                 let target_constraints = execute.target_constraints.clone();
-                let ability = build_resolved_from_def(&execute, obj_id, controller);
+                let ability =
+                    build_triggered_ability_from_context(state, trigger, &source_context, None);
                 pending.push(PendingTrigger {
                     source_id: obj_id,
                     controller,
@@ -6342,6 +6421,7 @@ fn collect_matching_delayed_triggers(
             state,
             delayed.source_id,
             delayed.controller,
+            delayed.ability.trigger_source.as_ref(),
         ) {
             if !scope.accepts(&trigger_event) {
                 continue;
@@ -6378,6 +6458,7 @@ fn collect_matching_delayed_triggers(
             state,
             synth.source_id,
             synth.controller,
+            synth.ability.trigger_source.as_ref(),
         ) {
             if scope.accepts(&trigger_event) {
                 to_fire.push((synth, event_index, trigger_event));
@@ -6642,6 +6723,7 @@ fn delayed_trigger_event_with_index(
     state: &GameState,
     source_id: ObjectId,
     controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
 ) -> Option<(usize, GameEvent)> {
     use crate::types::ability::DelayedTriggerCondition;
 
@@ -6708,6 +6790,7 @@ fn delayed_trigger_event_with_index(
             Some(Zone::Battlefield),
             Some(Zone::Graveyard),
             filter,
+            source_context,
         ),
         // CR 603.7c: "when [object] leaves the battlefield" — any zone change from battlefield
         DelayedTriggerCondition::WhenLeavesPlayFiltered { filter } => {
@@ -6719,6 +6802,7 @@ fn delayed_trigger_event_with_index(
                 Some(Zone::Battlefield),
                 None,
                 filter,
+                source_context,
             )
         }
         // CR 603.7c: "when [object] enters the battlefield" — zone change to battlefield
@@ -6731,6 +6815,7 @@ fn delayed_trigger_event_with_index(
                 None,
                 Some(Zone::Battlefield),
                 filter,
+                source_context,
             )
         }
         // "when [object] dies or is exiled" — zone change to graveyard OR exile from battlefield.
@@ -6748,11 +6833,13 @@ fn delayed_trigger_event_with_index(
                 ) && matches!(
                     e,
                     GameEvent::ZoneChanged { object_id, .. }
-                        if crate::game::filter::matches_target_filter(
+                        if delayed_zone_change_filter_matches(
                             state,
                             *object_id,
                             filter,
-                            &FilterContext::from_source_with_controller(source_id, controller),
+                            source_id,
+                            controller,
+                            source_context,
                         )
                 )
             })
@@ -6799,6 +6886,7 @@ fn delayed_zone_change_event_with_index(
     from: Option<Zone>,
     to: Option<Zone>,
     filter: &crate::types::ability::TargetFilter,
+    source_context: Option<&TriggerSourceContext>,
 ) -> Option<(usize, GameEvent)> {
     events
         .iter()
@@ -6813,15 +6901,47 @@ fn delayed_zone_change_event_with_index(
                     ..
                 } if from.is_none_or(|zone| *event_from == Some(zone))
                     && to.is_none_or(|zone| *event_to == zone)
-                    && crate::game::filter::matches_target_filter(
+                    && delayed_zone_change_filter_matches(
                         state,
                         *object_id,
                         filter,
-                        &FilterContext::from_source_with_controller(source_id, controller),
-                )
+                        source_id,
+                        controller,
+                        source_context,
+                    )
             )
         })
         .map(|(idx, event)| (idx, event.clone()))
+}
+
+/// Match a delayed zone-change subject against its condition filter.
+///
+/// A bare `SelfRef` in this path names the object carried by this immediate
+/// `ZoneChanged` event (for example, Animate Dead's "when ~ leaves"), not a
+/// current source lookup. The event is being consumed at the same boundary at
+/// which it was emitted, so comparing its subject id is attribution-only; all
+/// source facts in every other filter arm still flow through the exact context.
+fn delayed_zone_change_filter_matches(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &crate::types::ability::TargetFilter,
+    source_id: ObjectId,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+) -> bool {
+    if matches!(filter, crate::types::ability::TargetFilter::SelfRef) && source_context.is_some() {
+        return object_id == source_id;
+    }
+
+    crate::game::filter::matches_target_filter(
+        state,
+        object_id,
+        filter,
+        &source_context.map_or_else(
+            || FilterContext::from_source_with_controller(source_id, controller),
+            |source| FilterContext::from_trigger_source_with_controller(source, controller),
+        ),
+    )
 }
 
 /// Check whether a trigger's constraint allows it to fire.
@@ -6970,21 +7090,74 @@ fn check_trigger_constraint_with_ref(
     }
 }
 
+/// Evaluates the cast-payment facts carried either by the event subject or by
+/// the exact trigger source. Keeping this value-level avoids a source-id
+/// fallback that could bind a later incarnation during an intervening-if
+/// recheck (CR 603.4).
+fn additional_cost_paid_matches(
+    payment_source: crate::types::ability::AdditionalCostPaymentSource,
+    origin: Option<AdditionalCostOrigin>,
+    origin_ordinal: Option<u32>,
+    variant: Option<crate::types::ability::KickerVariant>,
+    min_count: u32,
+    kickers_paid: &[crate::types::ability::KickerVariant],
+    additional_cost_payment_count: u32,
+    additional_cost_payments: &[crate::types::ability::AdditionalCostInstancePayment],
+) -> bool {
+    match variant {
+        Some(kicker) => kickers_paid.contains(&kicker),
+        None => {
+            let non_kicker_count = if let Some(origin) = origin {
+                match origin_ordinal {
+                    Some(ordinal) => {
+                        crate::types::ability::additional_cost_instance_payment_count_for_ordinal(
+                            additional_cost_payments,
+                            origin,
+                            ordinal,
+                        )
+                    }
+                    None => crate::types::ability::additional_cost_instance_payment_count(
+                        additional_cost_payments,
+                        origin,
+                    ),
+                }
+            } else if additional_cost_payments.is_empty() {
+                additional_cost_payment_count
+            } else {
+                additional_cost_payments
+                    .iter()
+                    .map(|payment| payment.count)
+                    .sum()
+            };
+            crate::types::ability::additional_cost_payment_count_matches(
+                payment_source,
+                non_kicker_count > 0 || !kickers_paid.is_empty(),
+                kickers_paid.len(),
+                non_kicker_count,
+                min_count,
+            )
+        }
+    }
+}
+
 /// Check whether an intervening-if condition is satisfied.
 /// Used both at fire-time and resolution-time.
 ///
 /// Predicates check player/game state directly.
 /// Combinators (`And`/`Or`) recurse into their children.
 ///
-/// `source_id` is required for conditions like `SolveConditionMet` that need
-/// to inspect the trigger's source object (e.g., the Case's solve condition).
-pub(crate) fn check_trigger_condition(
+/// `source_context` is the sole source-relative authority. Its object id may
+/// still be used for event attribution, but source facts must read through
+/// `TriggerSourceContext::source_read` so a later same-id incarnation cannot
+/// answer an intervening-if check.
+pub(crate) fn check_trigger_condition_with_source(
     state: &GameState,
     condition: &TriggerCondition,
     controller: PlayerId,
-    source_id: Option<ObjectId>,
+    source_context: Option<&TriggerSourceContext>,
     trigger_event: Option<&GameEvent>,
 ) -> bool {
+    let source_id = source_context.map(|source| source.identity.reference.object_id);
     match condition {
         TriggerCondition::GainedLife { minimum } => {
             player_field(state, controller, |p| p.life_gained_this_turn >= *minimum)
@@ -6993,12 +7166,12 @@ pub(crate) fn check_trigger_condition(
             player_field(state, controller, |p| p.life_lost_this_turn > 0)
         }
         TriggerCondition::Descended => player_field(state, controller, |p| p.descended_this_turn),
-        TriggerCondition::SourceEnteredThisTurn => {
-            source_id.is_some_and(|id| eval_source_entered_this_turn(state, id))
+        TriggerCondition::SourceEnteredThisTurn => source_context.is_some_and(|source| {
+            source.source_read(state).entered_battlefield_turn() == Some(state.turn_number)
+        }),
+        TriggerCondition::EchoDue => {
+            source_context.is_some_and(|source| source.source_read(state).echo_due())
         }
-        TriggerCondition::EchoDue => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.echo_due),
         // CR 506.5 + CR 508.1m + CR 603.2c: Count co-attackers excluding the
         // matched attacking creature. Attack matchers narrow ordinary Attacks
         // trigger events to one attacker; observer triggers (HYDRA
@@ -7020,7 +7193,9 @@ pub(crate) fn check_trigger_condition(
                     _ => source_id,
                 }
                 .unwrap_or(ObjectId(0));
-                let filter_source_id = source_id.unwrap_or(ObjectId(0));
+                let filter_context = source_context.map_or_else(FilterContext::neutral, |source| {
+                    FilterContext::from_trigger_source_with_controller(source, controller)
+                });
                 let co_attacker_count = combat
                     .attackers
                     .iter()
@@ -7031,12 +7206,7 @@ pub(crate) fn check_trigger_condition(
                                 .get(&a.object_id)
                                 .is_some_and(|obj| obj.controller == controller)
                             && filter.as_ref().is_none_or(|f| {
-                                crate::game::trigger_matchers::target_filter_matches_object(
-                                    state,
-                                    a.object_id,
-                                    f,
-                                    filter_source_id,
-                                )
+                                matches_target_filter(state, a.object_id, f, &filter_context)
                             })
                     })
                     .count();
@@ -7065,28 +7235,31 @@ pub(crate) fn check_trigger_condition(
                 attacker_ids,
                 attacks,
                 controller,
-                source_id,
+                source_context,
                 subject,
             );
             comparator.evaluate(actual as i32, *count as i32)
         }
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
-        TriggerCondition::SolveConditionMet => source_id
-            .and_then(|id| state.objects.get(&id).map(|obj| (id, obj)))
-            .and_then(|(id, obj)| obj.case_state.as_ref().map(|cs| (id, cs)))
-            .is_some_and(|(id, cs)| {
-                !cs.is_solved && evaluate_solve_condition(state, cs, controller, id)
-            }),
+        TriggerCondition::SolveConditionMet => source_context.is_some_and(|source| {
+            source
+                .source_read(state)
+                .case_state()
+                .is_some_and(|case_state| {
+                    !case_state.is_solved
+                        && evaluate_solve_condition(state, &case_state, controller, source)
+                })
+        }),
         // CR 716.2a: True when the source Class is at or above the specified level.
-        TriggerCondition::ClassLevelGE { level } => {
-            source_id.is_some_and(|id| eval_class_level_ge(state, id, *level))
-        }
+        TriggerCondition::ClassLevelGE { level } => source_context
+            .and_then(|source| source.source_read(state).class_level())
+            .is_some_and(|current| current >= *level),
         // CR 701.64b + CR 702.186b: True when the source permanent is harnessed.
         // Gates an ∞ (Infinity) triggered ability so it only fires while
         // harnessed (the ∞ ability word maps to this condition).
-        TriggerCondition::SourceIsHarnessed => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.harnessed),
+        TriggerCondition::SourceIsHarnessed => {
+            source_context.is_some_and(|source| source.source_read(state).harnessed())
+        }
         TriggerCondition::AttractionVisitRoll { min, max } => trigger_event
             .and_then(|e| match e {
                 GameEvent::AttractionVisited { roll, .. } => Some(*roll),
@@ -7126,24 +7299,36 @@ pub(crate) fn check_trigger_condition(
             controller: caster_scope,
             owner: owner_scope,
         } => {
-            let checked_id = trigger_event
-                .and_then(|e| match e {
-                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-                    _ => None,
-                })
-                .or(source_id);
-            checked_id
-                .and_then(|id| state.objects.get(&id))
-                .is_some_and(|obj| {
-                    obj.cast_from_zone
-                        .is_some_and(|cz| zone.is_none_or(|z| cz == z))
+            let event_object_id = trigger_event.and_then(|e| match e {
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            });
+            let event_matches =
+                event_object_id
+                    .and_then(|id| state.objects.get(&id))
+                    .is_some_and(|object| {
+                        object.cast_from_zone.is_some_and(|cast_zone| {
+                            zone.is_none_or(|expected| expected == cast_zone)
+                        }) && caster_scope.as_ref().is_none_or(|scope| {
+                            object.cast_controller.is_some_and(|caster| {
+                                controller_ref_matches_player(caster, controller, scope)
+                            })
+                        }) && owner_scope.as_ref().is_none_or(|scope| {
+                            controller_ref_matches_player(object.owner, controller, scope)
+                        })
+                    });
+            event_object_id.is_some_and(|_| event_matches)
+                || source_context.is_some_and(|source| {
+                    let read = source.source_read(state);
+                    read.cast_from_zone()
+                        .is_some_and(|cast_zone| zone.is_none_or(|expected| expected == cast_zone))
                         && caster_scope.as_ref().is_none_or(|scope| {
-                            obj.cast_controller.is_some_and(|caster| {
+                            read.cast_controller().is_some_and(|caster| {
                                 controller_ref_matches_player(caster, controller, scope)
                             })
                         })
                         && owner_scope.as_ref().is_none_or(|scope| {
-                            controller_ref_matches_player(obj.owner, controller, scope)
+                            controller_ref_matches_player(read.owner(), controller, scope)
                         })
                 })
         }
@@ -7154,34 +7339,40 @@ pub(crate) fn check_trigger_condition(
         // `entered_via_ability_source` to the trigger source id. The negation
         // ("wasn't ... with this ability") wraps via `Not`.
         TriggerCondition::PlacedByAbilitySource => {
-            let checked_id = trigger_event
-                .and_then(|e| match e {
-                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-                    _ => None,
-                })
-                .or(source_id);
-            matches!(
-                (
-                    checked_id
-                        .and_then(|id| state.objects.get(&id))
-                        .and_then(|o| o.entered_via_ability_source),
-                    source_id,
-                ),
-                (Some(via), Some(src)) if via == src
-            )
+            let event_object_id = trigger_event.and_then(|e| match e {
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            });
+            let source_id = source_context.map(|source| source.identity.reference.object_id);
+            let via = event_object_id
+                .and_then(|id| state.objects.get(&id))
+                .and_then(|object| object.entered_via_ability_source)
+                .or_else(|| {
+                    event_object_id
+                        .is_none()
+                        .then(|| {
+                            source_context.and_then(|source| {
+                                source.source_read(state).entered_via_ability_source()
+                            })
+                        })
+                        .flatten()
+                });
+            matches!((via, source_id), (Some(via), Some(source)) if via == source)
         }
         // CR 305.1 + CR 603.4: "without being played" is encoded as
         // `Not(WasPlayed)` and checks the triggering zone-change object first.
         TriggerCondition::WasPlayed => {
-            let checked_id = trigger_event
-                .and_then(|e| match e {
-                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-                    _ => None,
-                })
-                .or(source_id);
-            checked_id
+            let event_object_id = trigger_event.and_then(|e| match e {
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            });
+            event_object_id
                 .and_then(|id| state.objects.get(&id))
-                .is_some_and(|obj| obj.played_from_zone.is_some())
+                .is_some_and(|object| object.played_from_zone.is_some())
+                || event_object_id.is_none()
+                    && source_context.is_some_and(|source| {
+                        source.source_read(state).played_from_zone().is_some()
+                    })
         }
         // CR 603.4 + CR 702.33d-f: "if it was kicked" intervening-if.
         // ETB/LTB trigger conditions refer to the triggering zone-change
@@ -7197,58 +7388,60 @@ pub(crate) fn check_trigger_condition(
             if kicker_cost.is_some() && variant.is_none() {
                 false
             } else {
-                let checked_id = trigger_event
-                    .and_then(|event| match event {
-                        GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-                        _ => None,
+                let event_object_id = trigger_event.and_then(|event| match event {
+                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                    _ => None,
+                });
+                if let Some(event_object_id) = event_object_id {
+                    // Event-subject read: this is the object named by the
+                    // triggering ZoneChanged event, never the trigger source.
+                    state.objects.get(&event_object_id).is_some_and(|object| {
+                        additional_cost_paid_matches(
+                            *source,
+                            *origin,
+                            *origin_ordinal,
+                            *variant,
+                            *min_count,
+                            &object.kickers_paid,
+                            object.additional_cost_payment_count,
+                            &object.additional_cost_payments,
+                        )
                     })
-                    .or(source_id);
-                checked_id
-                    .and_then(|id| state.objects.get(&id))
-                    .is_some_and(|obj| match variant {
-                        Some(kicker) => obj.kickers_paid.contains(kicker),
-                        None => {
-                            let non_kicker_count = if let Some(origin) = origin {
-                                origin_ordinal.map_or_else(
-                                    || obj.instance_payment_count(*origin),
-                                    |ordinal| {
-                                        obj.instance_payment_count_for_ordinal(*origin, ordinal)
-                                    },
-                                )
-                            } else if obj.additional_cost_payments.is_empty() {
-                                obj.additional_cost_payment_count
-                            } else {
-                                obj.additional_cost_payments
-                                    .iter()
-                                    .map(|payment| payment.count)
-                                    .sum()
-                            };
-                            crate::types::ability::additional_cost_payment_count_matches(
-                                *source,
-                                non_kicker_count > 0 || !obj.kickers_paid.is_empty(),
-                                obj.kickers_paid.len(),
-                                non_kicker_count,
-                                *min_count,
-                            )
-                        }
+                } else {
+                    source_context.is_some_and(|source_context| {
+                        let source_read = source_context.source_read(state);
+                        additional_cost_paid_matches(
+                            *source,
+                            *origin,
+                            *origin_ordinal,
+                            *variant,
+                            *min_count,
+                            &source_read.kickers_paid(),
+                            source_read.additional_cost_payment_count(),
+                            &source_read.additional_cost_payments(),
+                        )
                     })
+                }
             }
         }
         // CR 508.1: "if it's attacking" — true when the trigger source is in combat.attackers.
-        TriggerCondition::SourceIsAttacking => {
-            source_id.is_some_and(|id| eval_source_is_attacking(state, id))
-        }
+        TriggerCondition::SourceIsAttacking => source_context.is_some_and(|source| {
+            let read = source.source_read(state);
+            read.is_exact_live()
+                && eval_source_is_attacking(state, source.identity.reference.object_id)
+                || !read.is_exact_live() && source.combat_status.attacking
+        }),
         // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid
         // this turn". Negation ("unless it escaped") wraps via `Not`.
-        TriggerCondition::CastVariantPaid { variant } => source_id
-            .and_then(|id| state.objects.get(&id))
-            .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
-            .unwrap_or(false),
+        TriggerCondition::CastVariantPaid { variant } => {
+            source_context.and_then(|source| source.source_read(state).cast_variant_paid())
+                == Some((*variant, state.turn_number))
+        }
         // CR 702.176a + CR 603.4: Impending's end-step trigger checks that the
         // impending cost was paid, not that it was paid this turn.
-        TriggerCondition::CastVariantPaidPersistent { variant } => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.cast_variant_paid.is_some_and(|(v, _)| v == *variant)),
+        TriggerCondition::CastVariantPaidPersistent { variant } => source_context
+            .and_then(|source| source.source_read(state).cast_variant_paid())
+            .is_some_and(|(paid, _)| paid == *variant),
         // CR 605.1a: "that isn't a mana ability" gate on activated-ability
         // trigger events. `KeywordAbilityActivated` carries the explicit flag
         // (Exhaust mana abilities still emit this event). `AbilityActivated`
@@ -7294,9 +7487,9 @@ pub(crate) fn check_trigger_condition(
             let Some(subj) = dying_creature else {
                 return false;
             };
-            let ctx = FilterContext::from_source_with_controller(
-                source_id.unwrap_or(ObjectId(0)),
-                controller,
+            let ctx = source_context.map_or_else(
+                || FilterContext::from_source_with_controller(ObjectId(0), controller),
+                |source| FilterContext::from_trigger_source_with_controller(source, controller),
             );
             state.damage_dealt_this_turn.iter().any(|record| {
                 record.target == TargetRef::Object(subj)
@@ -7342,9 +7535,13 @@ pub(crate) fn check_trigger_condition(
             }),
         // CR 400.7 + CR 603.10: "if it was a [type]" — check LKI for the source's
         // core types at the time it left the battlefield.
-        TriggerCondition::WasType { card_type } => source_id
-            .and_then(|id| state.lki_cache.get(&id))
-            .is_some_and(|lki| lki.card_types.contains(card_type)),
+        TriggerCondition::WasType { card_type } => source_context.is_some_and(|source| {
+            source
+                .source_read(state)
+                .lki()
+                .card_types
+                .contains(card_type)
+        }),
         // CR 603.4 + CR 603.6 + CR 603.10: Intervening-if subject is the
         // zone-change event object, not necessarily the trigger source.
         TriggerCondition::ZoneChangeObjectMatchesFilter {
@@ -7358,7 +7555,8 @@ pub(crate) fn check_trigger_condition(
                 *origin,
                 *destination,
                 filter,
-                &FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0))),
+                &source_context
+                    .map_or_else(FilterContext::neutral, FilterContext::from_trigger_source),
             )
         }),
         // CR 603.4 + CR 611.2b: Source-bound intervening-if predicate. Reuse
@@ -7380,8 +7578,22 @@ pub(crate) fn check_trigger_condition(
         // matches the LIVE object first and consults `state.lki_cache` only when the
         // object no longer carries its battlefield appearance. Live state always wins,
         // so this is a strict no-op for any source that still exists on the battlefield.
-        TriggerCondition::SourceMatchesFilter { filter } => source_id.is_some_and(|id| {
-            super::trigger_matchers::subject_filter_matches_with_lki(state, id, filter, id)
+        TriggerCondition::SourceMatchesFilter { filter } => source_context.is_some_and(|source| {
+            let context = FilterContext::from_trigger_source(source);
+            match source.source_read(state) {
+                crate::types::game_state::TriggerSourceRead::ExactLive(object) => {
+                    matches_target_filter(state, object.id, filter, &context)
+                }
+                crate::types::game_state::TriggerSourceRead::Latched(_) => {
+                    super::filter::matches_target_filter_on_lki_snapshot(
+                        state,
+                        source.identity.reference.object_id,
+                        &source.lki,
+                        filter,
+                        &context,
+                    )
+                }
+            }
         }),
         // CR 603.4 + CR 120.1: "if any of that damage was dealt by a [filter]"
         // evaluates the triggering damage source as it was when the damage was
@@ -7397,10 +7609,9 @@ pub(crate) fn check_trigger_condition(
                     is_combat,
                     ..
                 } => {
-                    let ctx = FilterContext::from_source_with_controller(
-                        source_id.unwrap_or(ObjectId(0)),
-                        controller,
-                    );
+                    let ctx = source_context.map_or_else(FilterContext::neutral, |source| {
+                        FilterContext::from_trigger_source_with_controller(source, controller)
+                    });
                     state.damage_dealt_this_turn.iter().rev().find(|record| {
                         record.source_id == *dmg_src
                             && record.target == *target
@@ -7416,10 +7627,9 @@ pub(crate) fn check_trigger_condition(
                     source_amounts,
                     ..
                 } => {
-                    let ctx = FilterContext::from_source_with_controller(
-                        source_id.unwrap_or(ObjectId(0)),
-                        controller,
-                    );
+                    let ctx = source_context.map_or_else(FilterContext::neutral, |source| {
+                        FilterContext::from_trigger_source_with_controller(source, controller)
+                    });
                     source_amounts.iter().find_map(|(dmg_src, amount)| {
                         state.damage_dealt_this_turn.iter().rev().find(|record| {
                             record.source_id == *dmg_src
@@ -7441,10 +7651,9 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::EventObjectMatchesFilter { filter } => trigger_event
             .and_then(crate::game::targeting::extract_source_from_event)
             .is_some_and(|object_id| {
-                let ctx = FilterContext::from_source_with_controller(
-                    source_id.unwrap_or(ObjectId(0)),
-                    controller,
-                );
+                let ctx = source_context.map_or_else(FilterContext::neutral, |source| {
+                    FilterContext::from_trigger_source_with_controller(source, controller)
+                });
                 if super::filter::matches_target_filter(state, object_id, filter, &ctx) {
                     return true;
                 }
@@ -7487,12 +7696,22 @@ pub(crate) fn check_trigger_condition(
         // permanent entered the battlefield) matches the linked anchor word.
         // Case-insensitive to match the persistence canonicalisation used by
         // `StaticCondition::ChosenLabelIs`.
-        TriggerCondition::ChosenLabelIs { label } => {
-            source_id.is_some_and(|id| eval_chosen_label_is(state, id, label))
-        }
+        TriggerCondition::ChosenLabelIs { label } => source_context.is_some_and(|source| {
+            source
+                .source_read(state)
+                .lki()
+                .chosen_attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    ChosenAttribute::Label(chosen) => Some(chosen),
+                    _ => None,
+                })
+                .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label))
+        }),
         // "if you control a [type]" — check for presence of matching permanent.
         TriggerCondition::ControlsType { filter } => {
-            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
+            let ctx = source_context
+                .map_or_else(FilterContext::neutral, FilterContext::from_trigger_source);
             state
                 .battlefield
                 .iter()
@@ -7500,7 +7719,8 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 603.8: "when you control no [type]" — true when no permanents match the filter.
         TriggerCondition::ControlsNone { filter } => {
-            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
+            let ctx = source_context
+                .map_or_else(FilterContext::neutral, FilterContext::from_trigger_source);
             !state
                 .battlefield
                 .iter()
@@ -7585,10 +7805,9 @@ pub(crate) fn check_trigger_condition(
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
         TriggerCondition::ControlCount { minimum, filter } => {
-            let ctx = FilterContext::from_source_with_controller(
-                source_id.unwrap_or(ObjectId(0)),
-                controller,
-            );
+            let ctx = source_context.map_or_else(FilterContext::neutral, |source| {
+                FilterContext::from_trigger_source_with_controller(source, controller)
+            });
             let count = state
                 .battlefield
                 .iter()
@@ -7637,19 +7856,18 @@ pub(crate) fn check_trigger_condition(
             // At detection time `state.current_trigger_event` is not yet populated,
             // so event-scoped refs (e.g. triggering-spell mana spent) must resolve
             // against the explicit `trigger_event` parameter.
-            let source_id = source_id.unwrap_or(ObjectId(0));
             let lhs = crate::game::quantity::resolve_quantity_for_trigger_check(
                 state,
                 lhs,
                 controller,
-                source_id,
+                source_context,
                 trigger_event,
             );
             let rhs = crate::game::quantity::resolve_quantity_for_trigger_check(
                 state,
                 rhs,
                 controller,
-                source_id,
+                source_context,
                 trigger_event,
             );
             comparator.evaluate(lhs, rhs)
@@ -7675,7 +7893,8 @@ pub(crate) fn check_trigger_condition(
                     .iter()
                     .map(|a| a.defending_player)
                     .collect();
-                let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
+                let ctx = source_context
+                    .map_or_else(FilterContext::neutral, FilterContext::from_trigger_source);
                 defenders.iter().all(|&def_pid| {
                     !state.battlefield.iter().any(|id| {
                         state.objects.get(id).is_some_and(|obj| {
@@ -7711,83 +7930,113 @@ pub(crate) fn check_trigger_condition(
         // wraps via `Not { Box::new(SourceIsTapped) }`. No battlefield zone guard
         // (trigger conditions; zone already constrained by functioning-abilities path).
         TriggerCondition::SourceIsTapped => {
-            source_id.is_some_and(|id| eval_source_is_tapped(state, id))
+            source_context.is_some_and(|source| source.source_read(state).lki().tapped)
         }
         // CR 603.4 + CR 603.6a + CR 110.5b: "enters tapped" rider — the subject
         // is the permanent named by the triggering zone-change event (the
-        // entering permanent), not the ability's own source. Resolve the
-        // entering object from `trigger_event`; fall back to `source_id` for
-        // the SelfRef case where the entering permanent IS the source.
+        // entering permanent), not the ability's own source. When no event
+        // subject exists, the SelfRef case reads the captured source rather
+        // than looking up its raw storage id.
         // Negation ("enters untapped") wraps via `Not`. Permissive on a missing
         // object: an unfindable id yields `false` here (so `Not` yields `true`),
         // matching the `WasCast` arm's documented permissive-on-missing behavior.
-        TriggerCondition::ZoneChangeObjectIsTapped => trigger_event
-            .and_then(|e| match e {
+        TriggerCondition::ZoneChangeObjectIsTapped => {
+            let event_object_id = trigger_event.and_then(|event| match event {
                 GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
                 _ => None,
-            })
-            .or(source_id)
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.tapped),
+            });
+            if let Some(event_object_id) = event_object_id {
+                // Event-subject read, not a source-relative lookup.
+                state
+                    .objects
+                    .get(&event_object_id)
+                    .is_some_and(|object| object.tapped)
+            } else {
+                source_context.is_some_and(|source| source.source_read(state).lki().tapped)
+            }
+        }
         // CR 701.27g: True when the trigger source is a transformed permanent (DFC
         // with its back face up). Negation wraps via `Not { Box::new(SourceIsTransformed) }`.
-        TriggerCondition::SourceIsTransformed => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.transformed),
+        TriggerCondition::SourceIsTransformed => {
+            source_context.is_some_and(|source| source.source_read(state).transformed())
+        }
         // CR 708.2: True when the trigger source is face-up. Face-up is the inverse
         // of the GameObject `face_down` flag — there is no separate `face_up` field.
         // Negation wraps via `Not { Box::new(SourceIsFaceUp) }`.
-        TriggerCondition::SourceIsFaceUp => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| !obj.face_down),
+        TriggerCondition::SourceIsFaceUp => {
+            source_context.is_some_and(|source| !source.source_read(state).face_down())
+        }
         // CR 708.2: True when the trigger source is face-down. Negation wraps via
         // `Not { Box::new(SourceIsFaceDown) }`.
-        TriggerCondition::SourceIsFaceDown => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.face_down),
-        // CR 113.6b: True when the trigger source is in the specified zone.
-        TriggerCondition::SourceInZone { zone } => {
-            source_id.is_some_and(|id| eval_source_in_zone(state, id, *zone))
+        TriggerCondition::SourceIsFaceDown => {
+            source_context.is_some_and(|source| source.source_read(state).face_down())
         }
+        // CR 113.6b: True when the trigger source is in the specified zone.
+        TriggerCondition::SourceInZone { zone } => source_context.is_some_and(|source| {
+            // CR 603.4: a source-zone intervening-if asks whether this exact
+            // object is still in the required zone at the re-check. The
+            // latched branch preserves past source facts, but it must not make
+            // a departed source appear to remain in its former zone.
+            matches!(
+                source.source_read(state),
+                crate::types::game_state::TriggerSourceRead::ExactLive(object)
+                    if object.zone == *zone
+            )
+        }),
         // CR 702.104b: True when the Tribute ETB replacement resolved without the
         // chosen opponent placing the +1/+1 counters. Read from the creature's
         // persisted `ChosenAttribute::TributeOutcome` — explicit `Declined` or no
         // outcome recorded (e.g., all opponents eliminated before the prompt) both
         // count as "tribute wasn't paid". An explicit `Paid` outcome suppresses the
         // trigger.
-        TriggerCondition::TributeNotPaid => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_none_or(|obj| {
-                !obj.chosen_attributes
-                    .iter()
-                    .any(|a| matches!(a, ChosenAttribute::TributeOutcome(TributeOutcome::Paid)))
-            }),
+        TriggerCondition::TributeNotPaid => source_context.is_none_or(|source| {
+            !source
+                .source_read(state)
+                .lki()
+                .chosen_attributes
+                .iter()
+                .any(|attribute| {
+                    matches!(
+                        attribute,
+                        ChosenAttribute::TributeOutcome(TributeOutcome::Paid)
+                    )
+                })
+        }),
         // CR 207.2c + CR 601.2: cast during the configured phase set.
         TriggerCondition::CastDuringPhase { phases } => phases.contains(&state.phase),
         // CR 601.3b + CR 702.8a: source permanent came from a spell cast using
         // the specified timing permission this turn.
-        TriggerCondition::CastTimingPermission { permission } => source_id
-            .and_then(|id| state.objects.get(&id))
-            .map(|obj| obj.cast_timing_permission == Some((*permission, state.turn_number)))
-            .unwrap_or(false),
+        TriggerCondition::CastTimingPermission { permission } => {
+            source_context.and_then(|source| source.source_read(state).cast_timing_permission())
+                == Some((*permission, state.turn_number))
+        }
         // CR 207.2c: Adamant — at least N mana of a specific color was spent to cast.
         // Reads the per-color tally recorded in casting::pay_mana_cost.
-        TriggerCondition::ManaColorSpent { color, minimum } => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.colors_spent_to_cast.get(*color) >= *minimum),
+        TriggerCondition::ManaColorSpent { color, minimum } => {
+            source_context.is_some_and(|source| {
+                source.source_read(state).colors_spent_to_cast().get(*color) >= *minimum
+            })
+        }
         // CR 601.2h: "if no mana was spent to cast it/them" — check the cast or
         // entering object, not the trigger source (Lavinia #2345 / Satoru #2417).
         // Read `mana_spent_to_cast_amount`, not the transient `mana_spent_to_cast`
         // boolean: `clear_post_collection_transients` clears the latter after trigger
         // collection but before CR 603.4 resolution re-checks.
         TriggerCondition::ManaSpentCondition { text } => {
-            let cast_object_id = trigger_event
-                .and_then(crate::game::targeting::extract_source_from_event)
-                .or(source_id);
             if text.contains("no mana was spent") {
-                cast_object_id
-                    .and_then(|id| state.objects.get(&id))
-                    .is_some_and(|obj| obj.mana_spent_to_cast_amount == 0)
+                let event_object_id =
+                    trigger_event.and_then(crate::game::targeting::extract_source_from_event);
+                if let Some(event_object_id) = event_object_id {
+                    // Event-subject read: the cast object is carried by this event.
+                    state
+                        .objects
+                        .get(&event_object_id)
+                        .is_some_and(|object| object.mana_spent_to_cast_amount == 0)
+                } else {
+                    source_context.is_some_and(|source| {
+                        source.source_read(state).mana_spent_to_cast_amount() == 0
+                    })
+                }
             } else {
                 // Other mana-spent conditions (e.g., "if mana from a Treasure was spent")
                 // remain unimplemented — default to false.
@@ -7804,19 +8053,30 @@ pub(crate) fn check_trigger_condition(
         // triggering object is the leaving creature, extracted from the event;
         // its LKI is keyed by its own ObjectId, not the source's. For a
         // self-referential trigger (Undying's "When this creature dies, if it
-        // had no +1/+1 counters on it"), the triggering object IS the source,
-        // so the event source equals `source_id` and the `or(source_id)`
-        // fallback (also covering event-less Phase/reflexive triggers) yields
-        // identical behavior. Mirrors the `ManaSpentCondition` resolution above.
-        TriggerCondition::HadCounters { counter_type } => trigger_event
-            .and_then(crate::game::targeting::extract_source_from_event)
-            .or(source_id)
-            .and_then(|id| state.lki_cache.get(&id))
-            .is_some_and(|lki| match counter_type {
-                Some(ct) => lki.counters.get(ct).is_some_and(|&v| v > 0),
-                // Any counter: check if any counter was present.
-                None => lki.counters.values().any(|&v| v > 0),
-            }),
+        // had no +1/+1 counters on it"), the triggering object IS the source.
+        // The event-less fallback reads the captured source LKI rather than a
+        // later object that happens to reuse its storage id.
+        TriggerCondition::HadCounters { counter_type } => {
+            let matches_counter = |lki: &crate::types::game_state::LKISnapshot| match counter_type {
+                Some(counter_type) => lki
+                    .counters
+                    .get(counter_type)
+                    .is_some_and(|&count| count > 0),
+                None => lki.counters.values().any(|&count| count > 0),
+            };
+            if let Some(event_object_id) =
+                trigger_event.and_then(crate::game::targeting::extract_source_from_event)
+            {
+                // Event-subject LKI is keyed by the triggering object.
+                state
+                    .lki_cache
+                    .get(&event_object_id)
+                    .is_some_and(matches_counter)
+            } else {
+                source_context
+                    .is_some_and(|source| matches_counter(&source.source_read(state).lki()))
+            }
+        }
         // CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they]
         // draw in each of [your|their] draw steps" — suppress trigger when
         // the drawing player is the active player, the current phase is the
@@ -7838,18 +8098,22 @@ pub(crate) fn check_trigger_condition(
             // surfaces rather than silently spamming triggers.
             _ => false,
         },
-        TriggerCondition::And { conditions } => conditions
-            .iter()
-            .all(|c| check_trigger_condition(state, c, controller, source_id, trigger_event)),
-        TriggerCondition::Or { conditions } => conditions
-            .iter()
-            .any(|c| check_trigger_condition(state, c, controller, source_id, trigger_event)),
+        TriggerCondition::And { conditions } => conditions.iter().all(|c| {
+            check_trigger_condition_with_source(state, c, controller, source_context, trigger_event)
+        }),
+        TriggerCondition::Or { conditions } => conditions.iter().any(|c| {
+            check_trigger_condition_with_source(state, c, controller, source_context, trigger_event)
+        }),
         // CR 603.4 + CR 608.2c: Logical negation — invert the wrapped condition's
         // truth value. Used for "unless [phrase]" intervening-if patterns; mirrors
         // `TargetFilter::Not` and `StaticCondition::Not`.
-        TriggerCondition::Not { condition } => {
-            !check_trigger_condition(state, condition, controller, source_id, trigger_event)
-        }
+        TriggerCondition::Not { condition } => !check_trigger_condition_with_source(
+            state,
+            condition,
+            controller,
+            source_context,
+            trigger_event,
+        ),
         // CR 309.7: True when the controller has completed a dungeon. `specific: None`
         // matches "any dungeon"; `specific: Some(d)` matches dungeon `d`. Negation
         // ("haven't completed Tomb of Annihilation") wraps via `Not`.
@@ -7869,19 +8133,27 @@ pub(crate) fn check_trigger_condition(
         // CR 702.112: True when the referenced creature has the renowned designation.
         TriggerCondition::IsRenowned { subject } => match subject {
             // CR 702.112a: "if ~ is renowned" — the ability's own permanent.
-            RenownSubject::Source => source_id
-                .and_then(|id| state.objects.get(&id))
-                .is_some_and(|obj| obj.is_renowned),
+            RenownSubject::Source => {
+                source_context.is_some_and(|source| source.source_read(state).is_renowned())
+            }
             // CR 702.112b: "if it's renowned" — the renowned designation belongs to the
             // event-subject creature, which other spells/abilities can identify. Resolve
             // the subject object from the triggering event (same extractor that resolves
-            // TargetFilter::TriggeringSource), falling back to the source for the
-            // SelfRef-shaped case. Permissive on a missing/ambiguous object (yields false).
-            RenownSubject::EventSubject => trigger_event
-                .and_then(crate::game::targeting::extract_source_from_event)
-                .or(source_id)
-                .and_then(|id| state.objects.get(&id))
-                .is_some_and(|obj| obj.is_renowned),
+            // TargetFilter::TriggeringSource); an event-less SelfRef reads its exact
+            // trigger context. Permissive on a missing/ambiguous object (yields false).
+            RenownSubject::EventSubject => {
+                if let Some(event_object_id) =
+                    trigger_event.and_then(crate::game::targeting::extract_source_from_event)
+                {
+                    // Event-subject read, not a trigger-source lookup.
+                    state
+                        .objects
+                        .get(&event_object_id)
+                        .is_some_and(|object| object.is_renowned)
+                } else {
+                    source_context.is_some_and(|source| source.source_read(state).is_renowned())
+                }
+            }
         },
         // CR 711.2a + CR 711.2b: Level-up creature trigger gating — check counter count on source.
         // `CounterMatch::Any` sums across every counter type; `OfType(ct)` reads a single type.
@@ -7890,9 +8162,10 @@ pub(crate) fn check_trigger_condition(
             counters,
             minimum,
             maximum,
-        } => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| counter_condition_matches(obj, counters, *minimum, *maximum)),
+        } => source_context.is_some_and(|source| {
+            let lki = source.source_read(state).lki();
+            counter_condition_matches_lki(&lki, counters, *minimum, *maximum)
+        }),
         // CR 608.2c + CR 603.2 + CR 603.4: spell-cast intervening-if on targets.
         TriggerCondition::TriggeringSpellTargetsFilter { filter } => trigger_event
             .and_then(|event| match event {
@@ -7900,12 +8173,12 @@ pub(crate) fn check_trigger_condition(
                 _ => None,
             })
             .is_some_and(|spell_id| {
-                let context_source_id = source_id.unwrap_or(spell_id);
+                let context = source_context.map_or_else(
+                    || FilterContext::from_source(state, spell_id),
+                    FilterContext::from_trigger_source,
+                );
                 super::restrictions::triggering_spell_targets_filter(
-                    state,
-                    spell_id,
-                    filter,
-                    context_source_id,
+                    state, spell_id, filter, &context,
                 )
             }),
         // CR 601.2a + CR 603.4: spell-cast intervening-if on the triggering spell's
@@ -7918,14 +8191,40 @@ pub(crate) fn check_trigger_condition(
                 _ => None,
             })
             .is_some_and(|spell_id| {
-                crate::game::trigger_matchers::target_filter_matches_object(
-                    state,
-                    spell_id,
-                    filter,
-                    source_id.unwrap_or(spell_id),
-                )
+                let context = source_context.map_or_else(
+                    || FilterContext::from_source(state, spell_id),
+                    FilterContext::from_trigger_source,
+                );
+                matches_target_filter(state, spell_id, filter, &context)
             }),
     }
+}
+
+/// Test-only compatibility adapter for focused condition fixtures. Production
+/// collection and stack rechecks call `check_trigger_condition_with_source`
+/// with the context captured at observation time; tests may materialize a
+/// context from a deliberately live source to state their setup compactly.
+#[cfg(test)]
+pub(crate) fn check_trigger_condition(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_id: Option<ObjectId>,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    let source_context = source_id.and_then(|id| {
+        state
+            .objects
+            .get(&id)
+            .map(|source| trigger_source_context_for_latch(state, source))
+    });
+    check_trigger_condition_with_source(
+        state,
+        condition,
+        controller,
+        source_context.as_ref(),
+        trigger_event,
+    )
 }
 
 fn attackers_declared_count(
@@ -7933,7 +8232,7 @@ fn attackers_declared_count(
     attacker_ids: &[ObjectId],
     attacks: &[(ObjectId, crate::game::combat::AttackTarget)],
     trigger_controller: PlayerId,
-    source_id: Option<ObjectId>,
+    source_context: Option<&TriggerSourceContext>,
     subject: &crate::types::ability::AttackersDeclaredCountSubject,
 ) -> usize {
     match subject {
@@ -7978,12 +8277,16 @@ fn attackers_declared_count(
                     // more Dinosaurs" from over-firing on mixed attacker batches.
                     scope_ok
                         && filter.as_ref().is_none_or(|f| {
-                            crate::game::trigger_matchers::target_filter_matches_object(
-                                state,
-                                **id,
-                                f,
-                                source_id.unwrap_or(ObjectId(0)),
-                            )
+                            let context = source_context.map_or_else(
+                                || {
+                                    FilterContext::from_source_with_controller(
+                                        ObjectId(0),
+                                        trigger_controller,
+                                    )
+                                },
+                                FilterContext::from_trigger_source,
+                            );
+                            matches_target_filter(state, **id, f, &context)
                         })
                 })
                 .count()
@@ -8002,12 +8305,16 @@ fn attackers_declared_count(
                     controller,
                     attacked,
                 ) && filter.as_ref().is_none_or(|f| {
-                    crate::game::trigger_matchers::target_filter_matches_object(
-                        state,
-                        *attacker_id,
-                        f,
-                        source_id.unwrap_or(ObjectId(0)),
-                    )
+                    let context = source_context.map_or_else(
+                        || {
+                            FilterContext::from_source_with_controller(
+                                ObjectId(0),
+                                trigger_controller,
+                            )
+                        },
+                        FilterContext::from_trigger_source,
+                    );
+                    matches_target_filter(state, *attacker_id, f, &context)
                 })
             })
             .count(),
@@ -8160,7 +8467,7 @@ fn evaluate_solve_condition(
     state: &GameState,
     cs: &crate::game::game_object::CaseState,
     controller: PlayerId,
-    source_id: ObjectId,
+    source_context: &TriggerSourceContext,
 ) -> bool {
     use crate::types::ability::SolveCondition;
 
@@ -8191,7 +8498,14 @@ fn evaluate_solve_condition(
         // controller's end step through the single condition
         // evaluator that powers intervening-ifs and static abilities.
         SolveCondition::Condition { condition } => {
-            crate::game::layers::evaluate_condition(state, condition, controller, source_id)
+            // A Case's solve condition functions only while this exact Case is
+            // still present. Do not let a later same-id incarnation answer it.
+            match source_context.source_read(state) {
+                crate::types::game_state::TriggerSourceRead::ExactLive(source) => {
+                    crate::game::layers::evaluate_condition(state, condition, controller, source.id)
+                }
+                crate::types::game_state::TriggerSourceRead::Latched(_) => false,
+            }
         }
         SolveCondition::Text { .. } => false, // Undecomposed conditions never auto-solve
     }
@@ -8211,7 +8525,7 @@ fn player_field(state: &GameState, controller: PlayerId, f: impl Fn(&Player) -> 
 fn record_trigger_fired_with_ref(
     state: &mut GameState,
     constraint: Option<&crate::types::ability::TriggerConstraint>,
-    obj_id: ObjectId,
+    source_context: Option<&TriggerSourceContext>,
     definition_ref: Option<&TriggerDefinitionRef>,
     event: &GameEvent,
 ) {
@@ -8240,7 +8554,8 @@ fn record_trigger_fired_with_ref(
                 GameEvent::LifeChanged { player_id, .. } => *player_id,
                 _ => return,
             };
-            let Some(controller) = state.objects.get(&obj_id).map(|object| object.controller)
+            let Some(controller) =
+                source_context.map(|source| source.source_read(state).controller())
             else {
                 return;
             };
@@ -8332,7 +8647,17 @@ fn record_trigger_fired(
     event: &GameEvent,
 ) {
     let definition_ref = trigger_definition_ref_for_live_index(state, obj_id, trig_idx);
-    record_trigger_fired_with_ref(state, constraint, obj_id, Some(&definition_ref), event);
+    let source_context = state
+        .objects
+        .get(&obj_id)
+        .map(|source| trigger_source_context_for_latch(state, source));
+    record_trigger_fired_with_ref(
+        state,
+        constraint,
+        source_context.as_ref(),
+        Some(&definition_ref),
+        event,
+    );
 }
 
 /// Build a ResolvedAbility from a TriggerDefinition using typed fields.
@@ -8717,9 +9042,10 @@ pub(super) fn build_triggered_ability_from_context(
     }
 }
 
-/// Compatibility constructor for engine-internal fixtures and synthesized
-/// triggers that do not carry a source observation. Collection paths must call
+/// Compatibility constructor for engine-internal fixtures that do not carry a
+/// source observation. Collection paths must call
 /// [`build_triggered_ability_from_context`] with their owned source context.
+#[cfg(test)]
 pub(super) fn build_triggered_ability(
     state: &GameState,
     trig_def: &TriggerDefinition,
@@ -16922,6 +17248,16 @@ pub mod tests {
         let mut state = setup();
         let source = ObjectId(10); // The permanent with the trigger
         let dying_creature = ObjectId(20); // The creature that died
+        state.objects.insert(
+            source,
+            GameObject::new(
+                source,
+                CardId(1),
+                PlayerId(0),
+                "Damage source".to_string(),
+                Zone::Battlefield,
+            ),
+        );
 
         // Record damage: source dealt 3 damage to dying_creature
         state.damage_dealt_this_turn.push_back(DamageRecord {
@@ -17983,6 +18319,132 @@ pub mod tests {
             Some(src),
             None,
         ));
+    }
+
+    #[test]
+    fn exact_trigger_source_context_survives_same_id_reincarnation_across_condition_filter_quantity_and_ledger(
+    ) {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Old source".to_string(),
+            Zone::Battlefield,
+        );
+        let old_pair = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Old pair".to_string(),
+            Zone::Battlefield,
+        );
+        let returned_pair = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Returned pair".to_string(),
+            Zone::Battlefield,
+        );
+        let old_host = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Old host".to_string(),
+            Zone::Battlefield,
+        );
+        let returned_host = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Returned host".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).expect("source exists");
+            source.tapped = true;
+            source.paired_with = Some(old_pair);
+            source.attached_to = Some(crate::game::game_object::AttachTarget::Object(old_host));
+            source.chosen_attributes.push(ChosenAttribute::Number(7));
+        }
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source_id).expect("source exists"),
+        );
+
+        // This models an old trigger paused while the same storage id returns as
+        // a different object. Every source-relative reader below must still see
+        // the old source's facts, not these returned-object values.
+        {
+            let source = state.objects.get_mut(&source_id).expect("source exists");
+            source.bump_incarnation();
+            source.controller = PlayerId(1);
+            source.tapped = false;
+            source.paired_with = Some(returned_pair);
+            source.attached_to = Some(crate::game::game_object::AttachTarget::Object(
+                returned_host,
+            ));
+            source.chosen_attributes.clear();
+            source.chosen_attributes.push(ChosenAttribute::Number(2));
+        }
+
+        assert!(check_trigger_condition_with_source(
+            &state,
+            &TriggerCondition::SourceIsTapped,
+            PlayerId(0),
+            Some(&source_context),
+            None,
+        ));
+        assert!(matches_target_filter(
+            &state,
+            old_pair,
+            &TargetFilter::SourceOrPaired,
+            &FilterContext::from_trigger_source(&source_context),
+        ));
+        assert!(matches_target_filter(
+            &state,
+            old_host,
+            &TargetFilter::AttachedTo,
+            &FilterContext::from_trigger_source(&source_context),
+        ));
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_for_trigger_check(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ChosenNumber,
+                },
+                PlayerId(0),
+                Some(&source_context),
+                None,
+            ),
+            7,
+            "quantity reads the old source's chosen number"
+        );
+
+        state.active_player = PlayerId(1);
+        let definition_ref = TriggerDefinitionRef {
+            source: source_context.identity.reference,
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        record_trigger_fired_with_ref(
+            &mut state,
+            Some(&crate::types::ability::TriggerConstraint::OncePerOpponentPerTurn),
+            Some(&source_context),
+            Some(&definition_ref),
+            &GameEvent::LifeChanged {
+                player_id: PlayerId(1),
+                amount: -1,
+            },
+        );
+        assert!(
+            state
+                .triggers_fired_this_turn_per_opponent
+                .contains(&(definition_ref, PlayerId(1))),
+            "the old controller records the opponent ledger; the returned controller would reject it"
+        );
     }
 
     // CR 603.6a + CR 110.5b: `ZoneChangeObjectIsTapped` resolves the *entering*

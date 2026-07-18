@@ -156,6 +156,11 @@ pub fn resolve(
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
     delayed_ability.scoped_player = ability.scoped_player;
+    // A delayed trigger is a continuation of this resolved ability, so preserve
+    // the same exact trigger source across its later match and resolution.
+    if let Some(source_context) = ability.trigger_source.clone() {
+        delayed_ability.set_trigger_source_recursive(source_context);
+    }
 
     // CR 603.7c: Most delayed triggers fire once and are removed.
     // WheneverEvent triggers fire each time and persist until end-of-turn cleanup.

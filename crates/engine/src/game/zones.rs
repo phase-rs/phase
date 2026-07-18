@@ -799,6 +799,13 @@ pub fn move_to_zone(
     // with" cards here, before CR 400.7 cleanup prunes `TrackedBySource`.
     zone_change_record.linked_exile_snapshot =
         capture_linked_exile_snapshot(state, object_id, from);
+    zone_change_record.sync_trigger_source_exiled_cards(
+        state
+            .cards_exiled_with_source_this_turn
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default(),
+    );
     // CR 607.2b + CR 603.10e: Persist the linked-exile snapshot as last-known
     // information so a self-sacrifice ability that refers to "cards exiled with
     // this permanent" (Rod of Absorption) still resolves correctly after its own
@@ -1294,6 +1301,13 @@ pub fn move_to_library_at_index(
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+    zone_change_record.sync_trigger_source_exiled_cards(
+        state
+            .cards_exiled_with_source_this_turn
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default(),
+    );
     zone_change_record.sync_trigger_source_context();
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);

@@ -1130,6 +1130,7 @@ fn evaluate_condition_with_context(
                     QuantityContext {
                         entering: None,
                         source: source_id,
+                        trigger_source: None,
                         recipient: recipient_id,
                         scoped_player: None,
                     },

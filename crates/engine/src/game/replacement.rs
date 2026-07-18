@@ -4685,6 +4685,7 @@ fn replacement_condition_quantity_ctx(
     crate::game::quantity::QuantityContext {
         entering: None,
         source: source_id,
+        trigger_source: None,
         recipient: None,
         scoped_player,
     }
@@ -4857,8 +4858,12 @@ fn evaluate_replacement_condition(
             // CR 608.2c: resolve with the scoped-player context so `ScopedPlayer`
             // filters bind to the entering/affected object's controller.
             let ctx = replacement_condition_quantity_ctx(state, source_id, affected_object_id);
-            let lhs_val =
-                crate::game::quantity::resolve_quantity_with_ctx(state, lhs, controller, ctx);
+            let lhs_val = crate::game::quantity::resolve_quantity_with_ctx(
+                state,
+                lhs,
+                controller,
+                ctx.clone(),
+            );
             let rhs_val =
                 crate::game::quantity::resolve_quantity_with_ctx(state, rhs, controller, ctx);
             !comparator.evaluate(lhs_val, rhs_val)
@@ -4903,8 +4908,12 @@ fn evaluate_replacement_condition(
             // filters bind to the entering/affected object's controller (Land
             // Equilibrium's LHS "an opponent who controls at least as many lands").
             let ctx = replacement_condition_quantity_ctx(state, source_id, affected_object_id);
-            let lhs_val =
-                crate::game::quantity::resolve_quantity_with_ctx(state, lhs, controller, ctx);
+            let lhs_val = crate::game::quantity::resolve_quantity_with_ctx(
+                state,
+                lhs,
+                controller,
+                ctx.clone(),
+            );
             let rhs_val =
                 crate::game::quantity::resolve_quantity_with_ctx(state, rhs, controller, ctx);
             comparator.evaluate(lhs_val, rhs_val)
@@ -6476,6 +6485,7 @@ fn extract_etb_counters_from_effect(
             let ctx = crate::game::quantity::QuantityContext {
                 entering,
                 source: source_id,
+                trigger_source: None,
                 recipient: None,
                 scoped_player: None,
             };
@@ -6507,6 +6517,7 @@ fn extract_etb_counters_from_effect(
                 let ctx = crate::game::quantity::QuantityContext {
                     entering: event.affected_object_id(),
                     source: source_id,
+                    trigger_source: None,
                     recipient: None,
                     scoped_player: None,
                 };

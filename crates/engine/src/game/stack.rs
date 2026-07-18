@@ -274,16 +274,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.4: Intervening-if condition rechecked at resolution time.
     if let StackEntryKind::TriggeredAbility {
         condition: Some(ref condition),
-        source_id,
+        source_id: _,
         ref trigger_event,
         ..
-    } = entry.kind
+    } = &entry.kind
     {
-        if !super::triggers::check_trigger_condition(
+        let trigger_source = entry
+            .ability()
+            .and_then(|ability| ability.trigger_source.as_ref());
+        if !super::triggers::check_trigger_condition_with_source(
             state,
             condition,
             entry.controller,
-            Some(source_id),
+            trigger_source,
             trigger_event.as_ref(),
         ) {
             events.push(GameEvent::StackResolved {
@@ -2375,19 +2378,18 @@ fn observer_candidates_are_inert(
 ) -> bool {
     let event_keys = crate::game::trigger_index::keys_from_event(event, state);
     for candidate in candidates.iter().copied() {
-        let Some((controller, source, triggers)) = state.objects.get(&candidate).map(|obj| {
-            (
-                obj.controller,
-                crate::types::identifiers::ObjectIncarnationRef::from_object(obj),
-                obj.trigger_definitions
-                    .iter_all()
-                    .cloned()
-                    .enumerate()
-                    .collect::<Vec<_>>(),
-            )
-        }) else {
+        let Some(source_obj) = state.objects.get(&candidate) else {
             continue;
         };
+        let source_context = super::triggers::trigger_source_context_for_latch(state, source_obj);
+        let controller = source_context.lki.controller;
+        let source = source_context.identity.reference;
+        let triggers = source_context
+            .trigger_entries
+            .iter()
+            .cloned()
+            .enumerate()
+            .collect::<Vec<_>>();
 
         for (trigger_index, entry) in triggers {
             let definition_ref = crate::types::ability::TriggerDefinitionRef {
@@ -2401,19 +2403,23 @@ fn observer_candidates_are_inert(
                 continue;
             }
             if trigger.condition.as_ref().is_some_and(|condition| {
-                !super::triggers::check_trigger_condition(
+                !super::triggers::check_trigger_condition_with_source(
                     state,
                     condition,
                     controller,
-                    Some(candidate),
+                    Some(&source_context),
                     Some(event),
                 )
             }) {
                 continue;
             }
 
-            let mut ability =
-                super::triggers::build_triggered_ability(state, &trigger, candidate, controller);
+            let mut ability = super::triggers::build_triggered_ability_from_context(
+                state,
+                &trigger,
+                &source_context,
+                Some(&definition_ref),
+            );
             ability.ability_index = Some(trigger_index);
             ability.may_trigger_origin = Some(MayTriggerOrigin::Definition { definition_ref });
             if !optional_ability_is_inert_under_auto_choice(state, &ability, Some(event)) {
