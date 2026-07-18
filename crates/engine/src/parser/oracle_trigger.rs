@@ -754,77 +754,6 @@ fn quantity_comparison_operands(cond: &TriggerCondition) -> Option<(&QuantityExp
     }
 }
 
-/// CR 122.1 + CR 603.4 + CR 603.10a: Resolve every deferred "the difference"
-/// counter-anaphor placeholder anywhere in an ability's effect tree.
-///
-/// The put-counter parser emits a `Variable { "difference" }` count placeholder
-/// for a bare "equal to the difference" because the two operands live on the
-/// trigger's hoisted intervening-if, not the effect clause. `Effect::count_expr_mut`
-/// only reaches the top-level effect, so a placeholder nested under a
-/// clause-level conditional `sub_ability` (Conformer Shuriken: "tap target
-/// creature …; if that creature has power greater than ~'s power, put a number
-/// of +1/+1 counters on ~ equal to the difference") would otherwise escape both
-/// the bind and the guard. This walks the full tree — `sub_ability`,
-/// `else_ability`, and single-`Box<Effect>` wrappers — so that:
-///   * with a hoisted `QuantityComparison` (`bound = Some`), each placeholder
-///     binds to that `Difference` (Drizzt Do'Urden), and
-///   * with none to bind (`bound = None`), the carrying counter effect is
-///     downgraded to an explicit `Effect::Unimplemented` — an honest coverage
-///     gap rather than a silently-zero `PutCounter` that reads as supported.
-fn resolve_difference_anaphor_in_ability(
-    def: &mut AbilityDefinition,
-    bound: Option<&QuantityExpr>,
-) {
-    resolve_difference_anaphor_in_effect(&mut def.effect, bound);
-    if let Some(sub) = def.sub_ability.as_deref_mut() {
-        resolve_difference_anaphor_in_ability(sub, bound);
-    }
-    if let Some(els) = def.else_ability.as_deref_mut() {
-        resolve_difference_anaphor_in_ability(els, bound);
-    }
-}
-
-fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&QuantityExpr>) {
-    // Recurse into the single-`Box<Effect>` wrapper (the draw-replacement
-    // substitute) so a placeholder nested inside it is reached. This is the only
-    // `Effect` variant that wraps a heterogeneous sub-`Effect`; every other
-    // nesting is via `AbilityDefinition` (`sub_ability`/`else_ability`), walked
-    // by the caller.
-    if let Effect::CreateDrawReplacement {
-        replacement_effect: inner,
-    } = effect
-    {
-        resolve_difference_anaphor_in_effect(inner, bound);
-    }
-
-    // Only counter effects ever carry the deferred placeholder (it is emitted
-    // solely by the put-counter parser), so restrict both bind and downgrade to
-    // them — this keeps the downgrade's `Effect::Unimplemented` name/description
-    // honest without depending on `count_expr_mut` being counter-specific.
-    if !matches!(
-        effect,
-        Effect::PutCounter { .. } | Effect::PutCounterAll { .. }
-    ) {
-        return;
-    }
-    let is_placeholder = effect
-        .count_expr_mut()
-        .is_some_and(|slot| crate::parser::oracle_effect::is_difference_anaphor_placeholder(slot));
-    if !is_placeholder {
-        return;
-    }
-    match bound {
-        Some(count) => {
-            if let Some(slot) = effect.count_expr_mut() {
-                *slot = count.clone();
-            }
-        }
-        None => {
-            *effect = Effect::unimplemented("put", "counters equal to the difference");
-        }
-    }
-}
-
 pub(crate) fn parse_trigger_lines_at_index(
     text: &str,
     card_name: &str,
@@ -1802,7 +1731,10 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // so it must become an explicit unsupported residual rather than survive as a
     // silently-zero, false-green `PutCounter`.
     if let Some(execute) = def.execute.as_deref_mut() {
-        resolve_difference_anaphor_in_ability(execute, difference_count.as_ref());
+        crate::parser::oracle_effect::resolve_difference_anaphor_in_ability(
+            execute,
+            difference_count.as_ref(),
+        );
     }
 
     // CR 603.4: Intervening-if life-gain triggers check the gained-life

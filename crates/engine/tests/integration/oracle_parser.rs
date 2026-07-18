@@ -8,6 +8,98 @@ use engine::types::keywords::Keyword;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
+/// CR 701.57c + CR 608.2c: Hit the Mother Lode — Discover 10 followed by a
+/// conditional "create a number of tapped Treasure tokens equal to the
+/// difference". The follow-up clause's bare "the difference" anaphor must bind
+/// to the `Difference` of the leading `QuantityCheck` condition's operands
+/// (`ObjectManaValue { CostPaidObject }` vs `Fixed(10)`), the token must be
+/// `tapped: true`, and NOTHING may remain `Unimplemented`. Reverting the token
+/// anaphor recognition, the shared difference binder, or the spell-seam
+/// invocation flips the token count back to a dead `Variable("difference")`
+/// placeholder (or drops the whole token clause to `Unimplemented`).
+#[test]
+fn hit_the_mother_lode_binds_difference_token_count() {
+    use engine::types::ability::{
+        AbilityCondition, Comparator, Effect, ObjectScope, QuantityExpr, QuantityRef,
+    };
+
+    fn any_unimplemented(def: &engine::types::ability::AbilityDefinition) -> bool {
+        matches!(&*def.effect, Effect::Unimplemented { .. })
+            || def.sub_ability.as_deref().is_some_and(any_unimplemented)
+            || def.else_ability.as_deref().is_some_and(any_unimplemented)
+    }
+
+    let result = parse(
+        "Discover 10. If the discovered card's mana value is less than 10, create a number of tapped Treasure tokens equal to the difference.",
+        "Hit the Mother Lode",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    let top = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Discover { .. }))
+        .unwrap_or_else(|| panic!("no Discover ability parsed: {result:#?}"));
+    assert!(
+        !any_unimplemented(top),
+        "Hit the Mother Lode must have no Unimplemented residual: {top:#?}"
+    );
+
+    let token_def = top
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("Discover has no follow-up token sub: {top:#?}"));
+
+    let expected_mv = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+    };
+    let expected_difference = QuantityExpr::Difference {
+        left: Box::new(expected_mv.clone()),
+        right: Box::new(QuantityExpr::Fixed { value: 10 }),
+    };
+
+    match &*token_def.effect {
+        Effect::Token {
+            name,
+            tapped,
+            count,
+            ..
+        } => {
+            assert_eq!(name, "Treasure", "token is a Treasure: {token_def:#?}");
+            assert!(*tapped, "Treasure tokens enter tapped: {token_def:#?}");
+            assert_eq!(
+                count, &expected_difference,
+                "token count binds to Difference{{ObjectManaValue(CostPaidObject), Fixed(10)}}: {token_def:#?}"
+            );
+        }
+        other => panic!("expected a Token effect sub, got {other:#?}"),
+    }
+
+    match token_def.condition.as_ref() {
+        Some(AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        }) => {
+            assert_eq!(
+                lhs, &expected_mv,
+                "condition lhs is the discovered card's mana value"
+            );
+            assert_eq!(*comparator, Comparator::LT, "condition uses less-than");
+            assert_eq!(
+                rhs,
+                &QuantityExpr::Fixed { value: 10 },
+                "condition rhs is 10"
+            );
+        }
+        other => panic!("expected a QuantityCheck condition on the token sub, got {other:#?}"),
+    }
+}
+
 fn parse(
     oracle_text: &str,
     card_name: &str,
