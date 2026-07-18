@@ -2034,7 +2034,6 @@ fn self_counter_batch_state_is_settled(state: &GameState) -> bool {
         && state.pending_repeated_optional_payment.is_none()
         && state.pending_repeat_until.is_none()
         && state.pending_change_zone_iteration.is_none()
-        && state.pending_change_zone_in_flight.is_none()
         && state.pending_copy_token_resolution.is_none()
         && state.pending_vote_ballot_iteration.is_none()
         && state.pending_per_player_zone_choice.is_none()

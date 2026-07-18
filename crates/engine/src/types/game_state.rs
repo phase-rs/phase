@@ -1368,6 +1368,56 @@ impl LogicalZoneChangeGroup {
     }
 }
 
+/// The one zone-change delivery currently paused inside a logical owner.
+///
+/// The object incarnation and complete proposed event are captured together
+/// before control leaves the delivery loop. A raw `ObjectId` is insufficient:
+/// an object can leave and return while the replacement or as-enters prompt is
+/// pending (CR 400.7), and the resumed delivery must not be attributed to that
+/// new object. `delivery_events` is the explicit slice produced by the resumed
+/// delivery; later trigger collection consumes that owned history rather than
+/// discovering a "last" event in global state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PausedZoneChangeDeliveryCount {
+    /// The resumed delivery has not yet contributed to a `ChangeZone` "that
+    /// many" total and the owner must count its captured event exactly once.
+    NeedsCount,
+    /// The synchronous Aura/as-enters path already included this delivery in
+    /// its carried total before surfacing the prompt.
+    AlreadyCounted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingZoneChangeDelivery {
+    pub member: ObjectIncarnationRef,
+    pub expected_event: ProposedEvent,
+    pub delivery_events: Vec<GameEvent>,
+    pub count: PausedZoneChangeDeliveryCount,
+}
+
+impl PendingZoneChangeDelivery {
+    pub fn new(member: ObjectIncarnationRef, expected_event: ProposedEvent) -> Self {
+        Self {
+            member,
+            expected_event,
+            delivery_events: Vec::new(),
+            count: PausedZoneChangeDeliveryCount::NeedsCount,
+        }
+    }
+
+    pub fn captures(&self, member: ObjectIncarnationRef, expected_event: &ProposedEvent) -> bool {
+        self.member == member && self.expected_event == *expected_event
+    }
+
+    pub fn append_delivery_events(&mut self, events: &[GameEvent]) {
+        self.delivery_events.extend_from_slice(events);
+    }
+
+    pub fn mark_counted(&mut self) {
+        self.count = PausedZoneChangeDeliveryCount::AlreadyCounted;
+    }
+}
+
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
 /// `ChangeZone` resolution loop paused when one of the moving objects
 /// triggered a per-permanent replacement choice (shock-land "pay 2 life?",
@@ -1392,9 +1442,12 @@ impl LogicalZoneChangeGroup {
 /// Mirrors `PendingRepeatIteration`'s stash-and-drain shape; the only new
 /// fields are the captured ChangeZone parameters needed to resume identically
 /// to the live `resolve` path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingChangeZoneIteration {
     pub logical_zone_change_group: LogicalZoneChangeGroup,
+    /// The chosen member that is currently completing outside the ordinary
+    /// `remaining` loop. Required even when the tail is empty.
+    pub paused_current: Option<PendingZoneChangeDelivery>,
     pub remaining: Vec<ObjectId>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
@@ -2409,9 +2462,13 @@ pub struct PendingCounterRemovalQueue {
 /// from the original mill-only `PendingMillDeliveries` is wire-transparent; the
 /// field-name alias on the holding `GameState` field carries the only readable
 /// name change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingBatchDeliveries {
     pub logical_zone_change_group: LogicalZoneChangeGroup,
+    /// The request that paused for replacement/as-enters resolution. This lives
+    /// beside an empty tail when the last member paused, so the resumed delivery
+    /// still has an unambiguous logical owner.
+    pub paused_current: Option<PendingZoneChangeDelivery>,
     /// Objects whose per-object zone move has not yet been delivered.
     pub remaining: Vec<ObjectId>,
     /// The batch destination zone (graveyard for mill by default; hand for mass
@@ -9857,20 +9914,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
 
-    /// CR 608.2c: The single object whose move paused the active
-    /// `pending_change_zone_iteration` on a per-permanent replacement CHOICE
-    /// (`ZoneMoveResult::NeedsChoice`), paired with its pre-move zone. Unlike the
-    /// `remaining` members, this object is delivered out-of-band by the
-    /// replacement resume (not by the iteration drain), so the drain would
-    /// otherwise never count it toward `moved_count`. The drain consumes this at
-    /// its top and increments the carried count iff the object actually reached
-    /// the iteration's destination — so a downstream "that many" includes the
-    /// object that prompted the replacement. Pause/resume is strictly sequential,
-    /// so at most one object is ever in flight (set on the pause, taken on the
-    /// next drain pass).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_change_zone_in_flight: Option<(ObjectId, crate::types::zones::Zone)>,
-
     /// CR 614.12a + CR 614.13a/b: Battlefield objects eligible to be chosen by an
     /// as-enters Devour sacrifice (CR 702.82a/c), captured the instant BEFORE the
     /// FIRST co-entering devourer enters and PERSISTED for the whole simultaneous
@@ -11473,6 +11516,93 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// Builds the exact paused-delivery key from the replacement record before
+    /// that record is consumed. Only a `ZoneChange` can belong to either
+    /// logical zone-change owner.
+    pub fn pending_zone_change_delivery_from_replacement(
+        &self,
+    ) -> Option<PendingZoneChangeDelivery> {
+        let expected_event = self.pending_replacement.as_ref()?.proposed.clone();
+        let object_id = match &expected_event {
+            ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+            _ => return None,
+        };
+        let member = ObjectIncarnationRef::from_object(self.objects.get(&object_id)?);
+        Some(PendingZoneChangeDelivery::new(member, expected_event))
+    }
+
+    /// Appends one explicitly-bounded resumed-delivery slice to its sole
+    /// matching logical owner. Callers retain the key captured before the
+    /// replacement record was consumed; this rejects a same-id new incarnation
+    /// or a different proposed event instead of guessing from global history.
+    pub fn capture_paused_zone_change_delivery(
+        &mut self,
+        member: ObjectIncarnationRef,
+        expected_event: &ProposedEvent,
+        delivery_events: &[GameEvent],
+    ) -> bool {
+        let mut owner_count = 0;
+        if let Some(paused) = self
+            .pending_change_zone_iteration
+            .as_mut()
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.captures(member, expected_event))
+        {
+            paused.append_delivery_events(delivery_events);
+            owner_count += 1;
+        }
+        if let Some(paused) = self
+            .pending_batch_deliveries
+            .as_mut()
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.captures(member, expected_event))
+        {
+            paused.append_delivery_events(delivery_events);
+            owner_count += 1;
+        }
+        assert!(
+            owner_count <= 1,
+            "one paused delivery cannot have two owners"
+        );
+        owner_count == 1
+    }
+
+    /// Copy-target and Aura resumption already own the prompt rather than a
+    /// `PendingReplacement`. They identify the parked boundary by the prompt's
+    /// immutable member id and append only the caller's explicit delivery
+    /// slice. The stored incarnation/proposed event remains the authority; this
+    /// helper never reads the current object to rebuild either one.
+    pub fn capture_paused_zone_change_delivery_for_member(
+        &mut self,
+        member_id: ObjectId,
+        delivery_events: &[GameEvent],
+    ) -> bool {
+        let mut owner_count = 0;
+        if let Some(paused) = self
+            .pending_change_zone_iteration
+            .as_mut()
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.member.object_id == member_id)
+        {
+            paused.append_delivery_events(delivery_events);
+            owner_count += 1;
+        }
+        if let Some(paused) = self
+            .pending_batch_deliveries
+            .as_mut()
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.member.object_id == member_id)
+        {
+            paused.append_delivery_events(delivery_events);
+            owner_count += 1;
+        }
+        assert!(
+            owner_count <= 1,
+            "one paused delivery cannot have two owners"
+        );
+        owner_count == 1
+    }
+
     /// Allocate the complete owner for one logical zone-change action before
     /// any member is delivered. Only objects on the battlefield at this exact
     /// point become prospective battlefield members; nonbattlefield actions
@@ -11925,7 +12055,6 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_repeated_optional_payment: None,
             pending_change_zone_iteration: None,
-            pending_change_zone_in_flight: None,
             devour_eligible_snapshot: None,
             merged_card_component_route: None,
             pending_copy_token_resolution: None,
@@ -13042,7 +13171,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_repeat_iteration: _,
         pending_repeated_optional_payment: _,
         pending_change_zone_iteration: _,
-        pending_change_zone_in_flight: _,
         devour_eligible_snapshot: _,
         merged_card_component_route: _,
         pending_copy_token_resolution: _,
@@ -15925,6 +16053,7 @@ mod tests {
                 LogicalZoneChangeGroupId(1),
                 Vec::new(),
             ),
+            paused_current: None,
             remaining: vec![],
             source_id: ObjectId(7),
             controller: PlayerId(0),

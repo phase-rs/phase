@@ -11,9 +11,12 @@ use crate::types::ability::{
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCounterPostAction, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{
+    GameState, PendingCounterPostAction, PendingZoneChangeDelivery, WaitingFor,
+};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 303.4f + CR 701.23a: Search effects that put an Aura onto the battlefield
@@ -273,6 +276,22 @@ pub(crate) use crate::game::zone_pipeline::{
     apply_zone_delivery_tail, deliver_replaced_zone_change, execute_zone_move, ZoneDeliveryResult,
     ZoneMoveResult,
 };
+
+/// Records the identity/proposal boundary before an Aura or copy-target prompt
+/// returns control after delivery. Replacement-ordering pauses replace this
+/// anticipated event with the authoritative `PendingReplacement` proposal.
+pub(crate) fn anticipated_zone_change_delivery(
+    state: &GameState,
+    object_id: ObjectId,
+    destination: Zone,
+    source_id: ObjectId,
+) -> Option<PendingZoneChangeDelivery> {
+    let object = state.objects.get(&object_id)?;
+    Some(PendingZoneChangeDelivery::new(
+        ObjectIncarnationRef::from_object(object),
+        ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id)),
+    ))
+}
 
 fn append_effect_resolved_after_counter_pause(
     state: &mut GameState,
@@ -922,6 +941,13 @@ pub fn resolve(
             ),
             ..ctx.clone()
         };
+        let anticipated_pause = anticipated_zone_change_delivery(
+            state,
+            *obj_id,
+            per_obj_ctx.destination,
+            per_obj_ctx.source_id,
+        );
+        let delivery_start = events.len();
         match process_one_zone_move(state, &per_obj_ctx, *obj_id, events) {
             ZoneMoveResult::Done => {
                 if moved_to_dest(state) {
@@ -935,6 +961,11 @@ pub fn resolve(
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group: logical_zone_change_group.clone(),
+                        paused_current: anticipated_pause.map(|mut boundary| {
+                            boundary.append_delivery_events(&events[delivery_start..]);
+                            boundary.mark_counted();
+                            boundary
+                        }),
                         remaining: targeted_objects[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -976,6 +1007,12 @@ pub fn resolve(
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
+                        paused_current: Some(
+                            state
+                                .pending_zone_change_delivery_from_replacement()
+                                .or(anticipated_pause)
+                                .expect("zone-change pause must retain its exact boundary"),
+                        ),
                         remaining: targeted_objects[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -1006,14 +1043,6 @@ pub fn resolve(
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
-                // CR 608.2c: this object is paused mid-move on a replacement choice
-                // and will be delivered by the replacement resume (NOT by the drain's
-                // `remaining` loop). Record it as in-flight, with its pre-move zone, so
-                // the drain counts it toward `moved_count` once it reaches the
-                // destination — otherwise a downstream "that many" undercounts by one.
-                if let Some(before) = before_zone {
-                    state.pending_change_zone_in_flight = Some((*obj_id, before));
-                }
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                 // may already have surfaced its own `EffectZoneChoice`.
                 crate::game::replacement::park_waiting_for(state, player);
@@ -1580,6 +1609,9 @@ pub fn resolve_all(
         // control" effects.
         // CR 122.1 + CR 122.1h: each object enters with the resolved counters
         // (e.g. a finality counter on Shilgengar's mass return).
+        let anticipated_pause =
+            anticipated_zone_change_delivery(state, obj_id, dest_zone, ability.source_id);
+        let delivery_start = events.len();
         match execute_zone_move(
             state,
             obj_id,
@@ -1642,6 +1674,12 @@ pub fn resolve_all(
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
+                        paused_current: Some(
+                            state
+                                .pending_zone_change_delivery_from_replacement()
+                                .or(anticipated_pause)
+                                .expect("zone-change pause must retain its exact boundary"),
+                        ),
                         remaining: matching[i + 1..].to_vec(),
                         source_id: ability.source_id,
                         controller: ability.controller,
@@ -1665,11 +1703,6 @@ pub fn resolve_all(
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
-                // CR 608.2c: record the replacement-paused member as in-flight (with
-                // its pre-move zone) so the drain counts it once delivered — mirrors
-                // the targeted loop, keeping "that many" correct across a mass-move
-                // replacement pause.
-                state.pending_change_zone_in_flight = Some((obj_id, per_object_origin));
                 crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
             }
@@ -1690,6 +1723,11 @@ pub fn resolve_all(
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
+                        paused_current: anticipated_pause.map(|mut boundary| {
+                            boundary.append_delivery_events(&events[delivery_start..]);
+                            boundary.mark_counted();
+                            boundary
+                        }),
                         remaining: matching[i + 1..].to_vec(),
                         source_id: ability.source_id,
                         controller: ability.controller,
@@ -5747,6 +5785,7 @@ mod tests {
             Some(crate::types::game_state::PendingChangeZoneIteration {
                 logical_zone_change_group: state
                     .allocate_logical_zone_change_group(&[hero, soldier]),
+                paused_current: None,
                 remaining: vec![hero, soldier],
                 source_id: ObjectId(100),
                 controller: PlayerId(0),
@@ -8360,7 +8399,6 @@ mod tests {
         }
 
         assert!(state.pending_change_zone_iteration.is_none());
-        assert!(state.pending_change_zone_in_flight.is_none());
         for shock in [s1, s2, s3] {
             assert_eq!(state.objects[&shock].zone, Zone::Battlefield);
         }

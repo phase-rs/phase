@@ -17,8 +17,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BatchCompletion, ExileLinkKind, GameState, LiminalEntryKind, MergedCardComponentRoute,
     PendingBatchDeliveries, PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest,
-    PendingCounterPostAction, PendingLiminalEntryResume, PostReplacementDrainOwner, WaitingFor,
-    ZoneDeliveryExileTracking,
+    PendingCounterPostAction, PendingLiminalEntryResume, PendingZoneChangeDelivery,
+    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
 use std::collections::HashSet;
 
@@ -1065,6 +1065,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
         let logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
         state.pending_batch_deliveries = Some(PendingBatchDeliveries {
             logical_zone_change_group,
+            paused_current: None,
             remaining: Vec::new(),
             destination,
             source_id: None,
@@ -1097,6 +1098,8 @@ fn deliver_batch(
     let mut queue = reqs.into_iter();
     while let Some(req) = queue.next() {
         let destination = req.to;
+        let anticipated_pause = anticipated_zone_change_delivery(state, &req);
+        let delivery_start = events.len();
         match move_object(state, req, events) {
             ZoneMoveResult::Done => {}
             ZoneMoveResult::NeedsChoice(_) => {
@@ -1105,7 +1108,11 @@ fn deliver_batch(
                 // stash the rest of the batch so no object strands. The paused
                 // object rides in `state.pending_replacement` and is delivered
                 // by the resume path.
-                stash_batch_tail(state, queue.collect(), destination);
+                let paused_current = state
+                    .pending_zone_change_delivery_from_replacement()
+                    .or(anticipated_pause)
+                    .expect("parked batch zone change must retain an exact boundary");
+                stash_batch_tail(state, queue.collect(), destination, Some(paused_current));
                 return BatchMoveResult::NeedsChoice;
             }
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -1127,7 +1134,12 @@ fn deliver_batch(
                 // aura-resume drain; the prior note here that the tail would be
                 // "silently drained by the NEXT unrelated resume" is no longer
                 // accurate.)
-                stash_batch_tail(state, queue.collect(), destination);
+                let paused_current = anticipated_pause.map(|mut boundary| {
+                    boundary.append_delivery_events(&events[delivery_start..]);
+                    boundary.mark_counted();
+                    boundary
+                });
+                stash_batch_tail(state, queue.collect(), destination, paused_current);
                 return BatchMoveResult::NeedsChoice;
             }
         }
@@ -1152,15 +1164,27 @@ fn finish_simultaneous_batch(
 /// can finish it. New saves serialize every request's complete heterogeneous
 /// context. The legacy uniform projection remains populated for old-save wire
 /// compatibility but is not authoritative for newly parked actions.
-fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destination: Zone) {
-    let Some(first) = tail.first() else {
-        return;
-    };
-    let source_id = first.source().filter(|&s| s != first.object_id);
-    let enter_tapped = first.mods.enter_tapped;
-    let exile_tracking = first.exile_links.tracking;
-    let library_placement = first.placement.clone();
-    let replacement_applied = first.replacement_applied.clone();
+fn stash_batch_tail(
+    state: &mut GameState,
+    tail: Vec<ZoneMoveRequest>,
+    destination: Zone,
+    paused_current: Option<PendingZoneChangeDelivery>,
+) {
+    let source_id = tail
+        .first()
+        .and_then(|first| first.source().filter(|&source| source != first.object_id));
+    let enter_tapped = tail
+        .first()
+        .map_or(EtbTapState::Unspecified, |first| first.mods.enter_tapped);
+    let exile_tracking = tail
+        .first()
+        .map_or(ZoneDeliveryExileTracking::None, |first| {
+            first.exile_links.tracking
+        });
+    let library_placement = tail.first().and_then(|first| first.placement.clone());
+    let replacement_applied = tail
+        .first()
+        .map_or_else(HashSet::new, |first| first.replacement_applied.clone());
     let remaining = tail.iter().map(|request| request.object_id).collect();
     let announced_members = tail
         .iter()
@@ -1172,6 +1196,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
         .collect();
     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
         logical_zone_change_group: state.allocate_logical_zone_change_group(&announced_members),
+        paused_current,
         remaining,
         destination,
         source_id,
@@ -1188,6 +1213,42 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
         zone_change_record_start: state.zone_changes_this_turn.len(),
         deferred_events: Vec::new(),
     });
+}
+
+/// Captures the pre-delivery identity and the proposed event a batch member is
+/// about to attempt. Replacement pauses overwrite this with the authoritative
+/// parked `PendingReplacement` event; Aura/copy-target pauses retain this
+/// request-derived event because their prompt is surfaced after delivery.
+fn anticipated_zone_change_delivery(
+    state: &GameState,
+    request: &ZoneMoveRequest,
+) -> Option<PendingZoneChangeDelivery> {
+    let object = state.objects.get(&request.object_id)?;
+    let mut expected_event =
+        ProposedEvent::zone_change(request.object_id, object.zone, request.to, request.source());
+    if let ProposedEvent::ZoneChange {
+        enter_tapped,
+        enter_transformed,
+        controller_override,
+        enter_with_counters,
+        face_down_profile,
+        attach_to,
+        applied,
+        ..
+    } = &mut expected_event
+    {
+        *enter_tapped = request.mods.enter_tapped;
+        *enter_transformed = request.mods.enter_transformed;
+        *controller_override = request.mods.controller_override;
+        *enter_with_counters = request.mods.enter_with_counters.clone();
+        *face_down_profile = request.mods.face_down_profile.clone().map(Box::new);
+        *attach_to = request.mods.attach_to;
+        *applied = request.replacement_applied.clone();
+    }
+    Some(PendingZoneChangeDelivery::new(
+        crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+        expected_event,
+    ))
 }
 
 /// CR 603.10a + CR 616.1: Resume a parked batch-delivery tail after the

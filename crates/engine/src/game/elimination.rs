@@ -978,6 +978,7 @@ mod tests {
                 crate::types::identifiers::LogicalZoneChangeGroupId(1),
                 Vec::new(),
             ),
+            paused_current: None,
             remaining: Vec::new(),
             destination: Zone::Exile,
             source_id: None,

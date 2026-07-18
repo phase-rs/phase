@@ -4207,6 +4207,14 @@ pub(super) fn handle_resolution_choice(
                             enters_modified_if: enters_modified_if.clone(),
                             enter_attached_to: None,
                         };
+                        let anticipated_pause =
+                            effects::change_zone::anticipated_zone_change_delivery(
+                                state,
+                                *card_id,
+                                ctx.destination,
+                                ctx.source_id,
+                            );
+                        let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
                         ) {
@@ -4225,6 +4233,12 @@ pub(super) fn handle_resolution_choice(
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group: logical_zone_change_group
                                             .clone(),
+                                        paused_current: anticipated_pause.map(|mut boundary| {
+                                            boundary
+                                                .append_delivery_events(&events[delivery_start..]);
+                                            boundary.mark_counted();
+                                            boundary
+                                        }),
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -4268,6 +4282,12 @@ pub(super) fn handle_resolution_choice(
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
+                                        paused_current: Some(
+                                            state
+                                                .pending_zone_change_delivery_from_replacement()
+                                                .or(anticipated_pause)
+                                                .expect("zone-change pause must retain its exact boundary"),
+                                        ),
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -4569,6 +4589,14 @@ pub(super) fn handle_resolution_choice(
                     let logical_zone_change_group =
                         state.allocate_logical_zone_change_group(&chosen_ids);
                     for (i, card_id) in chosen_ids.iter().enumerate() {
+                        let anticipated_pause =
+                            effects::change_zone::anticipated_zone_change_delivery(
+                                state,
+                                *card_id,
+                                ctx.destination,
+                                ctx.source_id,
+                            );
+                        let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move(
                             state, &ctx, *card_id, events,
                         ) {
@@ -4585,6 +4613,12 @@ pub(super) fn handle_resolution_choice(
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group: logical_zone_change_group
                                             .clone(),
+                                        paused_current: anticipated_pause.map(|mut boundary| {
+                                            boundary
+                                                .append_delivery_events(&events[delivery_start..]);
+                                            boundary.mark_counted();
+                                            boundary
+                                        }),
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -4621,6 +4655,12 @@ pub(super) fn handle_resolution_choice(
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
+                                        paused_current: Some(
+                                            state
+                                                .pending_zone_change_delivery_from_replacement()
+                                                .or(anticipated_pause)
+                                                .expect("zone-change pause must retain its exact boundary"),
+                                        ),
                                         remaining: chosen_ids[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,

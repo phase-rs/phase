@@ -177,6 +177,10 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.sacrifice_provenance);
+    // A replacement-paused zone move belongs to its logical owner by both the
+    // pre-move incarnation and the exact proposed event. Capture this before
+    // `continue_replacement` consumes the pending record.
+    let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -243,6 +247,7 @@ pub(super) fn handle_replacement_choice(
                     else {
                         unreachable!("arm pattern guarantees a ZoneChange payload");
                     };
+                    let delivery_start = events.len();
                     match crate::game::zone_pipeline::deliver(
                         state,
                         approved,
@@ -279,6 +284,13 @@ pub(super) fn handle_replacement_choice(
                             }
                             return Ok(state.waiting_for.clone());
                         }
+                    }
+                    if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                        state.capture_paused_zone_change_delivery(
+                            paused.member,
+                            &paused.expected_event,
+                            &events[delivery_start..],
+                        );
                     }
                     if let Some(provenance) = parked_sacrifice_provenance {
                         if provenance.object_id == object_id {
@@ -1613,9 +1625,15 @@ fn finish_copy_target_choice_entry(
     // leave a stale event in the vec, and we discard rather than fire a
     // phantom entry trigger.
     if replay_entry_events {
+        let delivery_start = events.len();
         if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+            state.capture_paused_zone_change_delivery_for_member(
+                source_id,
+                &events[delivery_start..],
+            );
             return Ok(Some(waiting_for));
         }
+        state.capture_paused_zone_change_delivery_for_member(source_id, &events[delivery_start..]);
     }
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
