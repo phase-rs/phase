@@ -187,11 +187,24 @@ impl GameScenario {
         }
     }
 
+    /// Create a scenario with an explicit `FormatConfig` (the format axis), a
+    /// player count, and a seed. This is the general constructor; `new_n_player`
+    /// is its standard-format specialization. Enables team formats — e.g.
+    /// `FormatConfig::two_headed_giant()` — in scenario-driven tests so team
+    /// combat (CR 805.10) can be exercised through the production apply pipeline.
+    pub fn new_with_format(
+        format_config: crate::types::format::FormatConfig,
+        player_count: u8,
+        seed: u64,
+    ) -> Self {
+        GameScenario {
+            state: GameState::new(format_config, player_count, seed),
+        }
+    }
+
     /// Create a scenario with N players using the default format config (20 life each).
     pub fn new_n_player(count: u8, seed: u64) -> Self {
-        GameScenario {
-            state: GameState::new(crate::types::format::FormatConfig::standard(), count, seed),
-        }
+        Self::new_with_format(crate::types::format::FormatConfig::standard(), count, seed)
     }
 
     /// Set the game phase. Also sets `waiting_for`, `priority_player`, `active_player`,

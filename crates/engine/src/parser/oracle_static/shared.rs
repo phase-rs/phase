@@ -1424,22 +1424,184 @@ fn parse_keyword_grant_from_exiled_object_static(text: &str) -> Option<Vec<Stati
         );
     }
 
-    let defs = keywords
+    // CR 611.3a: one INDEPENDENT SelfRef grant per listed keyword (per-item core).
+    // Each keyword's presence check is the exiled-`<type>`-card filter (in the
+    // exile zone) narrowed to cards that HAVE that keyword.
+    Some(per_keyword_conditional_grants(
+        &TargetFilter::SelfRef,
+        keywords,
+        text,
+        |ki| {
+            let mut tf = base.clone();
+            tf.properties.push(FilterProp::WithKeyword { value: ki });
+            TargetFilter::Typed(tf)
+        },
+    ))
+}
+
+/// CR 611.3a: Build one INDEPENDENT conditional keyword grant per listed keyword.
+/// `subject` is what receives the keyword ([`TargetFilter::SelfRef`] for
+/// "~"/"this creature", an `EquippedBy`/`EnchantedBy` filter for an attached
+/// subject); `presence_filter_for` yields, per keyword `Ki`, the presence filter
+/// for the card that must HAVE `Ki` (gating that grant on THAT keyword alone).
+/// Modeling the list as one static under the first keyword's condition (the
+/// observed collapse) made every keyword apply whenever ANY one matched — this is
+/// the per-item seam both the exiled-`<type>`-card and source-linked callers share.
+fn per_keyword_conditional_grants(
+    subject: &TargetFilter,
+    keywords: Vec<Keyword>,
+    description: &str,
+    presence_filter_for: impl Fn(Keyword) -> TargetFilter,
+) -> Vec<StaticDefinition> {
+    keywords
         .into_iter()
         .map(|ki| {
-            let mut tf = base.clone();
-            tf.properties
-                .push(FilterProp::WithKeyword { value: ki.clone() });
+            let filter = presence_filter_for(ki.clone());
             StaticDefinition::continuous()
-                .affected(TargetFilter::SelfRef)
+                .affected(subject.clone())
                 .modifications(vec![ContinuousModification::AddKeyword { keyword: ki }])
                 .condition(StaticCondition::IsPresent {
-                    filter: Some(TargetFilter::Typed(tf)),
+                    filter: Some(filter),
                 })
-                .description(text.to_string())
+                .description(description.to_string())
         })
-        .collect();
-    Some(defs)
+        .collect()
+}
+
+/// CR 607.2a: linked abilities identify cards exiled with this permanent.
+/// nom: the source-linked exile-pool object phrase — "a card exiled with ~|it"
+/// (the pool of cards exiled *with* this permanent, not the whole exile zone).
+fn parse_source_exiled_object_nom(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("a card exiled with ~"),
+            tag("a card exiled with it"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 702.5 + CR 702.6: nom combinator for the granted SUBJECT of a same-is-true
+/// keyword grant (lowercased). "~"/"it" is the source itself
+/// ([`TargetFilter::SelfRef`]); "equipped/enchanted creature|permanent" is the
+/// attached permanent ([`FilterProp::EquippedBy`]/[`FilterProp::EnchantedBy`],
+/// mirroring [`attached_subject_filter`]). One `value(_, tag())` arm per subject;
+/// the attached-subject arms precede the bare self-refs so "equipped creature" is
+/// not misread. The trailing space is consumed so the remainder begins at "has".
+fn parse_source_exiled_subject_nom(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
+            tag::<_, _, OracleError<'_>>("equipped creature "),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            tag("enchanted creature "),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EquippedBy])),
+            tag("equipped permanent "),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy])),
+            tag("enchanted permanent "),
+        ),
+        value(TargetFilter::SelfRef, tag("~ ")),
+        value(TargetFilter::SelfRef, tag("it ")),
+    ))
+    .parse(input)
+}
+
+/// nom: "<object> has <K0>, <subject> has <K0>" — the PREFIX clause order (Eater
+/// of Virtue, Death-Mask Duplicant). Returns `(subject, K0)`; the condition
+/// keyword and the granted keyword must match (they are the same keyword).
+fn parse_source_exiled_grant_prefix(input: &str) -> OracleResult<'_, (TargetFilter, &str)> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("as long as ").parse(input)?;
+    let (input, _) = parse_source_exiled_object_nom(input)?;
+    let (input, _) = tag(" has ").parse(input)?;
+    let (input, k0a) = nom_primitives::parse_keyword_name(input)?;
+    let (input, _) = tag(", ").parse(input)?;
+    let (input, subject) = parse_source_exiled_subject_nom(input)?;
+    let (input, _) = tag("has ").parse(input)?;
+    let (input, k0b) = nom_primitives::parse_keyword_name(input)?;
+    if k0a != k0b {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    Ok((input, (subject, k0a)))
+}
+
+/// nom: "<subject> has <K0> as long as <object> has <K0>" — the POSTFIX clause
+/// order (Urborg Scavengers). Returns `(subject, K0)`.
+fn parse_source_exiled_grant_postfix(input: &str) -> OracleResult<'_, (TargetFilter, &str)> {
+    let (input, subject) = parse_source_exiled_subject_nom(input)?;
+    let (input, _) = tag::<_, _, OracleError<'_>>("has ").parse(input)?;
+    let (input, k0a) = nom_primitives::parse_keyword_name(input)?;
+    let (input, _) = tag(" as long as ").parse(input)?;
+    let (input, _) = parse_source_exiled_object_nom(input)?;
+    let (input, _) = tag(" has ").parse(input)?;
+    let (input, k0b) = nom_primitives::parse_keyword_name(input)?;
+    if k0a != k0b {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    Ok((input, (subject, k0a)))
+}
+
+/// CR 611.3a + CR 607.2a (Eater of Virtue, Death-Mask Duplicant, Urborg
+/// Scavengers): the source-linked sibling of
+/// [`parse_keyword_grant_from_exiled_object_static`]. The condition object is "a
+/// card exiled WITH this permanent" ([`TargetFilter::ExiledBySource`] — the linked
+/// exile pool, not every card in the exile zone), the grant lands on "~" or the
+/// equipped/enchanted creature, and it appears in either clause order:
+///   PREFIX  — "As long as a card exiled with ~ has `<K0>`, `<subject>` has `<K0>`.
+///             The same is true for `<K1>`, …"  (Eater of Virtue, Death-Mask)
+///   POSTFIX — "`<subject>` has `<K0>` as long as a card exiled with it has `<K0>`.
+///             The same is true for `<K1>`, …"  (Urborg Scavengers)
+/// Each listed keyword becomes one INDEPENDENT grant via the shared per-item core;
+/// the prior parse collapsed the whole list under the first keyword's condition
+/// (an exiled flyer granted every keyword) or dropped the tail into an
+/// `Unrecognized` condition (every continuation keyword lost).
+fn parse_keyword_grant_from_source_exiled_object_static(
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let (tail, (subject, k0_name)) = alt((
+        parse_source_exiled_grant_prefix,
+        parse_source_exiled_grant_postfix,
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+
+    let k0: Keyword = k0_name.parse().ok()?;
+    // tail: ". the same is true for <list>." (or "." / "" for a single keyword).
+    let tail = tail.trim_start_matches('.').trim_start();
+    let mut keywords = vec![k0];
+    if !tail.is_empty() {
+        keywords.extend(
+            super::super::oracle_effect::sequence::try_parse_same_is_true_continuation(tail)?,
+        );
+    }
+
+    // CR 607.2a + CR 611.3a: the presence check is a card in the source-linked exile
+    // pool ([`TargetFilter::ExiledBySource`] — cards exiled *with* this permanent,
+    // not every card in the exile zone) that HAS the keyword. `ExiledBySource` is
+    // a whole-object ref, so it is AND-composed with the exile-zone keyword filter
+    // (the same `InZone{Exile} + WithKeyword` shape the exiled-`<type>`-card path
+    // relies on) rather than folded in as a property.
+    Some(per_keyword_conditional_grants(
+        &subject,
+        keywords,
+        text,
+        |ki| TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::InZone { zone: Zone::Exile },
+                    FilterProp::WithKeyword { value: ki },
+                ])),
+            ],
+        },
+    ))
 }
 
 /// CR 508.1c + CR 509.1b: predicate combinator for the defensive-flyer compound
@@ -1720,6 +1882,17 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // the shared condition on the first keyword only (the observed bug: the grant
     // applies unconditionally to every keyword).
     if let Some(defs) = parse_keyword_grant_from_exiled_object_static(&stripped) {
+        return defs;
+    }
+
+    // CR 611.3a + CR 607.2a (Eater of Virtue, Death-Mask Duplicant, Urborg
+    // Scavengers): the source-linked exile-pool sibling of the handler above —
+    // "a card exiled WITH ~" in either clause order, granting to "~" or the
+    // equipped/enchanted creature. Same precedence rationale: it must run before
+    // generic multi-sentence splitting, which collapses the "the same is true
+    // for" list under the first keyword's condition (an exiled flyer would then
+    // grant every keyword) or strands the tail in an `Unrecognized` condition.
+    if let Some(defs) = parse_keyword_grant_from_source_exiled_object_static(&stripped) {
         return defs;
     }
 

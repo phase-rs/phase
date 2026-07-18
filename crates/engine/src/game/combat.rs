@@ -687,17 +687,7 @@ fn validate_per_defender_attacker_caps(
     state: &GameState,
     attacks: &[(ObjectId, AttackTarget)],
 ) -> Result<(), String> {
-    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        let StaticMode::MaxAttackersEachCombat {
-            max,
-            defender: Some(AttackDefenderScope::Controller),
-        } = def.mode
-        else {
-            continue;
-        };
-        // CR 109.5: "you" resolves to the controller of the permanent carrying
-        // the static.
-        let protected_player = source.controller;
+    for (protected_player, max) in per_defender_caps(state) {
         let count = attacks
             .iter()
             .filter(|(_, target)| matches!(target, AttackTarget::Player(pid) if *pid == protected_player))
@@ -709,6 +699,25 @@ fn validate_per_defender_attacker_caps(
         }
     }
     Ok(())
+}
+
+/// CR 508.1c + CR 802.1: The active per-defender attacker caps
+/// (`MaxAttackersEachCombat { defender: Some(Controller) }`, e.g. Judoon
+/// Enforcers), as `(protected_player, max)` pairs. Single authority shared by the
+/// strict validator (`validate_per_defender_attacker_caps`) and the CR 508.1d
+/// solver (`max_no_payment`), so both read one cap set.
+fn per_defender_caps(state: &GameState) -> Vec<(PlayerId, u32)> {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(source, def)| match def.mode {
+            // CR 109.5: "you" resolves to the controller of the permanent
+            // carrying the static.
+            StaticMode::MaxAttackersEachCombat {
+                max,
+                defender: Some(AttackDefenderScope::Controller),
+            } => Some((source.controller, max)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// CR 508.5 + CR 310.8d: Resolve the defending player for an `AttackTarget` —
@@ -2402,7 +2411,7 @@ fn creature_cant_attack_gated(
 ///  - `obj.controller != state.active_player` (active-player guard)
 ///  - the object is not a `CoreType::Creature`
 ///  - it has neither a `StaticMode::MustAttack` static (CR 508.1d) nor a
-///    goading player from `goading_players_for_creature` (CR 701.15b)
+///    goading player from `goading_players_for_creature_gated` (CR 701.15b)
 ///  - `obj.tapped` (CR 508.1a: chosen attackers must be untapped)
 ///  - it has `Keyword::Defender` and no `StaticMode::CanAttackWithDefender`
 ///    override (CR 702.3b)
@@ -2461,8 +2470,10 @@ fn creature_must_attack_with_attackable_players_gated(
     let Some(obj) = state.objects.get(&obj_id) else {
         return false;
     };
-    // Active-player guard.
-    if obj.controller != state.active_player {
+    // CR 805.10a: attacking-team guard — a must-attack requirement applies to any
+    // creature controlled by the active player or a teammate, not just the literal
+    // active player (the active team makes one combined attack).
+    if !active_attacking_team(state).contains(&obj.controller) {
         return false;
     }
     if !obj.card_types.core_types.contains(&CoreType::Creature) {
@@ -2775,370 +2786,941 @@ pub fn propagate_banding_block_state(combat: &mut CombatState) {
 /// CR 702.22b/c: Optional `bands` lists explicit attacking bands chosen by the
 /// active player. When empty, no band ids are assigned (banding is inert until
 /// `GameAction::DeclareAttackers` grows a band-declaration surface).
+/// CR 508.1d + CR 701.15c: one individual attack requirement the maximum-
+/// requirement solver scores independently. A single creature can carry several
+/// (a generic "attacks if able" plus one `Goad` entry per distinct goader plus
+/// one `MustAttackPlayer` per specific-player static), and CR 701.15c makes each
+/// distinct goader an additional requirement — hence a flat multiset, not a
+/// per-creature aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttackRequirement {
+    /// CR 508.1d + CR 701.15b (first clause): `creature` attacks this combat if
+    /// able. Obeyed iff `creature` attacks any legal target.
+    MustAttackGeneric { creature: ObjectId },
+    /// CR 508.1b + CR 508.1d: `creature` must attack `player` directly. Obeyed
+    /// iff `creature` attacks that player (not a planeswalker/battle they control,
+    /// per CR 508.5). Only emitted when `player` is currently attackable.
+    MustAttackPlayer {
+        creature: ObjectId,
+        player: PlayerId,
+    },
+    /// CR 701.15b (second clause) + CR 701.15c: `creature` attacks a player other
+    /// than `goader` if able. Obeyed iff `creature` attacks a player ≠ `goader`.
+    Goad {
+        creature: ObjectId,
+        goader: PlayerId,
+    },
+}
+
+/// CR 508.1a–d: the single live engine model of attacker-declaration legality,
+/// built once from the current `GameState`. Nonserialized; every consumer (prompt
+/// builder, self-heal refresh, strict validation, AI completion, CR 508.1d solver)
+/// reads it so there is one authority for the per-attacker legal map, the caps,
+/// the CombatAlone classification, and the requirement multiset. Mirrors how
+/// `get_valid_block_targets` centralizes the blocker map.
+struct AttackDeclarationConstraints {
+    /// Eligible attacker ids (attacking team, all creature-level restrictions
+    /// passed), ascending by `ObjectId` for determinism.
+    candidates: Vec<ObjectId>,
+    /// Per-candidate legal `AttackTarget`s after all HARD target restrictions
+    /// (requirements do NOT filter this). Ascending `AttackTarget` order.
+    legal_targets: HashMap<ObjectId, Vec<AttackTarget>>,
+    /// Union of `legal_targets` values (aggregate compat for `valid_attack_targets`).
+    aggregate_targets: Vec<AttackTarget>,
+    /// CR 508.1d / CR 701.15c requirement multiset.
+    requirements: Vec<AttackRequirement>,
+    /// CR 508.1c global cap (`MaxAttackersEachCombat { defender: None }`).
+    global_cap: Option<u32>,
+    /// CR 508.1c per-defender caps as `(protected_player, max)`.
+    per_defender_caps: Vec<(PlayerId, u32)>,
+    /// CR 506.5: creatures that can't attack alone (`NeedsCompanion`).
+    needs_companion: HashSet<ObjectId>,
+    /// CR 506.5: creatures that can only attack alone (`MustBeSole`).
+    must_be_sole: HashSet<ObjectId>,
+}
+
+/// CR 508.1c/d: whether `attacker_id` may HARD-legally attack `target` (target
+/// validity + scoped `CantAttack`/`CantAttackOrBlock` + `AttackOnlyNeighbor` +
+/// player-scoped temporary attack prohibition). Requirements (`MustAttack*`,
+/// goad) are NOT consulted here — they are scored by the solver, not used to
+/// filter the per-attacker legal map. This is the single per-pairing authority
+/// shared by the map builder and `validate_attack_declaration`.
+fn attacker_can_attack_target(
+    state: &GameState,
+    attacker_id: ObjectId,
+    target: AttackTarget,
+    gates: &CombatStaticGates,
+    active_team: &[PlayerId],
+) -> bool {
+    // CR 508.1b + CR 310.5/310.8b: target validity + active-team exclusion.
+    match target {
+        AttackTarget::Player(pid) => {
+            if !state.players.iter().any(|p| p.id == pid)
+                || state.eliminated_players.contains(&pid)
+                || active_team.contains(&pid)
+            {
+                return false;
+            }
+        }
+        AttackTarget::Planeswalker(pw_id) => {
+            let Some(pw) = state.objects.get(&pw_id) else {
+                return false;
+            };
+            if pw.zone != crate::types::zones::Zone::Battlefield
+                || !pw
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Planeswalker)
+                || active_team.contains(&pw.controller)
+            {
+                return false;
+            }
+        }
+        AttackTarget::Battle(battle_id) => {
+            let Some(battle) = state.objects.get(&battle_id) else {
+                return false;
+            };
+            if battle.zone != crate::types::zones::Zone::Battlefield
+                || !battle
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Battle)
+                || battle
+                    .protector()
+                    .is_some_and(|protector| active_team.contains(&protector))
+            {
+                return false;
+            }
+        }
+    }
+
+    // CR 508.1d: scoped remote CantAttack / CantAttackOrBlock (Eriette-class).
+    if (gates.has_cant_attack
+        && crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CantAttack,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(attacker_id),
+                attack_target: Some(target),
+                ..Default::default()
+            },
+        ))
+        || (gates.has_cant_attack_or_block
+            && crate::game::static_abilities::check_static_ability(
+                state,
+                StaticMode::CantAttackOrBlock,
+                &crate::game::static_abilities::StaticCheckContext {
+                    target_id: Some(attacker_id),
+                    attack_target: Some(target),
+                    ..Default::default()
+                },
+            ))
+    {
+        return false;
+    }
+
+    // CR 508.1c + CR 109.5 + CR 607.2d: directional AttackOnlyNeighbor.
+    if gates.has_attack_only_neighbor
+        && !attack_passes_neighbor_restriction(state, attacker_id, target)
+    {
+        return false;
+    }
+
+    // CR 508.1c + CR 109.5: player-scoped temporary attack prohibition.
+    if !attack_passes_temporary_prohibition(state, attacker_id, target) {
+        return false;
+    }
+
+    true
+}
+
+/// CR 508.1c + CR 109.5 + CR 607.2d: per-pairing `AttackOnlyNeighbor` check
+/// (Pramikon / Mystic Barrier / Teyo). Extracted from the declaration loop so the
+/// map builder and strict validator share one authority.
+fn attack_passes_neighbor_restriction(
+    state: &GameState,
+    attacker_id: ObjectId,
+    target: AttackTarget,
+) -> bool {
+    let Some(attacker_controller) = state.objects.get(&attacker_id).map(|o| o.controller) else {
+        return true;
+    };
+    for (source, def) in super::functioning_abilities::game_functioning_statics(state) {
+        if !matches!(def.mode, StaticMode::AttackOnlyNeighbor) {
+            continue;
+        }
+        let Some(dir) = source.chosen_direction() else {
+            continue;
+        };
+        let Some(nearest) = crate::game::players::nearest_opponent(state, attacker_controller, dir)
+        else {
+            continue;
+        };
+        if !crate::game::restrictions::attack_target_matches_defended_scope(
+            state,
+            Some(&target),
+            &crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
+            nearest,
+            nearest,
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+/// CR 508.1c + CR 109.5: per-pairing player-scoped temporary attack prohibition
+/// (`GameRestriction::ProhibitActivity { Attack }` — Willie Lumpkin). Extracted
+/// from the declaration loop so the map builder and strict validator share it.
+fn attack_passes_temporary_prohibition(
+    state: &GameState,
+    attacker_id: ObjectId,
+    target: AttackTarget,
+) -> bool {
+    let Some(attacker_controller) = state.objects.get(&attacker_id).map(|o| o.controller) else {
+        return true;
+    };
+    for restriction in &state.restrictions {
+        let crate::types::ability::GameRestriction::ProhibitActivity {
+            source,
+            affected_players,
+            activity: crate::types::ability::ProhibitedActivity::Attack { defended },
+            ..
+        } = restriction
+        else {
+            continue;
+        };
+        let Some(protected) = state.objects.get(source).map(|o| o.controller) else {
+            continue;
+        };
+        let attacker_is_affected = match affected_players {
+            crate::types::ability::RestrictionPlayerScope::AllPlayers => true,
+            crate::types::ability::RestrictionPlayerScope::SpecificPlayer(p) => {
+                *p == attacker_controller
+            }
+            crate::types::ability::RestrictionPlayerScope::OpponentsOfSourceController => {
+                attacker_controller != protected
+            }
+            crate::types::ability::RestrictionPlayerScope::TargetedPlayer
+            | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
+            | crate::types::ability::RestrictionPlayerScope::DefendingPlayer
+            | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetController
+            | crate::types::ability::RestrictionPlayerScope::ScopedPlayer => false,
+        };
+        if !attacker_is_affected {
+            continue;
+        }
+        if crate::game::restrictions::attack_target_matches_defended_scope(
+            state,
+            Some(&target),
+            defended,
+            protected,
+            protected,
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+/// CR 508.1a + CR 805.10a: the attacking team = active player ∪ teammates.
+fn active_attacking_team(state: &GameState) -> Vec<PlayerId> {
+    std::iter::once(state.active_player)
+        .chain(players::teammates(state, state.active_player))
+        .collect()
+}
+
+/// CR 508.1a + CR 805.10a: eligible attacker ids for the whole attacking team,
+/// applying every creature-level restriction `get_valid_attacker_ids` applies,
+/// but keyed to team membership rather than the literal active player.
+fn team_eligible_attacker_ids(state: &GameState, gates: &CombatStaticGates) -> Vec<ObjectId> {
+    let active_team = active_attacking_team(state);
+    let mut ids: Vec<ObjectId> = state
+        .battlefield_phased_in_ids()
+        .iter()
+        .filter_map(|id| {
+            let obj = state.objects.get(id)?;
+            let eligible = active_team.contains(&obj.controller)
+                && obj.card_types.core_types.contains(&CoreType::Creature)
+                && !obj.tapped
+                && (!obj.has_keyword(&Keyword::Defender)
+                    || super::functioning_abilities::active_static_definitions(state, obj)
+                        .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
+                    || (gates.has_can_attack_with_defender
+                        && crate::game::static_abilities::check_static_ability(
+                            state,
+                            StaticMode::CanAttackWithDefender,
+                            &crate::game::static_abilities::StaticCheckContext {
+                                target_id: Some(*id),
+                                ..Default::default()
+                            },
+                        )))
+                && !creature_cant_attack_gated(state, *id, gates)
+                && !has_summoning_sickness(obj)
+                && passes_combat_attacker_restriction(state, *id);
+            eligible.then_some(*id)
+        })
+        .collect();
+    ids.sort_unstable_by_key(|id| id.0);
+    ids
+}
+
+impl AttackDeclarationConstraints {
+    /// CR 508.1a–d: build the model from live state.
+    fn build(state: &GameState) -> Self {
+        let gates = CombatStaticGates::compute(state);
+        let active_team = active_attacking_team(state);
+        let candidates = team_eligible_attacker_ids(state, &gates);
+        let all_targets = get_valid_attack_targets(state);
+        let attackable_players = attackable_player_targets(state);
+
+        let mut legal_targets: HashMap<ObjectId, Vec<AttackTarget>> = HashMap::new();
+        let mut aggregate: HashSet<AttackTarget> = HashSet::new();
+        for &cid in &candidates {
+            let mut targets: Vec<AttackTarget> = all_targets
+                .iter()
+                .copied()
+                .filter(|&t| attacker_can_attack_target(state, cid, t, &gates, &active_team))
+                .collect();
+            targets.sort_unstable();
+            for &t in &targets {
+                aggregate.insert(t);
+            }
+            legal_targets.insert(cid, targets);
+        }
+        let mut aggregate_targets: Vec<AttackTarget> = aggregate.into_iter().collect();
+        aggregate_targets.sort_unstable();
+
+        // CR 508.1d / CR 701.15c: requirement multiset over eligible candidates.
+        let mut requirements = Vec::new();
+        let mut needs_companion = HashSet::new();
+        let mut must_be_sole = HashSet::new();
+        for &cid in &candidates {
+            let Some(obj) = state.objects.get(&cid) else {
+                continue;
+            };
+            // CR 508.1d: generic "attacks each combat if able" (local or remote).
+            let has_generic_must =
+                super::functioning_abilities::active_static_definitions(state, obj)
+                    .any(|sd| sd.mode == StaticMode::MustAttack)
+                    || (gates.has_must_attack
+                        && crate::game::static_abilities::check_static_ability(
+                            state,
+                            StaticMode::MustAttack,
+                            &crate::game::static_abilities::StaticCheckContext {
+                                target_id: Some(cid),
+                                ..Default::default()
+                            },
+                        ));
+            // CR 701.15b: goaders (distinct players).
+            let goaders = goading_players_for_creature_gated(state, cid, gates.has_goad);
+            // CR 701.15b (first clause): a goaded creature ALSO "attacks each
+            // combat if able" — emit the generic requirement independently so it
+            // is scored even when the second (attack-a-non-goader) clause is
+            // unsatisfiable. This is executor-confirmation #1 implemented by
+            // construction rather than relying on the shared predicate.
+            if has_generic_must || !goaders.is_empty() {
+                requirements.push(AttackRequirement::MustAttackGeneric { creature: cid });
+            }
+            for player in must_attack_players_for_creature(state, obj) {
+                if attackable_players.contains(&player) {
+                    requirements.push(AttackRequirement::MustAttackPlayer {
+                        creature: cid,
+                        player,
+                    });
+                }
+            }
+            let mut goader_list: Vec<PlayerId> = goaders.into_iter().collect();
+            goader_list.sort_unstable_by_key(|p| p.0);
+            for goader in goader_list {
+                requirements.push(AttackRequirement::Goad {
+                    creature: cid,
+                    goader,
+                });
+            }
+            // CR 506.5: CombatAlone classification.
+            for sd in super::functioning_abilities::active_static_definitions(state, obj) {
+                if let StaticMode::CombatAlone {
+                    action: CombatAloneAction::Attack,
+                    requirement,
+                } = sd.mode
+                {
+                    match requirement {
+                        CombatAloneRequirement::NeedsCompanion => {
+                            needs_companion.insert(cid);
+                        }
+                        CombatAloneRequirement::MustBeSole => {
+                            must_be_sole.insert(cid);
+                        }
+                    }
+                }
+            }
+        }
+
+        AttackDeclarationConstraints {
+            candidates,
+            legal_targets,
+            aggregate_targets,
+            requirements,
+            global_cap: max_attackers_each_combat(state),
+            per_defender_caps: per_defender_caps(state),
+            needs_companion,
+            must_be_sole,
+        }
+    }
+
+    /// Free (untaxed) legal targets for a candidate.
+    fn free_targets(&self, state: &GameState, cid: ObjectId) -> Vec<AttackTarget> {
+        self.legal_targets
+            .get(&cid)
+            .map(|ts| {
+                ts.iter()
+                    .copied()
+                    .filter(|&t| !attack_incurs_tax(state, cid, t))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// CR 508.1d + CR 118.12a: `attack_incurs_tax` treats the tax of a single (C,T)
+/// pairing evaluated in isolation as C's free/paid verdict in ANY declaration.
+/// This is exact ONLY under "affected-ness independence", which has TWO
+/// dependencies:
+///   (1) Every `UnlessPayScaling` variant computes each affected creature's OWN
+///       share from (that creature, its target, game state) and NEVER from the
+///       cardinality/membership of the rest of the declared attacker set. The
+///       exhaustive match below is the tripwire for THIS dependency ONLY: a NEW
+///       variant that couples cost to the count of OTHER attackers (e.g. "pays
+///       {1} for each other attacking creature") breaks the oracle and MUST be
+///       handled by re-deriving `max_no_payment` over full declarations, not
+///       per-pairing. Do NOT silence E0004 with a wildcard.
+///   (2) `compute_attack_tax` resolves every `QuantityRef` against the committed
+///       `GameState`, NEVER against the passed pairing slice `&[(C,T)]` or the
+///       declared attacker set. This dependency is NOT guarded by E0004: a future
+///       change to quantity resolution can break the oracle while leaving this
+///       match exhaustive. If quantity resolution ever reads the declared-attacker
+///       set, re-derive `max_no_payment` over full declarations.
+const _: fn(&crate::types::ability::UnlessPayScaling) = |scaling| {
+    use crate::types::ability::UnlessPayScaling;
+    match scaling {
+        UnlessPayScaling::Flat
+        | UnlessPayScaling::PerAffectedCreature
+        | UnlessPayScaling::PerQuantityRef { .. }
+        | UnlessPayScaling::PerAffectedAndQuantityRef { .. }
+        | UnlessPayScaling::PerAffectedWithRef { .. } => {
+            // affected-ness-independent (dependency 1): single-pairing verdict is exact.
+        }
+    }
+};
+
+/// CR 508.1d: whether attacking `target` with `creature` alone would incur an
+/// "unless pay" tax. Thin per-pairing wrapper over `compute_attack_tax`; see the
+/// affected-ness-independence tripwire above for why the isolated verdict is exact.
+fn attack_incurs_tax(state: &GameState, creature: ObjectId, target: AttackTarget) -> bool {
+    compute_attack_tax(state, &[(creature, target)]).is_some()
+}
+
+/// CR 508.1d: number of requirement multiset entries obeyed by declaration `D`.
+fn score_declaration(
+    constraints: &AttackDeclarationConstraints,
+    attacks: &[(ObjectId, AttackTarget)],
+) -> u32 {
+    constraints
+        .requirements
+        .iter()
+        .filter(|req| requirement_obeyed(req, attacks))
+        .count() as u32
+}
+
+/// CR 508.1d / CR 701.15b: whether one requirement is obeyed by `attacks`.
+fn requirement_obeyed(req: &AttackRequirement, attacks: &[(ObjectId, AttackTarget)]) -> bool {
+    match req {
+        AttackRequirement::MustAttackGeneric { creature } => {
+            attacks.iter().any(|(c, _)| c == creature)
+        }
+        AttackRequirement::MustAttackPlayer { creature, player } => attacks
+            .iter()
+            .any(|(c, t)| c == creature && matches!(t, AttackTarget::Player(p) if p == player)),
+        AttackRequirement::Goad { creature, goader } => attacks
+            .iter()
+            .any(|(c, t)| c == creature && matches!(t, AttackTarget::Player(p) if p != goader)),
+    }
+}
+
+/// CR 508.1d: score obeyed by the single-attacker declaration `{creature → target}`.
+fn score_single(
+    constraints: &AttackDeclarationConstraints,
+    creature: ObjectId,
+    target: AttackTarget,
+) -> u32 {
+    score_declaration(constraints, &[(creature, target)])
+}
+
+/// CR 508.1d: the maximum number of requirements obeyable by any declaration that
+/// uses only free (untaxed) attacks and obeys all hard restrictions/caps/
+/// CombatAlone. Taxes never raise this bound (CR 508.1d: a player is not required
+/// to pay a cost merely to satisfy a requirement). See Decision 1 for the
+/// scenario partition + completeness argument.
+fn max_no_payment(constraints: &AttackDeclarationConstraints, state: &GameState) -> u32 {
+    // Short-circuit: no requirements → nothing to maximize (vanilla-board case).
+    if constraints.requirements.is_empty() {
+        return 0;
+    }
+
+    // Separable fast path: with no coupling constraint, each creature's obeyed
+    // requirements depend only on its own chosen (free) target, so the optimum is
+    // the per-creature sum of best single-target scores.
+    let coupled = constraints.global_cap.is_some()
+        || !constraints.per_defender_caps.is_empty()
+        || !constraints.needs_companion.is_empty()
+        || !constraints.must_be_sole.is_empty();
+    if !coupled {
+        return constraints
+            .candidates
+            .iter()
+            .map(|&cid| {
+                constraints
+                    .free_targets(state, cid)
+                    .into_iter()
+                    .map(|t| score_single(constraints, cid, t))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .sum();
+    }
+
+    // Coupled case: the score is the score of the maximum-requirement free
+    // declaration (the same witness the AI completion constructs), so score and
+    // witness never disagree.
+    best_free_declaration(constraints, state).1
+}
+
+/// CR 508.1c/d: the maximum-requirement FREE declaration (witness) under all hard
+/// caps + CombatAlone, plus its score. Shared by the AI completion witness and
+/// `max_no_payment`'s coupled path so the score and the constructed declaration
+/// always agree.
+///
+/// Decision 1 (PLAN-v3): a memoized, dominance-pruned dynamic program — complete,
+/// not a heuristic or capped search. Declarations are partitioned by attacker
+/// count (0 / 1 / ≥2); the maximum over the three partitions is exact:
+///
+/// - **Empty** (0 attackers): score 0 — the baseline `best` seed.
+/// - **Single** (exactly 1): a direct sweep over each eligible candidate × free
+///   target, honoring caps. `MustBeSole` creatures are allowed here (this is the
+///   only declaration shape in which they may attack); `NeedsCompanion` creatures
+///   are excluded (they cannot attack alone). O(N × targets).
+/// - **≥2** (`dp` below): a resource-constrained DP over candidates EXCLUDING
+///   `MustBeSole` (they can only be sole). `NeedsCompanion` creatures are included
+///   because any ≥2-attacker terminal satisfies "can't attack alone". Because a
+///   requirement names exactly one creature and each creature attacks exactly one
+///   target, a declaration's score is separable (`Σ score_single`), so the only
+///   inter-creature coupling is the caps + the ≥2 gate. DP state is
+///   `(candidate index, attackers_used clamped to the global cap, per-capped-
+///   defender counts)`; memoized on that tuple with the max-scoring suffix kept
+///   (dominance pruning). This collapses the previously exponential
+///   coupling-static-with-no-cap case (e.g. goaded go-wide board + one
+///   `NeedsCompanion` creature) to a polynomial state space.
+///
+/// Deterministic: candidates ascend by `ObjectId`, targets by `AttackTarget`
+/// `Ord`; ties break to fewer attackers, then to the lexicographically smaller
+/// `(ObjectId, AttackTarget)` sequence, at every comparison.
+/// A concrete attacker declaration: each chosen attacker paired with its target.
+type AttackAssignment = Vec<(ObjectId, AttackTarget)>;
+
+/// Memo table for the CR 508.1d scenario-3 DP (`dp_best_suffix`): keyed by
+/// `(candidate index, attackers-used clamped, per-capped-defender counts)`,
+/// storing the best FREE suffix (`None` when no valid ≥2-attacker terminal is
+/// reachable from that state).
+type DpSuffixMemo = HashMap<(usize, u32, Vec<u32>), Option<AttackAssignment>>;
+
+fn best_free_declaration(
+    constraints: &AttackDeclarationConstraints,
+    state: &GameState,
+) -> (AttackAssignment, u32) {
+    let free: Vec<(ObjectId, Vec<AttackTarget>)> = constraints
+        .candidates
+        .iter()
+        .map(|&cid| (cid, constraints.free_targets(state, cid)))
+        .collect();
+
+    // Scenario 1: the empty declaration (score 0) is the baseline.
+    let mut best: (Vec<(ObjectId, AttackTarget)>, u32) = (Vec::new(), 0);
+
+    // Scenario 2: exactly one attacker. `MustBeSole` allowed; `NeedsCompanion`
+    // excluded (cannot attack alone). Caps are trivial for a single attacker but
+    // still enforced (a `0` cap forbids attacking that defender at all).
+    for (cid, targets) in &free {
+        if constraints.needs_companion.contains(cid) {
+            continue;
+        }
+        if constraints.global_cap == Some(0) {
+            continue;
+        }
+        for &t in targets {
+            if let AttackTarget::Player(pid) = t {
+                if constraints
+                    .per_defender_caps
+                    .iter()
+                    .any(|(p, cap)| *p == pid && *cap == 0)
+                {
+                    continue;
+                }
+            }
+            consider_declaration(constraints, &mut best, vec![(*cid, t)]);
+        }
+    }
+
+    // Scenario 3: ≥2 attackers, memoized DP over non-`MustBeSole` candidates.
+    let dp_free: Vec<(ObjectId, Vec<AttackTarget>)> = free
+        .iter()
+        .filter(|(cid, _)| !constraints.must_be_sole.contains(cid))
+        .cloned()
+        .collect();
+    // `clamp` bounds the tracked attacker count. When a global cap exists it must
+    // be ≥2 for a ≥2-attacker declaration to be feasible; otherwise only the ">=2"
+    // terminal gate matters, so clamping at 2 keeps the state space tiny (the
+    // pathological no-cap coupling case becomes O(N)).
+    let clamp = match constraints.global_cap {
+        Some(g) if g < 2 => None,
+        Some(g) => Some(g),
+        None => Some(2),
+    };
+    if let Some(clamp) = clamp {
+        let capped: Vec<(PlayerId, u32)> = constraints.per_defender_caps.clone();
+        let mut memo: DpSuffixMemo = HashMap::new();
+        if let Some(decl) = dp_best_suffix(
+            constraints,
+            &dp_free,
+            &capped,
+            constraints.global_cap,
+            clamp,
+            0,
+            0,
+            vec![0; capped.len()],
+            &mut memo,
+        ) {
+            consider_declaration(constraints, &mut best, decl);
+        }
+    }
+
+    best
+}
+
+/// Replace `best` with `decl` when `decl` is strictly better under the
+/// deterministic order: higher score, then fewer attackers, then the
+/// lexicographically smaller `(ObjectId, AttackTarget)` sequence.
+fn consider_declaration(
+    constraints: &AttackDeclarationConstraints,
+    best: &mut (AttackAssignment, u32),
+    decl: AttackAssignment,
+) {
+    let score = score_declaration(constraints, &decl);
+    let better = score > best.1
+        || (score == best.1
+            && (decl.len() < best.0.len() || (decl.len() == best.0.len() && decl < best.0)));
+    if better {
+        *best = (decl, score);
+    }
+}
+
+/// Decision 1 scenario-3 DP: the best (max-score, then fewest attackers, then
+/// lexicographically smallest) FREE suffix over `dp_free[idx..]` given that
+/// `used` attackers (clamped) and `defender_counts` have already been committed by
+/// the prefix. Returns `None` when no completion reaches a valid ≥2-attacker
+/// terminal. Memoized on `(idx, used, defender_counts)` so each reachable resource
+/// vector is solved once (dominance pruning). Score is separable, so the suffix
+/// value is independent of how the prefix reached `(used, defender_counts)`.
+#[allow(clippy::too_many_arguments)]
+fn dp_best_suffix(
+    constraints: &AttackDeclarationConstraints,
+    dp_free: &[(ObjectId, Vec<AttackTarget>)],
+    capped: &[(PlayerId, u32)],
+    global_cap: Option<u32>,
+    clamp: u32,
+    idx: usize,
+    used: u32,
+    defender_counts: Vec<u32>,
+    memo: &mut DpSuffixMemo,
+) -> Option<AttackAssignment> {
+    if idx == dp_free.len() {
+        // Valid terminal iff the whole declaration has ≥2 attackers.
+        return (used >= 2).then(Vec::new);
+    }
+    let key = (idx, used, defender_counts.clone());
+    if let Some(cached) = memo.get(&key) {
+        return cached.clone();
+    }
+
+    let mut best_suffix: Option<AttackAssignment> = None;
+
+    // Option A: this candidate does not attack.
+    if let Some(sub) = dp_best_suffix(
+        constraints,
+        dp_free,
+        capped,
+        global_cap,
+        clamp,
+        idx + 1,
+        used,
+        defender_counts.clone(),
+        memo,
+    ) {
+        consider_suffix(constraints, &mut best_suffix, sub);
+    }
+
+    // Option B: this candidate attacks each cap-respecting free target.
+    let (cid, targets) = &dp_free[idx];
+    for &t in targets {
+        // CR 508.1c: global cap (enforced only when one exists; no cap ⇒ `used`
+        // is clamped at 2 and never gates).
+        if let Some(g) = global_cap {
+            if used >= g {
+                continue;
+            }
+        }
+        let mut new_counts = defender_counts.clone();
+        if let AttackTarget::Player(pid) = t {
+            if let Some(pos) = capped.iter().position(|(p, _)| *p == pid) {
+                if new_counts[pos] >= capped[pos].1 {
+                    continue;
+                }
+                new_counts[pos] += 1;
+            }
+        }
+        let new_used = (used + 1).min(clamp);
+        if let Some(mut sub) = dp_best_suffix(
+            constraints,
+            dp_free,
+            capped,
+            global_cap,
+            clamp,
+            idx + 1,
+            new_used,
+            new_counts,
+            memo,
+        ) {
+            let mut cand = Vec::with_capacity(sub.len() + 1);
+            cand.push((*cid, t));
+            cand.append(&mut sub);
+            consider_suffix(constraints, &mut best_suffix, cand);
+        }
+    }
+
+    memo.insert(key, best_suffix.clone());
+    best_suffix
+}
+
+/// Keep the better of `*best` and `cand` for the scenario-3 DP suffix comparison:
+/// higher score, then fewer attackers, then the lexicographically smaller
+/// `(ObjectId, AttackTarget)` sequence. Suffix scores are comparable directly
+/// because scoring is separable (the shared prefix contributes equally).
+fn consider_suffix(
+    constraints: &AttackDeclarationConstraints,
+    best: &mut Option<AttackAssignment>,
+    cand: AttackAssignment,
+) {
+    let replace = match best {
+        None => true,
+        Some(b) => {
+            let sc = score_declaration(constraints, &cand);
+            let sb = score_declaration(constraints, b);
+            sc > sb || (sc == sb && (cand.len() < b.len() || (cand.len() == b.len() && cand < *b)))
+        }
+    };
+    if replace {
+        *best = Some(cand);
+    }
+}
+
+/// CR 508.1d: engine-owned AI attacker-declaration completion. Returns the AI's
+/// heuristic proposal UNCHANGED when it is hard-legal, meets the maximum
+/// requirement score, and incurs no tax; otherwise returns the deterministic
+/// tax-free maximum witness (`best_free_declaration`). Because the witness is
+/// tax-free by construction, the completed declaration NEVER opens a
+/// `CombatTaxPayment` prompt, so a tax-decline re-entry terminates (Decision 3 —
+/// no repeat-proposal loop, no policy state in serialized rules state). This is
+/// the single AI legality authority — it does not create a second validator.
+pub fn complete_attacker_proposal(
+    state: &GameState,
+    proposed_attacks: &[(ObjectId, AttackTarget)],
+    proposed_bands: &[Vec<ObjectId>],
+) -> crate::types::actions::GameAction {
+    let constraints = AttackDeclarationConstraints::build(state);
+    let required = max_no_payment(&constraints, state);
+    complete_one(
+        state,
+        proposed_attacks,
+        proposed_bands,
+        &constraints,
+        required,
+        &mut None,
+    )
+}
+
+/// Batch form of [`complete_attacker_proposal`]: completes every proposal in one
+/// generation pass against a SINGLE constraints model, a single `max_no_payment`
+/// bar, and a single lazily-computed tax-free witness — all invariant across
+/// proposals because `state` is unchanged. The AI candidate generator
+/// (`ai_support::candidates::attacker_actions`) enumerates many proposals per
+/// prompt, so this avoids rebuilding the model + re-running the CR 508.1d solver
+/// once per proposal (the previous per-proposal `complete_attacker_proposal` loop).
+/// Proposals never carry bands here.
+pub fn complete_attacker_proposals(
+    state: &GameState,
+    proposals: &[Vec<(ObjectId, AttackTarget)>],
+) -> Vec<crate::types::actions::GameAction> {
+    let constraints = AttackDeclarationConstraints::build(state);
+    let required = max_no_payment(&constraints, state);
+    let mut witness_cache: Option<AttackAssignment> = None;
+    proposals
+        .iter()
+        .map(|proposal| {
+            complete_one(
+                state,
+                proposal,
+                &[],
+                &constraints,
+                required,
+                &mut witness_cache,
+            )
+        })
+        .collect()
+}
+
+/// Shared per-proposal completion against a prebuilt model + `required` bar.
+/// Returns the proposal unchanged when it is hard-legal, meets the maximum
+/// requirement score, and is tax-free; otherwise returns the deterministic
+/// tax-free maximum witness. The witness is identical for every proposal in a
+/// batch, so it is computed at most once and cached in `witness_cache`.
+fn complete_one(
+    state: &GameState,
+    proposed_attacks: &[(ObjectId, AttackTarget)],
+    proposed_bands: &[Vec<ObjectId>],
+    constraints: &AttackDeclarationConstraints,
+    required: u32,
+    witness_cache: &mut Option<AttackAssignment>,
+) -> crate::types::actions::GameAction {
+    let proposal_legal = validate_declaration_core(
+        state,
+        proposed_attacks,
+        proposed_bands,
+        constraints,
+        required,
+    )
+    .is_ok();
+    let proposal_score = score_declaration(constraints, proposed_attacks);
+    let proposal_taxed = proposed_attacks
+        .iter()
+        .any(|(c, t)| attack_incurs_tax(state, *c, *t));
+    if proposal_legal && proposal_score >= required && !proposal_taxed {
+        return crate::types::actions::GameAction::DeclareAttackers {
+            attacks: proposed_attacks.to_vec(),
+            bands: proposed_bands.to_vec(),
+        };
+    }
+    let witness = witness_cache.get_or_insert_with(|| best_free_declaration(constraints, state).0);
+    crate::types::actions::GameAction::DeclareAttackers {
+        attacks: witness.clone(),
+        bands: vec![],
+    }
+}
+
+/// CR 508.1a–e: strict human-legality authority for a declaration. Pure (reads
+/// state only). Runs all HARD restriction checks (creature-level + per-target +
+/// caps + bands + CombatAlone) then enforces the CR 508.1d maximum-requirement
+/// bar: `score(D) ≥ max_no_payment`. Voluntarily-taxed attacks are allowed; taxes
+/// never raise `max_no_payment`.
+pub fn validate_attack_declaration(
+    state: &GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
+) -> Result<(), String> {
+    // CR 508.1d: build the model + maximum-requirement bar once, then validate.
+    let constraints = AttackDeclarationConstraints::build(state);
+    let required = max_no_payment(&constraints, state);
+    validate_declaration_core(state, attacks, bands, &constraints, required)
+}
+
+/// CR 508.1a–e strict legality against a PREBUILT constraints model + `required`
+/// bar. Split out of [`validate_attack_declaration`] so a batch completion pass
+/// (`complete_attacker_proposals`) can validate many proposals without rebuilding
+/// the model or re-running the CR 508.1d solver per proposal.
+fn validate_declaration_core(
+    state: &GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
+    constraints: &AttackDeclarationConstraints,
+    required: u32,
+) -> Result<(), String> {
+    let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
+    validate_attackers(state, &attacker_ids)?;
+    // CR 508.1c + CR 508.5: defender-scoped attacker caps.
+    validate_per_defender_attacker_caps(state, attacks)?;
+    if !bands.is_empty() {
+        validate_attack_band_declarations(state, attacks, bands)?;
+    }
+
+    // CR 604.1: hoist restriction gates once.
+    let gates = CombatStaticGates::compute(state);
+    let active_team = active_attacking_team(state);
+
+    // CR 508.1b/c/d: per-target hard restrictions (target validity + scoped
+    // CantAttack + AttackOnlyNeighbor + temporary prohibition), via the single
+    // per-pairing authority shared with the map builder.
+    for (attacker_id, target) in attacks {
+        if !attacker_can_attack_target(state, *attacker_id, *target, &gates, &active_team) {
+            return Err(format!(
+                "{attacker_id:?} can't attack {target:?} (CR 508.1c/d attack restriction)"
+            ));
+        }
+    }
+
+    // CR 508.1d: maximum-requirement bar. This single comparison replaces the old
+    // per-creature MustAttack loop, the goad-redirect loop, and the universal
+    // MustAttackPlayer loop — correctly permitting a maximum-score declaration even
+    // when individual requirements are mutually incompatible.
+    let score = score_declaration(constraints, attacks);
+    if score < required {
+        return Err(format!(
+            "Declaration obeys {score} attack requirement(s) but {required} are obtainable without paying a cost (CR 508.1d)"
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn declare_attackers_with_bands(
     state: &mut GameState,
     attacks: &[(ObjectId, AttackTarget)],
     bands: &[Vec<ObjectId>],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
-    declare_attackers_with_bands_impl(state, attacks, bands, None, events)
+    validate_attack_declaration(state, attacks, bands)?;
+    commit_attack_declaration(state, attacks, bands, events);
+    Ok(())
 }
 
-/// CR 508.1d: Finalize a declaration after its player declined an "unless pay"
-/// attack cost. A declined creature is unavailable for requirement maximization,
-/// so its attack requirements do not make the reduced declaration illegal.
-pub(super) fn declare_attackers_with_bands_after_combat_tax_declined(
+/// CR 508.1f + CR 508.1k: commit a validated declaration — tap (vigilance-exempt),
+/// mark chosen creatures attacking, populate `CombatState`, emit `AttackersDeclared`,
+/// and record per-turn tracking. Pure mutation; NO validation (the caller has
+/// already run `validate_attack_declaration`, or resolved a snapshot).
+///
+/// CR 508.1f note: the tap is modeled here at commit time. On the tax path this is
+/// AFTER the CR 508.1i mana-ability window, which PRESERVES CURRENT SHIPPED
+/// BEHAVIOR (a known CR 508.1i self-mana simplification): deferring the tap past
+/// the mana-ability window lets an attacking creature with a mana ability tap
+/// ITSELF toward its own attack cost, which CR 508.1i forbids once the creature is
+/// tapped at 508.1f. This is NOT observationally equivalent to 508.1f-time tapping;
+/// fixing it is out of scope. Nothing between 508.1f and 508.1k receives priority,
+/// so the deviation is unobservable except through that self-mana edge case.
+pub(super) fn commit_attack_declaration(
     state: &mut GameState,
     attacks: &[(ObjectId, AttackTarget)],
     bands: &[Vec<ObjectId>],
-    declined_taxed_attackers: &HashSet<ObjectId>,
     events: &mut Vec<GameEvent>,
-) -> Result<(), String> {
-    declare_attackers_with_bands_impl(
-        state,
-        attacks,
-        bands,
-        Some(declined_taxed_attackers),
-        events,
-    )
-}
-
-fn declare_attackers_with_bands_impl(
-    state: &mut GameState,
-    attacks: &[(ObjectId, AttackTarget)],
-    bands: &[Vec<ObjectId>],
-    declined_taxed_attackers: Option<&HashSet<ObjectId>>,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), String> {
+) {
     let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
-    validate_attackers(state, &attacker_ids)?;
-    // CR 508.1c + CR 508.5: defender-scoped attacker caps ("...attack you each
-    // combat") need per-target defending players, which only the full `attacks`
-    // slice carries — enforce them here rather than in `validate_attackers`.
-    validate_per_defender_attacker_caps(state, attacks)?;
-    if !bands.is_empty() {
-        validate_attack_band_declarations(state, attacks, bands)?;
-    }
-    let attackable_players = attackable_player_targets(state);
-    // CR 604.1: hoist the combat-restriction existence gates once; every
-    // per-permanent / per-attacker static check below reuses them so each loop
-    // stays O(N) instead of O(N^2).
-    let gates = CombatStaticGates::compute(state);
-
-    // CR 508.1d / CR 701.15b: Creatures that must attack each combat if able.
-    // `creature_must_attack` is the single authority for the requirement +
-    // exemption logic; this loop only adds the "already declared?" check and
-    // the rejection error text.
-    for &obj_id in &state.battlefield {
-        // CR 508.1d: A player need not pay a cost just to satisfy an attack
-        // requirement. A creature removed after its tax was declined is therefore
-        // unavailable when maximizing requirements for this declaration.
-        if declined_taxed_attackers.is_some_and(|ids| ids.contains(&obj_id)) {
-            continue;
-        }
-        if !creature_must_attack_with_attackable_players_gated(
-            state,
-            obj_id,
-            &attackable_players,
-            &gates,
-        ) {
-            continue;
-        }
-        // Already declared as attacker — constraint satisfied
-        if attacker_ids.contains(&obj_id) {
-            continue;
-        }
-        // Creature could legally attack but wasn't declared.
-        // CR 701.15b: goad-specific error text; CR 508.1d otherwise.
-        if !goading_players_for_creature_gated(state, obj_id, gates.has_goad).is_empty() {
-            return Err(format!(
-                "{:?} is goaded and must attack this combat if able (CR 701.15b)",
-                obj_id
-            ));
-        }
-        return Err(format!(
-            "{:?} must attack this combat if able (CR 508.1d)",
-            obj_id
-        ));
-    }
-
-    // Validate attack targets. CR 805.10a: under the shared team turns
-    // option the active team's creatures attack the OTHER team as a group,
-    // so a target controlled by/protected by either active-team member
-    // (active player or teammate) is ineligible — not just the literal
-    // active player.
-    let active_team: Vec<PlayerId> = std::iter::once(state.active_player)
-        .chain(players::teammates(state, state.active_player))
-        .collect();
-    for (attacker_id, target) in attacks {
-        match target {
-            AttackTarget::Player(pid) => {
-                if !state.players.iter().any(|p| p.id == *pid)
-                    || state.eliminated_players.contains(pid)
-                    || active_team.contains(pid)
-                {
-                    return Err(format!("{:?} cannot attack player {:?}", attacker_id, pid));
-                }
-            }
-            AttackTarget::Planeswalker(pw_id) => {
-                let pw = state
-                    .objects
-                    .get(pw_id)
-                    .ok_or_else(|| format!("Planeswalker {:?} not found", pw_id))?;
-                if pw.zone != crate::types::zones::Zone::Battlefield
-                    || !pw
-                        .card_types
-                        .core_types
-                        .contains(&crate::types::card_type::CoreType::Planeswalker)
-                {
-                    return Err(format!(
-                        "{:?} is not a planeswalker on the battlefield",
-                        pw_id
-                    ));
-                }
-                // Can't attack your own (or, under team turns, your team's) planeswalker
-                if active_team.contains(&pw.controller) {
-                    return Err(format!("Cannot attack your own planeswalker {:?}", pw_id));
-                }
-            }
-            AttackTarget::Battle(battle_id) => {
-                // CR 310.5: Battles can be attacked.
-                let battle = state
-                    .objects
-                    .get(battle_id)
-                    .ok_or_else(|| format!("Battle {:?} not found", battle_id))?;
-                if battle.zone != crate::types::zones::Zone::Battlefield
-                    || !battle
-                        .card_types
-                        .core_types
-                        .contains(&crate::types::card_type::CoreType::Battle)
-                {
-                    return Err(format!(
-                        "{:?} is not a battle on the battlefield",
-                        battle_id
-                    ));
-                }
-                // CR 310.8b: A battle's protector can never attack it. Notably a
-                // Siege's controller CAN attack it if they are not the protector.
-                // Under team turns this extends to a teammate's protected battle.
-                if battle
-                    .protector()
-                    .is_some_and(|protector| active_team.contains(&protector))
-                {
-                    return Err(format!("Protector cannot attack battle {:?}", battle_id));
-                }
-            }
-        }
-    }
-
-    // CR 508.1d: Scoped remote CantAttack (Eriette — enchanted creatures can't
-    // attack you or planeswalkers you control).
-    for (attacker_id, target) in attacks {
-        if (gates.has_cant_attack
-            && crate::game::static_abilities::check_static_ability(
-                state,
-                StaticMode::CantAttack,
-                &crate::game::static_abilities::StaticCheckContext {
-                    target_id: Some(*attacker_id),
-                    attack_target: Some(*target),
-                    ..Default::default()
-                },
-            ))
-            || (gates.has_cant_attack_or_block
-                && crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CantAttackOrBlock,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(*attacker_id),
-                        attack_target: Some(*target),
-                        ..Default::default()
-                    },
-                ))
-        {
-            return Err(format!(
-                "{attacker_id:?} can't attack {target:?} (CR 508.1d attack restriction)"
-            ));
-        }
-    }
-
-    // CR 508.1c + CR 109.5 + CR 607.2d: The directional attack restriction
-    // (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric Tactician): "Each
-    // player may attack only the nearest opponent in the [last] chosen direction
-    // and planeswalkers controlled by that opponent." Each `AttackOnlyNeighbor`
-    // static resolves, per attacker, the neighbor in the source's live chosen
-    // direction and rejects any attack not aimed at that opponent or one of
-    // their planeswalkers. The restriction is global (affects EVERY player,
-    // CR 109.5 "each player"), so it is checked against every attacker regardless
-    // of who controls the source. A source with no chosen direction yet is inert
-    // (skipped). GAP-4: this deliberately does NOT reuse `TargetFilter::Neighbor`
-    // — the direction is a live chosen value read off the source, and the
-    // neighbor must be resolved per attacking player, so a static filter cannot
-    // express it.
-    if gates.has_attack_only_neighbor {
-        // CR 508.1c + CR 113.6: collect the functioning directional restrictors
-        // once (battlefield + command zone), rather than re-scanning every active
-        // static per attacker — O(A + S) instead of O(A × S).
-        let restrictors: Vec<_> = super::functioning_abilities::game_functioning_statics(state)
-            .filter(|(_, def)| matches!(def.mode, StaticMode::AttackOnlyNeighbor))
-            .collect();
-        for (attacker_id, target) in attacks {
-            let Some(attacker_controller) = state.objects.get(attacker_id).map(|o| o.controller)
-            else {
-                continue;
-            };
-            for &(source, _def) in &restrictors {
-                // CR 607.2d: no direction chosen yet — the restriction is inert.
-                let Some(dir) = source.chosen_direction() else {
-                    continue;
-                };
-                // CR 508.1c + CR 102.2: the legal target is the nearest OPPONENT
-                // in the chosen direction — skipping living teammates in team
-                // formats (2HG, CR 810), not merely the next seat — and
-                // planeswalkers that opponent controls.
-                let Some(nearest) =
-                    crate::game::players::nearest_opponent(state, attacker_controller, dir)
-                else {
-                    // No opponent in that direction (e.g. attacker is the sole
-                    // survivor) — no restriction target to enforce; inert.
-                    continue;
-                };
-                if !crate::game::restrictions::attack_target_matches_defended_scope(
-                    state,
-                    Some(target),
-                    &crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
-                    nearest,
-                    nearest,
-                ) {
-                    return Err(format!(
-                        "{attacker_id:?} can't attack {target:?} (CR 508.1c: may attack only the nearest opponent in the chosen direction and their planeswalkers)"
-                    ));
-                }
-            }
-        }
-    }
-
-    // CR 508.1c + CR 109.5: Player-scoped temporary attack prohibitions
-    // (`GameRestriction::ProhibitActivity { activity: Attack { defended } }` —
-    // Willie Lumpkin: "that player can't attack you or permanents you control
-    // during their next turn"). Each restriction defends a specific player (the
-    // grant's controller per CR 109.5) against the affected players. Reuse the
-    // SAME `attack_target_matches_defended_scope` authority static `CantAttack`
-    // uses, so both seams share one scope matcher.
-    for (attacker_id, target) in attacks {
-        let Some(attacker_controller) = state.objects.get(attacker_id).map(|o| o.controller) else {
-            continue;
-        };
-        for restriction in &state.restrictions {
-            let crate::types::ability::GameRestriction::ProhibitActivity {
-                source,
-                affected_players,
-                activity: crate::types::ability::ProhibitedActivity::Attack { defended },
-                ..
-            } = restriction
-            else {
-                continue;
-            };
-            // CR 109.5: the protected player ("you") is the grant's controller.
-            let Some(protected) = state.objects.get(source).map(|o| o.controller) else {
-                continue;
-            };
-            // CR 101.2: only the affected players are prohibited. Targeted scopes
-            // are resolved to `SpecificPlayer` by `add_restriction` before this
-            // gate ever runs.
-            let attacker_is_affected = match affected_players {
-                crate::types::ability::RestrictionPlayerScope::AllPlayers => true,
-                crate::types::ability::RestrictionPlayerScope::SpecificPlayer(p) => {
-                    *p == attacker_controller
-                }
-                crate::types::ability::RestrictionPlayerScope::OpponentsOfSourceController => {
-                    attacker_controller != protected
-                }
-                crate::types::ability::RestrictionPlayerScope::TargetedPlayer
-                | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
-                | crate::types::ability::RestrictionPlayerScope::DefendingPlayer
-                // CR 109.4 + CR 109.5: resolved to `SpecificPlayer` by
-                // `add_restriction` at creation time, so an unresolved scope here
-                // restricts no one.
-                | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetController
-                | crate::types::ability::RestrictionPlayerScope::ScopedPlayer => false,
-            };
-            if !attacker_is_affected {
-                continue;
-            }
-            // CR 508.5: the defended planeswalker/battle compares on controller,
-            // so pass `protected` as both source-controller and source-owner.
-            if crate::game::restrictions::attack_target_matches_defended_scope(
-                state,
-                Some(target),
-                defended,
-                protected,
-                protected,
-            ) {
-                return Err(format!(
-                    "{attacker_id:?} can't attack {target:?} (CR 508.1c player-scoped attack prohibition)"
-                ));
-            }
-        }
-    }
-
-    // CR 701.15b: a goaded creature must attack a player other than the goading
-    // player *if able*. "Able" is measured against the players this creature
-    // could legally be declared attacking: `get_valid_attack_targets` already
-    // applies CR 506.2/506.3 plus the exclusions for the active player,
-    // eliminated players, teammates, phased-out players, and players with
-    // protection from everything. A non-goading player who is not a legal attack
-    // target (e.g. a phased-out opponent or a teammate) does not make the
-    // creature able to attack elsewhere, so attacking a goading player stays
-    // legal. The previous check counted every non-eliminated player, wrongly
-    // forcing the creature off a goading player toward a target it could not
-    // actually attack.
-    for (attacker_id, target) in attacks {
-        if let AttackTarget::Player(defending_pid) = target {
-            let goading_players =
-                goading_players_for_creature_gated(state, *attacker_id, gates.has_goad);
-            if goading_players.is_empty() {
-                continue;
-            }
-            // Only enforce the redirect if a non-goading player is actually a
-            // legal attack target for this creature.
-            if goading_players.contains(defending_pid) {
-                let has_attackable_non_goading_target = attackable_players
-                    .iter()
-                    .any(|pid| !goading_players.contains(pid));
-                if has_attackable_non_goading_target {
-                    return Err(format!(
-                        "{:?} is goaded by {:?} and must attack a different player if able (CR 701.15b)",
-                        attacker_id, defending_pid
-                    ));
-                }
-            }
-        }
-    }
-
-    // CR 508.1b + CR 508.1d: MustAttackPlayer requires attacking the specified
-    // player directly when that player is a legal attack target. CR 508.5 maps
-    // planeswalker/battle attacks to a defending player for effects that ask for
-    // "defending player"; it does not make "attack a planeswalker that player
-    // controls" satisfy an effect that specifically says to attack that player.
-    for (attacker_id, target) in attacks {
-        let Some(obj) = state.objects.get(attacker_id) else {
-            continue;
-        };
-        for req_player in must_attack_players_for_creature(state, obj) {
-            // Only enforce when the creature can legally attack the required player.
-            if !attackable_players.contains(&req_player) {
-                continue;
-            }
-            let attacks_required_player =
-                matches!(target, AttackTarget::Player(pid) if *pid == req_player);
-            if !attacks_required_player {
-                return Err(format!(
-                    "{attacker_id:?} must attack {req_player:?} this combat if able (CR 508.1d)"
-                ));
-            }
-        }
-    }
-
     // CR 508.1f: Tap attackers. CR 508.1k: Creatures become attacking creatures.
     for &id in &attacker_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
@@ -3242,8 +3824,82 @@ fn declare_attackers_with_bands_impl(
     }
 
     super::restrictions::record_attackers_declared(state, attacker_count);
+}
 
-    Ok(())
+/// CR 508.1k + CR 400.7: commit a paused declaration from its `ObjectIncarnationRef`
+/// snapshot after the combat tax is accepted. Each proposed attacker/band member is
+/// resolved against the live object and kept ONLY if its incarnation still matches
+/// (CR 400.7: a creature that changed zones during the tax pause is a new object)
+/// AND it is still controlled by the attacking team (CR 508.1k). Requirements,
+/// restrictions, and taxes are NOT re-evaluated — the declaration was already
+/// validated before the pause.
+pub(super) fn commit_attack_declaration_from_snapshot(
+    state: &mut GameState,
+    snapshot_attacks: &[(
+        crate::types::identifiers::ObjectIncarnationRef,
+        AttackTarget,
+    )],
+    snapshot_bands: &[Vec<crate::types::identifiers::ObjectIncarnationRef>],
+    events: &mut Vec<GameEvent>,
+) -> Vec<(ObjectId, AttackTarget)> {
+    let active_team = active_attacking_team(state);
+    let resolves = |r: &crate::types::identifiers::ObjectIncarnationRef| -> bool {
+        state.objects.get(&r.object_id).is_some_and(|obj| {
+            obj.incarnation == r.incarnation && active_team.contains(&obj.controller)
+        })
+    };
+    let attacks: Vec<(ObjectId, AttackTarget)> = snapshot_attacks
+        .iter()
+        .filter(|(r, _)| resolves(r))
+        .map(|(r, t)| (r.object_id, *t))
+        .collect();
+    let bands: Vec<Vec<ObjectId>> = snapshot_bands
+        .iter()
+        .map(|band| {
+            band.iter()
+                .filter(|r| resolves(r))
+                .map(|r| r.object_id)
+                .collect::<Vec<_>>()
+        })
+        .filter(|band: &Vec<ObjectId>| {
+            // CR 702.22c: a band must retain at least one banding creature.
+            band.iter().any(|&id| has_banding(state, id))
+        })
+        .collect();
+    commit_attack_declaration(state, &attacks, &bands, events);
+    attacks
+}
+
+/// Snapshot `(ObjectId, AttackTarget)` attacks and `ObjectId` bands to
+/// incarnation-stamped refs for the combat-tax pause (CR 508.1k + CR 400.7). A
+/// proposed id no longer on the battlefield is dropped from the snapshot.
+pub(super) fn snapshot_attack_declaration(
+    state: &GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
+) -> (
+    Vec<(
+        crate::types::identifiers::ObjectIncarnationRef,
+        AttackTarget,
+    )>,
+    Vec<Vec<crate::types::identifiers::ObjectIncarnationRef>>,
+) {
+    use crate::types::identifiers::ObjectIncarnationRef;
+    let snap = |id: ObjectId| -> Option<ObjectIncarnationRef> {
+        state
+            .objects
+            .get(&id)
+            .map(ObjectIncarnationRef::from_object)
+    };
+    let snap_attacks = attacks
+        .iter()
+        .filter_map(|(id, t)| snap(*id).map(|r| (r, *t)))
+        .collect();
+    let snap_bands = bands
+        .iter()
+        .map(|band| band.iter().filter_map(|&id| snap(id)).collect())
+        .collect();
+    (snap_attacks, snap_bands)
 }
 
 /// Declare attackers without explicit band declarations.
@@ -3260,25 +3916,15 @@ pub fn declare_attackers(
 /// effects affecting it. This is the single authority for "who goaded this
 /// creature"; the AI candidate generator reuses it to build a legal forced
 /// attack assignment that avoids each goaded creature's goader.
-pub(crate) fn goading_players_for_creature(
-    state: &GameState,
-    creature_id: ObjectId,
-) -> HashSet<PlayerId> {
-    goading_players_for_creature_gated(
-        state,
-        creature_id,
-        static_kind_present(state, StaticModeKind::Goaded),
-    )
-}
-
-/// Loop-invariant-gated form of [`goading_players_for_creature`].
 ///
-/// CR 701.15b: with no functioning `Goaded` static, only the directly-goaded
-/// `goaded_by` set applies, so combat loops that have already hoisted the
-/// existence gate pass `has_goad_static = false` to skip the O(N) sweep. When
-/// `true`, the exact existing sweep runs unchanged. The gate is computed over
-/// `game_functioning_statics` (a superset of `battlefield_active_statics` for
-/// `Goaded`), so it never produces a false negative.
+/// Loop-invariant-gated: with no functioning `Goaded` static, only the
+/// directly-goaded `goaded_by` set applies, so combat loops that have already
+/// hoisted the existence gate pass `has_goad_static = false` to skip the O(N)
+/// sweep. When `true`, the exact existing sweep runs unchanged. The gate is
+/// computed over `game_functioning_statics` (a superset of
+/// `battlefield_active_statics` for `Goaded`), so it never produces a false
+/// negative. Callers that lack a hoisted gate compute it with
+/// `static_kind_present(state, StaticModeKind::Goaded)`.
 pub(crate) fn goading_players_for_creature_gated(
     state: &GameState,
     creature_id: ObjectId,
@@ -3454,50 +4100,13 @@ pub fn has_summoning_sickness(obj: &GameObject) -> bool {
 /// CR 508.1a / CR 302.6: Untapped creature controlled since turn started, without Defender.
 /// CR 702.26b: Phased-out creatures can't attack.
 pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
-    let active = state.active_player;
-    // CR 604.1: hoist the combat-restriction existence gates once before the
-    // per-permanent scan (collapses O(N^2) to O(N)).
-    let gates = CombatStaticGates::compute(state);
-
-    state
-        .battlefield_phased_in_ids()
-        .iter()
-        .filter_map(|id| {
-            let obj = state.objects.get(id)?;
-            if obj.controller == active
-                && obj.card_types.core_types.contains(&CoreType::Creature)
-                && !obj.tapped
-                && (!obj.has_keyword(&Keyword::Defender)
-                    || super::functioning_abilities::active_static_definitions(state, obj)
-                        .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                    || (gates.has_can_attack_with_defender
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::CanAttackWithDefender,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(*id),
-                                ..Default::default()
-                            },
-                        )))
-                // CR 508.1c: local + remote "can't attack" restrictions, via
-                // the single authority shared with display and enforcement. The
-                // `attack_defended.is_none()` scoping (a defender-scoped "can't
-                // attack player X" must NOT count) is preserved inside.
-                && !creature_cant_attack_gated(state, *id, &gates)
-                // CR 302.6: delegate to the single authority for summoning
-                // sickness — folds in Haste at query time without duplicating
-                // the flag/keyword logic here.
-                && !has_summoning_sickness(obj)
-                // CR 508.1c + CR 611.2c: additional-combat attacker restriction
-                // (Last Night Together / Bumi). No-op outside a restricted combat.
-                && passes_combat_attacker_restriction(state, *id)
-            {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .collect()
+    // CR 508.1a + CR 805.10a: the eligible-attacker set is the whole attacking
+    // team (active player ∪ teammates), not only the literal active player. All
+    // creature-level restriction checks live in the single `team_eligible_attacker_ids`
+    // authority, shared with the constraints model, so display / prompt / AI /
+    // strict validation agree. Returns ids ascending by `ObjectId`.
+    // CR 604.1: gates hoisted once inside the helper.
+    team_eligible_attacker_ids(state, &CombatStaticGates::compute(state))
 }
 
 /// CR 508.1c / CR 508.1d: Display-only attacker constraints for the active
@@ -3512,7 +4121,9 @@ pub fn attacker_constraints_for_active_player(
     state: &GameState,
     valid_attacker_ids: &[ObjectId],
 ) -> HashMap<ObjectId, CombatRequirement> {
-    let active = state.active_player;
+    // CR 805.10a: display constraints cover the whole attacking team (active
+    // player ∪ teammates), matching the team-aware eligible set.
+    let active_team = active_attacking_team(state);
     let gates = CombatStaticGates::compute(state);
     let attackable = attackable_player_targets(state);
     let valid: HashSet<ObjectId> = valid_attacker_ids.iter().copied().collect();
@@ -3522,7 +4133,9 @@ pub fn attacker_constraints_for_active_player(
         let Some(obj) = state.objects.get(&obj_id) else {
             continue;
         };
-        if obj.controller != active || !obj.card_types.core_types.contains(&CoreType::Creature) {
+        if !active_team.contains(&obj.controller)
+            || !obj.card_types.core_types.contains(&CoreType::Creature)
+        {
             continue;
         }
         // A creature under a "can't attack" restriction is never an eligible
@@ -3623,27 +4236,36 @@ pub(crate) fn ordered_valid_blocker_ids(
 /// are legal attackers/blockers. Re-deriving the payload mirrors the
 /// `turns.rs` declare-step arms so there is a single authority for the payload
 /// shape. A no-op for every non-declaration `WaitingFor` variant.
+/// CR 508.1a–d: build the `DeclareAttackers` waiting payload from the single live
+/// constraints model — the one authority for the eligible attacker ids, the
+/// aggregate compat targets, and the per-attacker legal map. `attacker_constraints`
+/// (display badges) reuse the same team-aware predicates. New prompts always emit
+/// `Some(map)` for the per-attacker map (never `None`, which is legacy-only).
+pub fn build_declare_attackers_waiting_for(
+    state: &GameState,
+) -> crate::types::game_state::WaitingFor {
+    let constraints = AttackDeclarationConstraints::build(state);
+    let valid_attacker_ids = constraints.candidates.clone();
+    let attacker_constraints = attacker_constraints_for_active_player(state, &valid_attacker_ids);
+    crate::types::game_state::WaitingFor::DeclareAttackers {
+        player: state.active_player,
+        valid_attacker_ids,
+        valid_attack_targets: constraints.aggregate_targets.clone(),
+        valid_attack_targets_by_attacker: Some(constraints.legal_targets.clone()),
+        attacker_constraints,
+    }
+}
+
 pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
     match &state.waiting_for {
         crate::types::game_state::WaitingFor::DeclareAttackers { .. } => {
-            // CR 508.1a: Mirror turns.rs:1369-1370 — rebuild both payload fields.
-            let valid_attacker_ids = get_valid_attacker_ids(state);
-            let valid_attack_targets = get_valid_attack_targets(state);
-            // CR 508.1c/d: recompute the display constraints from the same
-            // recomputed `valid_attacker_ids` (self-heal parity).
-            let attacker_constraints =
-                attacker_constraints_for_active_player(state, &valid_attacker_ids);
-            if let crate::types::game_state::WaitingFor::DeclareAttackers {
-                valid_attacker_ids: ids,
-                valid_attack_targets: targets,
-                attacker_constraints: constraints,
-                ..
-            } = &mut state.waiting_for
-            {
-                *ids = valid_attacker_ids;
-                *targets = valid_attack_targets;
-                *constraints = attacker_constraints;
-            }
+            // CR 508.1a: rebuild the entire payload — including the per-attacker
+            // legal map — from the single constraints authority. This is the
+            // in-place writer that `E0063` cannot flag (it mutates fields on an
+            // existing binding), so it must route through the shared builder or the
+            // new field would silently stay unpopulated.
+            let rebuilt = build_declare_attackers_waiting_for(state);
+            state.waiting_for = rebuilt;
         }
         crate::types::game_state::WaitingFor::DeclareBlockers { player, .. } => {
             // Copy `player` out before the immutable-borrowing queries below.
@@ -4579,6 +5201,290 @@ mod tests {
         id
     }
 
+    /// Build synthetic `AttackDeclarationConstraints` for the CR 508.1d solver
+    /// tests. `legal` pairs each candidate `ObjectId` with its legal `AttackTarget`
+    /// list; the remaining axes (caps, CombatAlone, requirements) are set directly.
+    #[allow(clippy::too_many_arguments)]
+    fn mk_constraints(
+        legal: Vec<(u64, Vec<AttackTarget>)>,
+        requirements: Vec<AttackRequirement>,
+        global_cap: Option<u32>,
+        per_defender_caps: Vec<(PlayerId, u32)>,
+        needs_companion: Vec<u64>,
+        must_be_sole: Vec<u64>,
+    ) -> AttackDeclarationConstraints {
+        let candidates: Vec<ObjectId> = legal.iter().map(|(id, _)| ObjectId(*id)).collect();
+        let mut legal_targets: HashMap<ObjectId, Vec<AttackTarget>> = HashMap::new();
+        let mut agg: std::collections::HashSet<AttackTarget> = std::collections::HashSet::new();
+        for (id, ts) in &legal {
+            for &t in ts {
+                agg.insert(t);
+            }
+            let mut sorted = ts.clone();
+            sorted.sort_unstable();
+            legal_targets.insert(ObjectId(*id), sorted);
+        }
+        let mut aggregate_targets: Vec<AttackTarget> = agg.into_iter().collect();
+        aggregate_targets.sort_unstable();
+        AttackDeclarationConstraints {
+            candidates,
+            legal_targets,
+            aggregate_targets,
+            requirements,
+            global_cap,
+            per_defender_caps,
+            needs_companion: needs_companion.into_iter().map(ObjectId).collect(),
+            must_be_sole: must_be_sole.into_iter().map(ObjectId).collect(),
+        }
+    }
+
+    /// Whether `attacks` obeys every HARD coupling constraint (caps + CombatAlone)
+    /// and every pair is a legal target — the brute-force feasibility oracle.
+    fn assignment_valid(
+        c: &AttackDeclarationConstraints,
+        attacks: &[(ObjectId, AttackTarget)],
+    ) -> bool {
+        let n = attacks.len() as u32;
+        if let Some(g) = c.global_cap {
+            if n > g {
+                return false;
+            }
+        }
+        for (pid, cap) in &c.per_defender_caps {
+            let cnt = attacks
+                .iter()
+                .filter(|(_, t)| matches!(t, AttackTarget::Player(p) if p == pid))
+                .count() as u32;
+            if cnt > *cap {
+                return false;
+            }
+        }
+        for (cid, t) in attacks {
+            if c.must_be_sole.contains(cid) && n != 1 {
+                return false;
+            }
+            if c.needs_companion.contains(cid) && n < 2 {
+                return false;
+            }
+            if !c.legal_targets.get(cid).is_some_and(|ts| ts.contains(t)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Exhaustive brute-force oracle for `max_no_payment`: enumerate every
+    /// assignment (each candidate either does not attack or attacks one of its
+    /// legal targets), keep the feasible ones, and return the maximum requirement
+    /// score. Exponential — used only on tiny synthetic instances as ground truth.
+    fn brute_force_max(c: &AttackDeclarationConstraints) -> u32 {
+        let opts: Vec<u64> = c
+            .candidates
+            .iter()
+            .map(|id| c.legal_targets.get(id).map_or(0, |t| t.len()) as u64 + 1)
+            .collect();
+        let total: u64 = opts.iter().product();
+        let mut best = 0u32;
+        for mut code in 0..total {
+            let mut attacks: Vec<(ObjectId, AttackTarget)> = Vec::new();
+            for (i, &id) in c.candidates.iter().enumerate() {
+                let o = opts[i];
+                let choice = (code % o) as usize;
+                code /= o;
+                if choice > 0 {
+                    attacks.push((id, c.legal_targets[&id][choice - 1]));
+                }
+            }
+            if assignment_valid(c, &attacks) {
+                best = best.max(score_declaration(c, &attacks));
+            }
+        }
+        best
+    }
+
+    /// CR 508.1d / Decision 1: the memoized, dominance-pruned DP
+    /// (`best_free_declaration`) must return the exact `max_no_payment` computed by
+    /// exhaustive brute force AND a witness that is itself feasible and achieves
+    /// that score. Covers every coupling axis (global cap, per-defender cap,
+    /// NeedsCompanion, MustBeSole), incompatible requirements, goad-avoidance, and
+    /// the wide-coupled case that the old backtracking blew up on. A default
+    /// two-player state carries no tax statics, so free_targets == legal_targets.
+    #[test]
+    fn best_free_declaration_matches_brute_force_oracle() {
+        use AttackRequirement::{Goad, MustAttackGeneric, MustAttackPlayer};
+        let state = GameState::new_two_player(42);
+        let p = |n: u8| AttackTarget::Player(PlayerId(n));
+        let pid = PlayerId;
+
+        let cases: Vec<(AttackDeclarationConstraints, &str)> = vec![
+            // Incompatible MustAttackPlayer: one creature, two lures → max 1.
+            (
+                mk_constraints(
+                    vec![(10, vec![p(1), p(2)])],
+                    vec![
+                        MustAttackPlayer {
+                            creature: ObjectId(10),
+                            player: pid(1),
+                        },
+                        MustAttackPlayer {
+                            creature: ObjectId(10),
+                            player: pid(2),
+                        },
+                    ],
+                    None,
+                    vec![],
+                    vec![],
+                    vec![],
+                ),
+                "incompatible must-attack-player",
+            ),
+            // Global cap 1 with two generic musts → only one obeyable.
+            (
+                mk_constraints(
+                    vec![(10, vec![p(1)]), (11, vec![p(1)])],
+                    vec![
+                        MustAttackGeneric {
+                            creature: ObjectId(10),
+                        },
+                        MustAttackGeneric {
+                            creature: ObjectId(11),
+                        },
+                    ],
+                    Some(1),
+                    vec![],
+                    vec![],
+                    vec![],
+                ),
+                "global cap 1",
+            ),
+            // Per-defender cap on P1 → both attack if split across P1/P2 → max 2.
+            (
+                mk_constraints(
+                    vec![(10, vec![p(1), p(2)]), (11, vec![p(1), p(2)])],
+                    vec![
+                        MustAttackGeneric {
+                            creature: ObjectId(10),
+                        },
+                        MustAttackGeneric {
+                            creature: ObjectId(11),
+                        },
+                    ],
+                    None,
+                    vec![(pid(1), 1)],
+                    vec![],
+                    vec![],
+                ),
+                "per-defender cap split",
+            ),
+            // NeedsCompanion coupled (the pathological wide case, kept small).
+            (
+                mk_constraints(
+                    vec![(10, vec![p(1)]), (11, vec![p(1)])],
+                    vec![
+                        MustAttackGeneric {
+                            creature: ObjectId(10),
+                        },
+                        MustAttackGeneric {
+                            creature: ObjectId(11),
+                        },
+                    ],
+                    None,
+                    vec![],
+                    vec![10],
+                    vec![],
+                ),
+                "needs-companion coupled",
+            ),
+            // MustBeSole must be excluded from any ≥2 declaration → max 1.
+            (
+                mk_constraints(
+                    vec![(10, vec![p(1)]), (11, vec![p(1)])],
+                    vec![
+                        MustAttackGeneric {
+                            creature: ObjectId(10),
+                        },
+                        MustAttackGeneric {
+                            creature: ObjectId(11),
+                        },
+                    ],
+                    None,
+                    vec![],
+                    vec![],
+                    vec![10],
+                ),
+                "must-be-sole excluded from multi",
+            ),
+            // Goad avoidance: attacking the non-goader obeys generic + goad → 2.
+            (
+                mk_constraints(
+                    vec![(10, vec![p(1), p(2)])],
+                    vec![
+                        MustAttackGeneric {
+                            creature: ObjectId(10),
+                        },
+                        Goad {
+                            creature: ObjectId(10),
+                            goader: pid(1),
+                        },
+                    ],
+                    None,
+                    vec![],
+                    vec![],
+                    vec![],
+                ),
+                "goad avoidance",
+            ),
+            // Cap + NeedsCompanion + goad together (coupled DP stress) → max 3.
+            (
+                mk_constraints(
+                    vec![
+                        (10, vec![p(1), p(2)]),
+                        (11, vec![p(1), p(2)]),
+                        (12, vec![p(1), p(2)]),
+                    ],
+                    vec![
+                        MustAttackGeneric {
+                            creature: ObjectId(10),
+                        },
+                        MustAttackGeneric {
+                            creature: ObjectId(11),
+                        },
+                        MustAttackGeneric {
+                            creature: ObjectId(12),
+                        },
+                        Goad {
+                            creature: ObjectId(10),
+                            goader: pid(1),
+                        },
+                    ],
+                    Some(2),
+                    vec![],
+                    vec![10],
+                    vec![],
+                ),
+                "cap + needs-companion + goad",
+            ),
+        ];
+
+        for (c, label) in &cases {
+            let (witness, dp_score) = best_free_declaration(c, &state);
+            let brute = brute_force_max(c);
+            assert_eq!(
+                dp_score, brute,
+                "DP score {dp_score} != brute-force {brute} for case '{label}'"
+            );
+            assert_eq!(
+                score_declaration(c, &witness),
+                dp_score,
+                "witness score disagrees with reported DP score for case '{label}'"
+            );
+            assert!(
+                assignment_valid(c, &witness),
+                "DP witness violates a hard constraint for case '{label}': {witness:?}"
+            );
+        }
+    }
+
     fn create_planeswalker(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
         let id = create_object(
             state,
@@ -5325,6 +6231,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: get_valid_attacker_ids(&state),
             valid_attack_targets: get_valid_attack_targets(&state),
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
         match &state.waiting_for {
@@ -5393,6 +6300,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: get_valid_attacker_ids(&state),
             valid_attack_targets: get_valid_attack_targets(&state),
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
         match &state.waiting_for {
@@ -6162,7 +7070,9 @@ mod tests {
             &mut events2,
         )
         .unwrap_err();
-        assert!(err.contains("cannot attack player"), "err={err}");
+        // CR 805.10a: attacking your own team is a hard target-validity restriction,
+        // now surfaced through the unified per-pairing restriction message.
+        assert!(err.contains("can't attack"), "err={err}");
     }
 
     #[test]
@@ -10159,14 +11069,15 @@ mod tests {
     fn must_attack_enforcement_omitted_creature_fails() {
         let mut state = setup_combat_phase();
         let must_attacker = create_must_attack_creature(&mut state, PlayerId(0));
-        // Declare no attackers — should fail because must_attacker can legally attack
+        // Declare no attackers — should fail because must_attacker can legally attack.
+        // New contract (CR 508.1d): the per-requirement validators are replaced by a
+        // single maximum-requirement bar, so the rejection now surfaces the unified
+        // "obeys N ... but M are obtainable" message rather than a per-requirement one.
         let result = declare_attackers(&mut state, &[], &mut vec![]);
         assert!(result.is_err());
         assert!(
-            result
-                .unwrap_err()
-                .contains("must attack this combat if able"),
-            "Error should mention must-attack requirement"
+            result.unwrap_err().contains("CR 508.1d"),
+            "Error should cite the CR 508.1d maximum-requirement bar"
         );
         // Suppress unused variable warning
         let _ = must_attacker;
@@ -10321,12 +11232,14 @@ mod tests {
     fn goad_enforcement_omitted_creature_fails() {
         let mut state = setup_combat_phase();
         let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
-        // Declare no attackers — goaded creature must attack if able.
+        // Declare no attackers — goaded creature must attack if able. New contract
+        // (CR 508.1d): the goad requirement is scored by the maximum-requirement bar,
+        // so the rejection cites CR 508.1d rather than a per-goad message.
         let result = declare_attackers(&mut state, &[], &mut vec![]);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("goaded"),
-            "Error should mention goaded"
+            result.unwrap_err().contains("CR 508.1d"),
+            "Error should cite the CR 508.1d maximum-requirement bar"
         );
         let _ = goaded;
     }
@@ -10366,9 +11279,12 @@ mod tests {
                 ),
             );
 
+        // New contract (CR 508.1d): both the omitted-attacker and attack-the-goader
+        // cases now fail the unified maximum-requirement bar (goad is a requirement,
+        // not a hard restriction), so both cite CR 508.1d.
         let omitted = declare_attackers(&mut state, &[], &mut vec![]);
         assert!(omitted.is_err());
-        assert!(omitted.unwrap_err().contains("goaded"));
+        assert!(omitted.unwrap_err().contains("CR 508.1d"));
 
         let attacks_goading_player = declare_attackers(
             &mut state,
@@ -10376,9 +11292,7 @@ mod tests {
             &mut vec![],
         );
         assert!(attacks_goading_player.is_err());
-        assert!(attacks_goading_player
-            .unwrap_err()
-            .contains("must attack a different player"));
+        assert!(attacks_goading_player.unwrap_err().contains("CR 508.1d"));
 
         let attacks_other_player = declare_attackers(
             &mut state,
@@ -10406,14 +11320,16 @@ mod tests {
                 player: PlayerId(2),
             }));
 
-        // Attacking the wrong player (P1) while P2 is a legal target: illegal.
+        // Attacking the wrong player (P1) while P2 is a legal target: illegal. New
+        // contract (CR 508.1d): MustAttackPlayer is scored by the maximum-requirement
+        // bar, so the rejection cites CR 508.1d.
         let wrong = declare_attackers(
             &mut state,
             &[(attacker, AttackTarget::Player(PlayerId(1)))],
             &mut vec![],
         );
         assert!(wrong.is_err());
-        assert!(wrong.unwrap_err().contains("must attack"));
+        assert!(wrong.unwrap_err().contains("CR 508.1d"));
 
         // Attacking the required player (P2): legal.
         let right = declare_attackers(
@@ -10513,9 +11429,11 @@ mod tests {
                 player: PlayerId(1),
             }));
 
+        // New contract (CR 508.1d): the MustAttackPlayer requirement is scored by the
+        // maximum-requirement bar, so an omitted required attacker cites CR 508.1d.
         let result = declare_attackers(&mut state, &[], &mut vec![]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must attack"));
+        assert!(result.unwrap_err().contains("CR 508.1d"));
     }
 
     #[test]
@@ -10538,8 +11456,11 @@ mod tests {
             &mut vec![],
         );
 
+        // New contract (CR 508.1d): attacking the required player's planeswalker does
+        // not obey "attack player P1 directly", so the declaration falls below the
+        // maximum-requirement bar and the rejection cites CR 508.1d.
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must attack"));
+        assert!(result.unwrap_err().contains("CR 508.1d"));
     }
 
     #[test]
@@ -10643,11 +11564,13 @@ mod tests {
             &[(goaded, AttackTarget::Player(PlayerId(1)))],
             &mut vec![],
         );
+        // New contract (CR 508.1d): the goad redirect is scored by the maximum-
+        // requirement bar (attacking non-goading P2 obeys the goad requirement,
+        // attacking goader P1 does not), so declaring against P1 falls below the bar
+        // and the rejection cites CR 508.1d.
         assert!(result.is_err());
         assert!(
-            result
-                .unwrap_err()
-                .contains("must attack a different player if able"),
+            result.unwrap_err().contains("CR 508.1d"),
             "an attackable non-goading opponent (P2) must still force the redirect"
         );
     }

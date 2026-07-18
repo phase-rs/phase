@@ -14279,6 +14279,18 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         }
     }
 
+    // CR 707.12 + CR 707.12a + CR 118.9: "Copy <exiled-card anaphor>, and you may
+    // cast the copy without paying its mana cost" (Mizzix's Mastery) — the copy and
+    // its coordinated free-cast tail are a single printed clause glued by a comma
+    // conjunction. Split it into the copy half (CopySpell) plus the shared cast
+    // half (CastFromZone) so `fold_cast_copy_of_card_defs` fuses them, exactly as
+    // the period-split two-sentence form (Mnemonic Deluge) already does. Must run
+    // before the generic compound/copy paths, which would otherwise swallow the
+    // cast tail.
+    if let Some(clause) = try_split_copy_cast_compound(text, ctx) {
+        return clause;
+    }
+
     // Compound shuffle subjects: "shuffle ~ and target creature ... into their owners' libraries"
     // Must come before try_split_targeted_compound because "shuffle" is the verb, not the subject.
     if let Some(clause) = try_parse_compound_shuffle(text) {
@@ -16512,6 +16524,99 @@ fn parse_bare_damage_continuation<'a>(
         },
         rem,
     ))
+}
+
+/// CR 707.12 + CR 707.12a + CR 118.9: "Copy `<exiled-card anaphor>`, and you may
+/// cast the copy without paying its mana cost" — Mizzix's Mastery's single-sentence
+/// copy-then-cast idiom. The comma conjunction glues the copy instruction to its
+/// coordinated free-cast tail; the chunk splitter keeps the whole thing as one
+/// clause because it sits inside the `for each … , ` iteration prefix (which
+/// suppresses internal splitting). Left alone, the copy path parses "copy it" and
+/// silently drops the cast tail.
+///
+/// This splits the clause into the two halves the period-split two-sentence form
+/// (Mnemonic Deluge: "Copy that card three times. You may cast the copies …")
+/// already produces as separate chunks: a `CopySpell` primary plus a `CastFromZone`
+/// sub-ability. The cast half is produced by the shared `try_parse_cast_effect`, so
+/// it is byte-identical to the two-sentence form's cast clause. Assembly promotes
+/// the sub-ability to a sibling def, and `fold_cast_copy_of_card_defs` (Case 2)
+/// fuses the `CopySpell{ParentTarget}` + `CastFromZone{ParentTarget, without_paying,
+/// Cast}` pair into the single `Effect::CastCopyOfCard` engine primitive. The parser
+/// never constructs `CastCopyOfCard` directly — the fold remains the one fusion
+/// authority. A bare "copy it" with no coordinated cast tail fails the connector
+/// match and falls through to the plain `CopySpell` path (Fork / Reverberate class).
+/// Copy head + coordinating connector for [`try_split_copy_cast_compound`].
+/// Composed one `alt` per axis: the copy-object exiled-card anaphor, then the
+/// comma/bare `and` conjunction (CR 608.2c) that coordinates the cast tail. The
+/// returned remainder is the lowercase cast half.
+fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("copy ").parse(input)?;
+    let (input, _) = alt((
+        tag("those exiled cards"),
+        tag("the copies"),
+        tag("those cards"),
+        tag("that card"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((tag(", and "), tag(" and "))).parse(input)?;
+    Ok((input, ()))
+}
+
+fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+
+    // Copy head + coordinating connector; the remainder is the cast half (lowercase).
+    let (tail_lower, ()) = parse_copy_cast_head_connector(&lower).ok()?;
+
+    // The cast half must reference the copy just made — never fuse an unrelated
+    // "cast <other>" conjunct.
+    if !scan_contains_phrase(tail_lower, "the copy")
+        && !scan_contains_phrase(tail_lower, "the copies")
+    {
+        return None;
+    }
+
+    // CR 118.9 + CR 707.12: delegate to the shared cast parser so the emitted
+    // `CastFromZone` is identical to the period-split two-sentence form's cast
+    // clause (which the fold already fuses). Only the free-cast-of-a-copy form
+    // qualifies for fusion.
+    let cast_effect = try_parse_cast_effect(tail_lower, ctx)?;
+    if !matches!(
+        &cast_effect,
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    // CR 707.10: the copy half. `ParentTarget` is required for the fold's Case 2 —
+    // it binds to the cards exiled by the preceding clause (the same shape the
+    // two-sentence "copy it" clause produces).
+    let copy_effect = Effect::CopySpell {
+        target: TargetFilter::ParentTarget,
+        retarget: CopyRetargetPermission::KeepOriginalTargets,
+        copier: None,
+        additional_modifications: Vec::new(),
+        starting_loyalty_from_casualty_sacrifice: false,
+    };
+
+    let sub_ability = AbilityDefinition::new(AbilityKind::Spell, cast_effect);
+    Some(ParsedEffectClause {
+        effect: copy_effect,
+        duration: None,
+        sub_ability: Some(Box::new(sub_ability)),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
 }
 
 fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {

@@ -7746,8 +7746,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     fn optional_you_may_accepts_mizzix_mastery_cast_copy() {
         let parsed = parse_named(
             "Exile target card that's an instant or sorcery from your graveyard. \
-             For each card exiled this way, copy it. You may cast the copy \
-             without paying its mana cost.",
+             For each card exiled this way, copy it, and you may cast the copy \
+             without paying its mana cost. Exile Mizzix's Mastery.",
             "Mizzix's Mastery",
             &["Sorcery"],
         );

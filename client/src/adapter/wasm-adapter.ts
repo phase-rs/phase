@@ -20,7 +20,12 @@ import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
 import type { AiCardDataMode } from "./card-db-subset";
-import { DEFAULT_AI_CARD_DATA_MODE, loadAiPoolCardDb } from "./card-db-subset";
+import {
+  applyAiPoolCardDbPlan,
+  DEFAULT_AI_CARD_DATA_MODE,
+  resolveAiPoolCardDbPlan,
+} from "./card-db-subset";
+import type { AiPoolCardDbPlan } from "./card-db-subset";
 
 /**
  * True on handheld browsers whose per-tab memory ceiling cannot hold the main
@@ -139,6 +144,10 @@ export class WasmAdapter implements EngineAdapter {
   // Multi-worker AI pool for VeryHard root parallelism (lazy-initialized)
   private aiPool: AiWorkerPool | null = null;
   private aiPoolFailed = false;
+  /** This game's card universe is unbounded (e.g. Momir): the pool was
+   *  disposed instead of loading the full corpus into every worker, and must
+   *  not be recreated until the next game (cleared in `resetGameState`). */
+  private aiPoolUnboundedGame = false;
 
   // How the AI worker pool loads its card database. `auto`/`subset` load an
   // engine-built game-scoped subset (escalating to full for unbounded games
@@ -208,9 +217,9 @@ export class WasmAdapter implements EngineAdapter {
         this.cardDbLoaded = true;
         // Also load into AI pool if it's already initialized. AI-pool workers
         // get the game-scoped subset (built on the main engine), not the full
-        // corpus, unless the mode is `full` or the universe is unbounded.
+        // corpus; an unbounded universe (e.g. Momir) disposes the pool instead.
         if (this.engine && this.aiPool && !this.aiPool.isCardDbLoaded) {
-          await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
+          await this.loadAiPoolGameDb(this.engine, this.aiPool);
         }
       } catch (err) {
         console.warn("Failed to load card database:", err);
@@ -410,13 +419,43 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
-/** Lazy AI pool init — only created on first VeryHard request. */
+/** Load an EXISTING pool's per-game card data, or dispose it when the game's
+   * universe is unbounded (e.g. Momir). Fanning the full ~93MB corpus onto
+   * every pool worker costs ~380MB of WASM linear memory per worker — measured
+   * at ~3GB total on a desktop 4-worker pool (user report, 2026-07-18). The
+   * single-worker fallback (main engine already holds the full DB) runs the
+   * same fixed-budget beam search; the pool only adds cross-seed
+   * rollout-variance averaging — the same tradeoff already accepted for
+   * memory-constrained handhelds. Pool *creation* resolves the plan before
+   * spawning workers (see `ensureAiPool`); this handles the cross-game case
+   * where a pool from a bounded game meets an unbounded one. Returns the
+   * surviving pool or null. */
+  private async loadAiPoolGameDb(
+    engine: EngineWorkerClient,
+    aiPool: AiWorkerPool,
+  ): Promise<AiWorkerPool | null> {
+    const plan = await resolveAiPoolCardDbPlan(this.aiCardDataMode, engine);
+    if (plan.kind === "unbounded") {
+      aiPool.dispose();
+      this.aiPool = null;
+      this.aiPoolUnboundedGame = true;
+      return null;
+    }
+    await applyAiPoolCardDbPlan(plan, aiPool);
+    return aiPool;
+  }
+
+  /** Lazy AI pool init — only created on first VeryHard request. */
   private async ensureAiPool(): Promise<AiWorkerPool | null> {
+    // Unbounded-universe game (e.g. Momir): the pool was already dropped for
+    // this game — don't recreate it just to escalate and drop it again on
+    // every AI decision.
+    if (this.aiPoolUnboundedGame) return null;
     if (this.aiPool) {
       // The pool's subset is game-scoped: after `resetGameState` invalidated it,
       // rebuild this game's subset (the pool instance is preserved across games).
       if (this.cardDbLoaded && this.engine && !this.aiPool.isCardDbLoaded) {
-        await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
+        return await this.loadAiPoolGameDb(this.engine, this.aiPool);
       }
       return this.aiPool;
     }
@@ -429,12 +468,22 @@ export class WasmAdapter implements EngineAdapter {
     // the pool only adds cross-seed rollout-variance averaging, not search depth.
     if (isMemoryConstrainedDevice()) return null;
     try {
+      // Resolve this game's card-data plan BEFORE paying to spawn workers:
+      // an unbounded-universe game (e.g. Momir) never creates a pool at all.
+      let plan: AiPoolCardDbPlan | null = null;
+      if (this.cardDbLoaded && this.engine) {
+        plan = await resolveAiPoolCardDbPlan(this.aiCardDataMode, this.engine);
+        if (plan.kind === "unbounded") {
+          this.aiPoolUnboundedGame = true;
+          return null;
+        }
+      }
       const cores = navigator.hardwareConcurrency ?? 0;
       const count = Math.max(2, Math.min(cores - 1, 4));
       this.aiPool = new AiWorkerPool(count);
       await this.aiPool.initialize();
-      if (this.cardDbLoaded && this.engine) {
-        await loadAiPoolCardDb(this.aiCardDataMode, this.engine, this.aiPool);
+      if (plan) {
+        await applyAiPoolCardDbPlan(plan, this.aiPool);
       }
       return this.aiPool;
     } catch {
@@ -566,6 +615,9 @@ export class WasmAdapter implements EngineAdapter {
     if (this.aiCardDataMode !== "full") {
       this.aiPool?.invalidateCardDb();
     }
+    // A pool dropped for an unbounded-universe game may be recreated for the
+    // next (bounded) game.
+    this.aiPoolUnboundedGame = false;
   }
 
   async estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
@@ -615,6 +667,7 @@ export class WasmAdapter implements EngineAdapter {
     this.aiPool?.dispose();
     this.aiPool = null;
     this.aiPoolFailed = false;
+    this.aiPoolUnboundedGame = false;
     this.fallback = null;
     this.initialized = false;
     this.initPromise = null;

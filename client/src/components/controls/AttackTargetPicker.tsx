@@ -1,15 +1,22 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 
-import type { AttackTarget, CombatRequirement, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
+import type { AttackTarget, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
-import { type AttackerStack, evenSplit, groupAttackers } from "../../utils/combat.ts";
+import {
+  type AttackerStack,
+  attackTargetKey,
+  attackTargetsForAttacker,
+  commonAttackTargets,
+  evenSplit,
+  groupAttackers,
+} from "../../utils/combat.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { PeekTab } from "../modal/DialogShell.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
@@ -19,18 +26,22 @@ import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 type AssignmentMap = Map<ObjectId, AttackTarget | null>;
 
 interface AttackTargetPickerProps {
-  validTargets: AttackTarget[];
-  selectedAttackers: ObjectId[];
   /**
-   * Engine-provided per-attacker combat requirements (`DeclareAttackers`
-   * `attacker_constraints`, keyed by stringified ObjectId). A
-   * `MustAttack{players}` with a non-empty `players` list is a
-   * `StaticMode::MustAttackPlayer` lure (CR 508.1d) that the engine enforces by
-   * requiring the attack be declared directly against one of those players; the
-   * picker mirrors that enforcement so the player never trips the invisible
-   * rejection. Optional/empty for 2-player games and generic goad.
+   * Aggregate compatibility target list (union of every attacker's legal
+   * targets). Used for display ordering and as the legacy fallback when the
+   * engine supplies no per-attacker map.
    */
-  attackerConstraints?: Record<string, CombatRequirement>;
+  validTargets: AttackTarget[];
+  /**
+   * Engine-authoritative per-attacker legal targets (`DeclareAttackers`
+   * `valid_attack_targets_by_attacker`, keyed by stringified ObjectId).
+   * `undefined` for a legacy payload → fall back to `validTargets`. When
+   * present, each attacker may only be aimed at its own bucket (CR 508.1c
+   * scoped restrictions are already baked into the map by the engine), so the
+   * picker is pure presentation over engine choices — no client legality.
+   */
+  validTargetsByAttacker?: Record<string, AttackTarget[]>;
+  selectedAttackers: ObjectId[];
   onConfirm: (attacks: [ObjectId, AttackTarget][]) => void;
   onCancel: () => void;
 }
@@ -59,8 +70,8 @@ interface AttackTargetPickerProps {
  */
 export function AttackTargetPicker({
   validTargets,
+  validTargetsByAttacker,
   selectedAttackers,
-  attackerConstraints,
   onConfirm,
   onCancel,
 }: AttackTargetPickerProps) {
@@ -82,26 +93,56 @@ export function AttackTargetPicker({
   const seatOrder = gameState?.seat_order;
   const teamBased = gameState?.format_config?.team_based ?? false;
 
-  const sortedTargets = useMemo(() => {
-    if (!seatOrder) return validTargets;
-    return [...validTargets].sort((a, b) => {
-      const aIdx = a.type === "Player" ? seatOrder.indexOf(a.data) : Infinity;
-      const bIdx = b.type === "Player" ? seatOrder.indexOf(b.data) : Infinity;
-      if (aIdx !== bIdx) return aIdx - bIdx;
-      // Total order: two non-Player targets both map to Infinity (as do any equal
-      // seat-index ties), so tie-break on the numeric id. Without this the
-      // comparator returns `Infinity - Infinity === NaN` for a pair of
-      // planeswalkers/battles, leaving their order — and thus which defender takes
-      // the front-loaded even-split remainder — dependent on JS sort stability.
-      return Number(a.data) - Number(b.data);
-    });
-  }, [validTargets, seatOrder]);
-
-  // Stacks of identical attackers, reusing the battlefield grouping block.
-  const stacks = useMemo(
-    () => groupAttackers(selectedAttackers, gameState),
-    [selectedAttackers, gameState],
+  const sortTargets = useCallback(
+    (targets: AttackTarget[]): AttackTarget[] => {
+      if (!seatOrder) return targets;
+      return [...targets].sort((a, b) => {
+        const aIdx = a.type === "Player" ? seatOrder.indexOf(a.data) : Infinity;
+        const bIdx = b.type === "Player" ? seatOrder.indexOf(b.data) : Infinity;
+        if (aIdx !== bIdx) return aIdx - bIdx;
+        // Total order: two non-Player targets both map to Infinity (as do any equal
+        // seat-index ties), so tie-break on the numeric id. Without this the
+        // comparator returns `Infinity - Infinity === NaN` for a pair of
+        // planeswalkers/battles, leaving their order — and thus which defender takes
+        // the front-loaded even-split remainder — dependent on JS sort stability.
+        return Number(a.data) - Number(b.data);
+      });
+    },
+    [seatOrder],
   );
+
+  // Per-attacker legal targets: engine-authoritative map, or the aggregate list
+  // for a legacy payload. Pure presentation over engine choices — no client
+  // legality is computed here.
+  const targetsFor = useCallback(
+    (id: ObjectId) => sortTargets(attackTargetsForAttacker(id, validTargetsByAttacker, validTargets)),
+    [sortTargets, validTargetsByAttacker, validTargets],
+  );
+
+  // "Attack All" offers only targets EVERY selected attacker may legally attack
+  // (the intersection of their engine-provided legal sets, CR 508.1c).
+  const attackAllTargets = useMemo(
+    () => sortTargets(commonAttackTargets(selectedAttackers, validTargetsByAttacker, validTargets)),
+    [sortTargets, selectedAttackers, validTargetsByAttacker, validTargets],
+  );
+
+  // Stacks of identical attackers, reusing the battlefield grouping block, then
+  // split so identically-named attackers with different legal-target sets are
+  // not treated as one interchangeable stack.
+  const stacks = useMemo(
+    () => groupAttackers(selectedAttackers, gameState, targetsFor),
+    [selectedAttackers, gameState, targetsFor],
+  );
+
+  // Distribute-mode columns: the union of legal targets across the selected
+  // attackers (a stack's row only exposes steppers for its own bucket).
+  const distributeColumns = useMemo(() => {
+    const seen = new Map<string, AttackTarget>();
+    for (const stack of stacks) {
+      for (const target of stack.targets) seen.set(attackTargetKey(target), target);
+    }
+    return sortTargets([...seen.values()]);
+  }, [stacks, sortTargets]);
 
   // The board state supplies each creature's current evaluated power. This is
   // intentionally only an unblocked, at-this-moment life estimate: blockers
@@ -122,26 +163,6 @@ export function AttackTargetPicker({
     () => selectedAttackers.reduce((n, id) => n + (assignments.get(id) == null ? 1 : 0), 0),
     [assignments, selectedAttackers],
   );
-
-  // CR 508.1d: the first distribute-mode attacker whose assigned target fails
-  // its MustAttackPlayer lure, or null when every constrained attacker is aimed
-  // at a required player. Gates the distribute Confirm so the display matches
-  // what the engine will accept.
-  const distributeMisaim = useMemo(
-    () => firstMisaimedAttacker(selectedAttackers, (id) => assignments.get(id) ?? null, attackerConstraints),
-    [selectedAttackers, assignments, attackerConstraints],
-  );
-
-  /** "{creature} must attack {player}" message for a mis-aimed lure. */
-  function mustAttackMessage(misaim: MisaimedAttacker): string {
-    const creature =
-      gameState?.objects[misaim.objectId]?.name ??
-      t("attackTargetPicker.creatureFallback", { id: misaim.objectId });
-    const player = misaim.players
-      .map((playerId) => getTargetLabel({ type: "Player", data: playerId }))
-      .join(", ");
-    return t("attackTargetPicker.mustAttackPlayer", { creature, player });
-  }
 
   function getTargetLabel(target: AttackTarget, showProjectedLife = false): string {
     if (target.type === "Player") {
@@ -194,9 +215,9 @@ export function AttackTargetPicker({
   }
 
   function handleAttackAll(target: AttackTarget) {
-    // Defensive: the button is disabled when a lured creature can't legally
-    // attack this target, but guard the dispatch too (CR 508.1d).
-    if (firstMisaimedAttacker(selectedAttackers, () => target, attackerConstraints) != null) return;
+    // `attackAllTargets` is already the intersection of every selected
+    // attacker's engine-provided legal set, so any offered target is legal for
+    // all of them (CR 508.1c). No client legality re-check.
     onConfirm(selectedAttackers.map((id) => [id, target]));
   }
 
@@ -234,22 +255,39 @@ export function AttackTargetPicker({
     });
   }
 
-  /** Spread one stack evenly across every target. */
+  /** Spread one stack evenly across its own legal targets. */
   function spreadStack(stack: AttackerStack) {
-    mutate((next) => spreadStackEvenly(next, stack, sortedTargets));
+    mutate((next) => spreadStackEvenly(next, stack, stack.targets));
   }
 
-  /** Spread every selected attacker evenly across every target. */
+  /** Spread every selected attacker evenly across the legal targets. When every
+   *  stack shares one legal set (the common case, incl. legacy payloads) this is
+   *  a single global even split across the shared columns; when legal sets differ
+   *  (CR 508.1c scoped restrictions) each stack is split only within its own
+   *  engine-provided bucket so no attacker lands on an illegal target. */
   function spreadAll() {
     mutate((next) => {
-      spreadAttackersEvenly(next, stacks.flatMap((stack) => stack.ids), sortedTargets);
+      const distinctSets = new Set(
+        stacks.map((s) => s.targets.map(attackTargetKey).sort().join("|")),
+      );
+      if (distinctSets.size <= 1 && distributeColumns.length > 0) {
+        const allIds = stacks.flatMap((s) => s.ids).sort((a, b) => a - b);
+        spreadAttackersEvenly(next, allIds, distributeColumns);
+      } else {
+        for (const stack of stacks) spreadAttackersEvenly(next, stack.ids, stack.targets);
+      }
     });
   }
 
-  /** Send every attacker of every stack to one target. */
+  /** Send every attacker that may legally attack `target` to it (stacks whose
+   *  engine-provided bucket excludes `target` are left untouched, CR 508.1c). */
   function allStacksToTarget(target: AttackTarget) {
+    const key = attackTargetKey(target);
     mutate((next) => {
-      for (const id of selectedAttackers) next.set(id, target);
+      for (const stack of stacks) {
+        if (!stack.targets.some((tt) => attackTargetKey(tt) === key)) continue;
+        for (const id of stack.ids) next.set(id, target);
+      }
     });
   }
 
@@ -273,9 +311,10 @@ export function AttackTargetPicker({
   }
 
   function handleDistributeConfirm() {
-    // The button is disabled while anything is unassigned or a lure is
-    // mis-aimed; guard here too so a stray call can't submit a rejected set.
-    if (unassignedTotal > 0 || distributeMisaim != null) return;
+    // The button is disabled while anything is unassigned; guard here too so a
+    // stray call can't submit an incomplete set. Target legality is the engine's
+    // job — every stepper only offered engine-provided targets (CR 508.1c).
+    if (unassignedTotal > 0) return;
     // The gate guarantees no nulls, but flatMap also makes the types sound.
     const attacks = selectedAttackers.flatMap((id): [ObjectId, AttackTarget][] => {
       const target = assignments.get(id);
@@ -350,39 +389,36 @@ export function AttackTargetPicker({
                 scrollbar unobtrusive. */}
             <div className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain thin-scrollbar pb-2 pt-4 ${sidePadding}`}>
               {mode === "all" ? (
-                /* Attack All mode: one button per target */
+                /* Attack All mode: one button per target every selected attacker
+                   can legally attack (the engine-provided intersection). */
                 <div className="flex flex-col gap-2">
-                  {sortedTargets.map((target) => {
-                    const color = getTargetSeatColor(target);
-                    // "Attack All" sends every selected creature here, so this
-                    // target is illegal if any of them is lured elsewhere.
-                    const blockedBy = firstMisaimedAttacker(selectedAttackers, () => target, attackerConstraints);
-                    return (
-                      <div key={attackTargetKey(target)} className="flex flex-col gap-0.5">
-                        <button
-                          onClick={() => handleAttackAll(target)}
-                          disabled={blockedBy != null}
-                          title={blockedBy ? mustAttackMessage(blockedBy) : undefined}
-                          className={gameButtonClass({ tone: "red", size: "md", disabled: blockedBy != null })}
-                        >
-                          <Trans
-                            t={t}
-                            i18nKey="attackTargetPicker.attackWith"
-                            count={selectedAttackers.length}
-                            values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
-                            components={{
-                              name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
-                            }}
-                          />
-                        </button>
-                        {blockedBy && (
-                          <p className="px-1 text-center text-[11px] font-medium text-rose-300">
-                            {mustAttackMessage(blockedBy)}
-                          </p>
-                        )}
-                      </div>
-                    );
-                  })}
+                  {attackAllTargets.length === 0 ? (
+                    <p className="px-1 py-4 text-center text-xs font-medium text-amber-300">
+                      {t("attackTargetPicker.noCommonTarget")}
+                    </p>
+                  ) : (
+                    attackAllTargets.map((target) => {
+                      const color = getTargetSeatColor(target);
+                      return (
+                        <div key={attackTargetKey(target)} className="flex flex-col gap-0.5">
+                          <button
+                            onClick={() => handleAttackAll(target)}
+                            className={gameButtonClass({ tone: "red", size: "md" })}
+                          >
+                            <Trans
+                              t={t}
+                              i18nKey="attackTargetPicker.attackWith"
+                              count={selectedAttackers.length}
+                              values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
+                              components={{
+                                name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
+                              }}
+                            />
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               ) : (
                 /* Distribute mode: per-target buckets with steppers + shortcuts */
@@ -397,8 +433,8 @@ export function AttackTargetPicker({
                     <div className="flex flex-wrap gap-1.5">
                       <button
                         onClick={spreadAll}
-                        disabled={sortedTargets.length === 0}
-                        className={gameButtonClass({ tone: "indigo", size: "xs", disabled: sortedTargets.length === 0 })}
+                        disabled={distributeColumns.length === 0}
+                        className={gameButtonClass({ tone: "indigo", size: "xs", disabled: distributeColumns.length === 0 })}
                       >
                         {t("attackTargetPicker.evenSplitAll")}
                       </button>
@@ -423,7 +459,7 @@ export function AttackTargetPicker({
                           <th className="px-2 py-1.5 text-center text-xs font-semibold text-gray-400">
                             {t("attackTargetPicker.unassigned")}
                           </th>
-                          {sortedTargets.map((target) => {
+                          {distributeColumns.map((target) => {
                             const color = getTargetSeatColor(target);
                             return (
                               <th key={attackTargetKey(target)} className="px-2 py-1.5 text-center align-top">
@@ -451,6 +487,7 @@ export function AttackTargetPicker({
                       <tbody>
                         {stacks.map((stack) => {
                           const unassigned = countUnassigned(stack);
+                          const legalKeys = new Set(stack.targets.map(attackTargetKey));
                           return (
                             <tr key={stack.key} className="border-t border-white/5">
                               <td className="sticky left-0 z-10 bg-gray-900 px-2 py-1.5">
@@ -459,7 +496,7 @@ export function AttackTargetPicker({
                                   <button
                                     type="button"
                                     onClick={() => spreadStack(stack)}
-                                    disabled={sortedTargets.length === 0}
+                                    disabled={stack.targets.length === 0}
                                     title={t("attackTargetPicker.spreadEvenly")}
                                     className="ml-auto shrink-0 rounded border border-gray-600 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 hover:border-gray-400 hover:bg-white/10 disabled:opacity-30"
                                   >
@@ -476,7 +513,17 @@ export function AttackTargetPicker({
                                   {unassigned}
                                 </span>
                               </td>
-                              {sortedTargets.map((target) => {
+                              {distributeColumns.map((target) => {
+                                // A stack whose engine-provided bucket excludes this
+                                // target gets an inert cell — the attacker can't be
+                                // aimed there (CR 508.1c).
+                                if (!legalKeys.has(attackTargetKey(target))) {
+                                  return (
+                                    <td key={attackTargetKey(target)} className="px-2 py-1.5 text-center text-gray-700">
+                                      —
+                                    </td>
+                                  );
+                                }
                                 const count = countOnTarget(stack, target);
                                 const label = getTargetLabel(target, true);
                                 return (
@@ -540,8 +587,8 @@ export function AttackTargetPicker({
                               <button
                                 type="button"
                                 onClick={() => spreadStack(stack)}
-                                disabled={sortedTargets.length === 0}
-                                className={`self-start ${gameButtonClass({ tone: "indigo", size: "xs", disabled: sortedTargets.length === 0 })}`}
+                                disabled={stack.targets.length === 0}
+                                className={`self-start ${gameButtonClass({ tone: "indigo", size: "xs", disabled: stack.targets.length === 0 })}`}
                               >
                                 {t("attackTargetPicker.spreadEvenly")}
                               </button>
@@ -555,7 +602,7 @@ export function AttackTargetPicker({
                                   {unassigned}
                                 </span>
                               </div>
-                              {sortedTargets.map((target) => {
+                              {stack.targets.map((target) => {
                                 const color = getTargetSeatColor(target);
                                 const count = countOnTarget(stack, target);
                                 const label = getTargetLabel(target, true);
@@ -594,17 +641,10 @@ export function AttackTargetPicker({
             <div className={`shrink-0 border-t border-white/10 pb-5 pt-3 ${sidePadding}`}>
               {mode === "distribute" && (
                 <>
-                  {/* Once everything is assigned, a mis-aimed lure is the only
-                      thing blocking Confirm — surface which creature and where. */}
-                  {unassignedTotal === 0 && distributeMisaim && (
-                    <p className="mb-2 text-center text-xs font-medium text-rose-300">
-                      {mustAttackMessage(distributeMisaim)}
-                    </p>
-                  )}
                   <button
                     onClick={handleDistributeConfirm}
-                    disabled={unassignedTotal > 0 || distributeMisaim != null}
-                    className={`w-full ${gameButtonClass({ tone: "emerald", size: "md", disabled: unassignedTotal > 0 || distributeMisaim != null })}`}
+                    disabled={unassignedTotal > 0}
+                    className={`w-full ${gameButtonClass({ tone: "emerald", size: "md", disabled: unassignedTotal > 0 })}`}
                   >
                     {unassignedTotal > 0
                       ? t("attackTargetPicker.assignRemaining", { count: unassignedTotal })
@@ -639,55 +679,6 @@ function objectCounterChips(obj: GameObject | undefined): Array<{ type: string; 
     .filter((entry): entry is [string, number] => entry[1] != null && entry[1] > 0 && entry[0] !== "loyalty")
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([type, count]) => ({ type, count }));
-}
-
-/** Stable key for an AttackTarget. */
-function attackTargetKey(target: AttackTarget): string {
-  return `${target.type}-${target.data}`;
-}
-
-/** A constrained attacker whose assigned target fails its MustAttackPlayer lure. */
-interface MisaimedAttacker {
-  objectId: ObjectId;
-  players: PlayerId[];
-}
-
-/**
- * Whether `target` satisfies a `MustAttack{players}` lure. Mirrors the engine's
- * declare-attackers validation exactly (CR 508.1d; `combat.rs`
- * `must_attack_players_for_creature` + `matches!(target, AttackTarget::Player(pid)
- * if *pid == req_player)`): the requirement is satisfied ONLY by attacking one of
- * the required players *directly*. Attacking a planeswalker/battle those players
- * control does NOT satisfy it, so a non-`Player` target never counts — display
- * must equal enforcement or the player hits the invisible engine rejection.
- */
-function attackTargetSatisfies(target: AttackTarget, requiredPlayers: PlayerId[]): boolean {
-  return target.type === "Player" && requiredPlayers.includes(target.data);
-}
-
-/**
- * First selected attacker under a specific-player MustAttack lure whose target
- * (as resolved by `targetFor`) violates it, or null when every constrained
- * attacker is aimed at a required player. `MustAttack{players: []}` (generic
- * must-attack / goad) and non-MustAttack constraints impose no target
- * restriction. A null `targetFor` result (still Unassigned) is skipped — that
- * case is already gated by the unassigned count.
- */
-function firstMisaimedAttacker(
-  attackerIds: ObjectId[],
-  targetFor: (id: ObjectId) => AttackTarget | null,
-  constraints: Record<string, CombatRequirement> | undefined,
-): MisaimedAttacker | null {
-  if (!constraints) return null;
-  for (const id of attackerIds) {
-    const requirement = constraints[id];
-    if (requirement?.kind !== "MustAttack" || requirement.players.length === 0) continue;
-    const target = targetFor(id);
-    if (target != null && !attackTargetSatisfies(target, requirement.players)) {
-      return { objectId: id, players: requirement.players };
-    }
-  }
-  return null;
 }
 
 function RestoreTab({ onClick }: { onClick: () => void }) {
