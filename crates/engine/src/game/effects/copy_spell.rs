@@ -1068,7 +1068,7 @@ mod tests {
             copy_obj
                 .trigger_definitions
                 .iter_all()
-                .any(|t| *t == sac_trigger),
+                .any(|t| t.definition == sac_trigger),
             "the copy must gain the granted end-step-sacrifice trigger (live store)"
         );
         assert!(

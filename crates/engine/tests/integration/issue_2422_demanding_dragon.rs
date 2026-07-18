@@ -120,9 +120,10 @@ fn demanding_dragon_parsed_etb_carries_unless_sacrifice_for_target_player() {
     let etb = runner.state().objects[&dragon]
         .trigger_definitions
         .iter_unchecked()
-        .find(|t| t.unless_pay.is_some())
+        .find(|t| t.definition.unless_pay.is_some())
         .expect("Demanding Dragon must have an ETB unless-pay trigger");
     let unless_pay = etb
+        .definition
         .unless_pay
         .as_ref()
         .expect("ETB must carry unless_pay (#2422)");

@@ -707,6 +707,7 @@ export type CastChoice = { type: "Cast" } | { type: "Decline" };
 export type AutoMayChoice = { type: "Accept" } | { type: "Decline" };
 
 export type MayTriggerOrigin =
+  | { type: "Definition"; definition_ref: TriggerDefinitionRef }
   | { type: "Printed"; trigger_index: number }
   | { type: "Keyword"; keyword: string };
 
@@ -990,6 +991,46 @@ export interface PrintedRef {
 export interface ObjectIncarnationRef {
   object_id: ObjectId;
   incarnation: number;
+}
+
+export interface CopyEffectInstanceRef {
+  continuous_effect_id: number;
+  modification_index: number;
+}
+
+export type TriggerDefinitionOccurrenceRef =
+  | { Printed: { base_set: number; printed_index: number } }
+  | {
+      CopiedValue: {
+        copy_effect: CopyEffectInstanceRef;
+        copied_slot: number;
+      };
+    }
+  | {
+      KeywordCompanion: {
+        grant_instance: number;
+        companion_index: number;
+      };
+    }
+  | {
+      CopyRetained: {
+        grant_instance: number;
+        source_base_set: number;
+        source_printed_index: number;
+      };
+    }
+  | { Granted: { grant_instance: number } }
+  | {
+      ExpandedGrant: {
+        grant_instance: number;
+        provider: TriggerDefinitionRef;
+        provider_output_index: number;
+      };
+    };
+
+export interface TriggerDefinitionRef {
+  source: ObjectIncarnationRef;
+  occurrence: TriggerDefinitionOccurrenceRef;
 }
 
 export interface ActiveLibrarySearch {

@@ -135,7 +135,6 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         replacement.fix_legacy_parse_time_consumed_flag();
     }
     obj.abilities = Arc::new(abilities.clone());
-    obj.trigger_definitions = card_face.triggers.clone().into();
     obj.replacement_definitions = replacements.clone().into();
     obj.static_definitions = card_face.static_abilities.clone().into();
     // CR 702.148a-b: Carry the cleave-cost ability set onto the object so the
@@ -151,7 +150,19 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_mana_cost = card_face.mana_cost.clone();
     obj.base_keywords = keywords;
     obj.base_abilities = Arc::new(abilities);
-    obj.base_trigger_definitions = Arc::new(card_face.triggers.clone());
+    let trigger_definitions = Arc::new(card_face.triggers.clone());
+    if !was_initialized {
+        obj.base_trigger_definitions = trigger_definitions;
+        obj.materialize_base_trigger_definitions();
+    } else if obj.base_trigger_definitions.as_ref() == card_face.triggers.as_slice() {
+        // Rehydrating the same face must preserve the recorded base-set
+        // generation; payload equality here is only an intentional-face
+        // restoration discriminator, never a live trigger identity decision.
+        obj.materialize_base_trigger_definitions();
+    } else {
+        obj.install_trigger_base_definitions(trigger_definitions)
+            .expect("trigger base-set generation must not overflow");
+    }
     obj.base_replacement_definitions = Arc::new(replacements);
     obj.base_static_definitions = Arc::new(card_face.static_abilities.clone());
     obj.base_color = color;
@@ -283,7 +294,6 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.mana_cost = back_face.mana_cost.clone();
     obj.keywords = back_face.keywords.clone();
     obj.abilities = Arc::new(back_face.abilities.clone());
-    obj.trigger_definitions = back_face.trigger_definitions.clone();
     obj.replacement_definitions = back_face.replacement_definitions.clone();
     obj.static_definitions = back_face.static_definitions.clone();
     obj.color = back_face.color.clone();
@@ -296,8 +306,9 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.base_mana_cost = back_face.mana_cost.clone();
     obj.base_keywords = back_face.keywords;
     obj.base_abilities = Arc::new(back_face.abilities);
-    obj.base_trigger_definitions =
-        Arc::new(back_face.trigger_definitions.iter_all().cloned().collect());
+    let trigger_definitions = Arc::new(back_face.trigger_definitions.iter_all().cloned().collect());
+    obj.install_trigger_base_definitions(trigger_definitions)
+        .expect("trigger base-set generation must not overflow");
     obj.base_replacement_definitions = Arc::new(
         back_face
             .replacement_definitions
@@ -556,7 +567,14 @@ pub(crate) fn ensure_keyword_triggers_for_copiable_values(values: &mut CopiableV
     }
 }
 
-pub fn apply_copiable_values(obj: &mut GameObject, values: &CopiableValues) {
+/// Apply the winning Layer-1 copy effect. The caller supplies the exact
+/// continuous-effect occurrence; a copied payload never imports the source
+/// object's live trigger occurrences.
+pub fn apply_copiable_values(
+    obj: &mut GameObject,
+    values: &CopiableValues,
+    copy_effect: crate::types::ability::CopyEffectInstanceRef,
+) {
     obj.name = values.name.clone();
     obj.mana_cost = values.mana_cost.clone();
     obj.color = values.color.clone();
@@ -567,9 +585,56 @@ pub fn apply_copiable_values(obj: &mut GameObject, values: &CopiableValues) {
     obj.keywords = values.keywords.clone();
     // All four ability sets are Arc-shared — refcount bumps, no deep copy.
     obj.abilities = Arc::clone(&values.abilities);
-    obj.trigger_definitions = Arc::clone(&values.trigger_definitions).into();
+    obj.trigger_definitions = values
+        .trigger_definitions
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(copied_slot, definition)| {
+            crate::types::ability::TriggerEntry::new(
+                crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
+                    copy_effect,
+                    copied_slot,
+                },
+                definition,
+            )
+        })
+        .collect();
     obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
     obj.static_definitions = Arc::clone(&values.static_definitions).into();
+}
+
+/// Materialize copiable values onto a newly constructed object (for example a
+/// duplicate conjure). This is a new base set, not an imaginary ongoing copy
+/// continuous effect, so final explicit and keyword-companion slots receive
+/// printed/base identities.
+pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableValues) {
+    obj.name = values.name.clone();
+    obj.mana_cost = values.mana_cost.clone();
+    obj.color = values.color.clone();
+    obj.card_types = values.card_types.clone();
+    obj.power = values.power;
+    obj.toughness = values.toughness;
+    obj.loyalty = values.loyalty;
+    obj.keywords = values.keywords.clone();
+    obj.abilities = Arc::clone(&values.abilities);
+    obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
+    obj.static_definitions = Arc::clone(&values.static_definitions).into();
+
+    obj.base_name = values.name.clone();
+    obj.base_mana_cost = values.mana_cost.clone();
+    obj.base_color = values.color.clone();
+    obj.base_card_types = values.card_types.clone();
+    obj.base_power = values.power;
+    obj.base_toughness = values.toughness;
+    obj.base_loyalty = values.loyalty;
+    obj.base_keywords = values.keywords.clone();
+    obj.base_abilities = Arc::clone(&values.abilities);
+    obj.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
+    obj.base_static_definitions = Arc::clone(&values.static_definitions);
+    obj.install_trigger_base_definitions(Arc::clone(&values.trigger_definitions))
+        .expect("trigger base-set generation must not overflow");
+    obj.base_characteristics_initialized = true;
 }
 
 pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
@@ -584,7 +649,11 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         keywords: obj.keywords.clone(),
         // BackFaceData still stores Vec<T>; deep-clone when snapshotting.
         abilities: (*obj.abilities).clone(),
-        trigger_definitions: obj.trigger_definitions.clone(),
+        trigger_definitions: obj
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.definition.clone())
+            .collect(),
         replacement_definitions: obj.replacement_definitions.clone(),
         // Snapshot: deref the Arc to satisfy `Definitions::from(Vec<T>)`.
         static_definitions: (*obj.base_static_definitions).clone().into(),
@@ -1839,6 +1908,164 @@ mod tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
     use crate::types::Phase;
+    use std::sync::Arc;
+
+    fn trigger_copiable_values() -> CopiableValues {
+        let mut source = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Trigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        source.base_trigger_definitions = Arc::new(vec![
+            TriggerDefinition::new(TriggerMode::Phase),
+            TriggerDefinition::new(TriggerMode::Attacks),
+        ]);
+        intrinsic_copiable_values(&source)
+    }
+
+    fn copy_recipient(id: u64) -> GameObject {
+        GameObject::new(
+            ObjectId(id),
+            CardId(id),
+            PlayerId(0),
+            "Copy Recipient".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    #[test]
+    fn unchanged_copy_across_recomputation_keeps_copy_slots() {
+        let values = trigger_copiable_values();
+        let copy_effect = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 17,
+            modification_index: 2,
+        };
+        let mut recipient = copy_recipient(2);
+
+        apply_copiable_values(&mut recipient, &values, copy_effect);
+        let first = recipient
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.occurrence.clone())
+            .collect::<Vec<_>>();
+        apply_copiable_values(&mut recipient, &values, copy_effect);
+        let second = recipient
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.occurrence.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(first, second);
+        assert!(matches!(
+            first.as_slice(),
+            [
+                crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
+                    copy_effect: first_effect,
+                    copied_slot: 0,
+                },
+                crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue {
+                    copy_effect: second_effect,
+                    copied_slot: 1,
+                },
+            ] if *first_effect == copy_effect && *second_effect == copy_effect
+        ));
+    }
+
+    #[test]
+    fn replacement_copy_and_copy_of_copy_receive_new_recipient_copy_refs() {
+        let values = trigger_copiable_values();
+        let first_copy = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 17,
+            modification_index: 2,
+        };
+        let replacement_copy = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 18,
+            modification_index: 2,
+        };
+        let mut recipient = copy_recipient(2);
+
+        apply_copiable_values(&mut recipient, &values, first_copy);
+        let first_occurrence = recipient.trigger_definitions[0].occurrence.clone();
+        apply_copiable_values(&mut recipient, &values, replacement_copy);
+        let replacement_occurrence = recipient.trigger_definitions[0].occurrence.clone();
+
+        assert_ne!(first_occurrence, replacement_occurrence);
+
+        let copy_of_copy_effect = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 19,
+            modification_index: 2,
+        };
+        let mut copy_of_copy = copy_recipient(3);
+        apply_copiable_values(&mut copy_of_copy, &values, copy_of_copy_effect);
+        assert_ne!(
+            copy_of_copy.trigger_definitions[0].occurrence, replacement_occurrence,
+            "copy-of-copy must be keyed by its own winning copy-effect occurrence"
+        );
+        assert_ne!(
+            recipient.trigger_definition_ref(&recipient.trigger_definitions[0]),
+            copy_of_copy.trigger_definition_ref(&copy_of_copy.trigger_definitions[0]),
+            "copy-of-copy must not import the source object's exact trigger ref"
+        );
+    }
+
+    #[test]
+    fn duplicate_base_install_uses_printed_slots_not_copy_effect_refs() {
+        let values = trigger_copiable_values();
+        let mut first_duplicate = copy_recipient(2);
+        let mut second_duplicate = copy_recipient(3);
+
+        install_copiable_values_as_base(&mut first_duplicate, &values);
+        install_copiable_values_as_base(&mut second_duplicate, &values);
+
+        for duplicate in [&first_duplicate, &second_duplicate] {
+            assert!(duplicate.trigger_definitions.iter_all().all(|entry| {
+                matches!(
+                    entry.occurrence,
+                    crate::types::ability::TriggerDefinitionOccurrenceRef::Printed { .. }
+                )
+            }));
+        }
+        assert_ne!(
+            first_duplicate.trigger_definition_ref(&first_duplicate.trigger_definitions[0]),
+            second_duplicate.trigger_definition_ref(&second_duplicate.trigger_definitions[0]),
+            "fresh duplicated objects retain distinct source incarnation authority"
+        );
+    }
+
+    #[test]
+    fn full_face_replacement_allocates_a_distinct_printed_trigger_base_set() {
+        let mut object = copy_recipient(4);
+        let mut first_face = test_face(
+            "First Face",
+            "first-face-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        first_face.triggers = vec![TriggerDefinition::new(TriggerMode::Phase)];
+        let mut replacement_face = test_face(
+            "Replacement Face",
+            "replacement-face-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        replacement_face.triggers = vec![TriggerDefinition::new(TriggerMode::Attacks)];
+
+        apply_card_face_to_object(&mut object, &first_face);
+        let first = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        apply_card_face_to_object(&mut object, &replacement_face);
+        let replacement = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_ne!(
+            first, replacement,
+            "a full face replacement must allocate a new printed trigger base-set generation"
+        );
+        assert!(matches!(
+            replacement.occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::Printed { .. }
+        ));
+    }
 
     fn test_face(
         name: &str,

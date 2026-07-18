@@ -97,8 +97,11 @@ fn exert_candidates(state: &GameState, attacks: &[(ObjectId, AttackTarget)]) -> 
         .filter(|attacker_id| {
             !state.exerted_this_turn.contains(attacker_id)
                 && state.objects.get(attacker_id).is_some_and(|obj| {
-                    super::functioning_abilities::active_trigger_definitions(state, obj)
-                        .any(|(_, def)| def.mode == crate::types::triggers::TriggerMode::Exerted)
+                    super::functioning_abilities::active_trigger_definitions(state, obj).any(
+                        |active| {
+                            active.definition.mode == crate::types::triggers::TriggerMode::Exerted
+                        },
+                    )
                 })
         })
         .collect()
@@ -114,7 +117,9 @@ fn enlist_candidates(state: &GameState, attacks: &[(ObjectId, AttackTarget)]) ->
         .flat_map(|(attacker_id, _)| {
             let count = state.objects.get(attacker_id).map_or(0, |obj| {
                 super::functioning_abilities::active_trigger_definitions(state, obj)
-                    .filter(|(_, def)| def.mode == crate::types::triggers::TriggerMode::Enlisted)
+                    .filter(|active| {
+                        active.definition.mode == crate::types::triggers::TriggerMode::Enlisted
+                    })
                     .count()
             });
             (0..count).map(|_| *attacker_id)

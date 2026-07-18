@@ -6,7 +6,7 @@ use crate::game::layers::{
     evaluate_condition_with_recipient, order_active_continuous_effects,
 };
 use crate::game::quantity::resolve_quantity;
-use crate::types::ability::{ContinuousModification, TargetFilter};
+use crate::types::ability::{ContinuousModification, TargetFilter, TriggerProducerOrigin};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -80,11 +80,30 @@ impl Drop for OffZoneRecursionGuard {
 }
 
 pub fn effective_off_zone_keywords(state: &GameState, object_id: ObjectId) -> Vec<Keyword> {
+    effective_off_zone_keyword_contributions(state, object_id)
+        .into_iter()
+        .map(|entry| entry.keyword)
+        .collect()
+}
+
+/// Off-zone keyword characteristics together with the exact Layer-6 producer
+/// that supplied each nonprinted keyword. Trigger collection reconciles these
+/// contributions into recipient-local `TriggerEntry`s before matching, rather
+/// than recreating payload-only keyword companions at read time.
+pub(crate) fn effective_off_zone_keyword_contributions(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Vec<OffZoneKeywordContribution> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
     if obj.zone == Zone::Battlefield {
-        return obj.keywords.clone();
+        return obj
+            .keywords
+            .iter()
+            .cloned()
+            .map(OffZoneKeywordContribution::printed)
+            .collect();
     }
 
     // CR 613.1f: re-entrant computation for the same object returns base
@@ -93,10 +112,20 @@ pub fn effective_off_zone_keywords(state: &GameState, object_id: ObjectId) -> Ve
     // panics/early returns), so the set can never be left poisoned.
     let _guard = OffZoneRecursionGuard::enter(object_id);
     if _guard.is_reentrant() {
-        return obj.base_keywords.clone();
+        return obj
+            .base_keywords
+            .iter()
+            .cloned()
+            .map(OffZoneKeywordContribution::printed)
+            .collect();
     }
 
-    let mut keywords = obj.base_keywords.clone();
+    let mut keywords = obj
+        .base_keywords
+        .iter()
+        .cloned()
+        .map(OffZoneKeywordContribution::printed)
+        .collect();
     let effects = collect_applicable_off_zone_keyword_effects(state, object_id);
     let ordered = order_active_continuous_effects(Layer::Ability, &effects, state);
 
@@ -125,7 +154,7 @@ pub fn off_zone_has_keyword_kind(
     effective_off_zone_keyword(state, object_id, kind).is_some()
 }
 
-fn collect_applicable_off_zone_keyword_effects(
+pub(crate) fn collect_applicable_off_zone_keyword_effects(
     state: &GameState,
     object_id: ObjectId,
 ) -> Vec<ActiveContinuousEffect> {
@@ -212,37 +241,81 @@ fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> boo
     )
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct OffZoneKeywordContribution {
+    pub(crate) keyword: Keyword,
+    pub(crate) origin: Option<TriggerProducerOrigin>,
+    /// Stable output position inside one exact producer. This distinguishes
+    /// multiple keywords granted by `AddChosenKeyword` without inspecting
+    /// their payloads.
+    pub(crate) producer_output_index: usize,
+}
+
+impl OffZoneKeywordContribution {
+    fn printed(keyword: Keyword) -> Self {
+        Self {
+            keyword,
+            origin: None,
+            producer_output_index: 0,
+        }
+    }
+
+    fn granted(
+        keyword: Keyword,
+        effect: &ActiveContinuousEffect,
+        producer_output_index: usize,
+    ) -> Self {
+        Self {
+            keyword,
+            origin: effect.trigger_producer_origin.clone(),
+            producer_output_index,
+        }
+    }
+}
+
 fn apply_keyword_modification(
     state: &GameState,
     object_id: ObjectId,
-    keywords: &mut Vec<Keyword>,
+    keywords: &mut Vec<OffZoneKeywordContribution>,
     effect: &ActiveContinuousEffect,
 ) {
     match &effect.modification {
-        ContinuousModification::AddKeyword { keyword } => upsert_keyword(keywords, keyword.clone()),
+        ContinuousModification::AddKeyword { keyword } => upsert_keyword_contribution(
+            keywords,
+            OffZoneKeywordContribution::granted(keyword.clone(), effect, 0),
+        ),
         // CR 702.143d + CR 702 (alt-cost off-zone family): grant a cost-bearing
         // keyword whose cost is DERIVED from the recipient's mana cost. The
         // "without foretell" clause is enforced per-recipient here: if the
         // recipient already carries a keyword of this family (printed or granted),
         // no-op so its existing cost is preserved (Singing Towers of Darillium).
         ContinuousModification::AddKeywordWithDerivedCost { kind, derivation } => {
-            if keywords.iter().any(|k| kind.matches_keyword(k)) {
+            if keywords
+                .iter()
+                .any(|entry| kind.matches_keyword(&entry.keyword))
+            {
                 return;
             }
             if let Some(recipient) = state.objects.get(&object_id) {
                 let derived = derivation.derive(&recipient.mana_cost);
-                upsert_keyword(keywords, kind.with_cost(derived));
+                upsert_keyword_contribution(
+                    keywords,
+                    OffZoneKeywordContribution::granted(kind.with_cost(derived), effect, 0),
+                );
             }
         }
         ContinuousModification::RemoveKeyword { keyword } => {
-            keywords.retain(|existing| {
-                std::mem::discriminant(existing) != std::mem::discriminant(keyword)
+            keywords.retain(|entry| {
+                std::mem::discriminant(&entry.keyword) != std::mem::discriminant(keyword)
             });
         }
         ContinuousModification::AddDynamicKeyword { kind, value } => {
             let dynamic_value = resolve_quantity(state, value, effect.controller, effect.source_id);
             let keyword = kind.with_value(dynamic_value.max(0) as u32);
-            upsert_keyword(keywords, keyword);
+            upsert_keyword_contribution(
+                keywords,
+                OffZoneKeywordContribution::granted(keyword, effect, 0),
+            );
         }
         ContinuousModification::RemoveAllAbilities => keywords.clear(),
         // CR 608.2d + CR 613.1f + CR 702.14: Strip the *exact* keyword
@@ -260,7 +333,7 @@ fn apply_keyword_modification(
                 .get(&effect.source_id)
                 .and_then(|src| src.chosen_keyword())
             {
-                keywords.retain(|existing| existing != kw);
+                keywords.retain(|entry| &entry.keyword != kw);
             }
         }
         // CR 608.2d + CR 613.1f: Grant EACH keyword chosen at resolution time —
@@ -275,32 +348,43 @@ fn apply_keyword_modification(
                 .get(&effect.source_id)
                 .map(|src| src.chosen_keywords().into_iter().cloned().collect())
                 .unwrap_or_default();
-            for kw in chosen {
-                upsert_keyword(keywords, kw);
+            for (producer_output_index, kw) in chosen.into_iter().enumerate() {
+                upsert_keyword_contribution(
+                    keywords,
+                    OffZoneKeywordContribution::granted(kw, effect, producer_output_index),
+                );
             }
         }
         _ => {}
     }
 }
 
-fn upsert_keyword(keywords: &mut Vec<Keyword>, keyword: Keyword) {
+#[cfg(test)]
+fn upsert_keyword(keywords: &mut Vec<OffZoneKeywordContribution>, keyword: Keyword) {
+    upsert_keyword_contribution(keywords, OffZoneKeywordContribution::printed(keyword));
+}
+
+fn upsert_keyword_contribution(
+    keywords: &mut Vec<OffZoneKeywordContribution>,
+    contribution: OffZoneKeywordContribution,
+) {
     // CR 702.164b: summing keywords (Toxic) accumulate — never overwrite; push so
     // every instance is counted by the aggregate reader (effective_total_toxic_value).
     // Gate on the INCOMING keyword's summing flag (not a kind comparison) so a
     // granted off-zone Toxic pushes rather than clobbering an unrelated printed
     // keyword that shares its (Unknown) kind. Non-summing keywords keep the
     // upsert-by-kind dedup below unchanged.
-    if !keyword.sums_across_instances() {
+    if !contribution.keyword.sums_across_instances() {
         if let Some(existing) = keywords
             .iter_mut()
-            .find(|existing| existing.kind() == keyword.kind())
+            .find(|existing| existing.keyword.kind() == contribution.keyword.kind())
         {
-            *existing = keyword;
+            *existing = contribution;
             return;
         }
     }
 
-    keywords.push(keyword);
+    keywords.push(contribution);
 }
 
 #[cfg(test)]
@@ -349,7 +433,7 @@ mod tests {
         assert_eq!(
             toxic
                 .iter()
-                .filter(|kw| matches!(kw, Keyword::Toxic(_)))
+                .filter(|entry| matches!(entry.keyword, Keyword::Toxic(_)))
                 .count(),
             2
         );
@@ -373,7 +457,7 @@ mod tests {
         );
         assert_eq!(ward.len(), 1, "non-summing Ward keeps upsert-by-kind dedup");
         assert_eq!(
-            ward[0],
+            ward[0].keyword,
             Keyword::Ward(WardCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![],
@@ -386,15 +470,19 @@ mod tests {
         // (StartingIntensity). Both must survive.
         assert_eq!(Keyword::StartingIntensity(1).kind(), KeywordKind::Unknown);
         assert_eq!(Keyword::Toxic(1).kind(), KeywordKind::Unknown);
-        let mut mixed = vec![Keyword::StartingIntensity(1)];
+        let mut mixed = vec![OffZoneKeywordContribution::printed(
+            Keyword::StartingIntensity(1),
+        )];
         upsert_keyword(&mut mixed, Keyword::Toxic(1));
         assert_eq!(
             mixed.len(),
             2,
             "Toxic grant must not clobber an unrelated same-(Unknown)-kind printed keyword"
         );
-        assert!(mixed.contains(&Keyword::StartingIntensity(1)));
-        assert!(mixed.contains(&Keyword::Toxic(1)));
+        assert!(mixed
+            .iter()
+            .any(|entry| entry.keyword == Keyword::StartingIntensity(1)));
+        assert!(mixed.iter().any(|entry| entry.keyword == Keyword::Toxic(1)));
     }
 
     #[test]

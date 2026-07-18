@@ -123,8 +123,13 @@ fn spell_cast_matcher_accepts(
     spell_id: ObjectId,
 ) -> bool {
     let trigger = &state.objects.get(&ascension).unwrap().trigger_definitions[trigger_idx];
-    let matcher = trigger_matcher(trigger.mode.clone()).expect("SpellCast matcher");
-    matcher(&spell_cast_event(spell_id), trigger, ascension, state)
+    let matcher = trigger_matcher(trigger.definition.mode.clone()).expect("SpellCast matcher");
+    matcher(
+        &spell_cast_event(spell_id),
+        trigger.definition(),
+        ascension,
+        state,
+    )
 }
 
 fn ascension_triggers_on_stack(state: &GameState, ascension: ObjectId) -> usize {

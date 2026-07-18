@@ -682,11 +682,15 @@ fn white_auracite_real_oracle_text_returns_exiled_card() {
         .trigger_definitions
         .iter_all()
         .find(|t| {
-            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
-                && t.destination == Some(Zone::Battlefield)
+            matches!(t.definition.mode, crate::types::TriggerMode::ChangesZone)
+                && t.definition.destination == Some(Zone::Battlefield)
         })
         .expect("WA must have an ETB (ChangesZone to Battlefield) trigger");
-    let execute_def = etb_trigger.execute.as_deref().expect("trigger.execute");
+    let execute_def = etb_trigger
+        .definition
+        .execute
+        .as_deref()
+        .expect("trigger.execute");
     assert_eq!(
         execute_def.duration,
         Some(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -843,11 +847,15 @@ fn haytham_kenway_per_opponent_exile_returns_when_source_leaves() {
         .trigger_definitions
         .iter_all()
         .find(|t| {
-            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
-                && t.destination == Some(Zone::Battlefield)
+            matches!(t.definition.mode, crate::types::TriggerMode::ChangesZone)
+                && t.definition.destination == Some(Zone::Battlefield)
         })
         .expect("Haytham must have ETB trigger");
-    let execute_def = etb.execute.as_deref().expect("ETB must have execute");
+    let execute_def = etb
+        .definition
+        .execute
+        .as_deref()
+        .expect("ETB must have execute");
     assert_eq!(
         execute_def.duration,
         Some(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -964,11 +972,15 @@ fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
         .trigger_definitions
         .iter_all()
         .find(|t| {
-            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
-                && t.destination == Some(Zone::Battlefield)
+            matches!(t.definition.mode, crate::types::TriggerMode::ChangesZone)
+                && t.definition.destination == Some(Zone::Battlefield)
         })
         .expect("Journey must have ETB trigger");
-    let execute_def = etb_trigger.execute.as_deref().expect("trigger.execute");
+    let execute_def = etb_trigger
+        .definition
+        .execute
+        .as_deref()
+        .expect("trigger.execute");
     assert_eq!(
         execute_def.duration,
         Some(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -1072,8 +1084,8 @@ fn exile_return_fires_returned_creatures_etb_trigger() {
     let wall = state.objects.get(&wall_id).expect("Wall on battlefield");
     assert!(
         wall.trigger_definitions.iter_all().any(|t| {
-            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
-                && t.destination == Some(Zone::Battlefield)
+            matches!(t.definition.mode, crate::types::TriggerMode::ChangesZone)
+                && t.definition.destination == Some(Zone::Battlefield)
         }),
         "Wall of Omens must have an ETB trigger for this regression to be meaningful"
     );

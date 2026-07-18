@@ -1340,7 +1340,7 @@ mod tests {
             copied
                 .trigger_definitions
                 .iter_all()
-                .any(|t| matches!(t.mode, TriggerMode::Phase)),
+                .any(|t| matches!(t.definition.mode, TriggerMode::Phase)),
             "retained trigger must be the printed BeginCombat phase trigger"
         );
     }
@@ -1452,7 +1452,7 @@ mod tests {
             phantasmal_obj
                 .trigger_definitions
                 .iter_all()
-                .any(|t| matches!(t.mode, TriggerMode::Phase)),
+                .any(|t| matches!(t.definition.mode, TriggerMode::Phase)),
             "the propagated trigger must be the printed BoC phase trigger"
         );
     }
@@ -1504,7 +1504,7 @@ mod tests {
             state.objects[&assassin]
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t == &trigger),
+                .any(|t| t.definition == trigger),
             "the first copy must receive the granted trigger"
         );
 
@@ -1517,7 +1517,7 @@ mod tests {
             state.objects[&image]
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t == &trigger),
+                .any(|t| t.definition == trigger),
             "CR 707.9a: copy-effect granted triggers are copiable values"
         );
     }
@@ -1763,11 +1763,15 @@ mod tests {
             "Myriad keyword should be granted via except clause"
         );
         let has_myriad_trigger = source_obj.trigger_definitions.iter_all().any(|trigger| {
-            matches!(trigger.mode, TriggerMode::Attacks)
-                && matches!(trigger.valid_card, Some(TargetFilter::SelfRef))
-                && trigger.execute.as_deref().is_some_and(|ability| {
-                    ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
-                })
+            matches!(trigger.definition.mode, TriggerMode::Attacks)
+                && matches!(trigger.definition.valid_card, Some(TargetFilter::SelfRef))
+                && trigger
+                    .definition
+                    .execute
+                    .as_deref()
+                    .is_some_and(|ability| {
+                        ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
+                    })
         });
         assert!(
             has_myriad_trigger,
@@ -1901,7 +1905,7 @@ mod tests {
             stage_obj
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t.mode == TriggerMode::StateCondition),
+                .any(|t| t.definition.mode == TriggerMode::StateCondition),
             "the copy must inherit Dark Depths' state-triggered ability (CR 603.8)"
         );
 
@@ -2129,7 +2133,7 @@ mod tests {
                 .iter_all()
                 .any(|trigger| {
                     KeywordTriggerInstaller::trigger_matches_keyword_kind(
-                        trigger,
+                        &trigger.definition,
                         &Keyword::Persist,
                     )
                 }),

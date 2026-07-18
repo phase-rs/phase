@@ -542,7 +542,12 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         loyalty: obj.loyalty,
         loyalty_activations_this_turn: obj.loyalty_activations_this_turn,
         abilities: obj.abilities.clone(),
-        trigger_definitions: obj.trigger_definitions.clone(),
+        trigger_definitions: obj
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.definition.clone())
+            .collect::<Vec<_>>()
+            .into(),
         replacement_definitions: obj.replacement_definitions.clone(),
         static_definitions: obj.static_definitions.clone(),
         played_from_zone: obj.played_from_zone,

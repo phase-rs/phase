@@ -25,7 +25,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
     CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
     CopiableValues, Duration, Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope,
-    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -37,7 +38,7 @@ use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{
     DayNight, GameState, LayersDirty, StaticGateKey, TransientContinuousEffect,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 #[cfg(test)]
 use crate::types::keywords::KeywordKind;
@@ -1657,7 +1658,7 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // Subsequent layer effects that mutate `obj.abilities` / definitions
     // trigger copy-on-write via `Arc::make_mut`.
     obj.abilities = Arc::clone(&obj.base_abilities);
-    obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
+    obj.materialize_base_trigger_definitions();
     obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
     obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
     obj.color = obj.base_color.clone();
@@ -2119,6 +2120,43 @@ pub fn evaluate_layers(state: &mut GameState) {
     // immediately after the gate-truth cache and before `layers_dirty = Clean`, so a full
     // eval always leaves a precise presence index for the next scan-gate consult.
     refresh_static_mode_presence(state);
+
+    // Complete the Layer-6 producer reconciliation only after the entire pass
+    // has materialized every candidate. A producer absent from this finalized
+    // live set is retired; reappearing later receives a fresh monotonic grant
+    // generation rather than resurrecting an old identity.
+    let trigger_object_ids = state.objects.keys().copied().collect::<Vec<_>>();
+    for object_id in trigger_object_ids {
+        let Some(obj) = state.objects.get_mut(&object_id) else {
+            continue;
+        };
+        let live_instances = obj
+            .trigger_definitions
+            .iter_all()
+            .filter_map(|entry| match &entry.occurrence {
+                crate::types::ability::TriggerDefinitionOccurrenceRef::KeywordCompanion {
+                    grant_instance,
+                    ..
+                }
+                | crate::types::ability::TriggerDefinitionOccurrenceRef::CopyRetained {
+                    grant_instance,
+                    ..
+                }
+                | crate::types::ability::TriggerDefinitionOccurrenceRef::Granted {
+                    grant_instance,
+                }
+                | crate::types::ability::TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                    grant_instance,
+                    ..
+                } => Some(*grant_instance),
+                crate::types::ability::TriggerDefinitionOccurrenceRef::Printed { .. }
+                | crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+                | crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized => None,
+            })
+            .collect::<Vec<_>>();
+        obj.trigger_occurrence_state
+            .retire_absent_grants(&live_instances);
+    }
 
     // CR 603.6a + CR 611.2e: Layer evaluation just finalized post-layer
     // trigger sets on every battlefield permanent (granted triggers from
@@ -3196,6 +3234,8 @@ fn gather_ring_emblem_continuous_effects(
             controller: player,
             def_index: None,
             transient_id: None,
+            trigger_producer_origin: None,
+            expanded_trigger_provider: None,
             mod_index: 0,
             layer: modification.layer(),
             timestamp,
@@ -3483,20 +3523,41 @@ fn active_continuous_effects_from_static_definitions(
             // carry no activation use-restriction (CR 602.5b is activated-only). The
             // meta-effect itself has no standalone layer-6 behaviour, so skip it.
             if let ContinuousModification::GrantAllTriggeredAbilitiesOf { source } = modification {
+                let host_origin = state
+                    .objects
+                    .get(&source_id)
+                    .map(|source| TriggerProducerOrigin::Static {
+                        source: ObjectIncarnationRef::from_object(source),
+                        definition_index: def_idx,
+                        modification_index: mod_index,
+                    })
+                    .expect("static source must remain addressable while gathering effects");
                 effects.extend(expand_granted_triggered_abilities(
                     state,
                     source_id,
                     timestamp,
                     &affected_filter,
                     source,
+                    host_origin,
                 ));
                 continue;
             }
+            let trigger_producer_origin =
+                state
+                    .objects
+                    .get(&source_id)
+                    .map(|source| TriggerProducerOrigin::Static {
+                        source: ObjectIncarnationRef::from_object(source),
+                        definition_index: def_idx,
+                        modification_index: mod_index,
+                    });
             effects.push(ActiveContinuousEffect {
                 source_id,
                 controller,
                 def_index: Some(def_idx),
                 transient_id: None,
+                trigger_producer_origin,
+                expanded_trigger_provider: None,
                 mod_index,
                 layer: modification.layer(),
                 timestamp,
@@ -3587,6 +3648,8 @@ fn expand_granted_static_effects(
                 // confuse them with the host's `static_definitions[def_idx]`.
                 def_index: None,
                 transient_id: None,
+                trigger_producer_origin: None,
+                expanded_trigger_provider: None,
                 mod_index,
                 layer: modification.layer(),
                 // CR 613.7a (1st sentence): a granted static ability's continuous
@@ -3723,6 +3786,8 @@ fn expand_granted_activated_abilities(
                     controller: recipient_controller,
                     def_index: None,
                     transient_id: None,
+                    trigger_producer_origin: None,
+                    expanded_trigger_provider: None,
                     mod_index: next_mod_index,
                     layer: Layer::Ability,
                     timestamp: host_timestamp,
@@ -3765,6 +3830,7 @@ fn expand_granted_triggered_abilities(
     host_timestamp: u64,
     host_affected_filter: &TargetFilter,
     source: &TargetFilter,
+    host_origin: TriggerProducerOrigin,
 ) -> Vec<ActiveContinuousEffect> {
     let host_ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
     let mut out = Vec::new();
@@ -3814,17 +3880,19 @@ fn expand_granted_triggered_abilities(
             let Some(provider) = state.objects.get(&provider_id) else {
                 continue;
             };
-            for trigger in provider.trigger_definitions.iter_all() {
+            for entry in provider.trigger_definitions.iter_all() {
                 out.push(ActiveContinuousEffect {
                     source_id: recipient_id,
                     controller: recipient_controller,
                     def_index: None,
                     transient_id: None,
+                    trigger_producer_origin: Some(host_origin.clone()),
+                    expanded_trigger_provider: Some(provider.trigger_definition_ref(entry)),
                     mod_index: next_mod_index,
                     layer: Layer::Ability,
                     timestamp: host_timestamp,
                     modification: ContinuousModification::GrantTrigger {
-                        trigger: Box::new(trigger.clone()),
+                        trigger: Box::new(entry.definition.clone()),
                     },
                     affected_filter: TargetFilter::SelfRef,
                     condition: None,
@@ -3902,6 +3970,11 @@ pub(crate) fn gather_transient_continuous_effects(
                 controller: tce.controller,
                 def_index: None,
                 transient_id: Some(tce.id),
+                trigger_producer_origin: Some(TriggerProducerOrigin::Transient {
+                    continuous_effect_id: tce.id,
+                    modification_index: mod_index,
+                }),
+                expanded_trigger_provider: None,
                 mod_index,
                 layer: modification.layer(),
                 timestamp: tce.timestamp,
@@ -4669,6 +4742,39 @@ fn apply_continuous_effect(
     apply_continuous_effect_filtered(state, effect, None, abilities_suppressed, zone_cache);
 }
 
+/// Installs one Layer-6-produced trigger by producer identity, never by payload
+/// equality. Re-applying the same producer during a reset reuses its active
+/// generation; byte-identical triggers from distinct producers stay distinct.
+fn install_trigger_candidate(
+    obj: &mut crate::game::game_object::GameObject,
+    producer: TriggerGrantProducerKey,
+    definition: crate::types::ability::TriggerDefinition,
+) {
+    let grant_instance = obj
+        .trigger_occurrence_state
+        .grant_instance_for(producer.clone())
+        .expect("trigger grant allocator must not exhaust");
+    let occurrence = crate::types::ability::occurrence_for_grant(&producer, grant_instance);
+    if obj
+        .trigger_definitions
+        .iter_all()
+        .any(|entry| entry.occurrence == occurrence)
+    {
+        return;
+    }
+    obj.trigger_definitions
+        .push(crate::types::ability::TriggerEntry::new(
+            occurrence, definition,
+        ));
+}
+
+fn trigger_origin(effect: &ActiveContinuousEffect) -> TriggerProducerOrigin {
+    effect
+        .trigger_producer_origin
+        .clone()
+        .expect("trigger-producing continuous effect must carry an exact origin")
+}
+
 /// Apply a continuous effect's modification only to the subset of its affected
 /// objects that are in `restrict_to`. Used by the incremental layer-flush fast
 /// path so a pre-existing anthem/static re-applies to a freshly-entered object
@@ -5066,6 +5172,13 @@ fn apply_continuous_effect_filtered(
             src.base_trigger_definitions
                 .get(*source_trigger_index)
                 .cloned()
+                .map(|trigger| {
+                    (
+                        trigger,
+                        src.trigger_base_set_instance,
+                        *source_trigger_index,
+                    )
+                })
         })
     } else {
         None
@@ -5098,6 +5211,7 @@ fn apply_continuous_effect_filtered(
             (
                 src.base_abilities.as_ref().clone(),
                 src.base_trigger_definitions.as_ref().clone(),
+                src.trigger_base_set_instance,
                 src.base_static_definitions.as_ref().clone(),
                 src.base_keywords.clone(),
             )
@@ -5137,7 +5251,13 @@ fn apply_continuous_effect_filtered(
                 printed_ref,
                 token_image_ref,
             } => {
-                apply_copiable_values(obj, values);
+                let copy_effect = crate::types::ability::CopyEffectInstanceRef {
+                    continuous_effect_id: effect
+                        .transient_id
+                        .expect("CopyValues must originate from a transient continuous effect"),
+                    modification_index: effect.mod_index,
+                };
+                apply_copiable_values(obj, values, copy_effect);
                 // Display routing follows the copy: override the baseline
                 // restored by the layer reset so the copy renders the source's
                 // art. Reverts automatically when the copy effect expires.
@@ -5269,8 +5389,20 @@ fn apply_continuous_effect_filtered(
                 } else if !obj.keywords.contains(&resolved_keyword) {
                     obj.keywords.push(resolved_keyword.clone());
                 }
-                for trigger in KeywordTriggerInstaller::triggers_for(&resolved_keyword) {
-                    obj.trigger_definitions.push(trigger);
+                for (companion_index, trigger) in
+                    KeywordTriggerInstaller::triggers_for(&resolved_keyword)
+                        .into_iter()
+                        .enumerate()
+                {
+                    install_trigger_candidate(
+                        obj,
+                        TriggerGrantProducerKey::KeywordCompanion {
+                            origin: trigger_origin(effect),
+                            keyword_output_index: 0,
+                            companion_index,
+                        },
+                        trigger,
+                    );
                 }
             }
             // Asymmetric on purpose: `RemoveKeyword` strips every keyword that
@@ -5283,8 +5415,11 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::RemoveKeyword { keyword } => {
                 obj.keywords
                     .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(keyword));
-                obj.trigger_definitions.retain(|trigger| {
-                    !KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, keyword)
+                obj.trigger_definitions.retain(|entry| {
+                    !KeywordTriggerInstaller::trigger_matches_keyword_kind(
+                        entry.definition(),
+                        keyword,
+                    )
                 });
             }
             // CR 608.2d + CR 613.1f + CR 702.14: Strip the *exact* keyword
@@ -5307,8 +5442,11 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::RemoveChosenKeyword => {
                 if let Some(kw) = chosen_keyword.as_ref() {
                     obj.keywords.retain(|k| k != kw);
-                    obj.trigger_definitions.retain(|trigger| {
-                        !KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, kw)
+                    obj.trigger_definitions.retain(|entry| {
+                        !KeywordTriggerInstaller::trigger_matches_keyword_kind(
+                            entry.definition(),
+                            kw,
+                        )
                     });
                 }
             }
@@ -5329,14 +5467,25 @@ fn apply_continuous_effect_filtered(
                 // the source has no stored chosen keyword (e.g. the static is
                 // gathered before the choose effect has resolved), the list is
                 // empty and this is a no-op rather than a panic.
-                for kw in &add_chosen_keywords {
+                for (keyword_output_index, kw) in add_chosen_keywords.iter().enumerate() {
                     // CR 702.164b: summing keywords (Toxic) accumulate rather
                     // than dedup, mirroring the plain `AddKeyword` arm above.
                     if kw.sums_across_instances() || !obj.keywords.contains(kw) {
                         obj.keywords.push(kw.clone());
                     }
-                    for trigger in KeywordTriggerInstaller::triggers_for(kw) {
-                        obj.trigger_definitions.push(trigger);
+                    for (companion_index, trigger) in KeywordTriggerInstaller::triggers_for(kw)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        install_trigger_candidate(
+                            obj,
+                            TriggerGrantProducerKey::KeywordCompanion {
+                                origin: trigger_origin(effect),
+                                keyword_output_index,
+                                companion_index,
+                            },
+                            trigger,
+                        );
                     }
                 }
             }
@@ -5545,8 +5694,20 @@ fn apply_continuous_effect_filtered(
                     {
                         obj.keywords.push(keyword.clone());
                     }
-                    for trigger in KeywordTriggerInstaller::triggers_for(&keyword) {
-                        obj.trigger_definitions.push(trigger);
+                    for (companion_index, trigger) in
+                        KeywordTriggerInstaller::triggers_for(&keyword)
+                            .into_iter()
+                            .enumerate()
+                    {
+                        install_trigger_candidate(
+                            obj,
+                            TriggerGrantProducerKey::KeywordCompanion {
+                                origin: trigger_origin(effect),
+                                keyword_output_index: 0,
+                                companion_index,
+                            },
+                            trigger,
+                        );
                     }
                 }
             }
@@ -5602,9 +5763,19 @@ fn apply_continuous_effect_filtered(
                     &mut granted,
                     effect.source_id,
                 );
-                if !obj.trigger_definitions.iter_all().any(|t| t == &granted) {
-                    obj.trigger_definitions.push(granted);
-                }
+                let producer = effect
+                    .expanded_trigger_provider
+                    .as_ref()
+                    .map(|provider| TriggerGrantProducerKey::ExpandedGrant {
+                        origin: trigger_origin(effect),
+                        provider: Box::new(provider.clone()),
+                        provider_output_index: 0,
+                    })
+                    .unwrap_or_else(|| TriggerGrantProducerKey::Granted {
+                        origin: trigger_origin(effect),
+                        output_index: 0,
+                    });
+                install_trigger_candidate(obj, producer, granted);
             }
             // CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
             // recipient. The inner static's `affected`/`condition`/`modifications`
@@ -5709,10 +5880,18 @@ fn apply_continuous_effect_filtered(
             // copy retains "this ability". Idempotent — duplicate retain calls
             // (same trigger structurally) collapse into one.
             ContinuousModification::RetainPrintedTriggerFromSource { .. } => {
-                if let Some(trigger) = retained_printed_trigger.clone() {
-                    if !obj.trigger_definitions.iter_all().any(|t| t == &trigger) {
-                        obj.trigger_definitions.push(trigger);
-                    }
+                if let Some((trigger, source_base_set, source_printed_index)) =
+                    retained_printed_trigger.clone()
+                {
+                    install_trigger_candidate(
+                        obj,
+                        TriggerGrantProducerKey::CopyRetained {
+                            origin: trigger_origin(effect),
+                            source_base_set,
+                            source_printed_index,
+                        },
+                        trigger,
+                    );
                 }
             }
             // CR 707.9a: Retain the source's printed activated ability on the
@@ -5734,7 +5913,7 @@ fn apply_continuous_effect_filtered(
             // (structurally-equal entries collapse into one), mirroring the
             // single-index retains above.
             ContinuousModification::RetainAllOtherAbilitiesFromSource => {
-                if let Some((abilities, triggers, statics, keywords)) =
+                if let Some((abilities, triggers, source_base_set, statics, keywords)) =
                     retained_other_abilities.as_ref()
                 {
                     let obj_abilities = Arc::make_mut(&mut obj.abilities);
@@ -5743,10 +5922,16 @@ fn apply_continuous_effect_filtered(
                             obj_abilities.push(ability.clone());
                         }
                     }
-                    for trigger in triggers.iter() {
-                        if !obj.trigger_definitions.iter_all().any(|t| t == trigger) {
-                            obj.trigger_definitions.push(trigger.clone());
-                        }
+                    for (source_printed_index, trigger) in triggers.iter().enumerate() {
+                        install_trigger_candidate(
+                            obj,
+                            TriggerGrantProducerKey::CopyRetained {
+                                origin: trigger_origin(effect),
+                                source_base_set: *source_base_set,
+                                source_printed_index,
+                            },
+                            trigger.clone(),
+                        );
                     }
                     for static_def in statics.iter() {
                         if !obj.static_definitions.iter_all().any(|s| s == static_def) {
@@ -5999,8 +6184,12 @@ pub(crate) fn compute_current_copiable_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::elimination::eliminate_player;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::game::zone_pipeline::{
+        move_object, EntryMods, ExileLinkSpec, ZoneChangeCause, ZoneMoveRequest,
+    };
     use crate::game::zones::create_object;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::ability::{
@@ -6008,12 +6197,13 @@ mod tests {
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
         CountScope, Duration, Effect, FilterProp, ManaProduction, ObjectScope, PlayerFilter,
         PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SacrificeCost,
-        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
-        ZoneRef,
+        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+        TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
-    use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{LayersDirty, StaticSourceIndex, TransientContinuousEffect};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -7864,7 +8054,10 @@ mod tests {
             .trigger_definitions
             .iter_all()
             .filter(|t| {
-                KeywordTriggerInstaller::trigger_matches_keyword_kind(t, &Keyword::Fabricate(2))
+                KeywordTriggerInstaller::trigger_matches_keyword_kind(
+                    &t.definition,
+                    &Keyword::Fabricate(2),
+                )
             })
             .count();
         assert_eq!(
@@ -9447,8 +9640,8 @@ mod tests {
             .unwrap()
             .trigger_definitions
             .iter_all()
-            .find(|t| matches!(t.mode, TriggerMode::Attacks))
-            .and_then(|t| t.execute.clone())
+            .find(|t| matches!(t.definition.mode, TriggerMode::Attacks))
+            .and_then(|t| t.definition.execute.clone())
             .expect("Azure Beastbinder must have a parsed Attacks trigger with an execute body");
 
         // Resolve the trigger against the chosen target (the 5/5 creature),
@@ -9544,8 +9737,8 @@ mod tests {
             .unwrap()
             .trigger_definitions
             .iter_all()
-            .find(|t| matches!(t.mode, TriggerMode::Attacks))
-            .and_then(|t| t.execute.clone())
+            .find(|t| matches!(t.definition.mode, TriggerMode::Attacks))
+            .and_then(|t| t.definition.execute.clone())
             .expect("parsed Attacks trigger");
 
         let ability = build_resolved_from_def_with_targets(
@@ -15330,12 +15523,15 @@ mod tests {
         assert!(obj.keywords.contains(&Keyword::Undying));
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = obj.trigger_definitions.first().unwrap();
-        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
-        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(matches!(trigger.definition.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
         assert!(matches!(
-            trigger.condition,
+            trigger.definition.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+        assert!(matches!(
+            trigger.definition.condition,
             Some(TriggerCondition::Not { .. })
         ));
 
@@ -15405,10 +15601,13 @@ mod tests {
             "Bear should have Undying trigger"
         );
         let trigger = bear.trigger_definitions.first().unwrap();
-        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
-        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(matches!(trigger.definition.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
+        assert!(matches!(
+            trigger.definition.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
     }
 
     #[test]
@@ -15485,12 +15684,12 @@ mod tests {
             .stack
             .last()
             .and_then(|entry| entry.ability())
-            .map(|ability| ability.may_trigger_origin)
+            .map(|ability| ability.may_trigger_origin.clone())
             .or_else(|| {
                 state
                     .pending_trigger
                     .as_ref()
-                    .map(|trigger| trigger.may_trigger_origin)
+                    .map(|trigger| trigger.may_trigger_origin.clone())
             })
             .flatten();
         assert_eq!(
@@ -15586,10 +15785,17 @@ mod tests {
         assert!(obj.keywords.contains(&Keyword::Annihilator(1)));
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = obj.trigger_definitions.first().unwrap();
-        assert!(matches!(trigger.mode, TriggerMode::Attacks));
-        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(matches!(trigger.definition.mode, TriggerMode::Attacks));
+        assert!(matches!(
+            trigger.definition.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
 
-        let execute = trigger.execute.as_deref().expect("execute body required");
+        let execute = trigger
+            .definition
+            .execute
+            .as_deref()
+            .expect("execute body required");
         let Effect::Sacrifice {
             target,
             count,
@@ -15644,11 +15850,11 @@ mod tests {
         let annihilator_triggers = obj
             .trigger_definitions
             .iter_all()
-            .filter(|trigger| matches!(trigger.mode, TriggerMode::Attacks))
-            .filter(|trigger| matches!(trigger.valid_card, Some(TargetFilter::SelfRef)))
+            .filter(|trigger| matches!(trigger.definition.mode, TriggerMode::Attacks))
+            .filter(|trigger| matches!(trigger.definition.valid_card, Some(TargetFilter::SelfRef)))
             .filter(|trigger| {
                 matches!(
-                    trigger.execute.as_deref().map(|ability| &*ability.effect),
+                    trigger.definition.execute.as_deref().map(|ability| &*ability.effect),
                     Some(Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
                         count: QuantityExpr::Fixed { value: 1 },
@@ -15690,7 +15896,7 @@ mod tests {
             .iter_all()
             .find(|trigger| {
                 matches!(
-                    trigger.execute.as_deref().map(|ability| &*ability.effect),
+                    trigger.definition.execute.as_deref().map(|ability| &*ability.effect),
                     Some(Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
                         count: QuantityExpr::Fixed { value: 3 },
@@ -15699,8 +15905,11 @@ mod tests {
                 )
             })
             .expect("dynamic Annihilator 3 should install a sacrifice trigger");
-        assert!(matches!(trigger.mode, TriggerMode::Attacks));
-        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(matches!(trigger.definition.mode, TriggerMode::Attacks));
+        assert!(matches!(
+            trigger.definition.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
     }
 
     #[test]
@@ -15738,7 +15947,10 @@ mod tests {
         assert!(!obj.keywords.contains(&Keyword::Undying));
         assert!(
             !obj.trigger_definitions.iter_all().any(|trigger| {
-                KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, &Keyword::Undying)
+                KeywordTriggerInstaller::trigger_matches_keyword_kind(
+                    &trigger.definition,
+                    &Keyword::Undying,
+                )
             }),
             "RemoveKeyword(Undying) must remove the synthesized dies trigger"
         );
@@ -15974,6 +16186,250 @@ mod tests {
         let obj = state.objects.get_mut(&source).unwrap();
         Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
         obj.static_definitions.push(def);
+    }
+
+    fn granted_trigger_ref(
+        state: &GameState,
+        recipient: ObjectId,
+    ) -> crate::types::ability::TriggerDefinitionRef {
+        let object = state
+            .objects
+            .get(&recipient)
+            .expect("recipient remains live");
+        let entry = object
+            .trigger_definitions
+            .iter_all()
+            .next()
+            .expect("grant installs one trigger");
+        object.trigger_definition_ref(entry)
+    }
+
+    #[test]
+    fn grant_occurrences_survive_full_and_incremental_flush_and_regrant_fresh() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Grant Source", 1, 1, PlayerId(0));
+        let recipient = make_creature(&mut state, "Grant Recipient", 1, 1, PlayerId(0));
+        let grant = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: recipient })
+            .modifications(vec![ContinuousModification::GrantTrigger {
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::Phase)),
+            }]);
+        attach_static(&mut state, source, grant.clone());
+
+        evaluate_layers(&mut state);
+        let after_full = granted_trigger_ref(&state, recipient);
+
+        state.layers_dirty = LayersDirty::EnteredObjects([recipient].into());
+        flush_layers(&mut state);
+        let after_incremental = granted_trigger_ref(&state, recipient);
+        assert_eq!(
+            after_full, after_incremental,
+            "the unchanged producer retains one exact generation across full and incremental flush"
+        );
+
+        {
+            let source_object = state.objects.get_mut(&source).unwrap();
+            Arc::make_mut(&mut source_object.base_static_definitions).clear();
+            source_object.static_definitions.clear();
+        }
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&recipient].trigger_definitions.is_empty(),
+            "removing the producer retires its live grant"
+        );
+
+        attach_static(&mut state, source, grant);
+        evaluate_layers(&mut state);
+        let after_regrant = granted_trigger_ref(&state, recipient);
+        assert_ne!(
+            after_full, after_regrant,
+            "the same producer reappearing after retirement receives a fresh generation"
+        );
+    }
+
+    #[test]
+    fn static_grant_retires_when_source_departs_through_zone_pipeline() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Grant Source", 1, 1, PlayerId(0));
+        let recipient = make_creature(&mut state, "Grant Recipient", 1, 1, PlayerId(0));
+        attach_static(
+            &mut state,
+            source,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::Phase)),
+                }]),
+        );
+        evaluate_layers(&mut state);
+        let before_departure = granted_trigger_ref(&state, recipient);
+
+        let mut events = Vec::new();
+        move_object(
+            &mut state,
+            ZoneMoveRequest {
+                object_id: source,
+                to: Zone::Graveyard,
+                cause: ZoneChangeCause::Effect { source },
+                mods: EntryMods::default(),
+                placement: None,
+                exile_links: ExileLinkSpec::default(),
+                replacement_applied: Default::default(),
+            },
+            &mut events,
+        );
+        flush_layers(&mut state);
+
+        assert!(
+            state.objects[&recipient].trigger_definitions.is_empty(),
+            "the departed static producer must retire its grant {before_departure:?}"
+        );
+    }
+
+    #[test]
+    fn static_grant_retires_when_source_owner_is_eliminated() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let source = make_creature(&mut state, "Eliminated Grant Source", 1, 1, PlayerId(1));
+        let recipient = make_creature(&mut state, "Surviving Recipient", 1, 1, PlayerId(0));
+        attach_static(
+            &mut state,
+            source,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::Phase)),
+                }]),
+        );
+        evaluate_layers(&mut state);
+        let before_elimination = granted_trigger_ref(&state, recipient);
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+        flush_layers(&mut state);
+
+        assert!(
+            state.objects[&recipient].trigger_definitions.is_empty(),
+            "eliminating the producer owner must retire grant {before_elimination:?}"
+        );
+    }
+
+    #[test]
+    fn replacement_static_grant_source_gets_a_distinct_occurrence() {
+        let mut state = setup();
+        let original_source = make_creature(&mut state, "Original Grant Source", 1, 1, PlayerId(0));
+        let recipient = make_creature(&mut state, "Grant Recipient", 1, 1, PlayerId(0));
+        let grant = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: recipient })
+            .modifications(vec![ContinuousModification::GrantTrigger {
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::Phase)),
+            }]);
+        attach_static(&mut state, original_source, grant.clone());
+        evaluate_layers(&mut state);
+        let original = granted_trigger_ref(&state, recipient);
+
+        let mut events = Vec::new();
+        move_object(
+            &mut state,
+            ZoneMoveRequest {
+                object_id: original_source,
+                to: Zone::Graveyard,
+                cause: ZoneChangeCause::Effect {
+                    source: original_source,
+                },
+                mods: EntryMods::default(),
+                placement: None,
+                exile_links: ExileLinkSpec::default(),
+                replacement_applied: Default::default(),
+            },
+            &mut events,
+        );
+        let replacement_source =
+            make_creature(&mut state, "Replacement Grant Source", 1, 1, PlayerId(0));
+        attach_static(&mut state, replacement_source, grant);
+        flush_layers(&mut state);
+        let replacement = granted_trigger_ref(&state, recipient);
+
+        assert_ne!(
+            original, replacement,
+            "a replacement static source must not inherit the retired producer generation"
+        );
+    }
+
+    #[test]
+    fn same_static_grantor_keeps_byte_identical_trigger_outputs_distinct() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Grant Source", 1, 1, PlayerId(0));
+        let recipient = make_creature(&mut state, "Grant Recipient", 1, 1, PlayerId(0));
+        let trigger = TriggerDefinition::new(TriggerMode::Phase);
+        attach_static(
+            &mut state,
+            source,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![
+                    ContinuousModification::GrantTrigger {
+                        trigger: Box::new(trigger.clone()),
+                    },
+                    ContinuousModification::GrantTrigger {
+                        trigger: Box::new(trigger),
+                    },
+                ]),
+        );
+
+        evaluate_layers(&mut state);
+
+        let entries = state.objects[&recipient]
+            .trigger_definitions
+            .iter_all()
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0].occurrence, entries[1].occurrence);
+    }
+
+    #[test]
+    fn expanded_grant_provider_replacement_gets_a_distinct_occurrence() {
+        let mut state = setup();
+        let host = make_creature(&mut state, "Grant Host", 1, 1, PlayerId(0));
+        let recipient = make_creature(&mut state, "Grant Recipient", 1, 1, PlayerId(0));
+        let provider = make_creature(&mut state, "Grant Provider", 1, 1, PlayerId(0));
+        let trigger = TriggerDefinition::new(TriggerMode::Phase);
+
+        state
+            .objects
+            .get_mut(&provider)
+            .unwrap()
+            .install_trigger_base_definitions(Arc::new(vec![trigger.clone()]))
+            .expect("initial provider base set must allocate");
+        attach_static(
+            &mut state,
+            host,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                    source: TargetFilter::SpecificObject { id: provider },
+                }]),
+        );
+
+        evaluate_layers(&mut state);
+        let first = granted_trigger_ref(&state, recipient);
+        assert!(matches!(
+            first.occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::ExpandedGrant { .. }
+        ));
+
+        state
+            .objects
+            .get_mut(&provider)
+            .unwrap()
+            .install_trigger_base_definitions(Arc::new(vec![trigger]))
+            .expect("intentional provider replacement must allocate a new base set");
+        evaluate_layers(&mut state);
+        let second = granted_trigger_ref(&state, recipient);
+
+        assert_ne!(
+            first, second,
+            "an otherwise-identical replacement provider is a new expanded-grant producer"
+        );
     }
 
     #[test]

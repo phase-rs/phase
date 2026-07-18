@@ -2144,7 +2144,7 @@ mod tests {
             player: PlayerId(0),
             source_id,
             description: None,
-            may_trigger_key: Some(key),
+            may_trigger_key: Some(key.clone()),
         };
 
         let mut events = Vec::new();
@@ -2154,7 +2154,7 @@ mod tests {
                 player: PlayerId(0),
                 source_id,
                 description: None,
-                may_trigger_key: Some(key),
+                may_trigger_key: Some(key.clone()),
             },
             AutoMayChoice::Accept,
             &mut events,

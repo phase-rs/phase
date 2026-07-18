@@ -927,7 +927,7 @@ mod tests {
             "SOS Pest preset must install its attack-life trigger"
         );
         assert_eq!(
-            obj.trigger_definitions[0].mode,
+            obj.trigger_definitions[0].definition.mode,
             crate::types::triggers::TriggerMode::Attacks
         );
         assert!(
@@ -1667,7 +1667,7 @@ mod tests {
             watcher
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t.mode == TriggerMode::Drawn),
+                .any(|t| t.definition.mode == TriggerMode::Drawn),
             "sanity: watcher carries a Drawn trigger"
         );
     }
