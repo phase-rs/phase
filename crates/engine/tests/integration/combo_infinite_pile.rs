@@ -457,3 +457,91 @@ fn build_fresh_4p_cast_offer_accept_writes_infinite_pile() {
         "the ∞ pile survives a serde round-trip (build-fresh, current code)"
     );
 }
+
+// ─────────────────────── Basalt Monolith + Power Artifact ───────────────────────
+//
+// REAL 4-player playtest dump acceptance (user-flagged 2026-07-18): Basalt Monolith taps for
+// {C}{C}{C}; Power Artifact reduces its {3} untap to {1}; the loop nets ONLY colorless mana.
+// The loop detector correctly recorded a SINGLE `ResourceAxis::Mana(Colorless)` certificate
+// for P0 (the dump proves the writer is correct). The debug/loop refill
+// (`mana_payment::refill_infinite_mana`) must top the pool up with COLORLESS ONLY — the pre-fix
+// body fabricated 100 of ALL SIX colors, which both violates CR 106.1b + CR 106.4 (colors are
+// not interchangeable; only mana an ability produced enters the pool) and let the player
+// illegally pay colored pips ({W}/{U}/…) from an infinite-COLORLESS engine.
+//
+// Per memory [real-game-fixtures-not-synthetic]: this LOADS the real 4p dump (`deck_pools` —
+// registration metadata this refill never reads — trimmed to `[]` to keep the fixture lean,
+// exactly as the sibling `combo_infinite_pile_4p_offer.json` fixture does).
+//
+// REVERT-PROBE (non-vacuous): restoring the pre-fix body (iterate `INFINITE_MANA_TYPES` instead
+// of the recorded colors) refills 100 of every color ⇒ the "0 of every non-colorless color"
+// assertions below FLIP to fail. The positive colorless==100 assertion is the reach-guard that
+// proves the refill actually ran on P0, so the negatives are not vacuous.
+
+static BASALT_INFINITE_COLORLESS_STATE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| {
+        gunzip_fixture(include_bytes!(
+            "../fixtures/basalt_power_artifact_infinite_colorless.json.gz"
+        ))
+    });
+
+#[test]
+fn real_4p_basalt_power_artifact_refills_colorless_only() {
+    use engine::analysis::resource::ResourceAxis;
+    use engine::game::mana_payment::refill_infinite_mana;
+    use engine::types::mana::ManaType;
+
+    let mut state: GameState = serde_json::from_str(&BASALT_INFINITE_COLORLESS_STATE)
+        .expect("the real Basalt+Power Artifact dump must deserialize into the current GameState");
+
+    // Precondition: the loop detector recorded EXACTLY one mana axis — colorless — for P0.
+    let p0_axes = state
+        .unbounded_resources
+        .get(&P0)
+        .expect("P0 must be flagged unbounded in the real dump");
+    assert_eq!(
+        *p0_axes,
+        BTreeSet::from([ResourceAxis::Mana(ManaType::Colorless)]),
+        "fixture precondition: P0's only recorded mana axis is Colorless (Basalt + Power Artifact)"
+    );
+
+    // Drop the buggy pre-existing all-six pollution — THAT all-six pool is the output under
+    // repair. After the fix, the refill re-mints only what the recorded certificate names.
+    let p0_idx = state
+        .players
+        .iter()
+        .position(|p| p.id == P0)
+        .expect("P0 present in the loaded state");
+    state.players[p0_idx].mana_pool.clear();
+
+    refill_infinite_mana(&mut state);
+
+    let count_of = |color: ManaType| {
+        state.players[p0_idx]
+            .mana_pool
+            .mana
+            .iter()
+            .filter(|u| u.color == color)
+            .count()
+    };
+    // POSITIVE reach-guard: colorless IS topped up to the cap (proves the refill ran on P0).
+    assert_eq!(
+        count_of(ManaType::Colorless),
+        100,
+        "colorless refilled to the cap (100) for the colorless-only loop"
+    );
+    // DISCRIMINATOR: no colored mana is fabricated — the pre-fix all-six body FLIPS these.
+    for color in [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+    ] {
+        assert_eq!(
+            count_of(color),
+            0,
+            "{color:?} must NOT be fabricated — the loop produces only colorless (CR 106.1b/106.4)"
+        );
+    }
+}
