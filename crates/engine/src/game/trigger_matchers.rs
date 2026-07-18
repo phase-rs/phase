@@ -1238,6 +1238,9 @@ fn matching_combat_damage_to_player_sources(
         .collect()
 }
 
+/// CR 120.2a + CR 120.2b: damage events are classified as combat damage or
+/// damage dealt by a spell/ability effect; trigger filters may require either
+/// class or accept both.
 fn damage_kind_matches(filter: DamageKindFilter, is_combat: bool) -> bool {
     match filter {
         DamageKindFilter::Any => true,

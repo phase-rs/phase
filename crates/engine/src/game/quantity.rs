@@ -5383,26 +5383,33 @@ pub(crate) fn resolve_player_count(
     )
 }
 
+/// CR 603.2c + CR 608.2c: a resolving triggered ability that says "for each
+/// [player] dealt damage" counts distinct players from the triggering event
+/// context, not the whole turn ledger.
 fn resolve_event_context_player_count(
     state: &GameState,
     filter: &PlayerFilter,
     controller: PlayerId,
     source_id: ObjectId,
 ) -> i32 {
-    let events: Vec<&crate::types::events::GameEvent> = if state.current_trigger_events.is_empty() {
-        state.current_trigger_event.iter().collect()
-    } else {
-        state.current_trigger_events.iter().collect()
-    };
-
     let mut players = HashSet::new();
-    for event in events {
+    let mut record_player = |event: &crate::types::events::GameEvent| {
         if let Some(player) = crate::game::targeting::extract_player_from_event(event, state) {
             if crate::game::effects::matches_player_scope(
                 state, player, filter, controller, source_id,
             ) {
                 players.insert(player);
             }
+        }
+    };
+
+    if state.current_trigger_events.is_empty() {
+        if let Some(event) = &state.current_trigger_event {
+            record_player(event);
+        }
+    } else {
+        for event in &state.current_trigger_events {
+            record_player(event);
         }
     }
 
