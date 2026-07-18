@@ -1249,6 +1249,8 @@ fn damage_kind_matches(filter: DamageKindFilter, is_combat: bool) -> bool {
     }
 }
 
+/// CR 120.1 + CR 603.2c: an amount-qualified damage trigger evaluates the
+/// amount carried by the individual triggering damage event.
 fn damage_amount_matches(trigger: &TriggerDefinition, amount: u32) -> bool {
     trigger
         .damage_amount
@@ -1448,6 +1450,8 @@ pub(super) fn match_damage_done_once_by_controller(
     }
 }
 
+/// CR 120.1 + CR 603.2c: a player-recipient damage trigger must match its
+/// target filter against the player dealt the triggering damage.
 fn valid_damage_done_once_player_target(
     trigger: &TriggerDefinition,
     state: &GameState,
@@ -1462,6 +1466,8 @@ fn valid_damage_done_once_player_target(
     valid_player_matches(trigger, state, player_id, source_id)
 }
 
+/// CR 120.1 + CR 603.2c: a controller-batched damage trigger admits only a
+/// source that satisfies its source filter for the triggering event.
 fn damage_done_once_source_matches(
     trigger: &TriggerDefinition,
     state: &GameState,
@@ -1475,6 +1481,8 @@ fn damage_done_once_source_matches(
     }
 }
 
+/// CR 120.1 + CR 603.2c: filters the aggregate combat event to the sources
+/// that actually caused this controller-batched trigger to trigger.
 fn matching_combat_damage_once_by_controller_sources<'a>(
     trigger: &'a TriggerDefinition,
     source_id: ObjectId,
