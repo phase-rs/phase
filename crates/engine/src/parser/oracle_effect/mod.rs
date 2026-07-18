@@ -12812,7 +12812,11 @@ pub(crate) fn try_parse_threshold_land_balance(
 /// `.abs()` and `Draw` clamps `.max(0)` (CR 107.1b), so the leader(s) draw 0 and
 /// the "with fewer cards in hand" subject restriction needs no separate
 /// `PlayerFilter`.
-pub(crate) fn try_parse_catch_up_draw(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+pub(crate) fn parse_catch_up_draw_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
 
     let (extremum, _) = nom_on_lower(text, &lower, |input| {
@@ -12856,16 +12860,18 @@ pub(crate) fn try_parse_catch_up_draw(text: &str, kind: AbilityKind) -> Option<A
             },
         }),
     };
-    let mut def = AbilityDefinition::new(
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        Effect::Draw {
+        parsed_clause(Effect::Draw {
             count,
             target: TargetFilter::Controller,
-        },
-    );
-    // CR 101.4: APNAP fan-out over every player.
-    def.player_scope = Some(PlayerFilter::All);
-    Some(def)
+        }),
+        // CR 101.4: APNAP fan-out over every player.
+        Some(PlayerFilter::All),
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
@@ -25075,9 +25081,6 @@ fn try_parse_chain_bypass(
     if let Some(def) = try_parse_each_player_copy_chosen(text, kind) {
         return Some(def);
     }
-    if let Some(def) = try_parse_catch_up_draw(text, kind) {
-        return Some(def);
-    }
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
         return Some(def);
     }
@@ -25691,6 +25694,9 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    if let Some(ir) = parse_catch_up_draw_ir(text, kind, ctx) {
+        return ir;
+    }
     let text = strip_trailing_activation_restriction_sentence(text);
     // CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
     // sentence before chain splitting — it is a chain-level rounding annotation

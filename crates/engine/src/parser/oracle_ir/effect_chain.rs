@@ -53,6 +53,46 @@ pub(crate) struct EffectChainIr {
     pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
 }
 
+impl EffectChainIr {
+    /// Build a one-clause chain while retaining every field represented by
+    /// `ParsedEffectClause` plus the clause-level player iteration scope.
+    ///
+    /// Whole-body recognizers use this instead of reconstructing an
+    /// `AbilityDefinition`: `ParsedEffectClause` carries nested sub-abilities and
+    /// durations, while `ClauseIr` carries `player_scope`. The actor and trigger
+    /// context match the ordinary chain parser's output.
+    pub(crate) fn single_clause(
+        source_text: &str,
+        kind: AbilityKind,
+        parsed: ParsedEffectClause,
+        player_scope: Option<PlayerFilter>,
+        actor: Option<ControllerRef>,
+        in_trigger: bool,
+    ) -> Self {
+        let mut builder = ClauseIrBuilder::new(source_text);
+        builder
+            .clause(
+                source_text,
+                parsed,
+                None,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .player_scope(player_scope)
+            .push();
+        Self {
+            clauses: builder.finish(),
+            kind,
+            chain_rounding: None,
+            actor,
+            in_trigger,
+            repeat_until: None,
+        }
+    }
+}
+
 /// Root-level `AbilityDefinition` metadata that no `ClauseIr` can express.
 ///
 /// The shell is the typed replacement for the `AbilityDefinition` escape hatch:
@@ -758,7 +798,7 @@ impl ClauseDraft<'_> {
 mod tests {
     use super::*;
     use crate::parser::oracle_ir::ast::parsed_clause;
-    use crate::types::ability::Effect;
+    use crate::types::ability::{Duration, Effect};
 
     #[test]
     fn effect_chain_ir_empty_construction() {
@@ -887,5 +927,32 @@ mod tests {
         };
         assert_eq!(ir.clauses.len(), 1);
         assert_eq!(ir.kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn single_clause_preserves_parsed_fields_and_player_scope() {
+        let mut parsed = parsed_clause(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        });
+        parsed.duration = Some(Duration::Permanent);
+        parsed.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::NoOp,
+        )));
+
+        let ir = EffectChainIr::single_clause(
+            "draw a card",
+            AbilityKind::Spell,
+            parsed,
+            Some(PlayerFilter::All),
+            None,
+            false,
+        );
+
+        let clause = &ir.clauses[0];
+        assert_eq!(clause.player_scope, Some(PlayerFilter::All));
+        assert_eq!(clause.parsed.duration, Some(Duration::Permanent));
+        assert!(clause.parsed.sub_ability.is_some());
     }
 }
