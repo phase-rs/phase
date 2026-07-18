@@ -372,6 +372,10 @@ pub struct TriggerSourceContext {
     pub is_renowned: bool,
     #[serde(default)]
     pub is_saddled: bool,
+    /// Class level is a source characteristic used by "becomes level N"
+    /// trigger constraints and must not be rebound by object id after a move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_level: Option<u8>,
     /// Live Layer-6 entries copied without allocating or reconstructing occurrence
     /// identity. `TriggerDefinitionRef` is derived from `identity` plus each entry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -439,6 +443,37 @@ impl TriggerSourceContext {
         }
     }
 
+    /// Reads one triggered source through its exact event-time authority.
+    ///
+    /// A current object is usable only when both its incarnation and expected
+    /// public zone still agree with this context. A same-id return is never a
+    /// substitute for the captured source.
+    pub fn source_read<'a>(&'a self, state: &'a GameState) -> TriggerSourceRead<'a> {
+        state
+            .objects
+            .get(&self.identity.reference.object_id)
+            .filter(|object| {
+                ObjectIncarnationRef::from_object(object) == self.identity.reference
+                    && object.zone == self.identity.expected_zone
+            })
+            .map_or(
+                TriggerSourceRead::Latched(self),
+                TriggerSourceRead::ExactLive,
+            )
+    }
+
+    /// Returns a mutable source only while it remains the exact observed
+    /// incarnation in its expected zone. Latched state is projection-only.
+    pub fn source_mut_exact<'a>(&self, state: &'a mut GameState) -> Option<&'a mut GameObject> {
+        state
+            .objects
+            .get_mut(&self.identity.reference.object_id)
+            .filter(|object| {
+                ObjectIncarnationRef::from_object(object) == self.identity.reference
+                    && object.zone == self.identity.expected_zone
+            })
+    }
+
     /// Keeps the duplicated relation projections in lockstep with the complete
     /// zone-change record after the zone authority captures them.
     fn sync_zone_change_projections(&mut self, record: &ZoneChangeRecord) {
@@ -464,6 +499,52 @@ impl TriggerSourceContext {
         self.combat_status = record.combat_status;
         self.cast_from_zone = record.cast_from_zone;
         self.played_from_zone = record.played_from_zone;
+    }
+}
+
+/// Read-only authority for one triggered source. The projection branch exists
+/// specifically so a departed source never falls back to a later object with
+/// the same storage id.
+#[derive(Debug, Clone, Copy)]
+pub enum TriggerSourceRead<'a> {
+    ExactLive(&'a GameObject),
+    Latched(&'a TriggerSourceContext),
+}
+
+impl TriggerSourceRead<'_> {
+    pub fn controller(self) -> PlayerId {
+        match self {
+            Self::ExactLive(object) => object.controller,
+            Self::Latched(context) => context.lki.controller,
+        }
+    }
+
+    pub fn owner(self) -> PlayerId {
+        match self {
+            Self::ExactLive(object) => object.owner,
+            Self::Latched(context) => context.lki.owner,
+        }
+    }
+
+    pub fn card_id(self) -> CardId {
+        match self {
+            Self::ExactLive(object) => object.card_id,
+            Self::Latched(context) => context.card_id,
+        }
+    }
+
+    pub fn class_level(self) -> Option<u8> {
+        match self {
+            Self::ExactLive(object) => object.class_level,
+            Self::Latched(context) => context.class_level,
+        }
+    }
+
+    pub fn lki(self) -> LKISnapshot {
+        match self {
+            Self::ExactLive(object) => object.snapshot_public_characteristics(),
+            Self::Latched(context) => context.lki.clone(),
+        }
     }
 }
 
@@ -997,13 +1078,11 @@ pub enum YieldScope {
 /// latched at the moment the yield is registered.
 ///
 /// `ThisObject` binds a concrete object incarnation: a matching stack entry must
-/// carry the same `source_id` and `source_incarnation`. Here `incarnation` is an
-/// `Option<u64>`, so an `incarnation` of `None` matches a trigger whose
-/// `source_incarnation` is *also* `None` — synthetic/delayed game-rule triggers
-/// that never latched an incarnation can now be yielded (Option == Option
-/// compare). `AllCopies` binds a `CardId`: any trigger whose `source_card_id`
-/// equals it matches, regardless of which object (or whether the object still
-/// exists, CR 704.5d).
+/// carry the same `source_id` and exact `TriggerSourceContext`. Here `incarnation`
+/// is an `Option<u64>`, so an `incarnation` of `None` matches a synthetic/delayed
+/// trigger with no source context. `AllCopies` binds a `CardId`: any trigger whose
+/// source context carries that card id matches, regardless of which object (or
+/// whether the object still exists, CR 704.5d).
 ///
 /// Both variants carry an optional `trigger_description`, the per-trigger
 /// discriminator the stack entry already exposes
@@ -12921,7 +13000,7 @@ impl GameState {
                             // matches a trigger that latched no incarnation
                             // (synthetic/delayed), Some matches the same epoch.
                             *source_id == *yielded_id
-                                && ability.source_incarnation == *incarnation
+                                && ability.trigger_source_incarnation() == *incarnation
                                 && (trigger_description.is_none()
                                     || trigger_description.as_deref() == description.as_deref())
                         }
@@ -12929,7 +13008,7 @@ impl GameState {
                             card_id,
                             trigger_description,
                         } => {
-                            ability.source_card_id == Some(*card_id)
+                            ability.trigger_source_card_id() == Some(*card_id)
                                 && (trigger_description.is_none()
                                     || trigger_description.as_deref() == description.as_deref())
                         }
@@ -12945,9 +13024,9 @@ impl GameState {
     /// concrete `YieldTarget` by scanning the stack (top-down) for that source's
     /// triggered ability and reading the identity it captured at push. Returns
     /// `None` — caller no-ops — when no matching triggered entry is on the stack,
-    /// or when the requested `AllCopies` scope needs a `source_card_id` the
+    /// or when the requested `AllCopies` scope needs a source card id the
     /// trigger never latched. A `ThisObject` yield always resolves: a trigger
-    /// with no `source_incarnation` latches `incarnation: None`, which matches
+    /// with no source context latches `incarnation: None`, which matches
     /// only entries that likewise latched no incarnation (CR 400.7).
     pub fn resolve_yield_target_from_stack(
         &self,
@@ -12962,16 +13041,16 @@ impl GameState {
                 ..
             } if *sid == source_id => match scope {
                 // CR 400.7: latch the incarnation identity (now Option — a
-                // synthetic/delayed trigger with no `source_incarnation` still
+                // synthetic/delayed trigger with no source context still
                 // yields, storing `None`) and the per-trigger description.
                 YieldScope::ThisObject => Some(YieldTarget::ThisObject {
                     source_id,
-                    incarnation: ability.source_incarnation,
+                    incarnation: ability.trigger_source_incarnation(),
                     trigger_description: description.clone(),
                 }),
                 YieldScope::AllCopies => {
                     ability
-                        .source_card_id
+                        .trigger_source_card_id()
                         .map(|card_id| YieldTarget::AllCopies {
                             card_id,
                             trigger_description: description.clone(),
@@ -13299,8 +13378,8 @@ impl GameState {
         clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
-        // zones would otherwise carry a growing `ResolvedAbility::source_incarnation`
-        // into loop equality and never confirm a draw. Canonicalize it to `None`
+        // zones would otherwise carry a growing `TriggerSourceContext` into loop
+        // equality and never confirm a draw. Canonicalize source provenance away
         // across EVERY eq-compared carrier that transitively holds a
         // `ResolvedAbility`. (`pending_trigger_entry` is an `Option<ObjectId>`, not
         // an ability carrier, so it needs no normalization; `waiting_for` is
@@ -13309,27 +13388,27 @@ impl GameState {
         // registration — both are loop-stable and carry no growing epoch.)
         for entry in clone.stack.iter_mut() {
             if let Some(ability) = entry.ability_mut() {
-                ability.set_source_incarnation_recursive(None);
+                ability.clear_trigger_identity_recursive();
             }
         }
         if let Some(pt) = clone.pending_trigger.as_mut() {
-            pt.ability.set_source_incarnation_recursive(None);
+            pt.ability.clear_trigger_identity_recursive();
         }
         for ctx in clone.deferred_triggers.iter_mut() {
-            ctx.pending.ability.set_source_incarnation_recursive(None);
+            ctx.pending.ability.clear_trigger_identity_recursive();
         }
         if let Some(order) = clone.pending_trigger_order.as_mut() {
             for group in order.groups.iter_mut() {
                 for ctx in group.triggers.iter_mut() {
-                    ctx.pending.ability.set_source_incarnation_recursive(None);
+                    ctx.pending.ability.clear_trigger_identity_recursive();
                 }
             }
         }
         for dt in clone.delayed_triggers.iter_mut() {
-            dt.ability.set_source_incarnation_recursive(None);
+            dt.ability.clear_trigger_identity_recursive();
         }
         for epic in clone.epic_effects.iter_mut() {
-            epic.spell.set_source_incarnation_recursive(None);
+            epic.spell.clear_trigger_identity_recursive();
         }
 
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
@@ -15007,17 +15086,17 @@ mod tests {
 
     /// T-loop (§4 Condition 2): the all-zone incarnation bump advances a source's
     /// epoch every time it changes zones, so a mandatory loop that cycles its
-    /// source's zones would carry a growing `ResolvedAbility::source_incarnation`
-    /// into loop equality and never confirm a CR 104.4b draw. `normalize_for_loop`
-    /// canonicalizes `source_incarnation` to `None` across every eq-compared carrier
+    /// source's zones would carry a growing `TriggerSourceContext` into loop equality
+    /// and never confirm a CR 104.4b draw. `normalize_for_loop` canonicalizes source
+    /// provenance across every eq-compared carrier
     /// (here: `delayed_triggers` — the Warp "return at next end step" loop class —
     /// and `stack`).
     ///
     /// REVERT-PROBE: drop the carrier normalization in `normalize_for_loop` → the
-    /// two normalized states differ in `source_incarnation` → `loop_states_equal`
+    /// two normalized states differ in source provenance → `loop_states_equal`
     /// returns false → the draw is missed.
     #[test]
-    fn normalize_for_loop_zeroes_source_incarnation_across_carriers() {
+    fn normalize_for_loop_zeroes_trigger_source_across_carriers() {
         use crate::types::ability::{DelayedTriggerCondition, Effect};
         use crate::types::phase::Phase;
 
@@ -15031,7 +15110,7 @@ mod tests {
                 ObjectId(5),
                 PlayerId(0),
             );
-            a.set_source_incarnation_recursive(Some(inc));
+            a.set_test_trigger_source_recursive(inc, CardId(0));
             a
         }
 
@@ -15058,21 +15137,21 @@ mod tests {
         let mut b = a.clone();
         b.delayed_triggers[0]
             .ability
-            .set_source_incarnation_recursive(Some(2));
+            .set_test_trigger_source_recursive(2, CardId(0));
         b.stack
             .back_mut()
             .unwrap()
             .ability_mut()
             .unwrap()
-            .set_source_incarnation_recursive(Some(2));
+            .set_test_trigger_source_recursive(2, CardId(0));
 
         assert_ne!(
             a, b,
-            "fixture must actually differ in source_incarnation before normalization"
+            "fixture must actually differ in trigger source before normalization"
         );
         assert!(
             loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
-            "normalize_for_loop must zero source_incarnation across delayed_triggers + stack"
+            "normalize_for_loop must zero trigger source across delayed_triggers + stack"
         );
     }
 
@@ -17402,7 +17481,7 @@ mod tests {
     // ---- CR 117.3d priority-yield accessors ----
 
     /// Build a `TriggeredAbility` stack entry from `source_id` whose ability
-    /// latched `incarnation` (CR 400.7) and `card_id` (CR 704.5d) at push.
+    /// latched exact source context (CR 400.7 / CR 704.5d) at push.
     fn triggered_entry(
         entry_id: ObjectId,
         source_id: ObjectId,
@@ -17419,8 +17498,9 @@ mod tests {
             source_id,
             controller,
         );
-        ability.source_incarnation = incarnation;
-        ability.source_card_id = card_id;
+        if let Some(incarnation) = incarnation {
+            ability.set_test_trigger_source_recursive(incarnation, card_id.unwrap_or(CardId(0)));
+        }
         StackEntry {
             id: entry_id,
             source_id,
@@ -17567,7 +17647,7 @@ mod tests {
                 actual_mana_spent: 0,
             },
         };
-        let mut act_ability = ResolvedAbility::new(
+        let act_ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
@@ -17576,7 +17656,6 @@ mod tests {
             ObjectId(5),
             PlayerId(1),
         );
-        act_ability.source_card_id = Some(CardId(9));
         let activated = StackEntry {
             id: ObjectId(21),
             source_id: ObjectId(5),
@@ -17592,11 +17671,10 @@ mod tests {
 
     /// CR 400.7 incarnation identity: a `Some`-incarnation `ThisObject` yield
     /// never matches a trigger that latched no incarnation (synthetic game-rule
-    /// triggers, `source_incarnation: None`), but an `AllCopies` yield still
-    /// matches when the card identity is present. (The matching `None`-yield /
-    /// `None`-trigger case is covered by the G6 synthetic-latch test.)
+    /// triggers with no source context), and an `AllCopies` yield also cannot
+    /// match without an exact source context.
     #[test]
-    fn this_object_some_incarnation_never_matches_none_trigger_but_all_copies_can() {
+    fn yields_require_exact_source_context_for_card_identity() {
         let mut state = GameState::new_two_player(1);
         let entry = triggered_entry(
             ObjectId(10),
@@ -17622,7 +17700,10 @@ mod tests {
                 trigger_description: None,
             },
         );
-        assert!(state.is_priority_yielded(PlayerId(0), &entry));
+        assert!(
+            !state.is_priority_yielded(PlayerId(0), &entry),
+            "a synthetic trigger without source context has no AllCopies identity"
+        );
     }
 
     #[test]
@@ -17709,10 +17790,7 @@ mod tests {
         );
         assert_eq!(
             state.resolve_yield_target_from_stack(ObjectId(0), YieldScope::AllCopies),
-            Some(YieldTarget::AllCopies {
-                card_id: CardId(9),
-                trigger_description: None
-            })
+            None
         );
     }
 
@@ -17817,8 +17895,8 @@ mod tests {
         );
     }
 
-    /// G6 (CR 400.7 synthetic latch): a trigger that latched no incarnation
-    /// (`source_incarnation: None`, e.g. a synthetic/delayed game-rule trigger)
+    /// G6 (CR 400.7 synthetic latch): a trigger with no exact source context
+    /// (e.g. a synthetic/delayed game-rule trigger)
     /// now resolves to a `ThisObject` yield storing `incarnation: None`, and that
     /// yield matches the same None-incarnation entry — previously a silent no-op.
     #[test]

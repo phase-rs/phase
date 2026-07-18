@@ -214,7 +214,7 @@ pub fn resolve(
     // staying in exile.
     if target_ids.is_empty()
         && matches!(target_filter, TargetFilter::SelfRef)
-        && ability.source_is_current(state)
+        && ability.self_ref_is_current(state)
     {
         target_ids = vec![ability.source_id];
     }
@@ -1477,7 +1477,10 @@ mod tests {
             siege_id,
             PlayerId(0),
         );
-        ability.set_source_incarnation_recursive(Some(captured_incarnation));
+        ability.set_test_trigger_source_recursive(
+            captured_incarnation,
+            state.objects[&siege_id].card_id,
+        );
 
         // CR 400.7j: mirror `resolve_top` — during resolution the resolving entry is
         // stashed in `state.resolving_stack_entry`, and the self-move re-latch reads

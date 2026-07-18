@@ -1718,6 +1718,7 @@ impl GameObject {
                 transformed: self.transformed,
                 is_renowned: self.is_renowned,
                 is_saddled: self.is_saddled,
+                class_level: self.class_level,
                 trigger_entries: self.trigger_definitions.iter_all().cloned().collect(),
                 timestamp: self.timestamp,
                 entered_battlefield_turn: self.entered_battlefield_turn,

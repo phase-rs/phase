@@ -2124,10 +2124,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         effect,
         targets,
         source_id: _,
-        source_incarnation,
-        // Latched card identity for `AllCopies` priority yields; a batched
-        // self-counter spell never carries one (set only on triggered pushes).
-        source_card_id,
+        trigger_source,
+        trigger_definition_ref,
         controller: _,
         original_controller,
         scoped_player,
@@ -2184,8 +2182,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
 
     self_counter
         && targets.is_empty()
-        && source_incarnation.is_none()
-        && source_card_id.is_none()
+        && trigger_source.is_none()
+        && trigger_definition_ref.is_none()
         && original_controller.is_none()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
@@ -3082,16 +3080,13 @@ pub(crate) fn create_warp_delayed_trigger(
             controller,
         ));
     }
-    // CR 400.7: Stamp the source's current incarnation so the SelfRef target
-    // resolves only while the permanent is the same object. If the creature is
-    // blinked before the delayed trigger fires, the re-entered permanent has a
-    // higher incarnation and the exile finds no valid target.
-    delayed_ability
-        .set_source_incarnation_recursive(state.objects.get(&object_id).map(|o| o.incarnation));
-    // CR 400.7 identity latch + CR 704.5d: snapshot the source's card identity
-    // so an `AllCopies` priority yield can match by card identity after the
-    // source ceases to exist.
-    delayed_ability.source_card_id = state.objects.get(&object_id).map(|o| o.card_id);
+    // CR 400.7: bind the delayed self-reference to the exact source authority.
+    // A blinked return is a distinct incarnation and cannot satisfy this context.
+    if let Some(source) = state.objects.get(&object_id) {
+        delayed_ability.set_trigger_source_recursive(
+            super::triggers::trigger_source_context_for_latch(state, source),
+        );
+    }
 
     state
         .delayed_triggers
@@ -3422,8 +3417,11 @@ mod tests {
             PlayerId(0),
         );
         ability.optional = true;
-        ability
-            .set_source_incarnation_recursive(state.objects.get(&predator).map(|o| o.incarnation));
+        let source_context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&predator).expect("fixture source"),
+        );
+        ability.set_trigger_source_recursive(source_context);
 
         let trigger_event = GameEvent::DamageDealt {
             source_id: predator,
@@ -4347,7 +4345,7 @@ mod tests {
         }
 
         // Push a stack entry as if cast via Warp, then resolve to install the
-        // delayed trigger (which now stamps source_incarnation).
+        // delayed trigger (which now stamps exact source context).
         state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,

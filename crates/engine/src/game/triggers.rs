@@ -549,7 +549,7 @@ fn reconcile_off_zone_keyword_triggers(state: &mut GameState) {
 /// never emitted as an event; it only lets the existing snapshot constructor
 /// preserve the source's exact current zone without rebuilding trigger-entry
 /// provenance at a collection site.
-fn trigger_source_context_for_latch(
+pub(super) fn trigger_source_context_for_latch(
     state: &GameState,
     source: &GameObject,
 ) -> TriggerSourceContext {
@@ -942,13 +942,12 @@ fn collect_matching_triggers_inner(
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
 ) -> Vec<MatchedTrigger> {
     let mut pending = Vec::new();
-    let (obj_id, controller) = match source {
-        TriggerSource::Live(source_obj) => (source_obj.id, source_obj.controller),
-        TriggerSource::Context(source_context) => (
-            source_context.identity.reference.object_id,
-            source_context.lki.controller,
-        ),
+    let source_context = match source {
+        TriggerSource::Live(source_obj) => trigger_source_context_for_latch(state, source_obj),
+        TriggerSource::Context(source_context) => source_context.clone(),
     };
+    let obj_id = source_context.identity.reference.object_id;
+    let controller = source_context.lki.controller;
 
     // CR 604.1 + CR 702.62a: Companion triggered abilities for keywords granted
     // to an *off-zone* card. `evaluate_layers` (Layer 6) only installs
@@ -1127,7 +1126,7 @@ fn collect_matching_triggers_inner(
                 state,
                 trig_def,
                 definition_ref.as_ref(),
-                obj_id,
+                Some(&source_context),
                 controller,
                 event,
             ) {
@@ -1152,7 +1151,12 @@ fn collect_matching_triggers_inner(
                     }
                 }
             }
-            let mut ability = build_triggered_ability(state, trig_def, obj_id, controller);
+            let mut ability = build_triggered_ability_from_context(
+                state,
+                trig_def,
+                &source_context,
+                definition_ref.as_ref(),
+            );
             // CR 603.4: Stamp the printed-trigger index so per-turn resolution
             // tracking (`AbilityCondition::NthResolutionThisTurn`) can identify
             // "this ability" at resolution time.
@@ -1648,7 +1652,13 @@ pub(super) fn resolve_tap_mana_triggers_inline(
                 ) {
                     continue;
                 }
-                let mut ability = build_triggered_ability(state, trig_def, obj_id, obj.controller);
+                let source_context = trigger_source_context_for_latch(state, obj);
+                let mut ability = build_triggered_ability_from_context(
+                    state,
+                    trig_def,
+                    &source_context,
+                    Some(&active.definition_ref),
+                );
                 ability.ability_index = Some(trig_idx);
                 if super::mana_abilities::is_triggered_mana_ability(&ability, Some(&tap_event)) {
                     coupled.push(ability);
@@ -3837,37 +3847,16 @@ impl DelayedTriggerEventScope {
 /// across a group). The recursion is load-bearing: derived `PartialEq` descends
 /// into `sub_ability`/`else_ability`, so their `source_id`s must also be zeroed.
 ///
-/// `source_card_id` is the source's latched card identity (CR 400.7 / CR 704.5d,
-/// for AllCopies priority-yield matching) — a per-instance identity latch with no
-/// bearing on the trigger's game outcome, so it is zeroed alongside `source_id`;
+/// The exact source context includes the card identity used for AllCopies
+/// priority-yield matching (CR 400.7 / CR 704.5d) — per-instance provenance with
+/// no bearing on the trigger's game outcome, so it is zeroed alongside `source_id`;
 /// otherwise two outcome-identical triggers off different cards would ride in the
 /// derived `==` as distinguishable and lose their CR 603.3b auto-ordering.
 ///
 /// `pub(crate)` so `analysis::resource`'s coverability stack-normalizer shares this
 /// exact identity-stripping rather than keeping a drift-prone parallel copy.
 pub(crate) fn normalize_ability_identity(ability: &mut ResolvedAbility) {
-    ability.source_id = ObjectId(0);
-    ability.source_card_id = None;
-    // CR 400.7: `source_incarnation` is a source-identity field, the same identity
-    // class as `source_id`/`source_card_id`, so this single "strip ability source
-    // identity" authority must zero it too. This keeps every consumer consistent:
-    //   * CR 104.4b + CR 732.4 (mandatory-loop detection): the stack comparators
-    //     `analysis::resource::normalized_stack_entries` (the growing-cascade covering
-    //     pair) and the `normalize_for_loop` ring snapshots must agree on
-    //     `source_incarnation`. Without this, a normalized ring snapshot (`None`) would
-    //     fail to match a live entry (`Some(N)`) once the all-zone incarnation bump
-    //     advances the epoch, so a mandatory loop whose source cycles zones would no
-    //     longer be recognized as the same repeating state.
-    //   * CR 603.3b (trigger auto-ordering): `group_is_order_independent` compares two
-    //     structurally-identical triggers for order-independence — which is correct
-    //     regardless of which source incarnation each was captured at.
-    ability.source_incarnation = None;
-    if let Some(sub) = ability.sub_ability.as_mut() {
-        normalize_ability_identity(sub);
-    }
-    if let Some(else_branch) = ability.else_ability.as_mut() {
-        normalize_ability_identity(else_branch);
-    }
+    ability.clear_trigger_identity_recursive();
 }
 
 /// CR 603.2c + CR 603.10a: Are two ZoneChanged events part of ONE explicitly
@@ -4263,7 +4252,7 @@ fn group_thisobject_sources(
         .iter()
         .map(|ctx| YieldTarget::ThisObject {
             source_id: ctx.pending.source_id,
-            incarnation: ctx.pending.ability.source_incarnation,
+            incarnation: ctx.pending.ability.trigger_source_incarnation(),
             trigger_description: None,
         })
         .collect()
@@ -4278,7 +4267,7 @@ fn persistent_trigger_identity(
 ) -> Option<crate::types::game_state::YieldTarget> {
     use crate::types::game_state::YieldTarget;
 
-    let card_id = context.pending.ability.source_card_id?;
+    let card_id = context.pending.ability.trigger_source_card_id()?;
     let description = context.pending.description.as_deref()?.trim();
     if description.is_empty() {
         return None;
@@ -4464,7 +4453,7 @@ fn build_ephemeral_order_template(
         .map(|(pos, ctx)| PinnedDecision::Order {
             source: YieldTarget::ThisObject {
                 source_id: ctx.pending.source_id,
-                incarnation: ctx.pending.ability.source_incarnation,
+                incarnation: ctx.pending.ability.trigger_source_incarnation(),
                 trigger_description: None,
             },
             pos: pos as u8,
@@ -6823,7 +6812,7 @@ fn check_trigger_constraint_with_ref(
     state: &GameState,
     trig_def: &TriggerDefinition,
     definition_ref: Option<&TriggerDefinitionRef>,
-    obj_id: ObjectId,
+    source_context: Option<&TriggerSourceContext>,
     controller: PlayerId,
     event: &GameEvent,
 ) -> bool {
@@ -6946,10 +6935,8 @@ fn check_trigger_constraint_with_ref(
             nth_in_turn == *n
         }
         // CR 716.2a: "When this Class becomes level N" — fire only at the specified level.
-        TriggerConstraint::AtClassLevel { level } => state
-            .objects
-            .get(&obj_id)
-            .and_then(|obj| obj.class_level)
+        TriggerConstraint::AtClassLevel { level } => source_context
+            .and_then(|source| source.source_read(state).class_level())
             .is_some_and(|current| current == *level),
         // CR 603.4: "This ability triggers only the first N times each turn."
         TriggerConstraint::MaxTimesPerTurn { max } => definition_ref.is_none_or(|key| {
@@ -8306,7 +8293,11 @@ fn check_trigger_constraint(
         Some(&trigger_definition_ref_for_live_index(
             state, obj_id, trig_idx,
         )),
-        obj_id,
+        state
+            .objects
+            .get(&obj_id)
+            .map(|source| trigger_source_context_for_latch(state, source))
+            .as_ref(),
         controller,
         event,
     )
@@ -8569,12 +8560,21 @@ fn ability_condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool
     }
 }
 
-pub(super) fn build_triggered_ability(
+/// Builds a triggered ability exclusively from the source observation that
+/// matched it. The only live reads below are documented game-global event
+/// channels (`announced_source_x` and `active_player`), never a rebind of the
+/// source object by storage id.
+pub(super) fn build_triggered_ability_from_context(
     state: &GameState,
     trig_def: &TriggerDefinition,
-    source_id: ObjectId,
-    controller: PlayerId,
+    source_context: &TriggerSourceContext,
+    definition_ref: Option<&TriggerDefinitionRef>,
 ) -> ResolvedAbility {
+    let source_id = source_context.identity.reference.object_id;
+    let controller = source_context.lki.controller;
+    if let Some(definition_ref) = definition_ref {
+        debug_assert_eq!(definition_ref.source, source_context.identity.reference);
+    }
     if let Some(execute) = &trig_def.execute {
         // Pre-resolved ability definition -- direct typed access
         let mut resolved = build_resolved_from_def(execute, source_id, controller);
@@ -8584,33 +8584,35 @@ pub(super) fn build_triggered_ability(
         }
         // Propagate cast_from_zone from the source object so sub_ability
         // conditions like "if you cast it from your hand" can evaluate.
-        if let Some(zone) = state.objects.get(&source_id).and_then(|o| o.cast_from_zone) {
+        if let Some(zone) = source_context.cast_from_zone {
             resolved.context.cast_from_zone = Some(zone);
         }
         // CR 702.33d + CR 702.33f: Propagate kicker payments from the source
         // object's `kickers_paid` (set at cast resolution) into the
         // triggered ability's context so `AbilityCondition::AdditionalCostPaid`
         // (with kicker variant or multikicker count) can evaluate.
-        if let Some(obj) = state.objects.get(&source_id) {
-            if !obj.kickers_paid.is_empty() {
-                resolved.context.kickers_paid.clone_from(&obj.kickers_paid);
-                // Maintain the legacy single-bool flag for "if it was kicked"
-                // (no variant, min_count=1) so the default-shape evaluator
-                // remains correct on triggered abilities (the bool reads
-                // `additional_cost_paid` directly per the evaluator contract).
-                resolved.context.additional_cost_paid = true;
-            }
-            if obj.additional_cost_payment_count > 0 {
-                resolved.context.additional_cost_payment_count = obj.additional_cost_payment_count;
-                resolved.context.additional_cost_paid = true;
-            }
-            if !obj.additional_cost_payments.is_empty() {
-                resolved
-                    .context
-                    .additional_cost_payments
-                    .clone_from(&obj.additional_cost_payments);
-                resolved.context.additional_cost_paid = true;
-            }
+        if !source_context.kickers_paid.is_empty() {
+            resolved
+                .context
+                .kickers_paid
+                .clone_from(&source_context.kickers_paid);
+            // Maintain the legacy single-bool flag for "if it was kicked"
+            // (no variant, min_count=1) so the default-shape evaluator
+            // remains correct on triggered abilities (the bool reads
+            // `additional_cost_paid` directly per the evaluator contract).
+            resolved.context.additional_cost_paid = true;
+        }
+        if source_context.additional_cost_payment_count > 0 {
+            resolved.context.additional_cost_payment_count =
+                source_context.additional_cost_payment_count;
+            resolved.context.additional_cost_paid = true;
+        }
+        if !source_context.additional_cost_payments.is_empty() {
+            resolved
+                .context
+                .additional_cost_payments
+                .clone_from(&source_context.additional_cost_payments);
+            resolved.context.additional_cost_paid = true;
         }
         // CR 400.7d: an ability of a permanent may reference what was paid to
         // cast the spell that became it. The emerge-sacrificed creature is read
@@ -8622,11 +8624,9 @@ pub(super) fn build_triggered_ability(
         // cost-paid-object cost (paid at resolution, after this build-time stamp)
         // still wins; for Adipose Offspring the ETB trigger has no cost, so this
         // build-time stamp is the sole, correct source.
-        if let Some(obj) = state.objects.get(&source_id) {
-            if let Some(snapshot) = &obj.cast_cost_paid_object {
-                if resolved_ability_refs_cost_paid_object(&resolved) {
-                    resolved.set_cost_paid_object_recursive(snapshot.clone());
-                }
+        if let Some(snapshot) = &source_context.cast_cost_paid_object {
+            if resolved_ability_refs_cost_paid_object(&resolved) {
+                resolved.set_cost_paid_object_recursive(snapshot.clone());
             }
         }
         // CR 107.3i + CR 107.3a: bind this trigger's X to the announced X of an
@@ -8673,21 +8673,14 @@ pub(super) fn build_triggered_ability(
         if matches!(trig_def.mode, TriggerMode::Phase) {
             resolved.set_scoped_player_recursive(state.active_player);
         }
-        // CR 400.7: Capture the source's current incarnation so a self-reference
-        // ("sacrifice/exile this creature") resolves against the source only
-        // while it remains the same object. If the source is blinked between
-        // this trigger firing and its resolution, the re-entered permanent has a
-        // higher incarnation and the self-reference finds nothing.
-        resolved
-            .set_source_incarnation_recursive(state.objects.get(&source_id).map(|o| o.incarnation));
-        // CR 400.7 identity latch + CR 704.5d: snapshot the source's card
-        // identity so an `AllCopies` priority yield can still match by card
-        // identity after the source (e.g. a token) has ceased to exist.
-        resolved.source_card_id = state.objects.get(&source_id).map(|o| o.card_id);
+        resolved.set_trigger_source_recursive(source_context.clone());
+        if let Some(definition_ref) = definition_ref {
+            resolved.set_trigger_definition_ref_recursive(definition_ref.clone());
+        }
         resolved
     } else {
         // Trigger with no execute -- use Unimplemented as no-op marker
-        ResolvedAbility::new(
+        let mut resolved = ResolvedAbility::new(
             Effect::Unimplemented {
                 name: "TriggerNoExecute".to_string(),
                 description: None,
@@ -8695,8 +8688,53 @@ pub(super) fn build_triggered_ability(
             Vec::new(),
             source_id,
             controller,
-        )
+        );
+        resolved.set_trigger_source_recursive(source_context.clone());
+        if let Some(definition_ref) = definition_ref {
+            resolved.set_trigger_definition_ref_recursive(definition_ref.clone());
+        }
+        resolved
     }
+}
+
+/// Compatibility constructor for engine-internal fixtures and synthesized
+/// triggers that do not carry a source observation. Collection paths must call
+/// [`build_triggered_ability_from_context`] with their owned source context.
+pub(super) fn build_triggered_ability(
+    state: &GameState,
+    trig_def: &TriggerDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> ResolvedAbility {
+    if let Some(source) = state.objects.get(&source_id) {
+        return build_triggered_ability_from_context(
+            state,
+            trig_def,
+            &trigger_source_context_for_latch(state, source),
+            None,
+        );
+    }
+
+    let Some(execute) = &trig_def.execute else {
+        return ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "TriggerNoExecute".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            source_id,
+            controller,
+        );
+    };
+    let mut resolved = build_resolved_from_def(execute, source_id, controller);
+    if resolved.description.is_none() {
+        resolved.description = trig_def.description.clone();
+    }
+    resolved.unless_pay.clone_from(&trig_def.unless_pay);
+    if matches!(trig_def.mode, TriggerMode::Phase) {
+        resolved.set_scoped_player_recursive(state.active_player);
+    }
+    resolved
 }
 
 /// Extract the TargetFilter from an effect, if it has targeting requirements.
@@ -10656,10 +10694,10 @@ pub mod tests {
     /// yield (CR 117.3d) can later match by card identity even after the token
     /// source ceases to exist. The kill is a zone change (models an effect-driven
     /// death whose triggers are collected before the token-cease SBA runs).
-    /// Reverting the `source_card_id` stamp in `build_triggered_ability` leaves
-    /// the pushed entry's `source_card_id` as `None`, failing this test.
+    /// Reverting the exact source-context stamp in the trigger builder leaves
+    /// the pushed entry without its card identity, failing this test.
     #[test]
-    fn build_triggered_ability_stamps_source_card_id_for_token_dies_trigger() {
+    fn build_triggered_ability_stamps_trigger_source_context_for_token_dies_trigger() {
         let mut state = setup();
         let token = create_object(
             &mut state,
@@ -10705,13 +10743,17 @@ pub mod tests {
             })
             .expect("reach-guard: the token's dies-trigger is on the stack as a TriggeredAbility");
         assert_eq!(
-            ability.source_card_id,
+            ability.trigger_source_card_id(),
             Some(CardId(77)),
             "the dies-trigger must latch the token's card identity at push",
         );
         assert!(
-            ability.source_incarnation.is_some(),
+            ability.trigger_source_incarnation().is_some(),
             "the dies-trigger must also latch the source incarnation at push",
+        );
+        assert!(
+            ability.trigger_definition_ref.is_some(),
+            "the collected trigger must retain its exact definition occurrence",
         );
     }
 
@@ -20039,7 +20081,7 @@ pub mod tests {
         let ability = build_triggered_ability(&state, &trig_def, creature, PlayerId(0));
         // CR 400.7: the incarnation captured at fire time matches the live object.
         assert_eq!(
-            ability.source_incarnation,
+            ability.trigger_source_incarnation(),
             Some(state.objects[&creature].incarnation)
         );
 
@@ -20068,7 +20110,7 @@ pub mod tests {
             "Spark Elemental",
         );
         let ability = build_triggered_ability(&state, &trig_def, creature, PlayerId(0));
-        let captured = ability.source_incarnation;
+        let captured = ability.trigger_source_incarnation();
 
         // Blink through the real zone pipeline: leave the battlefield, then return.
         let mut blink_events = Vec::new();

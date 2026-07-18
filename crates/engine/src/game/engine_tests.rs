@@ -2138,8 +2138,9 @@ fn push_token_trigger(
         source,
         controller,
     );
-    ability.source_incarnation = incarnation;
-    ability.source_card_id = card_id;
+    if let Some(incarnation) = incarnation {
+        ability.set_test_trigger_source_recursive(incarnation, card_id.unwrap_or(CardId(0)));
+    }
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
     state.stack.push_back(StackEntry {
@@ -2235,8 +2236,9 @@ fn set_priority_yield_add_no_op_without_matching_stack_entry() {
 /// G6 (CR 400.7): a `ThisObject` add on a trigger with no latched incarnation
 /// (a synthetic/delayed game-rule trigger) now STORES a `None`-incarnation yield
 /// through the real `SetPriorityYield` pipeline and that yield matches its own
-/// trigger — previously this add was a silent no-op. An `AllCopies` add on the
-/// same trigger also stores.
+/// trigger — previously this add was a silent no-op. An `AllCopies` add cannot
+/// bind without an exact source context, even if a synthetic fixture carries a
+/// display card id.
 #[test]
 fn set_priority_yield_this_object_none_incarnation_latches_and_matches() {
     let mut state = setup_game_at_main_phase();
@@ -2288,10 +2290,9 @@ fn set_priority_yield_this_object_none_incarnation_latches_and_matches() {
         },
     )
     .expect("legal");
-    assert_eq!(
-        state.priority_yields.len(),
-        1,
-        "AllCopies add stores when the card identity is present"
+    assert!(
+        state.priority_yields.is_empty(),
+        "AllCopies add requires the exact source context rather than a synthetic card id"
     );
 }
 

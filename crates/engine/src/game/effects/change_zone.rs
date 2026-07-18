@@ -507,14 +507,11 @@ pub fn resolve(
             return Ok(());
         }
 
-        // CR 400.7: SelfRef resolves to the source only while it is still the
-        // same object (same incarnation). When `resolved_targets` returned empty
-        // because `source_is_current()` was false (the source left and re-entered
-        // the battlefield since the ability was created), the zone-scan fallback
-        // must NOT re-discover the source by raw id equality — that would bypass
-        // the incarnation guard. Short-circuit here so the stale self-reference
-        // does nothing (e.g. a Warp delayed exile after a blink).
-        if matches!(target_filter, TargetFilter::SelfRef) && !ability.source_is_current(state) {
+        // CR 400.7: SelfRef resolves only to the exact source or, for a departure
+        // trigger, its immediate recorded event successor. When no such binding
+        // remains (for example, a Warp delayed exile after a blink), the zone-scan
+        // fallback must not rediscover a same-id return by raw equality.
+        if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,

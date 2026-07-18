@@ -4219,14 +4219,14 @@ where
         //     card's P/T. Read the live source in its current zone, falling back
         //     to LKI only if the object has left the game entirely.
         //
-        // `source_incarnation` is set exactly for triggered abilities (whose
+        // `trigger_source` is set exactly for triggered abilities (whose
         // source can change zones between firing and resolution) and `None` for
         // activated abilities and casts, so it distinguishes the battlefield
         // look-back case from the current-zone case. A bare `resolve_quantity`
         // call with no ability (statics, whose source is on the battlefield, and
         // direct unit reads) defaults to the look-back read.
         ObjectScope::Source => {
-            let expects_battlefield = ability.is_none_or(|a| a.source_incarnation.is_some());
+            let expects_battlefield = ability.is_none_or(|a| a.trigger_source.is_some());
             if expects_battlefield {
                 read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
             } else {
@@ -10525,7 +10525,7 @@ mod tests {
     /// creature dying earlier this step. This is the counterpart to
     /// `resolve_source_power_prefers_lki_when_source_left_battlefield`: same
     /// off-battlefield source with a buffed LKI, but because the ability is
-    /// activated (`source_incarnation == None`) the live current-zone value wins.
+    /// activated (no `trigger_source`) the live current-zone value wins.
     /// Revert-failing: without the `expects_battlefield` gate the buffed LKI (3)
     /// leaks through and the activated graveyard ability over-reports.
     #[test]
@@ -10558,7 +10558,7 @@ mod tests {
                 scope: ObjectScope::Source,
             },
         };
-        // An activated ability has no `source_incarnation` — it functions from
+        // An activated ability has no `trigger_source` — it functions from
         // the current (graveyard) zone, so the live base power must win.
         let ability = ResolvedAbility::new(
             Effect::GainLife {
@@ -10570,8 +10570,8 @@ mod tests {
             PlayerId(0),
         );
         assert!(
-            ability.source_incarnation.is_none(),
-            "activated-ability fixture must have no source incarnation"
+            ability.trigger_source.is_none(),
+            "activated-ability fixture must have no trigger source"
         );
         assert_eq!(
             resolve_quantity_with_targets(&state, &power, &ability),

@@ -5219,8 +5219,7 @@ mod tests {
             source,
             PlayerId(1),
         );
-        ability.source_incarnation = Some(2);
-        ability.source_card_id = Some(CardId(77));
+        ability.set_test_trigger_source_recursive(2, CardId(77));
         state.stack.push_back(StackEntry {
             id: ObjectId(600),
             source_id: source,

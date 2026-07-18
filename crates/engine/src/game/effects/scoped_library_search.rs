@@ -88,8 +88,8 @@ pub(crate) fn has_only_detachable_shuffle_tail(ability: &ResolvedAbility) -> boo
 /// supported `Effect::ChangeZone` fields may enter it. Every checked field
 /// would otherwise require `resolve_ability_chain` to preserve behavior.
 fn is_plain_parent_target_delivery(delivery: &ResolvedAbility) -> bool {
-    delivery.source_incarnation.is_none()
-        && delivery.source_card_id.is_none()
+    delivery.trigger_source.is_none()
+        && delivery.trigger_definition_ref.is_none()
         && delivery.targets.is_empty()
         && delivery.sub_ability.is_none()
         && delivery.else_ability.is_none()

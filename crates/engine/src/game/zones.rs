@@ -628,7 +628,7 @@ pub(crate) fn record_resolution_source_relatch(
         .resolving_stack_entry
         .as_ref()
         .and_then(StackEntry::ability)
-        .map(|a| (a.source_id, a.source_incarnation))
+        .map(|a| (a.source_id, a.trigger_source_incarnation()))
     else {
         return;
     };

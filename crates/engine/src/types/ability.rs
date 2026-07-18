@@ -13,7 +13,7 @@ use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
 use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
-    TargetSelectionConstraint,
+    TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
@@ -20675,24 +20675,19 @@ pub enum ParentTargetMissingReason {
 pub struct ResolvedAbility {
     pub effect: Effect,
     pub targets: Vec<TargetRef>,
+    /// Attribution only. Triggered abilities additionally carry the exact
+    /// context below; callers must never use this raw id to rebind a departed
+    /// source to a newer incarnation.
     pub source_id: ObjectId,
-    /// CR 400.7: The source object's `incarnation` captured when this ability was
-    /// created. Set only for triggered abilities (where the source can change
-    /// zones between firing and resolution); `None` for activated abilities,
-    /// casts, and engine-internal abilities, which then bypass the epoch guard.
-    /// At resolution a self-reference (`~`) resolves to the source only while its
-    /// incarnation still matches — once the source has left and re-entered the
-    /// battlefield it is a new object and the self-reference finds nothing.
+    /// CR 400.7 + CR 113.7a: Complete event-time authority for a triggered
+    /// source. This is recursive across an ability chain and replaces the old
+    /// independent incarnation/card-id latches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_incarnation: Option<u64>,
-    /// CR 400.7 identity latch + CR 704.5d token cessation: the source's card
-    /// identity snapshotted at trigger push, so an `AllCopies` priority yield
-    /// can match by card identity after the source object ceases to exist (a
-    /// token that has left the battlefield is removed from `state.objects`
-    /// before priority is next offered). Set only for triggered abilities;
-    /// `None` for activated abilities, casts, and engine-internal abilities.
+    pub trigger_source: Option<TriggerSourceContext>,
+    /// Exact live definition occurrence that created this triggered ability.
+    /// `ability_index` remains presentation/compatibility only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_card_id: Option<CardId>,
+    pub trigger_definition_ref: Option<TriggerDefinitionRef>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -20967,8 +20962,8 @@ impl ResolvedAbility {
             repeat_until: None,
             replacement_applied: HashSet::new(),
             sub_link: SubAbilityLink::ContinuationStep,
-            source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
@@ -20985,18 +20980,77 @@ impl ResolvedAbility {
         }
     }
 
-    /// CR 400.7: Propagate the source's captured incarnation to this ability and
-    /// every sub/else branch (chained "...then exile ~" effects share the source).
-    /// Stamped when a triggered ability fires; read by the self-reference epoch
-    /// guard at resolution.
-    pub fn set_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
-        self.source_incarnation = incarnation;
+    /// Install one owned triggered-source authority over this entire ability
+    /// chain. Each branch resolves against the same observed incarnation.
+    pub fn set_trigger_source_recursive(&mut self, source: TriggerSourceContext) {
+        self.source_id = source.identity.reference.object_id;
+        self.controller = source.lki.controller;
+        self.original_controller = Some(source.lki.controller);
+        self.trigger_source = Some(source.clone());
         if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_source_incarnation_recursive(incarnation);
+            sub.set_trigger_source_recursive(source.clone());
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_source_incarnation_recursive(incarnation);
+            else_branch.set_trigger_source_recursive(source);
         }
+    }
+
+    /// Install the exact definition occurrence over every continuation branch.
+    pub fn set_trigger_definition_ref_recursive(&mut self, definition_ref: TriggerDefinitionRef) {
+        self.trigger_definition_ref = Some(definition_ref.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_trigger_definition_ref_recursive(definition_ref.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_trigger_definition_ref_recursive(definition_ref);
+        }
+    }
+
+    /// Clears provenance that distinguishes otherwise identical triggered
+    /// abilities for structural comparison. This deliberately clears the
+    /// complete owned authorities together; retaining either a source context
+    /// or a definition occurrence would reintroduce object-identity drift.
+    pub fn clear_trigger_identity_recursive(&mut self) {
+        self.source_id = ObjectId(0);
+        self.trigger_source = None;
+        self.trigger_definition_ref = None;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.clear_trigger_identity_recursive();
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.clear_trigger_identity_recursive();
+        }
+    }
+
+    pub fn trigger_source_incarnation(&self) -> Option<u64> {
+        self.trigger_source
+            .as_ref()
+            .map(|source| source.identity.reference.incarnation)
+    }
+
+    pub fn trigger_source_card_id(&self) -> Option<CardId> {
+        self.trigger_source.as_ref().map(|source| source.card_id)
+    }
+
+    /// Test-only fixture helper for a triggered ability whose source has
+    /// already left the object map. Production code must capture a real
+    /// [`TriggerSourceContext`] at collection time instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_test_trigger_source_recursive(&mut self, incarnation: u64, card_id: CardId) {
+        let mut source = crate::game::game_object::GameObject::new(
+            self.source_id,
+            card_id,
+            self.controller,
+            "test trigger source".to_string(),
+            Zone::Battlefield,
+        );
+        source.controller = self.controller;
+        source.incarnation = incarnation;
+        let context = source
+            .snapshot_for_zone_change(source.id, Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context
+            .expect("test source snapshot always contains trigger context");
+        self.set_trigger_source_recursive(context);
     }
 
     /// CR 400.7: True if the ability's source is still the same object instance it
@@ -21005,10 +21059,17 @@ impl ResolvedAbility {
     /// left and re-entered the battlefield as a new object, its incarnation no
     /// longer matches the captured value and this returns false.
     pub fn source_is_current(&self, state: &crate::types::game_state::GameState) -> bool {
-        match self.source_incarnation {
+        match self.trigger_source.as_ref() {
             None => true,
-            Some(captured) => {
-                let current = state.objects.get(&self.source_id).map(|o| o.incarnation);
+            Some(source) => {
+                let captured = source.identity.reference.incarnation;
+                let current_incarnation = state
+                    .objects
+                    .get(&self.source_id)
+                    .map(|object| object.incarnation);
+                let current = state.objects.get(&self.source_id).and_then(|object| {
+                    (object.zone == source.identity.expected_zone).then_some(object.incarnation)
+                });
                 current == Some(captured)
                     // CR 400.7j (+ CR 400.7g/h cast hop): a source that moved (possibly
                     // twice) as part of THIS resolution carries its identity-dependent
@@ -21018,9 +21079,65 @@ impl ResolvedAbility {
                     || matches!(state.resolution_source_relatch, Some(r)
                         if r.object_id == self.source_id
                             && r.original_stamp == captured
-                            && Some(r.current_incarnation) == current)
+                            && Some(r.current_incarnation) == current_incarnation)
             }
         }
+    }
+
+    /// Returns whether a self-reference can resolve to the source's current
+    /// object. A normal triggered source must still be its exact captured
+    /// incarnation. The one exception is the immediate successor of the
+    /// source's own recorded zone-change event: a dies trigger's "it" refers
+    /// to the card now in the graveyard, while its source facts remain LKI.
+    ///
+    /// The per-turn record check is load-bearing. If the object has moved again
+    /// after the triggering event, it is no longer that immediate successor and
+    /// a same-id return must not be rebound as the old source.
+    pub fn self_ref_is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        if self.source_is_current(state) {
+            return true;
+        }
+
+        let Some(source) = self.trigger_source.as_ref() else {
+            return true;
+        };
+        let Some(crate::types::GameEvent::ZoneChanged {
+            object_id,
+            to,
+            record,
+            ..
+        }) = state.current_trigger_event.as_ref()
+        else {
+            return false;
+        };
+        if *object_id != self.source_id
+            || record.trigger_source_context().is_none_or(|event_source| {
+                event_source.identity.reference != source.identity.reference
+            })
+            || state
+                .objects
+                .get(object_id)
+                .is_none_or(|object| object.zone != *to)
+        {
+            return false;
+        }
+
+        let Some(recorded_event) = state
+            .zone_changes_this_turn
+            .get(record.turn_zone_change_index)
+        else {
+            return false;
+        };
+        recorded_event
+            .trigger_source_context()
+            .is_some_and(|event_source| {
+                event_source.identity.reference == source.identity.reference
+            })
+            && state
+                .zone_changes_this_turn
+                .iter()
+                .skip(record.turn_zone_change_index + 1)
+                .all(|later| later.object_id != self.source_id)
     }
 
     /// CR 608.2c: Bind a tracked-set sentinel (`TrackedSetId(0)`) to a CONCRETE

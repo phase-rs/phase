@@ -332,7 +332,15 @@ pub(crate) fn grant_search_found_permission_after_delivery(
         grant.source.object_id,
         grant.controller,
     );
-    ability.source_incarnation = Some(grant.source.incarnation);
+    if let Some(source) = state
+        .objects
+        .get(&grant.source.object_id)
+        .filter(|source| source.incarnation == grant.source.incarnation)
+    {
+        ability.set_trigger_source_recursive(super::triggers::trigger_source_context_for_latch(
+            state, source,
+        ));
+    }
     // The canonical grant resolver is the single authority for stamping
     // source/controller/grantee provenance and permission replacement.
     effects::grant_permission::resolve(state, &ability, events)
