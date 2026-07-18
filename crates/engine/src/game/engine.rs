@@ -1367,8 +1367,7 @@ fn materialize_fixed_shortcut(
     // (carried on the clone since the offer). The drain path below is byte-identical for every
     // other loop.
     if !state.last_loop_action_sequence.is_empty() {
-        let seq = state.last_loop_action_sequence.clone();
-        materialize_object_growth_shortcut(state, result, &seq, n);
+        materialize_object_growth_shortcut(state, result, proposal);
         return;
     }
 
@@ -1972,86 +1971,30 @@ fn try_offer_object_growth_shortcut(
     Some((certificate, schema))
 }
 
-/// PR-7 Phase 4d-ii / P7 v3 (CR 732.2a): materialize a confirmed `Fixed(N)` object-growth
-/// shortcut by driving N real loop PERIODS on a clone via the injector, committing each
-/// completed period atomically. The recurrence boundary is the injector's OWN settle condition
-/// (`Priority` + empty stack per step) — one successful `drive_loop_sequence_iteration` IS one
-/// materialized period of real game actions, so the result is ground-truth (contrast the drain
-/// path, which re-derives recurrence from `loop_states_*`). The per-period `if is_err() break`
-/// is a DEFENSIVE containment (⭐ impl-gate A, measured PATH-2 — see below): were a FINITE loop
-/// ever false-accepted, driving real periods self-limits it to its true fuel — the drive aborts
-/// once the loop stops being sustainable ⇒ commit the completed periods + hand priority back
-/// (CR 800.4a). The class of *offered* finite loops is measured EMPTY, so this guard never fires
-/// on the certified class; it is retained as a 1-line correctness floor against a future detector
-/// regression. Emptiness proof (each measured, not asserted):
-///   (i)  cost-fuel: costs are paid only from the activating player's own resources (CR 118.3 /
-///        601.2f / 602.2b), so a cost-fueled finite loop drains the CONTROLLER's resource, which
-///        is case (ii).
-///   (ii) controller-fuel: a loop whose driving resource decreases is vetoed by the sign-check
-///        firewall (`driving_resources_non_decreasing`) BEFORE any offer — measured green by
-///        `sign_check_object_counter_decrease_rejects`.
-///   (iii) opponent-effect fuel: no *offered* loop's drive can abort because an opponent's
-///        resource hit zero — two independent reasons, both measured:
-///        - Non-targeted per-cycle effect: NO-OPS at exhaustion rather than erroring. Effect
-///          resolution has NO Err channel BY CONSTRUCTION — `apply_action(PassPriority)` reaches
-///          `handle_priority_pass_with_limit` (`-> WaitingFor`) `-> resolve_next_with_limit`
-///          (`-> u32`) `-> resolve_top` (`-> ()`); a `()`/`u32`/`WaitingFor` return type cannot
-///          propagate an `EngineError` via `?`, so CR 609.3 ("an effect that can't fully apply
-///          does only as much as possible") is realized STRUCTURALLY. `apply_action`'s Err
-///          surface is pre-resolution legality only. Measured green by
-///          `cond_a_nontargeted_opponent_depletion_noops_at_exhaustion_not_abort` (Pyrohemia).
-///          (An opponent reaching 0 life ends the loop via the infallible SBA pass / `!is_alive`
-///          break, CR 800.4a — player-elimination, a legitimate win, not a drive error.)
-///        - Targeted / choice-bearing variant: not offered in the FIRST place (the PRIMARY
-///          reason) — it emits an unpinned prompt that trips the drive's fail-closed catch-all
-///          (`_ => Err(RecastAbort)` in `drive_loop_action_iteration`) during full-resource
-///          detection, so `try_offer`'s drive returns `None`. This also excludes
-///          targeted-on-*projected*-resources that the cover check alone would miss; the cover
-///          check is a secondary, redundant guard.
-/// Residual (panic-on-empty — LOW, non-blocking): the proof above concerns `Err` vectors; a
-/// hypothetical `panic!`/`unwrap` on an empty legal set inside some effect handler would abort
-/// the process, not selectively abort the drive, so it cannot make the OFFER opponent-dependent
-/// (it crashes rather than shortcut-vetoes). It is also doubly-unreachable: (a) detection
-/// (`try_offer`) drives at FULL resources, so no exhaustion arises there; (b) only loops OFFERED
-/// as unbounded reach materialize — board-equal / net-non-negative cycles that by construction do
-/// NOT deplete a resource to the exhaustion a panic-on-empty would need. A materialize-time panic
-/// guard is a possible LOW defense-in-depth follow-up, not required for P2 soundness.
-/// Runs under the re-entrancy guard.
+/// PR-7 Phase 4d-ii / P7 v3 (CR 732.2a): "materialize" a confirmed UNBOUNDED object-growth
+/// shortcut (fodder/token reproduction, or a multi-activation mana engine). An unbounded loop is
+/// NOT replayed a discrete number of times — that would both CAP the infinite at N and be O(N)
+/// (measured ≈0.4 s per materialized token; 500 Saprolings drove for 212 s). Instead persist the
+/// certificate's unbounded axes for the controller through the SAME single writer the reconcile /
+/// determinate crown uses (`mark_unbounded_loop`; see the reconcile seam above). The ω-cover has
+/// already proved the growing class is inert + unobserved, and `board_covers_modulo_fodder`'s
+/// tapped-split proved the UNTAPPED remainder is B1-preserved (finite) while the total strictly
+/// grows — so the TAPPED members are exactly the unbounded pile. The board therefore needs NO
+/// mutation: the finite untapped reals stay as-is, and the pre-existing tapped fodder ARE the ∞
+/// pile (the HUD / battlefield render the marked axis as `∞`). For a mana engine the axes are
+/// `Mana(_)`, feeding the existing infinite-mana pool reseed. Every OFFERED growth loop is
+/// certified-unbounded, so `proposal.unbounded` is non-empty (an empty set is a harmless no-op).
+/// Then consume the recast context + hand priority to the living seat (CR 800.4a) — exactly as the
+/// old drive did — so this same `apply()` does not instantly re-offer; a later manual recast
+/// re-arms the context and a later beat re-detects genuinely.
 fn materialize_object_growth_shortcut(
     state: &mut GameState,
     result: &mut ActionResult,
-    seq: &[crate::types::game_state::LoopActionContext],
-    n: u32,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
 ) {
-    let Some(controller) = seq.first().map(|c| c.controller) else {
-        return; // empty sequence — nothing to materialize (callers gate on non-empty)
-    };
-    let expected_defs: Vec<Option<crate::types::ability::AbilityDefinition>> = seq
-        .iter()
-        .map(|c| loop_action_expected_def(state, c))
-        .collect();
-    let _probe = SimulationProbeGuard::enter();
-    // Last fully-completed period (owned O(1) rollback); the board is unchanged since the
-    // offer (Declare/Accept touch only the protocol).
-    let mut committed = state.clone();
-
-    for i in 0..n {
-        // Seed the controller's settle priority beat so the injector's first action is
-        // authorized (the entry `waiting_for` is RespondToShortcut / LoopShortcut).
-        let mut work = committed.clone();
-        priority::reset_priority(&mut work);
-        work.priority_player = controller;
-        work.waiting_for = WaitingFor::Priority { player: controller };
-        if drive_loop_sequence_iteration(&mut work, seq, i, &expected_defs).is_err() {
-            break; // loop no longer sustainable ⇒ keep the completed periods
-        }
-        committed = work; // ATOMIC: one real loop period committed
-    }
-
-    *state = committed;
-    // Ring-clear + consume the recast context BEFORE handback so this same `apply()` does
-    // not instantly re-offer the just-materialized loop; a later manual recast re-arms the
-    // context and a later beat re-detects genuinely.
+    // CR 732.2a: reuse the single `unbounded_resources` writer (never mutate the map inline). The
+    // proposer is the loop controller (the offer required the whole period to be theirs).
+    state.mark_unbounded_loop(proposal.proposer, &proposal.unbounded);
     state.loop_detect_ring.clear();
     state.last_loop_action_sequence.clear();
     priority::reset_priority(state);

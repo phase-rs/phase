@@ -448,12 +448,14 @@ fn mana_engine_interruptibility_defused_opponent_responds_no_grant() {
     );
 }
 
-/// P2 — Accept materializes N real periods of `+2 {C}` each (ground-truth drive). `Fixed(1)` ⇒
-/// `+2`, `Fixed(5)` ⇒ `+10`, all legal. Proves the multi-action materialize DRIVE
-/// (`drive_loop_sequence_iteration` per period, atomically committed). The per-period
-/// `if drive.is_err() break` self-limits an unsustainable loop — Basalt+Power is genuinely
-/// infinite so it never aborts here; the containment analysis is in the impl report.
-fn materialize_n(db: &CardDatabase, n: u32) -> i64 {
+/// P2 (updated 2026-07-18, user directive): Accept on an unbounded MANA engine MARKS the
+/// certificate's `Mana(_)` axes via `mark_unbounded_loop` (reusing the infinite-mana machinery)
+/// rather than driving N finite periods. The `refill_infinite_mana` pipeline top-up (engine.rs,
+/// after every action) then holds the flagged player's pool at `INFINITE_MANA_PER_TYPE`, so the
+/// grant is genuine infinite mana — treated as actually infinite within the phase (CR 500.4
+/// empties + finite-resolves it at the boundary) and INDEPENDENT of the declared count. Returns
+/// `(colorless_delta, flagged_infinite)`.
+fn accept_mana_engine(db: &CardDatabase, n: u32) -> (i64, bool) {
     let mut rig = setup(true, LoopDetectionMode::Interactive, db);
     let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).unwrap();
     let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).unwrap();
@@ -463,7 +465,7 @@ fn materialize_n(db: &CardDatabase, n: u32) -> i64 {
             rig.runner.state().waiting_for,
             WaitingFor::LoopShortcut { .. }
         ),
-        "precondition: the offer must fire before materialization"
+        "precondition: the offer must fire before acceptance"
     );
     let at_offer = colorless(rig.runner.state(), P0) as i64;
     rig.runner
@@ -477,26 +479,37 @@ fn materialize_n(db: &CardDatabase, n: u32) -> i64 {
             response: ShortcutResponse::Accept,
         })
         .expect("opponent accepts");
-    colorless(rig.runner.state(), P0) as i64 - at_offer
+    let flagged = rig
+        .runner
+        .state()
+        .unbounded_resources
+        .get(&P0)
+        .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_))));
+    (colorless(rig.runner.state(), P0) as i64 - at_offer, flagged)
 }
 
+/// The ∞-mark is count-INDEPENDENT and yields genuine infinite mana (pool held at
+/// `INFINITE_MANA_PER_TYPE`), not the old finite `+2·n`. DISCRIMINATING (revert-probe): without
+/// the `mark_unbounded_loop` call, `flagged` is false and the pool is never topped ⇒ both the
+/// flag and the ≥90 jump flip to fail.
 #[test]
-fn mana_engine_materialize_fixed_one_adds_two_mana() {
+fn mana_engine_accept_marks_infinite_mana_independent_of_count() {
     let Some(db) = shared_card_db() else { return };
-    assert_eq!(
-        materialize_n(db, 1),
-        2,
-        "Fixed(1) drives one real period ⇒ +2 colorless mana (ground-truth)"
+    let (delta1, flagged1) = accept_mana_engine(db, 1);
+    let (delta5, flagged5) = accept_mana_engine(db, 5);
+    assert!(
+        flagged1 && flagged5,
+        "accept must flag P0 with a Mana axis (∞ mana), not drive N finite periods"
     );
-}
-
-#[test]
-fn mana_engine_materialize_fixed_five_adds_ten_mana() {
-    let Some(db) = shared_card_db() else { return };
     assert_eq!(
-        materialize_n(db, 5),
-        10,
-        "Fixed(5) drives five real periods ⇒ +10 colorless mana (ground-truth, self-consistent)"
+        delta1, delta5,
+        "the ∞ mark is count-independent (contrast the old drive-N: +2 vs +10)"
+    );
+    // At offer the pool held +2 from the one detection period; refill tops all colors to
+    // INFINITE_MANA_PER_TYPE (100) ⇒ a large count-independent jump (≥90).
+    assert!(
+        delta1 >= 90,
+        "the pool must be topped to the infinite-mana constant, got {delta1}"
     );
 }
 

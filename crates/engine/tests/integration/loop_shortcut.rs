@@ -2808,14 +2808,20 @@ fn object_named_in_zone(
         .map(|o| o.id)
 }
 
-/// P2 ⭐ — Accept materializes exactly N real Saprolings. Continue P1 to the offer, declare
-/// `Fixed(5)`, opponent Accepts ⇒ the injector drives 5 real recast cycles on a clone,
-/// committing each ⇒ exactly +5 net Saprolings, Sprout Swarm back in hand, priority handed
-/// back, ring cleared. Revert-failing: without the object-growth materializer routing the
-/// drain path's boundary check (equal / cover_growth, no fodder disjunct) never recognizes
-/// the growing board ⇒ 0 committed cycles ⇒ 0 tokens.
+/// P2 ⭐ (updated 2026-07-18, user directive): ACCEPTING an unbounded object-growth (fodder /
+/// token) shortcut MARKS the certificate's ∞ axes via the shared `mark_unbounded_loop` writer
+/// and materializes ZERO discrete tokens — the ∞ status IS the applied result (contrast the
+/// old O(N) drive, which capped the infinite at N and cost ≈0.4 s/token / 212 s for 500). The
+/// finite tokens are minted later, at the CR 500.4 phase/turn boundary, when the player names a
+/// finite count for each ∞ status; accept itself only flags the status. Declaring `Fixed(5)`
+/// yet getting 0 tokens is itself discriminating — it proves the count is ignored (no drive).
+///
+/// DISCRIMINATING (revert-probe verified): deleting the `mark_unbounded_loop` call in
+/// `materialize_object_growth_shortcut` leaves `unbounded_resources` empty ⇒ the ∞-status
+/// assertion FLIPS to fail ("must mark unbounded_resources"); a re-introduced N-iteration drive
+/// would break the board-invariance assertion (it would add ≥1 Saproling).
 #[test]
-fn object_growth_51st_materializes_five_saprolings_on_accept() {
+fn object_growth_51st_accept_marks_unbounded_and_mints_no_tokens() {
     let (mut runner, sprout, fodder) = sprout_swarm_scenario(4);
     let outcome = runner
         .cast(sprout)
@@ -2823,32 +2829,50 @@ fn object_growth_51st_materializes_five_saprolings_on_accept() {
         .convoke_with(&[fodder[0]])
         .commit()
         .resolve();
+    let WaitingFor::LoopShortcut { certificate, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "P2 precondition: the offer must fire, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert!(certificate.unbounded.contains(&ResourceAxis::TokensCreated));
     assert!(
-        matches!(outcome.final_waiting_for(), WaitingFor::LoopShortcut { .. }),
-        "P2 precondition: the offer must fire, got {:?}",
-        outcome.final_waiting_for()
+        runner.state().unbounded_resources.is_empty(),
+        "the OFFER must not pre-mark the ∞ status (only accepting does)"
     );
     let at_offer = saproling_count(runner.state());
 
-    // P0 (LoopShortcut.proposer — inferred submitter) declares a Fixed(5) shortcut; the
-    // template is rederived from `last_loop_action_sequence`.
+    // P0 (LoopShortcut.proposer — inferred submitter) declares a Fixed(5) shortcut. The count
+    // is ignored for an unbounded loop (the ∞ mark is count-independent); Fixed(5) here is a
+    // discriminator that a re-introduced drive would turn into +5 tokens.
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(5),
             template: None,
         })
         .expect("declare shortcut");
-    // The lone opponent (P1 — inferred RespondToShortcut submitter) accepts ⇒ materialize.
+    // The lone opponent (P1 — inferred RespondToShortcut submitter) accepts ⇒ mark ∞.
     runner
         .act(GameAction::RespondToShortcut {
             response: ShortcutResponse::Accept,
         })
         .expect("respond accept");
 
+    // (1) ∞ status APPLIED — the revert-probe target.
+    let axes = runner
+        .state()
+        .unbounded_resources
+        .get(&P0)
+        .expect("accepting an unbounded loop must mark unbounded_resources for the controller");
+    assert!(
+        axes.contains(&ResourceAxis::TokensCreated),
+        "the marked axis must be TokensCreated, got {axes:?}"
+    );
+    // (2) ZERO tokens minted at accept — the finite count is named later, at the phase boundary.
     assert_eq!(
         saproling_count(runner.state()),
-        at_offer + 5,
-        "5 real recast cycles ⇒ +5 net Saprolings"
+        at_offer,
+        "accepting an unbounded loop must not drive discrete iterations"
     );
     assert!(
         object_named_in_zone(
@@ -2858,11 +2882,12 @@ fn object_growth_51st_materializes_five_saprolings_on_accept() {
             engine::types::zones::Zone::Hand
         )
         .is_some(),
-        "CR 702.27a: Sprout Swarm must still be in P0's hand after materialization"
+        "CR 702.27a: Sprout Swarm must still be in P0's hand after accept"
     );
+    // (3) priority handed back to a living seat (CR 800.4a) — the protocol closed cleanly.
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "priority handed back after materialization, got {:?}",
+        "priority handed back after accept, got {:?}",
         runner.state().waiting_for
     );
     assert!(runner.state().loop_detect_ring.is_empty());
