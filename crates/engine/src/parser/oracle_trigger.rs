@@ -1547,17 +1547,6 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             &pile.effect_chain(AbilityKind::Spell),
             modifiers,
         ))),
-        Some(TriggerBody::PreLowered(ability)) => {
-            // P05-U4 completion: no producers remain. U6 removes this legacy
-            // arm after the enum variant is deleted.
-            // CR 603.5: Pre-lowered bodies may not have stamped `optional`
-            // during extraction even when the trigger effect began with "you may".
-            let mut ability = ability.clone();
-            if modifiers.optional {
-                ability.optional = true;
-            }
-            Some(ability)
-        }
         None => None,
     };
 

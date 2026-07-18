@@ -25237,12 +25237,11 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
     }
 }
 
-/// Which whole-body entry-point mode a chain-lowering call runs.
+/// Which whole-body entry-point mode an ability-IR parse runs.
 ///
-/// `try_parse_chain_bypass` is intentionally empty after U3c, but the two entry
-/// points still do **not** run the same whole-body recognizer set. The difference
-/// is carried here as typed data rather than duplicated as two hand-maintained
-/// `if let` stacks:
+/// The two entry points do **not** run the same whole-body recognizer set. The
+/// difference is carried here as typed data rather than duplicated as two
+/// hand-maintained `if let` stacks:
 ///
 /// | mode | whole-body recognizers | context |
 /// |---|---|---|
@@ -25265,27 +25264,6 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
 pub(crate) enum ChainLoweringMode {
     Standalone,
     WithContext,
-}
-
-/// U3 completion seam: retain the now-empty bypass dispatcher until U6 deletes
-/// this escape hatch.
-///
-/// `ChainLoweringMode` remains the typed mode gate for the WithContext-only cloak
-/// IR producer in `parse_ability_ir`; removing either here would silently absorb
-/// the documented mode-asymmetry bug fix into this parity migration.
-/// Returns `None` so every recognizer lowers through ordinary ability IR.
-fn try_parse_chain_bypass(
-    _text: &str,
-    _kind: AbilityKind,
-    mode: ChainLoweringMode,
-    _ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
-    // U3c completed the shared list and the formerly mode-exclusive cloak
-    // recognizer. Keep explicit arms: a future entry point must choose its mode.
-    match mode {
-        ChainLoweringMode::Standalone => None,
-        ChainLoweringMode::WithContext => None,
-    }
 }
 
 /// Lowering: assemble an `AbilityDefinition` from an `AbilityIr`.
@@ -25369,16 +25347,6 @@ fn parse_ability_ir(
 }
 
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    // A fresh context per call, exactly as before: the bypasses may mutate `ctx`
-    // before declining, and those mutations must not reach `parse_effect_chain_ir`.
-    if let Some(def) = try_parse_chain_bypass(
-        text,
-        kind,
-        ChainLoweringMode::Standalone,
-        &mut ParseContext::default(),
-    ) {
-        return def;
-    }
     lower_ability_ir(&parse_ability_ir(
         text,
         kind,
@@ -25395,9 +25363,6 @@ pub(crate) fn parse_effect_chain_with_context(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    if let Some(def) = try_parse_chain_bypass(text, kind, ChainLoweringMode::WithContext, ctx) {
-        return def;
-    }
     lower_ability_ir(&parse_ability_ir(
         text,
         kind,
