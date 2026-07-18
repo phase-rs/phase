@@ -1498,17 +1498,77 @@ pub struct LogicalZoneChangeBattlefieldDeparture {
     pub source_context: TriggerSourceContext,
 }
 
-/// A batched trigger definition captured before the first delivery of one
-/// logical zone-change action.
+/// The point at which CR 603.10 observes a trigger source for a retained
+/// zone-change occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerObservationTime {
+    ImmediatelyBefore,
+    ImmediatelyAfter,
+}
+
+/// One time-specific source projection retained for a batched definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatchedTriggerObservation {
+    pub observation_time: TriggerObservationTime,
+    pub source_context: TriggerSourceContext,
+}
+
+/// A batched trigger definition captured for one logical zone-change action.
 ///
-/// The definition reference and source context are both event-time authority:
-/// neither may be rebuilt from a later live object whose grant generation or
-/// incarnation could have changed while the action was paused.
+/// The definition reference and time-specific source contexts are event-time
+/// authority: neither may be rebuilt from a later live object whose grant
+/// generation or incarnation could have changed while the action was paused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatchedBatchedTrigger {
     pub definition_ref: TriggerDefinitionRef,
     pub definition: TriggerDefinition,
-    pub source_context: TriggerSourceContext,
+    pub observations: Vec<LatchedTriggerObservation>,
+}
+
+impl LatchedBatchedTrigger {
+    pub fn new(
+        definition_ref: TriggerDefinitionRef,
+        definition: TriggerDefinition,
+        observation_time: TriggerObservationTime,
+        source_context: TriggerSourceContext,
+    ) -> Self {
+        Self {
+            definition_ref,
+            definition,
+            observations: vec![LatchedTriggerObservation {
+                observation_time,
+                source_context,
+            }],
+        }
+    }
+
+    pub fn source_context_at(
+        &self,
+        observation_time: TriggerObservationTime,
+    ) -> Option<&TriggerSourceContext> {
+        self.observations
+            .iter()
+            .find(|observation| observation.observation_time == observation_time)
+            .map(|observation| &observation.source_context)
+    }
+
+    pub fn add_observation(
+        &mut self,
+        observation_time: TriggerObservationTime,
+        source_context: TriggerSourceContext,
+    ) -> Result<(), String> {
+        if self.source_context_at(observation_time).is_some() {
+            return Err(format!(
+                "trigger definition {:?} already has a {observation_time:?} observation",
+                self.definition_ref
+            ));
+        }
+        self.observations.push(LatchedTriggerObservation {
+            observation_time,
+            source_context,
+        });
+        Ok(())
+    }
 }
 
 /// A functioning trigger-suppression static captured with the pre-delivery
@@ -1538,6 +1598,12 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_before_latched: bool,
     pub immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
     pub immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    /// `true` only after final delivery has flushed layers and captured every
+    /// ordinary CR 603.10 observation. This stays explicit even when no retained
+    /// occurrence admits an immediately-after definition.
+    pub immediately_after_latched: bool,
+    pub immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
+    pub immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
 }
 
 impl LogicalZoneChangeGroup {
@@ -1557,6 +1623,9 @@ impl LogicalZoneChangeGroup {
             immediately_before_latched: false,
             immediately_before_batched_triggers: Vec::new(),
             immediately_before_suppress_triggers: Vec::new(),
+            immediately_after_latched: false,
+            immediately_after_batched_triggers: Vec::new(),
+            immediately_after_suppress_triggers: Vec::new(),
         }
     }
 
@@ -1588,6 +1657,56 @@ impl LogicalZoneChangeGroup {
                 self.immediately_before_suppress_triggers.as_slice(),
             ))
             .ok_or_else(|| "logical zone-change group lacks an immediately-before latch".into())
+    }
+
+    /// Install the one authoritative post-delivery latch. A definition which
+    /// continued with the exact same identity is represented once with both
+    /// time-specific contexts; any other identity remains distinct, even when
+    /// its payload bytes are identical.
+    pub fn latch_immediately_after(
+        &mut self,
+        batched_triggers: Vec<LatchedBatchedTrigger>,
+        suppress_triggers: Vec<LatchedSuppressTrigger>,
+    ) -> Result<(), String> {
+        if self.immediately_after_latched {
+            return Err("logical zone-change group already has an immediately-after latch".into());
+        }
+        for post_latch in batched_triggers {
+            if let Some(existing) = self
+                .immediately_before_batched_triggers
+                .iter_mut()
+                .find(|pre_latch| pre_latch.definition_ref == post_latch.definition_ref)
+            {
+                assert_eq!(
+                    existing.definition, post_latch.definition,
+                    "a continuing TriggerDefinitionRef must retain its payload"
+                );
+                let source_context = post_latch
+                    .source_context_at(TriggerObservationTime::ImmediatelyAfter)
+                    .expect("post-delivery latch carries its immediately-after context")
+                    .clone();
+                existing
+                    .add_observation(TriggerObservationTime::ImmediatelyAfter, source_context)?;
+            } else {
+                self.immediately_after_batched_triggers.push(post_latch);
+            }
+        }
+        self.immediately_after_latched = true;
+        self.immediately_after_suppress_triggers = suppress_triggers;
+        Ok(())
+    }
+
+    /// Returns carrier-owned ordinary post-event authority only once the final
+    /// delivery marker proves the required layer flush completed.
+    pub fn immediately_after_latches(
+        &self,
+    ) -> Result<(&[LatchedBatchedTrigger], &[LatchedSuppressTrigger]), String> {
+        self.immediately_after_latched
+            .then_some((
+                self.immediately_after_batched_triggers.as_slice(),
+                self.immediately_after_suppress_triggers.as_slice(),
+            ))
+            .ok_or_else(|| "logical zone-change group lacks an immediately-after latch".into())
     }
 
     /// Retain the actual `ZoneChanged` records emitted by one explicitly-bounded

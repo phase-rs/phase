@@ -5,10 +5,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
     ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect, ModalChoice,
-    ObjectScope, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility,
-    SacrificeCost, TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
-    TypeFilter, TypedFilter,
+    ObjectScope, OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RenownSubject,
+    ResolvedAbility, SacrificeCost, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -17,7 +17,8 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     AutoMayChoice, DelayedTrigger, DistributionUnit, GameState, LatchedBatchedTrigger,
     LatchedSuppressTrigger, LogicalZoneChangeGroup, MayTriggerAutoChoiceKey, MayTriggerOrigin,
-    StackEntry, StackEntryKind, TargetSelectionConstraint, TriggerSourceContext, WaitingFor,
+    StackEntry, StackEntryKind, TargetSelectionConstraint, TriggerObservationTime,
+    TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::WardCost;
@@ -593,11 +594,12 @@ fn latch_logical_zone_change_group_immediately_before(
                 if active.definition.batched
                     && trigger_definition_functions_in_zone(active.definition, zone)
                 {
-                    batched_triggers.push(LatchedBatchedTrigger {
-                        definition_ref: active.definition_ref,
-                        definition: active.definition.clone(),
-                        source_context: source_context.clone(),
-                    });
+                    batched_triggers.push(LatchedBatchedTrigger::new(
+                        active.definition_ref,
+                        active.definition.clone(),
+                        TriggerObservationTime::ImmediatelyBefore,
+                        source_context.clone(),
+                    ));
                 }
             }
         }
@@ -623,6 +625,143 @@ fn latch_logical_zone_change_group_immediately_before(
     group
         .latch_immediately_before(batched_triggers, suppress_triggers)
         .expect("a new logical zone-change group is latched exactly once");
+}
+
+#[allow(dead_code)] // Wired to true ChangeZone completion in Phase 1b step 15.
+fn trigger_explicitly_observes_origin(trigger: &TriggerDefinition, zone: Zone) -> bool {
+    let origin_mentions_zone = |origin: &OriginConstraint| match origin {
+        OriginConstraint::Equals(expected) => *expected == zone,
+        OriginConstraint::OneOf(zones) => zones.contains(&zone),
+        OriginConstraint::Any | OriginConstraint::NotEquals(_) => false,
+    };
+
+    if !trigger.zone_change_clauses.is_empty() {
+        trigger
+            .zone_change_clauses
+            .iter()
+            .any(|clause| origin_mentions_zone(&clause.origin))
+    } else if !trigger.origin_zones.is_empty() {
+        trigger.origin_zones.contains(&zone)
+    } else {
+        trigger.origin == Some(zone)
+    }
+}
+
+/// CR 603.10 + CR 603.10a: Classify the only zone-change observations that
+/// look back before an event. Everything else is observed immediately after it.
+/// This is intentionally the single classifier for the logical-group latches.
+#[allow(dead_code)] // Consumed by settlement after its Step-13 collector migration.
+pub(crate) fn trigger_observation_time(
+    trigger: &TriggerDefinition,
+    event: &GameEvent,
+) -> TriggerObservationTime {
+    let GameEvent::ZoneChanged { from, to, .. } = event else {
+        return TriggerObservationTime::ImmediatelyAfter;
+    };
+
+    let is_zone_change_trigger = matches!(
+        trigger.mode,
+        TriggerMode::ChangesZone
+            | TriggerMode::ChangesZoneAll
+            | TriggerMode::Evolve
+            | TriggerMode::EntersOrHauntedCreatureDies
+            | TriggerMode::LeavesBattlefield
+    );
+    if !is_zone_change_trigger {
+        return TriggerObservationTime::ImmediatelyAfter;
+    }
+
+    let looks_back = match from {
+        Some(Zone::Battlefield) => {
+            matches!(trigger.mode, TriggerMode::LeavesBattlefield)
+                || trigger_explicitly_observes_origin(trigger, Zone::Battlefield)
+        }
+        Some(Zone::Graveyard) if matches!(to, Zone::Hand | Zone::Library) => {
+            trigger_explicitly_observes_origin(trigger, Zone::Graveyard)
+        }
+        _ => false,
+    };
+
+    if looks_back {
+        TriggerObservationTime::ImmediatelyBefore
+    } else {
+        TriggerObservationTime::ImmediatelyAfter
+    }
+}
+
+/// CR 603.10: Once final delivery is complete, flush exactly once and retain
+/// only the definitions and suppressors that can observe an ordinary retained
+/// occurrence. The caller owns the completion boundary; this helper never
+/// attempts to infer it from a current object or a partial delivery slice.
+#[allow(dead_code)] // True completion invokes this once in Phase 1b step 15.
+pub(crate) fn latch_logical_zone_change_group_immediately_after(
+    state: &mut GameState,
+    group: &mut LogicalZoneChangeGroup,
+) {
+    super::layers::flush_layers(state);
+    reconcile_off_zone_keyword_triggers(state);
+
+    let retained_events: Vec<&GameEvent> = group
+        .all_origin_occurrences
+        .iter()
+        .map(|occurrence| &occurrence.event)
+        .collect();
+    let mut batched_triggers = Vec::new();
+    for zone in [
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Zone::Exile,
+        Zone::Stack,
+        Zone::Command,
+    ] {
+        for source_id in trigger_source_ids_for_zone(state, zone) {
+            let Some(source) = state.objects.get(&source_id) else {
+                continue;
+            };
+            let source_context = trigger_source_context_for_latch(state, source);
+            for active in super::functioning_abilities::active_trigger_definitions(state, source) {
+                if active.definition.batched
+                    && trigger_definition_functions_in_zone(active.definition, zone)
+                    && retained_events.iter().any(|event| {
+                        trigger_observation_time(active.definition, event)
+                            == TriggerObservationTime::ImmediatelyAfter
+                    })
+                {
+                    batched_triggers.push(LatchedBatchedTrigger::new(
+                        active.definition_ref,
+                        active.definition.clone(),
+                        TriggerObservationTime::ImmediatelyAfter,
+                        source_context.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let suppress_triggers = (!batched_triggers.is_empty())
+        .then(|| {
+            super::functioning_abilities::battlefield_active_statics(state)
+                .filter_map(|(source, definition)| {
+                    let StaticMode::SuppressTriggers {
+                        source_filter,
+                        events,
+                    } = &definition.mode
+                    else {
+                        return None;
+                    };
+                    Some(LatchedSuppressTrigger {
+                        source_context: trigger_source_context_for_latch(state, source),
+                        source_filter: source_filter.clone(),
+                        events: events.clone(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    group
+        .latch_immediately_after(batched_triggers, suppress_triggers)
+        .expect("a completed logical zone-change group is latched exactly once");
 }
 
 /// Allocate one fully latched logical zone-change owner for either final pause
@@ -8744,7 +8883,7 @@ pub mod tests {
         PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
         SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
         StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -8859,7 +8998,12 @@ pub mod tests {
             HashSet::from([battlefield_source, graveyard_source])
         );
         assert!(batched.iter().all(|latched| {
-            latched.definition_ref.source == latched.source_context.identity.reference
+            latched.definition_ref.source
+                == latched
+                    .source_context_at(TriggerObservationTime::ImmediatelyBefore)
+                    .expect("pre-delivery latch owns its context")
+                    .identity
+                    .reference
                 && latched.definition.batched
         }));
         assert_eq!(suppressors.len(), 1);
@@ -8871,6 +9015,248 @@ pub mod tests {
             suppressors[0].events,
             vec![SuppressedTriggerEvent::EntersBattlefield]
         );
+    }
+
+    fn zone_change_event(from: Zone, to: Zone) -> GameEvent {
+        let object = GameObject::new(
+            ObjectId(901),
+            CardId(901),
+            PlayerId(0),
+            "observation subject".to_string(),
+            from,
+        );
+        GameEvent::ZoneChanged {
+            object_id: object.id,
+            from: Some(from),
+            to,
+            record: Box::new(object.snapshot_for_zone_change(object.id, Some(from), to)),
+        }
+    }
+
+    #[test]
+    fn trigger_observation_time_classifies_cr_603_10_zone_changes() {
+        let mut leaves = TriggerDefinition::new(TriggerMode::ChangesZone);
+        leaves.origin = Some(Zone::Battlefield);
+        leaves.destination = Some(Zone::Graveyard);
+
+        let mut enters = TriggerDefinition::new(TriggerMode::ChangesZone);
+        enters.destination = Some(Zone::Battlefield);
+
+        let mut leaves_graveyard = TriggerDefinition::new(TriggerMode::ChangesZone);
+        leaves_graveyard.origin = Some(Zone::Graveyard);
+
+        let mut unrelated = TriggerDefinition::new(TriggerMode::ChangesZone);
+        unrelated.origin = Some(Zone::Hand);
+        unrelated.destination = Some(Zone::Graveyard);
+
+        assert_eq!(
+            trigger_observation_time(
+                &leaves,
+                &zone_change_event(Zone::Battlefield, Zone::Graveyard)
+            ),
+            TriggerObservationTime::ImmediatelyBefore,
+            "LTB/dies look back"
+        );
+        assert_eq!(
+            trigger_observation_time(&enters, &zone_change_event(Zone::Hand, Zone::Battlefield)),
+            TriggerObservationTime::ImmediatelyAfter,
+            "ETB observes the post-event battlefield"
+        );
+        for destination in [Zone::Hand, Zone::Library] {
+            assert_eq!(
+                trigger_observation_time(
+                    &leaves_graveyard,
+                    &zone_change_event(Zone::Graveyard, destination),
+                ),
+                TriggerObservationTime::ImmediatelyBefore,
+                "graveyard-to-{destination:?} look-back"
+            );
+        }
+        assert_eq!(
+            trigger_observation_time(&unrelated, &zone_change_event(Zone::Hand, Zone::Graveyard)),
+            TriggerObservationTime::ImmediatelyAfter,
+            "ordinary unrelated zone moves use post-event authority"
+        );
+    }
+
+    #[test]
+    fn immediately_after_latch_coalesces_only_the_same_continuing_definition() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "batched source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.batched = true;
+        trigger.destination = Some(Zone::Battlefield);
+        let source_object = state.objects.get_mut(&source).expect("source exists");
+        std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+        source_object.materialize_base_trigger_definitions();
+
+        let mut group = allocate_logical_zone_change_group(&mut state, &[]);
+        group
+            .append_delivery_events(&[zone_change_event(Zone::Hand, Zone::Battlefield)])
+            .expect("retain ordinary event");
+        latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
+
+        let (before, _) = group
+            .immediately_before_latches()
+            .expect("pre-delivery latch remains owned");
+        let (after, _) = group
+            .immediately_after_latches()
+            .expect("post-delivery latch is explicit even after coalescing");
+        assert_eq!(before.len(), 1);
+        assert!(
+            after.is_empty(),
+            "same exact ref coalesces instead of duplicating"
+        );
+        assert!(before[0]
+            .source_context_at(TriggerObservationTime::ImmediatelyAfter)
+            .is_some());
+    }
+
+    fn granted_definition_ref(
+        source: ObjectIncarnationRef,
+        grant_instance: u64,
+    ) -> TriggerDefinitionRef {
+        TriggerDefinitionRef {
+            source,
+            occurrence: TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(grant_instance),
+            },
+        }
+    }
+
+    #[test]
+    fn immediately_after_latch_keeps_byte_identical_simultaneous_grants_separate() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "two grants source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.batched = true;
+        trigger.destination = Some(Zone::Battlefield);
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).expect("source exists"),
+        );
+        let source_ref = source_context.identity.reference;
+        let first_ref = granted_definition_ref(source_ref, 1);
+        let second_ref = granted_definition_ref(source_ref, 2);
+        let mut group = state.allocate_logical_zone_change_group(&[]);
+        group
+            .latch_immediately_before(
+                vec![
+                    LatchedBatchedTrigger::new(
+                        first_ref.clone(),
+                        trigger.clone(),
+                        TriggerObservationTime::ImmediatelyBefore,
+                        source_context.clone(),
+                    ),
+                    LatchedBatchedTrigger::new(
+                        second_ref.clone(),
+                        trigger.clone(),
+                        TriggerObservationTime::ImmediatelyBefore,
+                        source_context.clone(),
+                    ),
+                ],
+                Vec::new(),
+            )
+            .expect("install pre-delivery grants");
+        group
+            .latch_immediately_after(
+                vec![
+                    LatchedBatchedTrigger::new(
+                        first_ref,
+                        trigger.clone(),
+                        TriggerObservationTime::ImmediatelyAfter,
+                        source_context.clone(),
+                    ),
+                    LatchedBatchedTrigger::new(
+                        second_ref,
+                        trigger,
+                        TriggerObservationTime::ImmediatelyAfter,
+                        source_context,
+                    ),
+                ],
+                Vec::new(),
+            )
+            .expect("install post-delivery grants");
+
+        let (before, _) = group.immediately_before_latches().expect("pre latch");
+        assert_eq!(
+            before.len(),
+            2,
+            "two byte-identical simultaneous grants retain two identities"
+        );
+        assert!(before.iter().all(|latched| latched
+            .source_context_at(TriggerObservationTime::ImmediatelyAfter)
+            .is_some()));
+    }
+
+    #[test]
+    fn immediately_after_latch_retains_removed_grant_and_new_regrant_separately() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(904),
+            PlayerId(0),
+            "re-granted source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.batched = true;
+        trigger.destination = Some(Zone::Battlefield);
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).expect("source exists"),
+        );
+        let source_ref = source_context.identity.reference;
+        let removed_ref = granted_definition_ref(source_ref, 1);
+        let regranted_ref = granted_definition_ref(source_ref, 2);
+        let mut group = state.allocate_logical_zone_change_group(&[]);
+        group
+            .latch_immediately_before(
+                vec![LatchedBatchedTrigger::new(
+                    removed_ref.clone(),
+                    trigger.clone(),
+                    TriggerObservationTime::ImmediatelyBefore,
+                    source_context.clone(),
+                )],
+                Vec::new(),
+            )
+            .expect("install removed grant before delivery");
+        group
+            .latch_immediately_after(
+                vec![LatchedBatchedTrigger::new(
+                    regranted_ref.clone(),
+                    trigger,
+                    TriggerObservationTime::ImmediatelyAfter,
+                    source_context,
+                )],
+                Vec::new(),
+            )
+            .expect("install re-granted definition after delivery");
+
+        let (before, _) = group.immediately_before_latches().expect("pre latch");
+        let (after, _) = group.immediately_after_latches().expect("post latch");
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].definition_ref, removed_ref);
+        assert!(
+            before[0]
+                .source_context_at(TriggerObservationTime::ImmediatelyAfter)
+                .is_none(),
+            "removed grant cannot borrow post-delivery authority"
+        );
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].definition_ref, regranted_ref);
     }
 
     /// Helper to create a minimal TriggerDefinition with typed fields.
