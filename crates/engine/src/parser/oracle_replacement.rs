@@ -12995,6 +12995,56 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c + CR 615.5: when a source-type-gated reflection rider ALSO
+    /// carries a co-existing game-state condition, the parser must conjoin both —
+    /// the source-type gate is composed onto the existing condition via
+    /// `merge_ability_condition`, never substituted for it. Regression guard for
+    /// the "gate dropped when a condition already exists" bug (Finding L1). Uses a
+    /// synthetic-but-grammatical Comeuppance-class line (no printed card carries
+    /// both today) in the existing parser-test style.
+    #[test]
+    fn gated_reflection_rider_conjoins_coexisting_condition() {
+        use crate::types::ability::AbilityCondition;
+        let parsed = parse_oracle_text(
+            "Prevent all damage that would be dealt to you this turn by sources you \
+             don't control. If damage from a creature source is prevented this way, \
+             if you control an artifact, Comeuppance deals that much damage to that \
+             creature.",
+            "Comeuppance",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let rider = parsed.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("gated rider present");
+        let Some(AbilityCondition::And { conditions }) = rider.condition.as_ref() else {
+            panic!(
+                "expected the gate conjoined with the co-existing condition, got {:?}",
+                rider.condition
+            );
+        };
+        // BOTH survive: the source-type gate AND the embedded game-state condition.
+        assert!(
+            conditions.iter().any(|c| matches!(
+                c,
+                AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                    filter: TargetFilter::Typed(tf)
+                } if tf.type_filters == vec![TypeFilter::Creature]
+            )),
+            "the creature-source gate must be one conjunct; got {conditions:?}"
+        );
+        assert!(
+            conditions.iter().any(|c| !matches!(
+                c,
+                AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            )),
+            "the co-existing 'if you control an artifact' condition must survive as a \
+             conjunct; got {conditions:?}"
+        );
+    }
+
     #[test]
     fn replacement_enters_tapped() {
         let def =

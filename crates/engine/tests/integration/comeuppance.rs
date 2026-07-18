@@ -166,6 +166,74 @@ fn opponent_creature_combat_damage_prevented_and_reflected() {
     );
 }
 
+/// #1b — TWO opponent creatures with DISTINCT powers attack you in the SAME
+/// declare-attackers step: both combat-damage events are prevented, and each
+/// reflection deals exactly that attacker's OWN power back to that same attacker.
+/// This exercises the per-event batch routing through PRODUCTION combat with N≥2
+/// simultaneous attackers (Finding M2) — the single-attacker test #1 cannot catch
+/// a fold-into-aggregate or sibling-discard bug in the combat batch path.
+///
+/// Toughnesses are distinct (5 and 6) and above the reflected amount so both
+/// attackers survive and their `damage_marked` is individually observable.
+///
+/// Revert-failing: folding both prevented events into one aggregate would mark
+/// each attacker 5 (2+3) instead of its own power; a sibling-discard bug would
+/// mark only one. The distinct 2-vs-3 split is exactly what those bugs break.
+#[test]
+fn two_simultaneous_attackers_each_reflected_own_power() {
+    let mut small_id = None;
+    let mut big_id = None;
+    let mut runner = cast_comeuppance_then_p1_turn(|sc| {
+        // Distinct powers (2, 3) and distinct toughnesses (5, 6) so each attacker
+        // survives its own sub-lethal reflection and stays individually inspectable.
+        small_id = Some(sc.add_creature(P1, "Small Attacker", 2, 5).id());
+        big_id = Some(sc.add_creature(P1, "Big Attacker", 3, 6).id());
+    });
+    let small = small_id.unwrap();
+    let big = big_id.unwrap();
+    let p0_life_before = runner.life(P0);
+
+    runner.advance_to_combat();
+    run_combat(
+        &mut runner,
+        P1,
+        &[
+            (small, AttackTarget::Player(P0)),
+            (big, AttackTarget::Player(P0)),
+        ],
+        &[],
+    );
+    runner.advance_until_stack_empty();
+
+    // Positive reach-guard: both creatures actually attacked (declaring an attacker
+    // taps it — CR 508.1f), so the prevented events genuinely occurred in combat and
+    // the life/no-change negative below cannot pass vacuously.
+    assert!(
+        runner.state().objects[&small].tapped && runner.state().objects[&big].tapped,
+        "both creatures were declared as attackers (tapped), so both combat-damage \
+         events actually happened this step"
+    );
+
+    assert_eq!(
+        runner.life(P0),
+        p0_life_before,
+        "P0 takes NO combat damage — both simultaneous events are prevented by the \
+         shield"
+    );
+    assert_eq!(
+        runner.state().objects[&small].damage_marked,
+        2,
+        "the 2-power attacker is reflected exactly its OWN 2 damage (creature source \
+         → that creature), not an aggregate of both attackers"
+    );
+    assert_eq!(
+        runner.state().objects[&big].damage_marked,
+        3,
+        "the 3-power attacker is reflected exactly its OWN 3 damage — per-event \
+         source attribution survives the N≥2 combat batch"
+    );
+}
+
 /// #3 — Damage to a planeswalker you control is prevented and reflected. Guards
 /// the `permanent_type: Some(Planeswalker)` leg of the compound recipient (Gap
 /// A(a)). Revert-failing: without the planeswalker leg the shield only protects

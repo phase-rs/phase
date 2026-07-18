@@ -2073,13 +2073,20 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     crate::parser::oracle_replacement::rewrite_triggering_source_to_post_replacement_damage_source(
                         current,
                     );
-                    if current.condition.is_none() {
-                        current.condition = Some(
-                            crate::types::ability::AbilityCondition::PostReplacementDamageSourceMatchesFilter {
-                                filter: gate_filter.clone(),
-                            },
-                        );
-                    }
+                    // CR 608.2c: The reflection gate is conjoined with any
+                    // co-existing rider condition, not substituted for it — a rider
+                    // that already carries a game-state condition (e.g. an embedded
+                    // "if you control …") must satisfy BOTH. Compose through the
+                    // single-authority `merge_ability_condition` building block so
+                    // the gate is never silently dropped when a condition is present.
+                    let gate =
+                        crate::types::ability::AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                            filter: gate_filter.clone(),
+                        };
+                    current.condition = Some(crate::parser::oracle::merge_ability_condition(
+                        current.condition.take(),
+                        gate,
+                    ));
                 }
             }
         }
