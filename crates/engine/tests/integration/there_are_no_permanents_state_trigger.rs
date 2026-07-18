@@ -44,7 +44,7 @@
 //!   - CR 701.16a: to sacrifice a permanent is to move it to its owner's
 //!     graveyard.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
@@ -113,7 +113,7 @@ fn add_board_filler(
 /// `filler` (if any) on the board, then run the engine's real state-trigger scan
 /// (the same call the priority pipeline makes) and drain the stack. Returns the
 /// runner and the enchantment's id.
-fn run_case(oracle: &str, filler: Option<CoreType>) -> (GameRunner, ObjectId) {
+fn run_case(oracle: &str, filler: Option<(PlayerId, CoreType)>) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let ench = scenario
@@ -122,8 +122,8 @@ fn run_case(oracle: &str, filler: Option<CoreType>) -> (GameRunner, ObjectId) {
     let mut runner = scenario.build();
     make_enchantment(&mut runner, ench);
 
-    if let Some(core_type) = filler {
-        add_board_filler(&mut runner, P0, "Board Filler", core_type);
+    if let Some((player, core_type)) = filler {
+        add_board_filler(&mut runner, player, "Board Filler", core_type);
     }
 
     // POSITIVE reach-guard: the emptiness line parsed to a `StateCondition`
@@ -174,11 +174,24 @@ fn no_creatures_fires_and_sacrifices_the_enchantment() {
 /// so this is a genuine 1-vs-0 boundary, not a vacuous "never parsed" pass.
 #[test]
 fn no_creatures_does_not_fire_while_a_creature_is_present() {
-    let (runner, ench) = run_case(NO_CREATURES, Some(CoreType::Creature));
+    let (runner, ench) = run_case(NO_CREATURES, Some((P0, CoreType::Creature)));
     assert_eq!(
         zone(&runner, ench),
         Zone::Battlefield,
         "while a creature is on the battlefield the trigger must not fire"
+    );
+}
+
+/// Global scope discriminator: an opponent's creature also keeps the condition
+/// false. This rejects a controller-scoped lowering of "there are no creatures
+/// on the battlefield."
+#[test]
+fn no_creatures_does_not_fire_while_an_opponent_creature_is_present() {
+    let (runner, ench) = run_case(NO_CREATURES, Some((P1, CoreType::Creature)));
+    assert_eq!(
+        zone(&runner, ench),
+        Zone::Battlefield,
+        "an opponent's creature is still on the battlefield and must prevent the trigger"
     );
 }
 
@@ -199,7 +212,7 @@ fn no_lands_fires_and_sacrifices_the_enchantment() {
 /// condition false, so the trigger does not fire.
 #[test]
 fn no_lands_does_not_fire_while_a_land_is_present() {
-    let (runner, ench) = run_case(NO_LANDS, Some(CoreType::Land));
+    let (runner, ench) = run_case(NO_LANDS, Some((P0, CoreType::Land)));
     assert_eq!(
         zone(&runner, ench),
         Zone::Battlefield,
