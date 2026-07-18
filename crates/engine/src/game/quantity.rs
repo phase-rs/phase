@@ -8172,16 +8172,19 @@ mod tests {
             attachments: vec![
                 AttachmentSnapshot {
                     object_id: ObjectId(301),
+                    identity: None,
                     controller: PlayerId(0),
                     kind: AttachmentKind::Aura,
                 },
                 AttachmentSnapshot {
                     object_id: ObjectId(302),
+                    identity: None,
                     controller: PlayerId(0),
                     kind: AttachmentKind::Aura,
                 },
                 AttachmentSnapshot {
                     object_id: ObjectId(303),
+                    identity: None,
                     controller: PlayerId(1),
                     kind: AttachmentKind::Aura,
                 },

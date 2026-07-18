@@ -1224,6 +1224,11 @@ pub struct AttackDeclarationRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentSnapshot {
     pub object_id: ObjectId,
+    /// CR 400.7: Attachment relationship snapshots retain the attached object's
+    /// exact incarnation so a later object reusing the same storage id cannot
+    /// satisfy a source-relative trigger filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ObjectIncarnationRef>,
     pub controller: PlayerId,
     pub kind: crate::types::ability::AttachmentKind,
 }

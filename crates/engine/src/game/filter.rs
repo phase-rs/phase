@@ -2359,10 +2359,30 @@ fn zone_change_filter_inner(
         // CR 607.2d + CR 608.2c: SourceChosenPlayer is a player reference, not an object.
         TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false,
-        TargetFilter::SelfRef => record.object_id == source_id,
+        // A record carries the subject's event-time source context. When this
+        // filter belongs to a triggered ability, SelfRef/OriginalSource must
+        // compare those exact instances, not their reusable storage ids.
+        // A legacy record without that context is deliberately a non-match:
+        // CR 400.7 makes an unknown incarnation insufficient proof that this is
+        // the observed source, so it must not fall back to ObjectId equality.
+        TargetFilter::SelfRef => trigger_source.map_or(record.object_id == source_id, |source| {
+            record
+                .trigger_source_context()
+                .is_some_and(|record_source| {
+                    record_source.identity.reference == source.identity.reference
+                })
+        }),
         // CR 608.2c: the original (pre-rebind) source object; concretized to
         // SpecificObject before runtime — mirrors SelfRef's source identity.
-        TargetFilter::OriginalSource => record.object_id == source_id,
+        TargetFilter::OriginalSource => {
+            trigger_source.map_or(record.object_id == source_id, |source| {
+                record
+                    .trigger_source_context()
+                    .is_some_and(|record_source| {
+                        record_source.identity.reference == source.identity.reference
+                    })
+            })
+        }
         TargetFilter::SourceOrPaired => false,
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -2517,11 +2537,17 @@ fn zone_change_filter_inner(
         // trigger source is still on the battlefield, but SBA (CR 704.5n /
         // CR 704.5m) has already cleared its live `attached_to` pointer by the
         // time `process_triggers` runs. Matching against the snapshot is the
-        // authoritative last-known-information path.
-        TargetFilter::AttachedTo => record
-            .attachments
-            .iter()
-            .any(|att| att.object_id == source_id),
+        // authoritative last-known-information path. A legacy snapshot without
+        // an attachment identity likewise cannot prove an exact triggered source
+        // relationship, so the triggered-source branch deliberately non-matches.
+        TargetFilter::AttachedTo => trigger_source.map_or_else(
+            || record.attachments.iter().any(|att| att.object_id == source_id),
+            |source| {
+                record.attachments.iter().any(|attachment| {
+                    attachment.identity == Some(source.identity.reference)
+                })
+            },
+        ),
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::CostPaidObject
@@ -6182,6 +6208,74 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    #[test]
+    fn triggered_zone_change_identity_does_not_fall_back_to_legacy_object_ids() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let host = add_creature(&mut state, PlayerId(0), "Host");
+        let source_context = state
+            .objects
+            .get(&source)
+            .unwrap()
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Graveyard)
+            .trigger_source_context()
+            .unwrap()
+            .clone();
+        let context = FilterContext::from_trigger_source(&source_context);
+        let mut record = state
+            .objects
+            .get(&source)
+            .unwrap()
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Graveyard);
+
+        assert!(matches_target_filter_on_zone_change_record(
+            &state,
+            &record,
+            &TargetFilter::SelfRef,
+            &context,
+        ));
+
+        record.trigger_source_context = None;
+        assert!(
+            !matches_target_filter_on_zone_change_record(
+                &state,
+                &record,
+                &TargetFilter::SelfRef,
+                &context,
+            ),
+            "a legacy record without an incarnation proof must not rebind by ObjectId"
+        );
+
+        let mut attached_record = state.objects.get(&host).unwrap().snapshot_for_zone_change(
+            host,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        attached_record.attachments = vec![AttachmentSnapshot {
+            object_id: source,
+            identity: Some(source_context.identity.reference),
+            controller: PlayerId(0),
+            kind: AttachmentKind::Aura,
+        }];
+        assert!(matches_target_filter_on_zone_change_record(
+            &state,
+            &attached_record,
+            &TargetFilter::AttachedTo,
+            &context,
+        ));
+
+        attached_record.attachments[0].identity = None;
+        assert!(
+            !matches_target_filter_on_zone_change_record(
+                &state,
+                &attached_record,
+                &TargetFilter::AttachedTo,
+                &context,
+            ),
+            "a legacy attachment snapshot without an incarnation proof must not rebind by ObjectId"
+        );
     }
 
     #[test]
@@ -11313,6 +11407,7 @@ mod tests {
             core_types: vec![CoreType::Creature],
             attachments: vec![AttachmentSnapshot {
                 object_id: ObjectId(100),
+                identity: None,
                 controller: PlayerId(0),
                 kind: AttachmentKind::Aura,
             }],

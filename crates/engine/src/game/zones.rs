@@ -3,7 +3,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -107,6 +107,7 @@ pub(crate) fn capture_attachment_snapshot(
             };
             Some(crate::types::game_state::AttachmentSnapshot {
                 object_id: *id,
+                identity: Some(ObjectIncarnationRef::from_object(att)),
                 controller: att.controller,
                 kind,
             })

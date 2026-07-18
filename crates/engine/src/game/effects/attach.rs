@@ -2258,6 +2258,7 @@ mod tests {
         state.zone_changes_this_turn.push(ZoneChangeRecord {
             attachments: vec![AttachmentSnapshot {
                 object_id: old_equipment,
+                identity: None,
                 controller: PlayerId(0),
                 kind: AttachmentKind::Equipment,
             }],
@@ -2266,6 +2267,7 @@ mod tests {
         state.zone_changes_this_turn.push(ZoneChangeRecord {
             attachments: vec![AttachmentSnapshot {
                 object_id: new_equipment,
+                identity: None,
                 controller: PlayerId(0),
                 kind: AttachmentKind::Equipment,
             }],

@@ -7509,6 +7509,7 @@ mod tests {
             record: Box::new(ZoneChangeRecord {
                 attachments: vec![AttachmentSnapshot {
                     object_id: skullclamp,
+                    identity: None,
                     controller: PlayerId(0),
                     kind: AttachmentKind::Equipment,
                 }],
@@ -7584,6 +7585,7 @@ mod tests {
             record: Box::new(ZoneChangeRecord {
                 attachments: vec![AttachmentSnapshot {
                     object_id: aura,
+                    identity: None,
                     controller: PlayerId(0),
                     kind: AttachmentKind::Aura,
                 }],
