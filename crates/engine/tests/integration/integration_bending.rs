@@ -2,11 +2,11 @@
 //! and their shared infrastructure (meta-triggers, AI candidates, mana payment finalization).
 
 use engine::ai_support::candidate_actions;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, Effect, EffectScope, PtValue, QuantityExpr, ResolvedAbility, TapStateChange,
-    TargetFilter,
+    AbilityCost, AbilityDefinition, Effect, EffectScope, PtValue, QuantityExpr, ResolvedAbility,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -2105,6 +2105,126 @@ fn cast_synthetic_earthbend(
     // Both players pass — trigger resolves: Animate + PutCounter + CreateDelayedTrigger.
     apply_as_current(state, GameAction::PassPriority).expect("P0 pass");
     apply_as_current(state, GameAction::PassPriority).expect("P1 pass");
+}
+
+fn resolved_from_ability_definition(
+    def: &AbilityDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+    targets: Vec<TargetRef>,
+) -> ResolvedAbility {
+    let mut resolved = ResolvedAbility::new((*def.effect).clone(), targets, source_id, controller);
+    resolved.kind = def.kind;
+    resolved.sub_ability = def.sub_ability.as_ref().map(|sub| {
+        Box::new(resolved_from_ability_definition(
+            sub,
+            source_id,
+            controller,
+            vec![],
+        ))
+    });
+    resolved.duration = def.duration.clone();
+    resolved.condition = def.condition.clone();
+    resolved.optional_targeting = def.optional_targeting;
+    resolved.optional = def.optional;
+    resolved.target_choice_timing = def.target_choice_timing;
+    resolved.description = def.description.clone();
+    resolved.min_x_value = def.min_x_value;
+    resolved.cant_be_copied = def.cant_be_copied;
+    resolved.forward_result = def.forward_result;
+    resolved.player_scope = def.player_scope.clone();
+    resolved.starting_with = def.starting_with.clone();
+    resolved.target_selection_mode = def.target_selection_mode;
+    resolved.sub_link = def.sub_link;
+    resolved
+}
+
+fn plus_one_counter_count(state: &GameState, object_id: ObjectId) -> u32 {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.counters.get(&CounterType::Plus1Plus1).copied())
+        .unwrap_or(0)
+}
+
+const THE_BOULDER_ORACLE: &str = "Whenever The Boulder attacks, earthbend X, where X is the number of creatures you control with power 4 or greater. (Target land you control becomes a 0/0 creature with haste that's still a land. Put X +1/+1 counters on it. When it dies or is exiled, return it to the battlefield tapped.)";
+
+#[test]
+fn the_boulder_attack_trigger_counts_only_qualifying_controller_creatures_for_earthbend_x() {
+    use engine::game::quantity::resolve_quantity_with_targets;
+    use engine::types::ability::QuantityRef;
+    use engine::types::triggers::TriggerMode;
+
+    let mut scenario = GameScenario::default();
+    scenario.at_phase(Phase::DeclareAttackers);
+    let target_land = scenario.add_basic_land(P0, ManaColor::Green);
+    let boulder = scenario
+        .add_creature(P0, "The Boulder, Ready to Rumble", 4, 4)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Warrior", "Performer"])
+        .from_oracle_text(THE_BOULDER_ORACLE)
+        .id();
+    scenario.add_creature(P0, "Friendly 6/6", 6, 6);
+    scenario.add_creature(P0, "Friendly 3/3", 3, 3);
+    scenario.add_creature(P1, "Opponent 6/6", 6, 6);
+    let mut runner = scenario.build();
+
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        THE_BOULDER_ORACLE,
+        "The Boulder, Ready to Rumble",
+        &[],
+        &["Creature".to_string()],
+        &[
+            "Human".to_string(),
+            "Warrior".to_string(),
+            "Performer".to_string(),
+        ],
+    );
+    let trigger = parsed
+        .triggers
+        .into_iter()
+        .find(|trigger| trigger.mode == TriggerMode::Attacks)
+        .expect("The Boulder Oracle text should parse an attacks trigger");
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("The Boulder attacks trigger should execute earthbend");
+    let ability = resolved_from_ability_definition(
+        execute,
+        boulder,
+        P0,
+        vec![TargetRef::Object(target_land)],
+    );
+
+    let put_counters = ability
+        .sub_ability
+        .as_deref()
+        .expect("earthbend Animate should chain into PutCounter");
+    let Effect::PutCounter { count, .. } = &put_counters.effect else {
+        panic!("earthbend sub-ability should put +1/+1 counters, got {put_counters:?}");
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ),
+        "The Boulder must bind earthbend X to a typed object count, got {count:?}"
+    );
+    assert_eq!(
+        resolve_quantity_with_targets(runner.state(), count, put_counters),
+        2,
+        "pre-resolution X should count exactly The Boulder plus the friendly 6/6"
+    );
+
+    cast_synthetic_earthbend(runner.state_mut(), ability, boulder, P0);
+
+    assert_eq!(
+        plus_one_counter_count(runner.state(), target_land),
+        2,
+        "The Boulder earthbend should put two +1/+1 counters on the targeted land"
+    );
 }
 
 /// CR 603.7c + CR 614.7 + Issue #313: An earthbended land that takes lethal

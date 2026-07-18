@@ -4314,7 +4314,21 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     // input (matches the convention used by `parse_earthbend_params`'s sole
     // imperative caller, which passes a `rest_lower` slice).
     let lower_rest = rest.to_ascii_lowercase();
-    let (target, counter_count) = imperative::parse_earthbend_count_expr(tp.original, &lower_rest);
+    // CR 107.3: an "earthbend X, where X is …" body naming a quantity the shared
+    // parsers don't recognize yet returns `None`. Emitting the Animate +
+    // PutCounter chain with a fabricated `Variable{X}` (→ 0 for a triggered
+    // ability) would report the card as supported while applying the wrong
+    // counter count — a well-typed lie. Surface an honest strict-failure gap so
+    // coverage counts the card as unsupported until the quantity is handled.
+    // (matthewevans review, PR #5881.)
+    let Some((target, counter_count)) =
+        imperative::parse_earthbend_count_expr(tp.original, &lower_rest)
+    else {
+        return Some(parsed_clause(Effect::unimplemented(
+            "where_x_binding",
+            tp.original.to_string(),
+        )));
+    };
 
     let register_bending = AbilityDefinition::new(
         AbilityKind::Spell,
