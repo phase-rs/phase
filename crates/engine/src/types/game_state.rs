@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
-    CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow,
-    CopyChooseScope, CopyScale, CostPaidObjectSnapshot, CounterCostSelection,
+    CastTimingPermission, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
+    ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification,
+    ControlWindow, CopyChooseScope, CopyScale, CostPaidObjectSnapshot, CounterCostSelection,
     DelayedTriggerCondition, Duration, EffectKind, FaceDownProfile, GameRestriction, KeywordAction,
     KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
     ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
@@ -18,16 +18,19 @@ use super::ability::{
     TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
-use super::card::{CardFace, TokenImageRef};
+use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{
-    CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef, TrackedSetId,
+    CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
+    TrackedSetId,
 };
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction};
+use super::mana::{
+    ColoredManaCount, ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction,
+};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::{Phase, PhaseStop, TurnDirection};
 use super::player::{Player, PlayerCounterKind, PlayerId};
@@ -43,7 +46,7 @@ use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
 
-use crate::game::game_object::{AttachTarget, GameObject};
+use crate::game::game_object::{AttachTarget, GameObject, PhaseStatus};
 
 fn default_rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(0)
@@ -341,6 +344,129 @@ pub struct LKISnapshot {
     pub attachments: Vec<AttachmentSnapshot>,
 }
 
+/// Complete event-time authority for a triggered ability's source.
+///
+/// This is deliberately a projection rather than a `GameObject`: it preserves
+/// the exact source incarnation and the source facts that can outlive a zone
+/// change without creating a second mutable object authority.  The projection
+/// is captured by `GameObject::snapshot_for_zone_change` before reset/move and
+/// then completed with the record's relationship, link, and combat snapshots
+/// at the zone-change authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerSourceContext {
+    /// The exact source incarnation and the public zone in which it was observed.
+    pub identity: ObjectIdentityBinding,
+    /// Public source characteristics and persisted choices at that observation.
+    pub lki: LKISnapshot,
+    /// Stable card/display identity; tokens use `token_image_ref` inside `lki`.
+    pub card_id: CardId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+    #[serde(default)]
+    pub is_token: bool,
+    #[serde(default)]
+    pub face_down: bool,
+    #[serde(default)]
+    pub transformed: bool,
+    #[serde(default)]
+    pub is_renowned: bool,
+    #[serde(default)]
+    pub is_saddled: bool,
+    /// Live Layer-6 entries copied without allocating or reconstructing occurrence
+    /// identity. `TriggerDefinitionRef` is derived from `identity` plus each entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_entries: Vec<TriggerEntry>,
+    /// Layer timestamp and battlefield-entry order needed by trigger ordering.
+    pub timestamp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entered_battlefield_turn: Option<u32>,
+    /// Event-time source relationships. The source identity is exact; related
+    /// object ids are frozen projections and are never a license to rebind a
+    /// different source incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paired_with: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_controller: Option<PlayerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_to: Option<AttachTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_exile_snapshot: Vec<LinkedExileSnapshot>,
+    #[serde(default)]
+    pub combat_status: ZoneChangeCombatStatus,
+    /// Cast and as-cast facts are source facts, not a reason to read a later
+    /// object at the same storage id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_from_zone: Option<Zone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub played_from_zone: Option<Zone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_controller: Option<PlayerId>,
+    #[serde(default)]
+    pub phase_status: PhaseStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_variant_paid: Option<(CastVariantPaid, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_timing_permission: Option<(CastTimingPermission, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_x_paid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast_spell_keywords: Vec<Keyword>,
+    #[serde(default)]
+    pub mana_spent_to_cast: bool,
+    #[serde(default, skip_serializing_if = "ColoredManaCount::is_empty")]
+    pub colors_spent_to_cast: ColoredManaCount,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub mana_spent_to_cast_amount: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kickers_paid: Vec<KickerVariant>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub additional_cost_payment_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
+}
+
+impl TriggerSourceContext {
+    /// Returns the exact definition reference for an entry captured with this
+    /// source. No caller may infer provenance from definition payload bytes.
+    pub fn definition_ref(&self, entry: &TriggerEntry) -> TriggerDefinitionRef {
+        TriggerDefinitionRef {
+            source: self.identity.reference,
+            occurrence: entry.occurrence.clone(),
+        }
+    }
+
+    /// Keeps the duplicated relation projections in lockstep with the complete
+    /// zone-change record after the zone authority captures them.
+    fn sync_zone_change_projections(&mut self, record: &ZoneChangeRecord) {
+        self.lki.name.clone_from(&record.name);
+        self.lki.power = record.power;
+        self.lki.toughness = record.toughness;
+        self.lki.base_power = record.base_power;
+        self.lki.base_toughness = record.base_toughness;
+        self.lki.mana_value = record.mana_value;
+        self.lki.controller = record.controller;
+        self.lki.owner = record.owner;
+        self.lki.card_types.clone_from(&record.core_types);
+        self.lki.subtypes.clone_from(&record.subtypes);
+        self.lki.supertypes.clone_from(&record.supertypes);
+        self.lki.keywords.clone_from(&record.keywords);
+        self.lki.colors.clone_from(&record.colors);
+        self.is_token = record.is_token;
+        self.attached_to = record.attached_to;
+        self.attachments.clone_from(&record.attachments);
+        self.lki.attachments.clone_from(&record.attachments);
+        self.linked_exile_snapshot
+            .clone_from(&record.linked_exile_snapshot);
+        self.combat_status = record.combat_status;
+        self.cast_from_zone = record.cast_from_zone;
+        self.played_from_zone = record.played_from_zone;
+    }
+}
+
 /// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.
 ///
 /// Mana remembers the source that produced it, and source-qualified Oracle text
@@ -555,6 +681,11 @@ pub struct ZoneChangeRecord {
     /// record carries the exact LKI trigger multiset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trigger_definitions: Vec<TriggerEntry>,
+    /// The complete source projection captured at the same authority as this
+    /// record. Legacy hand-built records intentionally leave this absent; only
+    /// a real zone-change snapshot may supply an LKI source context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_source_context: Option<TriggerSourceContext>,
     /// CR 208.1: Power as of the zone change.
     pub power: Option<i32>,
     /// CR 208.1: Toughness as of the zone change.
@@ -660,6 +791,25 @@ pub struct ZoneChangeRecord {
     pub is_suspected: bool,
 }
 
+impl ZoneChangeRecord {
+    /// Returns the owned source context captured with this exact event record.
+    /// Callers must not reconstruct a source from a current object or from an
+    /// ObjectId-keyed LKI cache when this is absent.
+    pub fn trigger_source_context(&self) -> Option<&TriggerSourceContext> {
+        self.trigger_source_context.as_ref()
+    }
+
+    /// Completes the context's relationship projections after the zone authority
+    /// has captured attachments, links, and combat state.
+    pub(crate) fn sync_trigger_source_context(&mut self) {
+        let Some(mut context) = self.trigger_source_context.take() else {
+            return;
+        };
+        context.sync_zone_change_projections(self);
+        self.trigger_source_context = Some(context);
+    }
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -740,6 +890,7 @@ impl ZoneChangeRecord {
             supertypes: Vec::new(),
             keywords: Vec::new(),
             trigger_definitions: Vec::new(),
+            trigger_source_context: None,
             power: None,
             toughness: None,
             base_power: None,

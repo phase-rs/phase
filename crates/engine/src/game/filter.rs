@@ -1534,6 +1534,7 @@ pub fn matches_target_filter_on_lki_snapshot(
         supertypes: lki.supertypes.clone(),
         keywords: lki.keywords.clone(),
         trigger_definitions: Vec::new(),
+        trigger_source_context: None,
         power: lki.power,
         toughness: lki.toughness,
         // CR 208.4b + CR 613.4b: Carry base P/T into the synthesized record so
@@ -11550,6 +11551,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![Keyword::Changeling],
             trigger_definitions: Vec::new(),
+            trigger_source_context: None,
             power: Some(2),
             toughness: Some(3),
             base_power: Some(2),

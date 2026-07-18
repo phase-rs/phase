@@ -16,9 +16,10 @@ use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     AutoMayChoice, DelayedTrigger, DistributionUnit, GameState, MayTriggerAutoChoiceKey,
-    MayTriggerOrigin, StackEntry, StackEntryKind, TargetSelectionConstraint, WaitingFor,
+    MayTriggerOrigin, StackEntry, StackEntryKind, TargetSelectionConstraint, TriggerSourceContext,
+    WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
@@ -235,7 +236,7 @@ struct MatchedTrigger {
 
 struct OffZoneTriggerSourceCache {
     zone: Zone,
-    source_ids: Vec<ObjectId>,
+    source_ids: Vec<ObjectIncarnationRef>,
 }
 
 struct ActiveSuppressTriggerStatic {
@@ -542,100 +543,26 @@ fn reconcile_off_zone_keyword_triggers(state: &mut GameState) {
     }
 }
 
-fn keyword_kind_for_trigger(
-    keywords: &[Keyword],
-    trigger: &TriggerDefinition,
-) -> Option<KeywordKind> {
-    keywords
-        .iter()
-        .find(|keyword| KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, keyword))
-        .map(Keyword::kind)
+#[derive(Clone, Copy)]
+enum TriggerSource<'a> {
+    Live(&'a GameObject),
+    Context(&'a TriggerSourceContext),
 }
 
-fn runtime_granted_lki_keyword_triggers(
-    source_obj: &GameObject,
+/// Returns the record-owned source for a battlefield departure. An absent or
+/// mismatched context is not recoverable from the current object map: that map
+/// may already hold a different incarnation at the same storage id.
+fn ltb_trigger_source_context(
     record: &crate::types::game_state::ZoneChangeRecord,
-) -> Vec<(KeywordKind, TriggerDefinition)> {
-    partition_lki_trigger_definitions(source_obj, record)
-        .1
-        .into_iter()
-        .map(|(kind, entry)| (kind, entry.definition))
-        .collect()
-}
-
-fn lki_source_object_from_zone_change_record(
-    object_id: ObjectId,
-    record: &crate::types::game_state::ZoneChangeRecord,
-) -> Option<GameObject> {
-    if record.name.is_empty() && record.trigger_definitions.is_empty() {
-        return None;
-    }
-    let mut obj = GameObject::new(
-        object_id,
-        crate::types::identifiers::CardId(0),
-        record.owner,
-        record.name.clone(),
-        record.from_zone.unwrap_or(Zone::Battlefield),
-    );
-    obj.controller = record.controller;
-    obj.card_types.core_types = record.core_types.clone();
-    obj.card_types.subtypes = record.subtypes.clone();
-    obj.card_types.supertypes = record.supertypes.clone();
-    obj.keywords = record.keywords.clone();
-    obj.trigger_definitions = record.trigger_definitions.clone().into();
-    obj.power = record.power;
-    obj.toughness = record.toughness;
-    obj.base_power = record.base_power;
-    obj.base_toughness = record.base_toughness;
-    obj.color = record.colors.clone();
-    obj.is_token = record.is_token;
-    obj.attached_to = record.attached_to;
-    obj.is_suspected = record.is_suspected;
-    Some(obj)
-}
-
-fn partition_lki_trigger_definitions(
-    source_obj: &GameObject,
-    record: &crate::types::game_state::ZoneChangeRecord,
-) -> (
-    Vec<crate::types::ability::TriggerEntry>,
-    Vec<(KeywordKind, crate::types::ability::TriggerEntry)>,
-) {
-    let mut base_triggers: Vec<TriggerDefinition> = source_obj
-        .base_trigger_definitions
-        .iter()
-        .cloned()
-        .collect();
-    let mut printed = Vec::new();
-    let mut granted_keywords = Vec::new();
-    // Prefer the event's LKI snapshot. `ZoneChangeRecord::test_minimal` leaves
-    // `name` empty and omits trigger clones, so tests that hand-build minimal
-    // records can still fall back to the live object's trigger list. A full
-    // `snapshot_for_zone_change` record always carries the object name; when
-    // its trigger list is empty that means abilities were stripped at event
-    // time (ReturnAsAura no-target path, CR 614.12) and must not be repopulated
-    // from the live object (issue #1332).
-    let record_trigger_definitions: Vec<crate::types::ability::TriggerEntry> =
-        if record.trigger_definitions.is_empty() && record.name.is_empty() {
-            source_obj.trigger_definitions.iter_all().cloned().collect()
-        } else {
-            record.trigger_definitions.to_vec()
-        };
-    for trigger in record_trigger_definitions {
-        if let Some(pos) = base_triggers
-            .iter()
-            .position(|base| base == trigger.definition())
-        {
-            base_triggers.remove(pos);
-            printed.push(trigger.clone());
-        } else if let Some(kind) = keyword_kind_for_trigger(&record.keywords, trigger.definition())
-        {
-            granted_keywords.push((kind, trigger.clone()));
-        } else {
-            printed.push(trigger.clone());
-        }
-    }
-    (printed, granted_keywords)
+    moved_id: ObjectId,
+) -> Option<&TriggerSourceContext> {
+    (record.object_id == moved_id && record.from_zone == Some(Zone::Battlefield))
+        .then(|| record.trigger_source_context())
+        .flatten()
+        .filter(|context| {
+            context.identity.reference.object_id == moved_id
+                && context.identity.expected_zone == Zone::Battlefield
+        })
 }
 
 fn batched_zone_change_batch(events: &[GameEvent]) -> bool {
@@ -728,8 +655,33 @@ fn collect_matching_triggers(
         state,
         event,
         event_batch,
-        source_obj,
+        TriggerSource::Live(source_obj),
         timestamp,
+        zone_filter,
+        batched_this_pass,
+        registered_this_event,
+        None,
+        active_suppress_triggers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_matching_triggers_from_context(
+    state: &GameState,
+    event: &GameEvent,
+    event_batch: &[GameEvent],
+    source_context: &TriggerSourceContext,
+    zone_filter: Option<Zone>,
+    batched_this_pass: &mut HashSet<(ObjectId, usize)>,
+    registered_this_event: &mut HashSet<(ObjectId, usize)>,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+) -> Vec<MatchedTrigger> {
+    collect_matching_triggers_inner(
+        state,
+        event,
+        event_batch,
+        TriggerSource::Context(source_context),
+        source_context.entered_battlefield_turn.unwrap_or(0),
         zone_filter,
         batched_this_pass,
         registered_this_event,
@@ -743,7 +695,7 @@ fn collect_matching_triggers_inner(
     state: &GameState,
     event: &GameEvent,
     event_batch: &[GameEvent],
-    source_obj: &GameObject,
+    source: TriggerSource<'_>,
     timestamp: u32,
     zone_filter: Option<Zone>,
     batched_this_pass: &mut HashSet<(ObjectId, usize)>,
@@ -752,8 +704,13 @@ fn collect_matching_triggers_inner(
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
 ) -> Vec<MatchedTrigger> {
     let mut pending = Vec::new();
-    let obj_id = source_obj.id;
-    let controller = source_obj.controller;
+    let (obj_id, controller) = match source {
+        TriggerSource::Live(source_obj) => (source_obj.id, source_obj.controller),
+        TriggerSource::Context(source_context) => (
+            source_context.identity.reference.object_id,
+            source_context.lki.controller,
+        ),
+    };
 
     // CR 604.1 + CR 702.62a: Companion triggered abilities for keywords granted
     // to an *off-zone* card. `evaluate_layers` (Layer 6) only installs
@@ -780,12 +737,15 @@ fn collect_matching_triggers_inner(
         if let GameEvent::ZoneChanged {
             object_id,
             from: Some(Zone::Battlefield),
-            record,
+            record: _,
             ..
         } = event
         {
             if *object_id == obj_id {
-                runtime_granted_lki_keyword_triggers(source_obj, record)
+                // The source view always carries its concrete Layer-6 entries.
+                // Re-synthesizing keyword companions from payloads here would
+                // discard their occurrence provenance and can duplicate entries.
+                Vec::new()
             } else {
                 Vec::new()
             }
@@ -813,14 +773,17 @@ fn collect_matching_triggers_inner(
     // Synthesized granted-keyword triggers are appended after the printed set
     // with indices offset past `obj.trigger_definitions.len()` so the
     // `(obj_id, trig_idx)` dedup keys never collide with printed triggers.
-    let printed_trigger_count = source_obj.trigger_definitions.len();
+    let printed_trigger_count = match source {
+        TriggerSource::Live(source_obj) => source_obj.trigger_definitions.len(),
+        TriggerSource::Context(source_context) => source_context.trigger_entries.len(),
+    };
     let printed_triggers: Vec<(
         usize,
         Option<TriggerDefinitionRef>,
         &TriggerDefinition,
         Option<crate::types::keywords::KeywordKind>,
-    )> = if source_phase_out_event {
-        source_obj
+    )> = match source {
+        TriggerSource::Live(source_obj) if source_phase_out_event => source_obj
             .trigger_definitions
             .iter_all()
             .enumerate()
@@ -838,18 +801,32 @@ fn collect_matching_triggers_inner(
                     None,
                 )
             })
-            .collect()
-    } else {
-        super::functioning_abilities::active_trigger_definitions(state, source_obj)
-            .map(|active| {
+            .collect(),
+        TriggerSource::Live(source_obj) => {
+            super::functioning_abilities::active_trigger_definitions(state, source_obj)
+                .map(|active| {
+                    (
+                        active.live_index,
+                        Some(active.definition_ref),
+                        active.definition,
+                        None,
+                    )
+                })
+                .collect()
+        }
+        TriggerSource::Context(source_context) => source_context
+            .trigger_entries
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| {
                 (
-                    active.live_index,
-                    Some(active.definition_ref),
-                    active.definition,
+                    idx,
+                    Some(source_context.definition_ref(entry)),
+                    entry.definition(),
                     None,
                 )
             })
-            .collect()
+            .collect(),
     };
     let all_triggers = printed_triggers.into_iter().chain(
         granted_keyword_triggers
@@ -866,11 +843,21 @@ fn collect_matching_triggers_inner(
         // Empty trigger_zones defaults to battlefield-only (engine-internal triggers like
         // prowess/ward). Parser-created non-battlefield triggers set trigger_zones explicitly.
         if let Some(zone) = zone_filter {
-            let zones_match = if trig_def.trigger_zones.is_empty() {
+            let mut zones_match = if trig_def.trigger_zones.is_empty() {
                 zone == Zone::Battlefield
             } else {
                 trig_def.trigger_zones.contains(&zone)
             };
+            if !zones_match {
+                if let (
+                    TriggerSource::Context(source_context),
+                    GameEvent::ZoneChanged { record, to, .. },
+                ) = (source, event)
+                {
+                    zones_match = record.from_zone == Some(source_context.identity.expected_zone)
+                        && trig_def.trigger_zones.contains(to);
+                }
+            }
             if !zones_match {
                 continue;
             }
@@ -1212,11 +1199,28 @@ fn source_was_not_co_departed_into_zone(
         // have self-referential LTB triggers (Rancor class), but the destination
         // scan must read those from the CR 603.10a LKI record, not from the
         // post-move object.
-        GameEvent::ZoneChanged { to, record, .. } if *to == zone => {
-            !record.co_departed.contains(&source_id)
+        GameEvent::ZoneChanged {
+            object_id,
+            to,
+            record,
+            ..
+        } if *to == zone => {
+            (*object_id != source_id || record.from_zone != Some(Zone::Battlefield))
+                && !record.co_departed.contains(&source_id)
         }
         _ => true,
     }
+}
+
+fn live_battlefield_source_was_present_at_event(event: &GameEvent, source_id: ObjectId) -> bool {
+    !matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            ..
+        } if *object_id == source_id
+    )
 }
 
 fn storm_copy_count_before_cast(state: &GameState) -> i32 {
@@ -1588,6 +1592,15 @@ fn collect_pending_triggers(
             .into_iter()
             .map(|zone| {
                 let source_ids = trigger_source_ids_for_zone(state, zone);
+                let source_ids = source_ids
+                    .into_iter()
+                    .filter_map(|object_id| {
+                        state
+                            .objects
+                            .get(&object_id)
+                            .map(ObjectIncarnationRef::from_object)
+                    })
+                    .collect();
                 OffZoneTriggerSourceCache { zone, source_ids }
             })
             .collect::<Vec<_>>()
@@ -1664,6 +1677,9 @@ fn collect_pending_triggers(
 
         // Scan candidate permanents for matching triggers
         for obj_id in candidates.iter().copied() {
+            if !live_battlefield_source_was_present_at_event(event, obj_id) {
+                continue;
+            }
             let (
                 controller,
                 timestamp,
@@ -2079,6 +2095,9 @@ fn collect_pending_triggers(
         {
             if audit_trigger_index {
                 for obj_id in trigger_source_ids_for_zone(state, Zone::Battlefield) {
+                    if !live_battlefield_source_was_present_at_event(event, obj_id) {
+                        continue;
+                    }
                     let Some(obj) = state.objects.get(&obj_id) else {
                         continue;
                     };
@@ -2123,28 +2142,26 @@ fn collect_pending_triggers(
             ..
         } = event
         {
-            let lki_source_obj = state
-                .objects
-                .get(moved_id)
-                .filter(|obj| obj.zone != Zone::Battlefield)
-                .cloned()
-                .or_else(|| lki_source_object_from_zone_change_record(*moved_id, record));
-            if let Some(mut obj) = lki_source_obj {
-                let matched_triggers = {
-                    obj.trigger_definitions =
-                        partition_lki_trigger_definitions(&obj, record).0.into();
-                    collect_matching_triggers(
+            let matched_triggers =
+                if let Some(source_context) = ltb_trigger_source_context(record, *moved_id) {
+                    collect_matching_triggers_from_context(
                         state,
                         event,
                         events,
-                        &obj,
-                        obj.entered_battlefield_turn.unwrap_or(0),
+                        source_context,
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
                         &mut registered_this_event,
                         &active_suppress_triggers,
                     )
+                } else {
+                    // A record without its owned pre-event context cannot prove that
+                    // a current same-id object is the object that left the battlefield.
+                    // Fail closed rather than rebinding an LTB trigger to a later
+                    // incarnation.
+                    Vec::new()
                 };
+            if !matched_triggers.is_empty() {
                 for matched in matched_triggers {
                     record_trigger_fired_with_ref(
                         state,
@@ -2328,89 +2345,36 @@ fn collect_pending_triggers(
         // Synthetic battlefield-only keyword triggers (prowess / ward /
         // firebending / exploit) deliberately do NOT run in this loop.
         for cache in &off_zone_trigger_sources {
-            for obj_id in cache.source_ids.iter().copied() {
+            for source_ref in cache.source_ids.iter().copied() {
+                let obj_id = source_ref.object_id;
                 if !source_was_not_co_departed_into_zone(event, obj_id, cache.zone) {
                     continue;
                 }
                 let matched_triggers = {
-                    let obj = match state.objects.get(&obj_id) {
-                        Some(o) => o,
+                    let obj = match state
+                        .objects
+                        .get(&obj_id)
+                        .filter(|obj| ObjectIncarnationRef::from_object(obj) == source_ref)
+                    {
+                        Some(obj) => obj,
                         None => continue,
                     };
-                    if let GameEvent::ZoneChanged {
-                        object_id: moved_id,
-                        to,
-                        record,
-                        ..
-                    } = event
-                    {
-                        if obj_id == *moved_id && *to == cache.zone {
-                            // Full `snapshot_for_zone_change` records always
-                            // carry the object name; hand-built test records
-                            // omit it. Empty trigger snapshots on named records
-                            // are authoritative and must suppress stripped
-                            // triggers instead of falling back to the live
-                            // object.
-                            let use_lki_partition =
-                                !record.trigger_definitions.is_empty() || !record.name.is_empty();
-                            if use_lki_partition {
-                                let mut lki_obj = obj.clone();
-                                lki_obj.trigger_definitions =
-                                    partition_lki_trigger_definitions(obj, record).0.into();
-                                collect_matching_triggers_inner(
-                                    state,
-                                    event,
-                                    events,
-                                    &lki_obj,
-                                    0,
-                                    Some(cache.zone),
-                                    &mut batched_this_pass,
-                                    &mut registered_this_event,
-                                    None,
-                                    &active_suppress_triggers,
-                                )
-                            } else {
-                                collect_matching_triggers_inner(
-                                    state,
-                                    event,
-                                    events,
-                                    obj,
-                                    0,
-                                    Some(cache.zone),
-                                    &mut batched_this_pass,
-                                    &mut registered_this_event,
-                                    None,
-                                    &active_suppress_triggers,
-                                )
-                            }
-                        } else {
-                            collect_matching_triggers_inner(
-                                state,
-                                event,
-                                events,
-                                obj,
-                                0,
-                                Some(cache.zone),
-                                &mut batched_this_pass,
-                                &mut registered_this_event,
-                                None,
-                                &active_suppress_triggers,
-                            )
-                        }
-                    } else {
-                        collect_matching_triggers_inner(
-                            state,
-                            event,
-                            events,
-                            obj,
-                            0,
-                            Some(cache.zone),
-                            &mut batched_this_pass,
-                            &mut registered_this_event,
-                            None,
-                            &active_suppress_triggers,
-                        )
-                    }
+                    // A pre-change record context is LTB authority only. This
+                    // destination-zone scan must continue to use the live
+                    // post-change object until a later step introduces a true
+                    // post-event source context.
+                    collect_matching_triggers_inner(
+                        state,
+                        event,
+                        events,
+                        TriggerSource::Live(obj),
+                        0,
+                        Some(cache.zone),
+                        &mut batched_this_pass,
+                        &mut registered_this_event,
+                        None,
+                        &active_suppress_triggers,
+                    )
                 };
 
                 for matched in matched_triggers {
@@ -8704,6 +8668,34 @@ pub mod tests {
         GameState::new_two_player(42)
     }
 
+    #[test]
+    fn ltb_source_requires_the_record_owned_context_for_the_moved_object() {
+        let object = GameObject::new(
+            ObjectId(9),
+            CardId(12),
+            PlayerId(0),
+            "Departing source".to_string(),
+            Zone::Battlefield,
+        );
+        let record =
+            object.snapshot_for_zone_change(object.id, Some(Zone::Battlefield), Zone::Graveyard);
+        assert!(ltb_trigger_source_context(&record, object.id).is_some());
+        assert!(ltb_trigger_source_context(&record, ObjectId(10)).is_none());
+
+        let mut post_change_context = record.clone();
+        post_change_context
+            .trigger_source_context
+            .as_mut()
+            .expect("snapshot context")
+            .identity
+            .expected_zone = Zone::Graveyard;
+        assert!(ltb_trigger_source_context(&post_change_context, object.id).is_none());
+
+        let missing_context =
+            ZoneChangeRecord::test_minimal(object.id, Some(Zone::Battlefield), Zone::Graveyard);
+        assert!(ltb_trigger_source_context(&missing_context, object.id).is_none());
+    }
+
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
@@ -8828,20 +8820,25 @@ pub mod tests {
         }
     }
 
-    fn zone_changed_event_with_triggers(
+    /// Produces an LTB event from the source's authoritative live snapshot.
+    /// Tests must not reconstruct a departure source from trigger payloads: the
+    /// event owns the exact pre-event identity and cloned `TriggerEntry`s.
+    fn battlefield_departure_event_from_live(
+        state: &GameState,
         object_id: ObjectId,
         from: Zone,
         to: Zone,
-        core_types: Vec<CoreType>,
-        subtypes: Vec<&str>,
-        trigger_definitions: Vec<TriggerDefinition>,
     ) -> GameEvent {
-        let mut event = zone_changed_event(object_id, from, to, core_types, subtypes);
-        let GameEvent::ZoneChanged { record, .. } = &mut event else {
-            unreachable!("zone_changed_event always returns ZoneChanged");
-        };
-        record.trigger_definitions = trigger_definitions.into_iter().map(Into::into).collect();
-        event
+        let source = state
+            .objects
+            .get(&object_id)
+            .expect("LTB fixture source remains in the object map after its manual move");
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(from),
+            to,
+            record: Box::new(source.snapshot_for_zone_change(object_id, Some(from), to)),
+        }
     }
 
     fn make_creature(
@@ -17713,7 +17710,7 @@ pub mod tests {
             CardId(100),
             PlayerId(0),
             "Haywire Mite".to_string(),
-            Zone::Graveyard, // Already in graveyard (sacrificed as cost)
+            Zone::Battlefield,
         );
         {
             let mite = state.objects.get_mut(&mite_id).unwrap();
@@ -17738,27 +17735,17 @@ pub mod tests {
             std::sync::Arc::make_mut(&mut mite.base_trigger_definitions).push(trigger);
         }
 
-        // CR 603.10a: real zone-change events carry the LKI trigger snapshot
-        // from immediately before the object left the battlefield.
-        let trigger_definitions = state.objects[&mite_id]
-            .trigger_definitions
-            .iter_all()
-            .cloned()
-            .collect();
-
-        // Simulate the ZoneChanged event from sacrifice
-        let mut events = vec![zone_changed_event(
+        // CR 603.10a: capture the authoritative pre-departure source, then
+        // remove the object just as a sacrifice would.
+        let event = battlefield_departure_event_from_live(
+            &state,
             mite_id,
             Zone::Battlefield,
             Zone::Graveyard,
-            vec![CoreType::Creature, CoreType::Artifact],
-            Vec::new(),
-        )];
-        if let GameEvent::ZoneChanged { record, .. } = &mut events[0] {
-            record.trigger_definitions = trigger_definitions;
-        } else {
-            panic!("expected ZoneChanged event");
-        }
+        );
+        state.objects.get_mut(&mite_id).unwrap().zone = Zone::Graveyard;
+        state.battlefield.retain(|id| *id != mite_id);
+        let events = vec![event];
 
         process_triggers(&mut state, &events);
 
@@ -18649,7 +18636,7 @@ pub mod tests {
             "Dying Creature".to_string(),
             Zone::Battlefield,
         );
-        let dies_trigger = {
+        {
             let obj = state.objects.get_mut(&dying).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(0);
@@ -18663,24 +18650,21 @@ pub mod tests {
                 ))
                 .origin(Zone::Battlefield)
                 .destination(Zone::Graveyard);
-            obj.trigger_definitions.push(dies_trigger.clone());
-            dies_trigger
-        };
+            obj.trigger_definitions.push(dies_trigger);
+        }
         // Move the object out of the battlefield to mirror a real death.
+        let event = battlefield_departure_event_from_live(
+            &state,
+            dying,
+            Zone::Battlefield,
+            Zone::Graveyard,
+        );
         {
             let obj = state.objects.get_mut(&dying).unwrap();
             obj.zone = Zone::Graveyard;
         }
         state.battlefield.retain(|id| *id != dying);
-
-        let events = vec![zone_changed_event_with_triggers(
-            dying,
-            Zone::Battlefield,
-            Zone::Graveyard,
-            vec![CoreType::Creature],
-            Vec::new(),
-            vec![dies_trigger],
-        )];
+        let events = vec![event];
 
         process_triggers(&mut state, &events);
 
@@ -18715,7 +18699,7 @@ pub mod tests {
             "Hushed Creature".to_string(),
             Zone::Battlefield,
         );
-        let dies_trigger = {
+        {
             let obj = state.objects.get_mut(&dying).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(0);
@@ -18729,23 +18713,20 @@ pub mod tests {
                 ))
                 .origin(Zone::Battlefield)
                 .destination(Zone::Graveyard);
-            obj.trigger_definitions.push(dies_trigger.clone());
-            dies_trigger
-        };
+            obj.trigger_definitions.push(dies_trigger);
+        }
+        let event = battlefield_departure_event_from_live(
+            &state,
+            dying,
+            Zone::Battlefield,
+            Zone::Graveyard,
+        );
         {
             let obj = state.objects.get_mut(&dying).unwrap();
             obj.zone = Zone::Graveyard;
         }
         state.battlefield.retain(|id| *id != dying);
-
-        let events = vec![zone_changed_event_with_triggers(
-            dying,
-            Zone::Battlefield,
-            Zone::Graveyard,
-            vec![CoreType::Creature],
-            Vec::new(),
-            vec![dies_trigger],
-        )];
+        let events = vec![event];
 
         process_triggers(&mut state, &events);
 
@@ -18780,7 +18761,7 @@ pub mod tests {
             "Dying Artifact".to_string(),
             Zone::Battlefield,
         );
-        let dies_trigger = {
+        {
             let obj = state.objects.get_mut(&dying_artifact).unwrap();
             obj.card_types.core_types.push(CoreType::Artifact);
             obj.entered_battlefield_turn = Some(0);
@@ -18794,23 +18775,20 @@ pub mod tests {
                 ))
                 .origin(Zone::Battlefield)
                 .destination(Zone::Graveyard);
-            obj.trigger_definitions.push(dies_trigger.clone());
-            dies_trigger
-        };
+            obj.trigger_definitions.push(dies_trigger);
+        }
+        let event = battlefield_departure_event_from_live(
+            &state,
+            dying_artifact,
+            Zone::Battlefield,
+            Zone::Graveyard,
+        );
         {
             let obj = state.objects.get_mut(&dying_artifact).unwrap();
             obj.zone = Zone::Graveyard;
         }
         state.battlefield.retain(|id| *id != dying_artifact);
-
-        let events = vec![zone_changed_event_with_triggers(
-            dying_artifact,
-            Zone::Battlefield,
-            Zone::Graveyard,
-            vec![CoreType::Artifact],
-            Vec::new(),
-            vec![dies_trigger],
-        )];
+        let events = vec![event];
 
         process_triggers(&mut state, &events);
 

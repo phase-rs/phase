@@ -1,7 +1,5 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-#[cfg(test)]
-use crate::types::game_state::ZoneChangeRecord;
 use crate::types::game_state::{
     GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
 };
@@ -823,6 +821,7 @@ pub fn move_to_zone(
     } else {
         capture_combat_status(state, object_id)
     };
+    zone_change_record.sync_trigger_source_context();
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
@@ -1292,6 +1291,7 @@ pub fn move_to_library_at_index(
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+    zone_change_record.sync_trigger_source_context();
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
@@ -1558,6 +1558,7 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         .find(|record| record.object_id == object_id && record.to_zone == Zone::Battlefield)
     {
         record.controller = controller;
+        record.sync_trigger_source_context();
     }
 
     if let Some(record) = state
@@ -1580,6 +1581,7 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         )
     }) {
         record.controller = controller;
+        record.sync_trigger_source_context();
     }
 }
 
@@ -2410,18 +2412,25 @@ mod tests {
         move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
 
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0],
-            GameEvent::ZoneChanged {
-                object_id: id,
-                from: Some(Zone::Hand),
-                to: Zone::Graveyard,
-                record: Box::new(ZoneChangeRecord {
-                    name: "Card".to_string(),
-                    ..ZoneChangeRecord::test_minimal(id, Some(Zone::Hand), Zone::Graveyard)
-                }),
-            }
-        );
+        let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            record,
+        } = &events[0]
+        else {
+            panic!("move_to_zone must emit ZoneChanged");
+        };
+        assert_eq!(*object_id, id);
+        assert_eq!(*from, Some(Zone::Hand));
+        assert_eq!(*to, Zone::Graveyard);
+        assert_eq!(record.name, "Card");
+        let context = record
+            .trigger_source_context()
+            .expect("real zone-change events carry their source context");
+        assert_eq!(context.identity.reference.object_id, id);
+        assert_eq!(context.identity.expected_zone, Zone::Hand);
+        assert_eq!(context.card_id, CardId(1));
     }
 
     #[test]
