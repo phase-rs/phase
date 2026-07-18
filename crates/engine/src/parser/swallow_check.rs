@@ -2049,13 +2049,14 @@ const OTHER_DYNAMIC_MARKERS: &[&str] = &[
 /// limit rather than a dynamic quantity, so the DynamicQty / repeat_for
 /// suppression must not treat it as a dynamic marker. Two surface forms qualify:
 /// "Activate ... twice each turn" (CR 602.5b usage-limited activation) and
-/// "can [keyword] twice ... rather than once" — boast is a referable ability
-/// (CR 702.142b) whose usage-limit raise is governed by CR 602.5b (e.g. Birgi,
-/// God of Storytelling raising the boast limit). "rather than once" is unique
-/// in-tree to the ModifyActivationLimit parser family, so it is a reliable
-/// activation-limit signal independent of the "each turn" wording. "twice that
-/// many" / "twice X" remain real dynamic-quantity multipliers and are excluded.
-/// Shared by both call sites so the predicate can't drift.
+/// "can [keyword] twice ... rather than once" — boast's base "only once each
+/// turn" limit is CR 702.142a (an activation restriction, CR 602.5b), and boast
+/// is a referable ability (CR 702.142b) so an effect like Birgi, God of
+/// Storytelling can raise that limit. "rather than once" is unique in-tree to
+/// the ModifyActivationLimit parser family, so it is a reliable activation-limit
+/// signal independent of the "each turn" wording. "twice that many" / "twice X"
+/// remain real dynamic-quantity multipliers and are excluded. Shared by both
+/// call sites so the predicate can't drift.
 fn twice_is_activation_limit(cleaned: &str) -> bool {
     // allow-noncombinator: swallow detector marker scan on classified text
     (cleaned.contains("twice each turn") || cleaned.contains("rather than once"))
@@ -2078,7 +2079,7 @@ fn detect_dynamic_qty(
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    // CR 602.5b + CR 702.142b: "Activate ... twice each turn" / "can [keyword]
+    // CR 702.142a + CR 602.5b: "Activate ... twice each turn" / "can [keyword]
     // twice ... rather than once" is a fixed-count activation limit (handled by
     // ActivateLimit / ModifyActivationLimit), not a dynamic quantity.
     let has_marker = (cleaned.contains(" twice ") && !twice_is_activation_limit(cleaned)) // allow-noncombinator: swallow detector marker scan on classified text
@@ -8746,7 +8747,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// Birgi, God of Storytelling's boast-limit static parses to
     /// `ModifyActivationLimit` (reach-guard, per the vacuous-negative rule) and
     /// must NOT raise a false-positive `DynamicQty` swallow warning: its " twice "
-    /// is a fixed activation limit (CR 702.142b), not a dynamic quantity.
+    /// is a fixed activation limit (CR 702.142a), not a dynamic quantity.
     ///
     /// REVERT DISCRIMINATOR: dropping the `"rather than once"` arm of
     /// `twice_is_activation_limit` makes `has_marker` fire on this line with no

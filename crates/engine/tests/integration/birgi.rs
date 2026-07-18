@@ -11,11 +11,13 @@
 //! Exile the top two cards of your library. You may play those cards this turn."
 //!
 //! The card is ~fully implemented already; these tests are the regression net.
-//! CR 605.1b (mana trigger uses the stack, not a mana ability), CR 106.4 /
-//! CR 614.17 (the {R} persists through steps/phases then drains at cleanup),
-//! CR 702.142a/b + CR 602.5b (boast-twice, controller-scoped), CR 601.2a
-//! play-from-exile permission.
+//! CR 605.1b (mana trigger uses the stack, not a mana ability), CR 614.17 +
+//! CR 611.2a / CR 106.4 (the until-end-of-turn "don't lose this mana" can't-effect
+//! keeps the {R} through steps/phases, then it drains at cleanup once that
+//! duration ends), CR 702.142a + CR 602.5 (boast-twice activation limit,
+//! controller-scoped), CR 611.2a play-from-exile permission duration.
 
+use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{AbilityTag, CastingPermission, Duration};
@@ -139,6 +141,70 @@ fn cheap_spell(scenario: &mut GameScenario, player: PlayerId, name: &str) -> Obj
         .id()
 }
 
+/// Add a castable 0-cost sorcery ("You gain 1 life") to the top of `player`'s
+/// library, returning its id. `add_spell_to_library_top` reseats to `library[0]`
+/// exactly like `add_card_to_library_top` (both `insert(0, ..)`), so exile-top
+/// ordering stays deterministic — but unlike a bare named card this one is a
+/// real spell the play-from-exile permission can actually consume, which is what
+/// lets the Harnfel tests drive the grant's CONSUMER, not just inspect it.
+fn castable_top(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
+    scenario
+        .add_spell_to_library_top(player, name, false)
+        .from_oracle_text("You gain 1 life.")
+        .with_mana_cost(ManaCost::zero())
+        .id()
+}
+
+/// Shared consumer + expiry drill for Harnfel's play-from-exile grant. Casts
+/// `to_cast` from exile THIS turn through the real cast pipeline (asserting via
+/// `CastOutcome` deltas that it resolves — gains 1 life, moves to the graveyard —
+/// and leaves P0's cast path), then advances one turn and asserts the still
+/// `unplayed` sibling is no longer castable and its grant was pruned. This
+/// exercises the permission being spent and expiring, not merely produced.
+///
+/// CR 611.2a: "you may play those cards this turn" is a continuous effect that
+/// lasts until end of turn; CR 514.2: the grant is pruned at that turn's cleanup.
+fn assert_play_from_exile_consumed_then_expires(
+    runner: &mut GameRunner,
+    to_cast: ObjectId,
+    unplayed: ObjectId,
+) {
+    // (a) CONSUMER — the grant surfaces the card on P0's cast path, and casting
+    // it actually resolves and consumes that path.
+    assert!(
+        spell_objects_available_to_cast(runner.state(), P0).contains(&to_cast),
+        "the play-from-exile grant must surface the exiled card on P0's cast path"
+    );
+    let cast = runner.cast(to_cast).resolve();
+    cast.assert_zone(&[to_cast], Zone::Graveyard);
+    cast.assert_life_delta(P0, 1);
+    runner.advance_until_stack_empty();
+    assert!(
+        !spell_objects_available_to_cast(runner.state(), P0).contains(&to_cast),
+        "casting the granted card must consume its exile-cast path"
+    );
+
+    // (b) EXPIRY — the unplayed sibling is castable now, but not after the turn
+    // ends. CR 611.2a duration ends at cleanup; CR 514.2 prunes the grant.
+    assert!(
+        spell_objects_available_to_cast(runner.state(), P0).contains(&unplayed),
+        "the still-unplayed exiled sibling must be castable before the turn ends"
+    );
+    let this_turn = runner.state().turn_number;
+    advance_until(runner, |s| s.turn_number > this_turn);
+    assert!(
+        !spell_objects_available_to_cast(runner.state(), P0).contains(&unplayed),
+        "CR 611.2a: the unplayed exiled card must no longer be castable once the turn changes"
+    );
+    assert!(
+        !runner.state().objects[&unplayed]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::PlayFromExile { granted_to, .. } if *granted_to == P0)),
+        "CR 514.2 + CR 611.2a: the expired PlayFromExile grant must be pruned at end of turn"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test 1 — mana trigger: stack (not inline), {R} with EndOfTurn expiry,
 // persistence through steps/phases, drain at cleanup.
@@ -149,8 +215,9 @@ fn cheap_spell(scenario: &mut GameScenario, player: PlayerId, name: &str) -> Obj
 /// {R} inline during casting; assert the pool has no red at commit (negative)
 /// while a Birgi triggered ability sits on the stack (positive reach-guard).
 /// After it resolves the pool holds exactly one {R} carrying
-/// `ManaExpiry::EndOfTurn` (CR 614.17 — a misparse that drops the expiry fails
-/// the `red_expiry` assertion).
+/// `ManaExpiry::EndOfTurn` — the CR 614.17 "don't lose this mana" can't-effect
+/// bounded by the CR 611.2a until-end-of-turn duration (a misparse that drops
+/// the expiry fails the `red_expiry` assertion).
 #[test]
 fn birgi_mana_trigger_uses_stack_and_stamps_end_of_turn_expiry() {
     let mut scenario = GameScenario::new();
@@ -184,7 +251,7 @@ fn birgi_mana_trigger_uses_stack_and_stamps_end_of_turn_expiry() {
     assert_eq!(
         red_expiry(runner.state(), P0),
         Some(ManaExpiry::EndOfTurn),
-        "CR 614.17: the added {{R}} must carry the EndOfTurn 'don't lose this mana' expiry"
+        "CR 614.17 + CR 611.2a: the added {{R}} must carry the until-end-of-turn 'don't lose this mana' expiry"
     );
 
     let cast_turn = runner.state().turn_number;
@@ -198,13 +265,14 @@ fn birgi_mana_trigger_uses_stack_and_stamps_end_of_turn_expiry() {
         "CR 614.17: the {{R}} persists through steps/phases within the turn"
     );
 
-    // Drain: crossing this turn's cleanup empties it (CR 106.4 default restored
-    // once the 'until end of turn' can't-effect's window ends).
+    // Drain: crossing this turn's cleanup empties it. CR 611.2a: the
+    // until-end-of-turn "don't lose this mana" continuous effect's duration ends
+    // at cleanup, so CR 106.4's default step/phase mana-emptying is restored.
     advance_until(&mut runner, |s| s.turn_number > cast_turn);
     assert_eq!(
         red_count(runner.state(), P0),
         0,
-        "CR 106.4: the EndOfTurn {{R}} drains at the caster's cleanup"
+        "CR 611.2a + CR 106.4: the {{R}} drains at cleanup once the until-end-of-turn duration ends"
     );
 }
 
@@ -231,12 +299,14 @@ fn birgi_two_casts_add_two_red() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 — boast twice with Birgi; once without (CR 702.142a/b + CR 602.5b).
+// Test 3 — boast twice with Birgi; once without (CR 702.142a + CR 602.5).
 // ---------------------------------------------------------------------------
 
 /// With Birgi out, a boast creature you control may boast TWICE per turn; the
-/// third activation is rejected on the limit (CR 702.142b raises the CR 702.142a
-/// base once-per-turn to twice). Mana is available for all three attempts, so a
+/// third activation is rejected on the limit. CR 702.142a defines boast's base
+/// "Activate ... only once each turn" restriction (an activation restriction,
+/// CR 602.5); Birgi's static raises that limit to twice, so a third activation
+/// exceeds even the raised limit. Mana is available for all three attempts, so a
 /// rejected third proves the LIMIT — not payability — blocked it.
 #[test]
 fn boast_twice_with_birgi_rejects_third() {
@@ -266,7 +336,7 @@ fn boast_twice_with_birgi_rejects_third() {
     });
     assert!(
         third.is_err(),
-        "CR 702.142b: with Birgi the boast limit is twice — the third activation must be rejected"
+        "CR 702.142a + CR 602.5: with Birgi the boast limit is raised to twice — the third activation exceeds it and must be rejected"
     );
 }
 
@@ -307,7 +377,8 @@ fn boast_once_without_birgi_rejects_second() {
 // ---------------------------------------------------------------------------
 
 /// Harnfel's activated ability exiles the top two library cards and grants their
-/// controller a `PlayFromExile` permission for the rest of the turn (CR 601.2a).
+/// controller a `PlayFromExile` permission for the rest of the turn (CR 611.2a —
+/// a continuous effect from resolution lasting "until end of turn").
 /// A third, already-exiled card that was NOT exiled by this ability carries no
 /// grant, proving the permission is scoped to the exiled set, not the exile zone.
 ///
@@ -331,7 +402,7 @@ fn harnfel_exiles_top_two_and_grants_play_this_turn() {
     let buried = scenario.add_card_to_library_top(P0, "Buried");
     let top_two: Vec<ObjectId> = ["Top B", "Top A"]
         .into_iter()
-        .map(|n| scenario.add_card_to_library_top(P0, n))
+        .map(|n| castable_top(&mut scenario, P0, n))
         .collect();
     // A control card ALREADY in exile from an unrelated source (no grant).
     let control = scenario.add_creature_to_exile(P0, "Prior Exile", 1, 1).id();
@@ -363,7 +434,7 @@ fn harnfel_exiles_top_two_and_grants_play_this_turn() {
             CastingPermission::PlayFromExile { duration, .. } => assert_eq!(
                 *duration,
                 Duration::UntilEndOfTurn,
-                "CR 601.2a: 'play those cards this turn' grants until end of turn"
+                "CR 611.2a: 'play those cards this turn' creates a continuous effect lasting until end of turn"
             ),
             _ => unreachable!(),
         }
@@ -391,6 +462,10 @@ fn harnfel_exiles_top_two_and_grants_play_this_turn() {
         Zone::Graveyard,
         "the 'Discard a card' cost must move the fodder to the graveyard"
     );
+
+    // Consumer + expiry: spend the grant on one exiled card this turn, then
+    // confirm the unplayed sibling stops being castable once the turn ends.
+    assert_play_from_exile_consumed_then_expires(&mut runner, top_two[0], top_two[1]);
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +553,7 @@ fn opponents_cast_does_not_trigger_birgi_mana() {
 /// true}`). Harnfel enters as a Legendary Artifact; its "Discard a card: exile
 /// the top two, you may play those cards this turn" activated ability then exiles
 /// the top two library cards with a P0 `PlayFromExile` grant that ends this turn
-/// (CR 601.2a), while a card exiled by an unrelated source carries no grant.
+/// (CR 611.2a), while a card exiled by an unrelated source carries no grant.
 ///
 /// Drives the REAL card through the actual pipeline: `CastSpell` →
 /// `ModalFaceChoice` → `ChooseModalFace` → resolution → the discard-cost
@@ -497,7 +572,7 @@ fn harnfel_back_face_cast_grants_play_from_exile_this_turn() {
     let buried = scenario.add_card_to_library_top(P0, "Buried");
     let top_two: Vec<ObjectId> = ["Top B", "Top A"]
         .into_iter()
-        .map(|n| scenario.add_card_to_library_top(P0, n))
+        .map(|n| castable_top(&mut scenario, P0, n))
         .collect();
     let control = scenario.add_creature_to_exile(P0, "Prior Exile", 1, 1).id();
     // {4}{R} for the Harnfel back face.
@@ -571,7 +646,7 @@ fn harnfel_back_face_cast_grants_play_from_exile_this_turn() {
             CastingPermission::PlayFromExile { duration, .. } => assert_eq!(
                 *duration,
                 Duration::UntilEndOfTurn,
-                "CR 601.2a: 'play those cards this turn' grants until end of turn (gone next turn)"
+                "CR 611.2a: 'play those cards this turn' creates an until-end-of-turn continuous effect (gone next turn)"
             ),
             _ => unreachable!(),
         }
@@ -592,4 +667,8 @@ fn harnfel_back_face_cast_grants_play_from_exile_this_turn() {
             .any(|p| matches!(p, CastingPermission::PlayFromExile { granted_to, .. } if *granted_to == P0)),
         "a card exiled by an unrelated source must not receive Harnfel's play permission"
     );
+
+    // Consumer + expiry through the REAL modal-back-face path: spend the grant on
+    // one exiled card this turn, then confirm the unplayed sibling expires.
+    assert_play_from_exile_consumed_then_expires(&mut runner, top_two[0], top_two[1]);
 }
