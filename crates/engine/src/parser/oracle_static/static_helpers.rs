@@ -76,13 +76,16 @@ fn parse_bare_spell_subject_filter(base: &str) -> Option<TargetFilter> {
         ));
     }
     // CR 700.6: "historic" = legendary supertype, artifact card type, or Saga subtype.
-    if lower == "historic" {
+    if all_consuming(tag::<_, _, OracleError<'_>>("historic"))
+        .parse(lower.as_str())
+        .is_ok()
+    {
         return Some(TargetFilter::Typed(
             TypedFilter::card().properties(vec![FilterProp::Historic]),
         ));
     }
     // CR 205.4a: a lone supertype word ("legendary", "snow", ...).
-    parse_bare_supertype_spell_filter(base)
+    parse_bare_supertype_spell_filter(&lower)
 }
 
 /// CR 202.3: Nom parse of a trailing "with/of mana value N or greater/less"
