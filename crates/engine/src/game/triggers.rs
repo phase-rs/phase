@@ -737,7 +737,6 @@ fn collect_matching_triggers_inner(
         if let GameEvent::ZoneChanged {
             object_id,
             from: Some(Zone::Battlefield),
-            record: _,
             ..
         } = event
         {

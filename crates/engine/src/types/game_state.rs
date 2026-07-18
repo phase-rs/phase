@@ -1488,6 +1488,16 @@ pub struct LogicalZoneChangeOccurrence {
     pub event: GameEvent,
 }
 
+/// A battlefield departure derived from a fully owned logical zone-change
+/// group. The source context is the exact pre-change authority selected by the
+/// group; callers must not rebind it through `GameState::objects`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalZoneChangeBattlefieldDeparture {
+    pub member: ObjectIncarnationRef,
+    pub occurrence_ordinal: usize,
+    pub source_context: TriggerSourceContext,
+}
+
 /// Complete ownership for one logical zone-change action.
 ///
 /// Both pause carriers persist this same shape. It deliberately has no serde
@@ -1516,6 +1526,281 @@ impl LogicalZoneChangeGroup {
             terminal_outcomes,
             all_origin_occurrences: Vec::new(),
         }
+    }
+
+    /// Retain the actual `ZoneChanged` records emitted by one explicitly-bounded
+    /// delivery slice. Redirects therefore retain their actual destination,
+    /// while a prevented proposal contributes no occurrence at all.
+    pub fn append_delivery_events(&mut self, events: &[GameEvent]) -> Result<(), String> {
+        for event in events {
+            let GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+                record,
+            } = event
+            else {
+                continue;
+            };
+            if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to
+            {
+                return Err(format!(
+                    "logical zone-change occurrence record disagrees with event for object {}",
+                    object_id.0
+                ));
+            }
+
+            let ordinal = self.all_origin_occurrences.len();
+            let source_identity = record
+                .trigger_source_context()
+                .map(|context| context.identity.reference);
+            self.all_origin_occurrences
+                .push(LogicalZoneChangeOccurrence {
+                    ordinal,
+                    event: event.clone(),
+                });
+
+            if let Some(member_index) = source_identity.and_then(|identity| {
+                self.prospective_battlefield_members
+                    .iter()
+                    .position(|member| member.identity == identity)
+            }) {
+                self.record_terminal_outcome(
+                    member_index,
+                    LogicalZoneChangeTerminalOutcome::Moved {
+                        occurrence_ordinal: ordinal,
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record that a prospective battlefield member's proposed move was
+    /// prevented. No synthetic event is retained for a prevented proposal.
+    pub fn record_prevented(&mut self, member: ObjectIncarnationRef) -> Result<(), String> {
+        self.record_terminal_for_member(member, LogicalZoneChangeTerminalOutcome::Prevented)
+    }
+
+    /// Record that a prospective battlefield member completed its delivery
+    /// without moving. This is distinct from a replacement that prevented the
+    /// proposal: neither produces a `ZoneChanged` occurrence, but settlement
+    /// must retain the distinction.
+    pub fn record_remained(&mut self, member: ObjectIncarnationRef) -> Result<(), String> {
+        self.record_terminal_for_member(member, LogicalZoneChangeTerminalOutcome::Remained)
+    }
+
+    fn record_terminal_for_member(
+        &mut self,
+        member: ObjectIncarnationRef,
+        outcome: LogicalZoneChangeTerminalOutcome,
+    ) -> Result<(), String> {
+        let Some(index) = self
+            .prospective_battlefield_members
+            .iter()
+            .position(|candidate| candidate.identity == member)
+        else {
+            return Err(format!(
+                "logical zone-change member {}:{} was not announced from the battlefield",
+                member.object_id.0, member.incarnation
+            ));
+        };
+        self.record_terminal_outcome(index, outcome)
+    }
+
+    fn record_terminal_outcome(
+        &mut self,
+        member_index: usize,
+        outcome: LogicalZoneChangeTerminalOutcome,
+    ) -> Result<(), String> {
+        let Some(slot) = self.terminal_outcomes.get_mut(member_index) else {
+            return Err(format!(
+                "logical zone-change terminal slot {member_index} is missing"
+            ));
+        };
+        if !matches!(slot, LogicalZoneChangeTerminalOutcome::Pending) {
+            return Err(format!(
+                "logical zone-change member {} already has a terminal outcome",
+                self.prospective_battlefield_members[member_index]
+                    .identity
+                    .object_id
+                    .0
+            ));
+        }
+        *slot = outcome;
+        Ok(())
+    }
+
+    /// Validates the complete, serialized authority of this logical action.
+    /// Call only after every announced prospective member has reached a terminal
+    /// result; a paused owner is intentionally allowed to retain `Pending` slots.
+    pub fn validate_complete(&self) -> Result<(), String> {
+        if self.prospective_battlefield_members.len() != self.terminal_outcomes.len() {
+            return Err("logical zone-change member/outcome lengths differ".to_string());
+        }
+        for (index, member) in self.prospective_battlefield_members.iter().enumerate() {
+            if self.prospective_battlefield_members[..index]
+                .iter()
+                .any(|prior| prior.identity == member.identity)
+            {
+                return Err(format!(
+                    "logical zone-change member {}:{} was announced more than once",
+                    member.identity.object_id.0, member.identity.incarnation
+                ));
+            }
+        }
+
+        for (expected_ordinal, occurrence) in self.all_origin_occurrences.iter().enumerate() {
+            if occurrence.ordinal != expected_ordinal {
+                return Err(format!(
+                    "logical zone-change occurrence ordinal {} is not {expected_ordinal}",
+                    occurrence.ordinal
+                ));
+            }
+            let GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+                record,
+            } = &occurrence.event
+            else {
+                return Err(format!(
+                    "logical zone-change occurrence {expected_ordinal} is not ZoneChanged"
+                ));
+            };
+            if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to
+            {
+                return Err(format!(
+                    "logical zone-change occurrence {expected_ordinal} has an incoherent record"
+                ));
+            }
+        }
+
+        for (index, (member, outcome)) in self
+            .prospective_battlefield_members
+            .iter()
+            .zip(&self.terminal_outcomes)
+            .enumerate()
+        {
+            match outcome {
+                LogicalZoneChangeTerminalOutcome::Pending => {
+                    return Err(format!(
+                        "logical zone-change member {}:{} is not terminal",
+                        member.identity.object_id.0, member.identity.incarnation
+                    ));
+                }
+                LogicalZoneChangeTerminalOutcome::Prevented
+                | LogicalZoneChangeTerminalOutcome::Remained => {}
+                LogicalZoneChangeTerminalOutcome::Moved { occurrence_ordinal } => {
+                    let occurrence = self.all_origin_occurrences.get(*occurrence_ordinal).ok_or_else(|| {
+                        format!(
+                            "logical zone-change member at slot {index} refers to missing occurrence {occurrence_ordinal}"
+                        )
+                    })?;
+                    let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
+                        return Err(format!(
+                            "logical zone-change member at slot {index} refers to a non-zone-change occurrence"
+                        ));
+                    };
+                    if record
+                        .trigger_source_context()
+                        .map(|context| context.identity.reference)
+                        != Some(member.identity)
+                    {
+                        return Err(format!(
+                            "logical zone-change member at slot {index} does not match its exact event-time incarnation"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Derive the authoritative simultaneous battlefield departures. This is
+    /// the sole logical-group API that selects the exact departure source
+    /// context; it requires both a completed owner and an exact initial-member
+    /// identity.
+    pub fn battlefield_departures(
+        &self,
+    ) -> Result<Vec<LogicalZoneChangeBattlefieldDeparture>, String> {
+        self.validate_complete()?;
+        self.prospective_battlefield_members
+            .iter()
+            .zip(&self.terminal_outcomes)
+            .filter_map(|(member, outcome)| match outcome {
+                LogicalZoneChangeTerminalOutcome::Moved { occurrence_ordinal } => {
+                    Some((member.identity, *occurrence_ordinal))
+                }
+                LogicalZoneChangeTerminalOutcome::Prevented
+                | LogicalZoneChangeTerminalOutcome::Remained => None,
+                LogicalZoneChangeTerminalOutcome::Pending => unreachable!(
+                    "validate_complete rejects pending logical zone-change member outcomes"
+                ),
+            })
+            .map(|(member, occurrence_ordinal)| {
+                let GameEvent::ZoneChanged { from, record, .. } = &self
+                    .all_origin_occurrences
+                    .get(occurrence_ordinal)
+                    .expect("validate_complete checked moved occurrence ordinal")
+                    .event
+                else {
+                    unreachable!("validate_complete checked logical occurrence event kind");
+                };
+                if *from != Some(Zone::Battlefield) {
+                    return Err(format!(
+                        "logical zone-change battlefield member {}:{} moved from a nonbattlefield zone",
+                        member.object_id.0, member.incarnation
+                    ));
+                }
+                let source_context = record.trigger_source_context().cloned().ok_or_else(|| {
+                    format!(
+                        "logical zone-change battlefield member {}:{} lacks event-time source context",
+                        member.object_id.0, member.incarnation
+                    )
+                })?;
+                if source_context.identity.reference != member {
+                    return Err(format!(
+                        "logical zone-change battlefield member {}:{} rebound to a different event-time source",
+                        member.object_id.0, member.incarnation
+                    ));
+                }
+                Ok(LogicalZoneChangeBattlefieldDeparture {
+                    member,
+                    occurrence_ordinal,
+                    source_context,
+                })
+            })
+            .collect()
+    }
+
+    /// Stamp the retained events using only the derived exact battlefield
+    /// departures. The caller cannot accidentally mark a partial segment or an
+    /// object that was merely present in the attempted move set.
+    pub fn stamp_battlefield_departures(&mut self) -> Result<(), String> {
+        let departures = self.battlefield_departures()?;
+        if departures.len() < 2 {
+            return Ok(());
+        }
+        let departed_ids: Vec<_> = departures
+            .iter()
+            .map(|departure| departure.member.object_id)
+            .collect();
+        for departure in departures {
+            let occurrence = self
+                .all_origin_occurrences
+                .get_mut(departure.occurrence_ordinal)
+                .expect("battlefield_departures derived a retained occurrence");
+            let GameEvent::ZoneChanged { record, .. } = &mut occurrence.event else {
+                unreachable!("battlefield_departures derives only ZoneChanged occurrences");
+            };
+            record.co_departed = departed_ids
+                .iter()
+                .copied()
+                .filter(|object_id| *object_id != departure.member.object_id)
+                .collect();
+        }
+        Ok(())
     }
 }
 
@@ -16300,6 +16585,181 @@ mod tests {
             vec![LogicalZoneChangeTerminalOutcome::Pending]
         );
         assert!(group.all_origin_occurrences.is_empty());
+    }
+
+    #[test]
+    fn logical_zone_change_group_retains_actual_events_and_terminal_outcomes() {
+        let mut first = GameObject::new(
+            ObjectId(71),
+            CardId(71),
+            PlayerId(0),
+            "first".to_string(),
+            Zone::Battlefield,
+        );
+        first.incarnation = 4;
+        let mut prevented = GameObject::new(
+            ObjectId(72),
+            CardId(72),
+            PlayerId(0),
+            "prevented".to_string(),
+            Zone::Battlefield,
+        );
+        prevented.incarnation = 5;
+        let mut remained = GameObject::new(
+            ObjectId(73),
+            CardId(73),
+            PlayerId(0),
+            "remained".to_string(),
+            Zone::Battlefield,
+        );
+        remained.incarnation = 6;
+        let hand = GameObject::new(
+            ObjectId(74),
+            CardId(74),
+            PlayerId(0),
+            "hand".to_string(),
+            Zone::Hand,
+        );
+        let mut group = LogicalZoneChangeGroup::new(
+            LogicalZoneChangeGroupId(3),
+            vec![
+                LogicalZoneChangeProspectiveMember {
+                    identity: ObjectIncarnationRef::from_object(&first),
+                },
+                LogicalZoneChangeProspectiveMember {
+                    identity: ObjectIncarnationRef::from_object(&prevented),
+                },
+                LogicalZoneChangeProspectiveMember {
+                    identity: ObjectIncarnationRef::from_object(&remained),
+                },
+            ],
+        );
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: first.id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Exile,
+                record: Box::new(first.snapshot_for_zone_change(
+                    first.id,
+                    Some(Zone::Battlefield),
+                    Zone::Exile,
+                )),
+            },
+            GameEvent::ZoneChanged {
+                object_id: hand.id,
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record: Box::new(hand.snapshot_for_zone_change(
+                    hand.id,
+                    Some(Zone::Hand),
+                    Zone::Graveyard,
+                )),
+            },
+        ];
+
+        group
+            .append_delivery_events(&events)
+            .expect("append actual events");
+        group
+            .record_prevented(ObjectIncarnationRef::from_object(&prevented))
+            .expect("record prevented proposal");
+        group
+            .record_remained(ObjectIncarnationRef::from_object(&remained))
+            .expect("record completed no-move proposal");
+
+        assert_eq!(group.all_origin_occurrences.len(), 2);
+        assert_eq!(
+            group.terminal_outcomes,
+            vec![
+                LogicalZoneChangeTerminalOutcome::Moved {
+                    occurrence_ordinal: 0
+                },
+                LogicalZoneChangeTerminalOutcome::Prevented,
+                LogicalZoneChangeTerminalOutcome::Remained,
+            ]
+        );
+        group
+            .validate_complete()
+            .expect("complete ownership validates");
+        let departures = group
+            .battlefield_departures()
+            .expect("exact battlefield departure derives from retained event");
+        assert_eq!(departures.len(), 1);
+        assert_eq!(
+            departures[0].member,
+            ObjectIncarnationRef::from_object(&first)
+        );
+        assert_eq!(departures[0].occurrence_ordinal, 0);
+    }
+
+    #[test]
+    fn logical_zone_change_group_stamps_only_derived_complete_departures() {
+        let mut first = GameObject::new(
+            ObjectId(81),
+            CardId(81),
+            PlayerId(0),
+            "first".to_string(),
+            Zone::Battlefield,
+        );
+        first.incarnation = 7;
+        let mut second = GameObject::new(
+            ObjectId(82),
+            CardId(82),
+            PlayerId(0),
+            "second".to_string(),
+            Zone::Battlefield,
+        );
+        second.incarnation = 8;
+        let mut group = LogicalZoneChangeGroup::new(
+            LogicalZoneChangeGroupId(4),
+            vec![
+                LogicalZoneChangeProspectiveMember {
+                    identity: ObjectIncarnationRef::from_object(&first),
+                },
+                LogicalZoneChangeProspectiveMember {
+                    identity: ObjectIncarnationRef::from_object(&second),
+                },
+            ],
+        );
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: first.id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                record: Box::new(first.snapshot_for_zone_change(
+                    first.id,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )),
+            },
+            GameEvent::ZoneChanged {
+                object_id: second.id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                record: Box::new(second.snapshot_for_zone_change(
+                    second.id,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )),
+            },
+        ];
+        group
+            .append_delivery_events(&events)
+            .expect("append departures");
+        group
+            .stamp_battlefield_departures()
+            .expect("stamp complete exact departure set");
+
+        for occurrence in &group.all_origin_occurrences {
+            let GameEvent::ZoneChanged {
+                object_id, record, ..
+            } = &occurrence.event
+            else {
+                unreachable!("test retained only zone changes");
+            };
+            assert_eq!(record.co_departed.len(), 1);
+            assert_ne!(record.co_departed[0], *object_id);
+        }
     }
 
     #[test]
