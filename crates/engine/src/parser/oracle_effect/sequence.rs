@@ -1355,8 +1355,10 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
 /// (`you get an emblem with "…"` or the subject-stripped `get an emblem with
 /// "…"`). Combinator-only dispatch mirroring `try_parse_emblem_creation`'s prefix
 /// so the clause splitter treats an emblem's granted-ability quote as a
-/// self-contained sentence.
-fn clause_is_emblem_creation_head(current: &str) -> bool {
+/// self-contained sentence. Also the emblem-head deferral predicate for
+/// `should_defer_spell_to_effect`: a spell line matching this head routes to
+/// the effect parser even when its quoted body looks like a static pattern.
+pub(crate) fn is_emblem_creation_head(current: &str) -> bool {
     let is_emblem_head = alt((
         tag_no_case::<_, _, OracleError<'_>>("you get an emblem with \""),
         tag_no_case("get an emblem with \""),
@@ -1385,7 +1387,7 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     // sibling effects split into their own clauses — Nissa, Who Shakes the World's
     // "… Search your library …" would otherwise be swallowed into the emblem's
     // static text (issue #5282).
-    if clause_is_emblem_creation_head(current) {
+    if is_emblem_creation_head(current) {
         return true;
     }
 
@@ -2685,16 +2687,46 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), alt((tag("it's "), tag("it’s ")))),
         value((), tag("this creature gets ")),
         value((), tag("~ gets ")),
-        // CR 104.3 + CR 119.7 + CR 119.8: Bare-plural-player subject + restriction
-        // predicate. Everybody Lives! prints "Players can't lose life this turn
-        // and players can't lose the game or win the game this turn." — the
-        // conjunction must split so each half parses as its own
-        // subject + predicate clause. Safe to split: "players can't" /
-        // "players cannot" can only begin a subject-predicate clause, never a
-        // noun-phrase continuation.
-        value((), tag("players can't ")),
-        value((), tag("players cannot ")),
     )))
+    // CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: Plural-player subject +
+    // restriction predicate. Everybody Lives! prints "Players can't lose life
+    // this turn and players can't lose the game or win the game this turn.";
+    // Angel's Grace prints "You can't lose the game this turn and your
+    // opponents can't win the game this turn." (same conjunct in Celestine
+    // Reef's chaos trigger and Courageous Resolve's fateful-hour list) — the
+    // conjunction must split so each half parses as its own
+    // subject + predicate clause
+    // (`try_parse_subject_restriction_clause` → `parse_restriction_modes`).
+    // Safe to split: a plural-player subject followed by "can't"/"cannot" can
+    // only begin a subject-predicate clause, never a noun-phrase continuation.
+    // The subject axis is composed with the negation axis rather than
+    // enumerated per permutation (CLAUDE.md "compose, don't enumerate
+    // permutations").
+    //
+    // Class boundary — the subject axis is deliberately closed over the two
+    // forms printed cards actually feed to THIS bare-and boundary ("players",
+    // "your opponents"; AtomicCards survey of `and <player-subject> can't`).
+    // Sibling player-subject forms are excluded, each for cause:
+    // - "opponents can't" (bare, The Bird Champion) and the static-line
+    //   compounds (Platinum Angel, Abyssal Persecutor, Herald of Eternal
+    //   Dawn, Cloudsteel Kirin's granted ability) never reach this splitter:
+    //   whole-line "can't win/lose" statics are owned by the
+    //   `is_cant_win_lose_compound` seam (`oracle.rs` B20), which splits at
+    //   " and " before effect-sequence chunking.
+    // - "your opponent can't" (singular) appears only inside reminder text
+    //   (Adventurer Beguiler), which is stripped before parsing.
+    // - "each opponent can't" / "an opponent can't" / "their opponents
+    //   can't" appear in no printed Oracle text as a bare-and conjunct;
+    //   admitting them here would be speculative grammar with no card able
+    //   to exercise the lowering. Widen this axis only with a real card AND
+    //   a verified `parse_subject_application` lowering for the new subject.
+    .or(preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("players "),
+            tag("your opponents "),
+        )),
+        value((), alt((tag("can't "), tag("cannot ")))),
+    ))
     // CR 109.3 + CR 201.4b + CR 608.2k: gendered pronouns ("he"/"she") used as an
     // Oracle-text subject refer to the card itself (Machine Man, Model X-51:
     // "... put a +1/+1 counter on ~ and he gains flying until end of turn";
@@ -3267,7 +3299,16 @@ pub(super) fn push_clause_chunk(
     raw_text: &str,
     boundary_after: Option<ClauseBoundary>,
 ) {
-    let text = raw_text.trim().trim_end_matches('.').trim();
+    // CR 119.7 + CR 119.8: an Oxford-comma list ("X, Y, and Z") peeled from the
+    // tail via the bare-and splitter leaves the second-to-last chunk ending in
+    // a dangling list comma ("Y,") — trim it here, not just the sentence-final
+    // period, or the comma survives into the clause text and breaks any
+    // all_consuming parse (e.g. `parse_restriction_modes`) downstream.
+    // Courageous Resolve's fateful-hour list ("you can't lose life this turn,
+    // you can't lose the game this turn, and your opponents can't win the game
+    // this turn") is the exemplar: without this trim, "can't lose the game
+    // this turn," fails all_consuming and falls to Unimplemented.
+    let text = raw_text.trim().trim_end_matches(['.', ',']).trim();
     if text.is_empty() {
         return;
     }
@@ -4320,8 +4361,8 @@ pub(super) fn apply_clause_continuation(
             let bottom_def = AbilityDefinition::new(
                 kind,
                 Effect::PutAtLibraryPosition {
-                    target: TargetFilter::Any,
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ExiledBySource,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 0 },
                     position: crate::types::ability::LibraryPosition::Bottom,
                 },
             );
@@ -6265,6 +6306,8 @@ pub(super) fn parse_followup_continuation_ast(
                 tag("may choose "),
                 tag("you may exile "),
                 tag("may exile "),
+                tag("you may discard "),
+                tag("may discard "),
             ))
             .parse(lower.as_str())
             .is_ok();
@@ -6822,6 +6865,8 @@ pub(super) fn parse_followup_continuation_ast(
         // (e.g., Assassin's Trophy / Ranging Raptors / Harrow compound), the
         // explicit "put it onto the battlefield" chunk in the same sentence is
         // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
+        // Third-person search text uses "puts it" (Field of Ruin) and has the
+        // same meaning as the imperative "put it" form.
         //
         // CR 701.23i + CR 608.2c: Iterated-search variants (Winds of Abandon class)
         // surface a plural subject ("those players put those cards onto the
@@ -6841,10 +6886,14 @@ pub(super) fn parse_followup_continuation_ast(
                 bare,
                 "put that card onto the battlefield"
                     | "put it onto the battlefield"
+                    | "puts that card onto the battlefield"
+                    | "puts it onto the battlefield"
                     | "put them onto the battlefield"
                     | "put those cards onto the battlefield"
                     | "put that card onto the battlefield tapped"
                     | "put it onto the battlefield tapped"
+                    | "puts that card onto the battlefield tapped"
+                    | "puts it onto the battlefield tapped"
                     | "put them onto the battlefield tapped"
                     | "put those cards onto the battlefield tapped"
             )
@@ -11611,6 +11660,51 @@ mod tests {
         // verb must NOT split (no false clause boundary).
         assert!(!starts_bare_and_clause("he attacks this turn"));
         assert!(!starts_bare_and_clause("she deals 2 damage to any target"));
+    }
+
+    /// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: plural-player subject +
+    /// "can't"/"cannot" restriction boundary. Admitted subjects are exactly
+    /// the forms printed cards feed to this bare-and conjunct boundary:
+    /// "players" (Everybody Lives!) and "your opponents" (Angel's Grace,
+    /// Celestine Reef's chaos trigger, Courageous Resolve's fateful-hour
+    /// list). Sibling player-subject forms must NOT match — no printed card
+    /// reaches this boundary with them: bare "opponents can't" (The Bird
+    /// Champion) and the Platinum Angel-class compounds are whole-line
+    /// statics owned by the `is_cant_win_lose_compound` seam in `oracle.rs`;
+    /// singular "your opponent can't" occurs only in stripped reminder text
+    /// (Adventurer Beguiler); "each opponent"/"an opponent"/"their
+    /// opponents" + "can't" appear in no Oracle text at all.
+    #[test]
+    fn bare_and_clause_plural_player_restriction_boundary() {
+        // Admitted forms, verbatim from the cards that exercise them.
+        assert!(starts_bare_and_clause(
+            "players can't lose the game or win the game this turn"
+        ));
+        assert!(starts_bare_and_clause(
+            "your opponents can't win the game this turn"
+        ));
+        assert!(starts_bare_and_clause("your opponents can't win the game"));
+        // Excluded sibling subjects — must stay un-split at this boundary.
+        assert!(!starts_bare_and_clause("opponents can't win the game"));
+        assert!(!starts_bare_and_clause(
+            "your opponent can't win the game this turn"
+        ));
+        assert!(!starts_bare_and_clause(
+            "each opponent can't win the game this turn"
+        ));
+        assert!(!starts_bare_and_clause(
+            "an opponent can't win the game this turn"
+        ));
+        assert!(!starts_bare_and_clause(
+            "their opponents can't win the game this turn"
+        ));
+        // Possessive noun phrase is a continuation, not a player subject.
+        assert!(!starts_bare_and_clause(
+            "your opponents' creatures can't block this turn"
+        ));
+        // Admitted subject WITHOUT the restriction predicate must not split
+        // via this arm.
+        assert!(!starts_bare_and_clause("your opponents gain 2 life"));
     }
 
     /// CR 601.2c + CR 611.2c: A second `"target <noun>"` conjunct joined by a

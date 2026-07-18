@@ -459,7 +459,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 
     match event {
         // CR 732.2: a halted-resolution notification produces no trigger keys.
-        GameEvent::GameStarted | GameEvent::ResolutionHalted { .. } => {}
+        GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::ResolutionHalted { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}

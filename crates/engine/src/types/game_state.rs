@@ -11,10 +11,11 @@ use super::ability::{
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
     ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow,
     CopyChooseScope, CopyScale, CostPaidObjectSnapshot, CounterCostSelection,
-    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
-    LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
+    DelayedTriggerCondition, Duration, EffectKind, FaceDownProfile, GameRestriction, KeywordAction,
+    KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
+    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
+    TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerCondition,
+    TriggerDefinition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -1578,25 +1579,518 @@ pub enum PendingPlayerScopeSacrificeFollowUp {
 /// made their private choice. The original spell's controller remains on
 /// `ability`; a per-player clone is rebound only while calculating that
 /// player's local candidates and local-X quantity.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PendingScopedLibrarySearch {
     /// Search + parent-target delivery template, with the outer player scope
     /// removed by the resolution driver.
     pub ability: Box<ResolvedAbility>,
-    /// Players not yet offered their optional search / private selection, in
-    /// APNAP order.
-    pub remaining_players: Vec<PlayerId>,
-    /// Accepted searchers' selected cards. An empty selection is retained: a
-    /// player can search and fail to find while still needing the final shuffle.
-    pub selections: Vec<(PlayerId, Vec<ObjectId>)>,
-    /// The player currently answering either the optional-search offer or the
-    /// associated `SearchChoice`.
-    pub current_player: Option<PlayerId>,
+    pub phase: ScopedLibrarySearchPhase,
     /// The once-after-all-searches tail (Natural Balance's searched-this-way
     /// shuffle). It is carried through a replacement-paused batch delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_scope: Option<Box<ResolvedAbility>>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScopedLibrarySearchPhase {
+    CollectAcceptance {
+        remaining_players: Vec<PlayerId>,
+        accepted_players: Vec<PlayerId>,
+        acceptance_authorities: Vec<(PlayerId, ActiveSearchDecisionAuthority)>,
+        current_player: Option<PlayerId>,
+    },
+    CollectSelections {
+        prepared_choices: Vec<PreparedScopedLibrarySearchChoice>,
+        next_selection_index: usize,
+        current_player: Option<PlayerId>,
+        selections: Vec<(PlayerId, Vec<ObjectIncarnationRef>)>,
+        frozen_dispositions: Vec<FrozenScopedSearchFoundDisposition>,
+        #[serde(default)]
+        pending_reveals: Vec<(PlayerId, Vec<ObjectIncarnationRef>)>,
+    },
+    Delivering {
+        search_keys: Vec<PlayerId>,
+    },
+}
+
+#[derive(Deserialize)]
+struct PendingScopedLibrarySearchWire {
+    ability: Box<ResolvedAbility>,
+    phase: ScopedLibrarySearchPhase,
+    #[serde(default)]
+    after_scope: Option<Box<ResolvedAbility>>,
+}
+
+impl<'de> Deserialize<'de> for PendingScopedLibrarySearch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PendingScopedLibrarySearchWire::deserialize(deserializer)?;
+        let valid = match &wire.phase {
+            ScopedLibrarySearchPhase::CollectAcceptance {
+                remaining_players,
+                accepted_players,
+                acceptance_authorities,
+                current_player,
+            } => {
+                let mut participants = remaining_players.clone();
+                participants.extend(accepted_players.iter().copied());
+                participants.extend(current_player.iter().copied());
+                let unique: BTreeSet<_> = participants.iter().copied().collect();
+                let authority_players: BTreeSet<_> = acceptance_authorities
+                    .iter()
+                    .map(|(player, _)| *player)
+                    .collect();
+                unique.len() == participants.len()
+                    && authority_players.len() == acceptance_authorities.len()
+                    && unique == authority_players
+            }
+            ScopedLibrarySearchPhase::CollectSelections {
+                prepared_choices,
+                next_selection_index,
+                current_player,
+                selections,
+                frozen_dispositions,
+                pending_reveals,
+            } => {
+                let prepared: BTreeSet<_> = prepared_choices
+                    .iter()
+                    .map(|choice| choice.player)
+                    .collect();
+                let selected: BTreeSet<_> = selections.iter().map(|(player, _)| *player).collect();
+                let frozen: HashSet<_> = frozen_dispositions
+                    .iter()
+                    .map(|entry| (entry.searcher, entry.identity))
+                    .collect();
+                let reveal_players: BTreeSet<_> =
+                    pending_reveals.iter().map(|(player, _)| *player).collect();
+                let candidates_by_player: HashMap<_, HashSet<_>> = prepared_choices
+                    .iter()
+                    .map(|choice| {
+                        (
+                            choice.player,
+                            choice.candidates.iter().copied().collect::<HashSet<_>>(),
+                        )
+                    })
+                    .collect();
+                let candidate_count: usize = prepared_choices
+                    .iter()
+                    .map(|choice| choice.candidates.len())
+                    .sum();
+                let selections_by_player: HashMap<_, HashSet<_>> = selections
+                    .iter()
+                    .map(|(player, identities)| {
+                        (*player, identities.iter().copied().collect::<HashSet<_>>())
+                    })
+                    .collect();
+                let announced_by_player: HashMap<_, HashSet<_>> = prepared_choices
+                    .iter()
+                    .filter_map(|choice| {
+                        choice.announced_selection.as_ref().map(|announced| {
+                            (
+                                choice.player,
+                                announced.iter().copied().collect::<HashSet<_>>(),
+                            )
+                        })
+                    })
+                    .collect();
+                let mut original_dispositions_by_player =
+                    HashMap::<PlayerId, HashSet<ObjectIncarnationRef>>::new();
+                for frozen in frozen_dispositions.iter().filter(|frozen| {
+                    matches!(
+                        &frozen.disposition,
+                        crate::types::proposed_event::SearchFoundDisposition::Original
+                    )
+                }) {
+                    original_dispositions_by_player
+                        .entry(frozen.searcher)
+                        .or_default()
+                        .insert(frozen.identity);
+                }
+                let selections_valid = selections.iter().all(|(player, identities)| {
+                    let survivors = identities.iter().copied().collect::<HashSet<_>>();
+                    survivors.len() == identities.len()
+                        && announced_by_player.get(player).is_some_and(|announced| {
+                            survivors
+                                .iter()
+                                .all(|identity| announced.contains(identity))
+                        })
+                        && original_dispositions_by_player
+                            .get(player)
+                            .map_or(survivors.is_empty(), |originals| originals == &survivors)
+                });
+                let frozen_valid = frozen_dispositions.iter().all(|entry| {
+                    let was_announced_by_searcher = announced_by_player
+                        .get(&entry.searcher)
+                        .is_some_and(|announced| announced.contains(&entry.identity));
+                    let attribution_is_active_or_complete = selected.contains(&entry.searcher)
+                        || *current_player == Some(entry.searcher);
+                    was_announced_by_searcher && attribution_is_active_or_complete
+                });
+                let reveals_valid = pending_reveals.iter().all(|(player, identities)| {
+                    let reveal_enabled = prepared_choices
+                        .iter()
+                        .find(|choice| choice.player == *player)
+                        .is_some_and(|choice| choice.reveal);
+                    reveal_enabled
+                        && identities.iter().copied().collect::<HashSet<_>>().len()
+                            == identities.len()
+                        && selections_by_player.get(player).is_some_and(|selected| {
+                            identities
+                                .iter()
+                                .all(|identity| selected.contains(identity))
+                        })
+                });
+                let announced_sets_valid = prepared_choices.iter().all(|choice| {
+                    let completed = selected.contains(&choice.player);
+                    let current = *current_player == Some(choice.player);
+                    let permits_partial = choice.up_to
+                        || choice.allows_partial_find
+                        || choice.constraint.permits_partial_find();
+                    match (choice.offered_count, choice.announced_selection.as_ref()) {
+                        (None, None) => !completed && !current,
+                        (Some(offered_count), None) => {
+                            current && !completed && offered_count <= choice.candidates.len()
+                        }
+                        (Some(offered_count), Some(announced)) => {
+                            let announced_set = announced
+                                .iter()
+                                .copied()
+                                .collect::<HashSet<ObjectIncarnationRef>>();
+                            let prompt_count = choice.count.min(offered_count);
+                            (completed || current)
+                                && offered_count <= choice.candidates.len()
+                                && announced_set.len() == announced.len()
+                                && candidates_by_player.get(&choice.player).is_some_and(
+                                    |candidates| {
+                                        announced_set
+                                            .iter()
+                                            .all(|identity| candidates.contains(identity))
+                                    },
+                                )
+                                && if permits_partial {
+                                    announced.len() <= prompt_count
+                                } else {
+                                    announced.len() == prompt_count
+                                }
+                        }
+                        (None, Some(_)) => false,
+                    }
+                });
+                prepared.len() == prepared_choices.len()
+                    && candidates_by_player
+                        .values()
+                        .map(HashSet::len)
+                        .sum::<usize>()
+                        == candidate_count
+                    && selected.len() == selections.len()
+                    && frozen.len() == frozen_dispositions.len()
+                    && reveal_players.len() == pending_reveals.len()
+                    && selections_valid
+                    && frozen_valid
+                    && reveals_valid
+                    && announced_sets_valid
+                    && *next_selection_index <= prepared_choices.len()
+                    && current_player.is_none_or(|player| {
+                        *next_selection_index > 0
+                            && prepared_choices[*next_selection_index - 1].player == player
+                            && !selected.contains(&player)
+                    })
+            }
+            ScopedLibrarySearchPhase::Delivering { search_keys } => {
+                search_keys.iter().copied().collect::<BTreeSet<_>>().len() == search_keys.len()
+            }
+        };
+        if !valid {
+            return Err(serde::de::Error::custom(
+                "invalid scoped library search phase invariants",
+            ));
+        }
+        Ok(Self {
+            ability: wire.ability,
+            phase: wire.phase,
+            after_scope: wire.after_scope,
+        })
+    }
+}
+
+impl PendingScopedLibrarySearch {
+    pub fn current_player(&self) -> Option<PlayerId> {
+        match &self.phase {
+            ScopedLibrarySearchPhase::CollectAcceptance { current_player, .. }
+            | ScopedLibrarySearchPhase::CollectSelections { current_player, .. } => *current_player,
+            ScopedLibrarySearchPhase::Delivering { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedScopedLibrarySearchChoice {
+    pub player: PlayerId,
+    pub library_owner: Option<PlayerId>,
+    pub candidates: Vec<ObjectIncarnationRef>,
+    /// Number of still-live exact candidates shown when this player's prompt
+    /// was created. This may be smaller than `candidates.len()` after an
+    /// earlier simultaneous participant changes a candidate's incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_count: Option<usize>,
+    /// The exact cards this player announced before SearchFound replacement
+    /// processing began. It remains present across a parked replacement prefix
+    /// so serde validation can attribute both Original and Modified outcomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_selection: Option<Vec<ObjectIncarnationRef>>,
+    #[serde(default = "default_prepared_search_filter")]
+    pub filter: TargetFilter,
+    pub count: usize,
+    pub reveal: bool,
+    pub up_to: bool,
+    pub allows_partial_find: bool,
+    pub constraint: SearchSelectionConstraint,
+}
+
+fn default_prepared_search_filter() -> TargetFilter {
+    TargetFilter::Any
+}
+
+/// One exact selected object and its terminal SearchFound replacement outcome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenScopedSearchFoundDisposition {
+    pub searcher: PlayerId,
+    pub identity: ObjectIncarnationRef,
+    pub disposition: crate::types::proposed_event::SearchFoundDisposition,
+}
+
+/// The owner/zone/exact-incarnation facts learned during one effective hidden-zone
+/// search. Construction is validated so serialized provenance cannot claim that a
+/// card from one player's hidden zone was learned while searching another player.
+/// CR 400.7: Exact incarnations prevent search knowledge from carrying across a
+/// zone change to the new object that card becomes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ActiveLibrarySearch {
+    searcher: PlayerId,
+    searched_zone_owner: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effective_library_owner: Option<PlayerId>,
+    learned_audience: Vec<PlayerId>,
+    looked_at: Vec<(PlayerId, Zone, ObjectIncarnationRef)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveLibrarySearchInvariantError {
+    TupleOwnerMismatch,
+    EffectiveLibraryOwnerMismatch,
+    LibraryTupleWithoutEffectiveLibrary,
+}
+
+impl std::fmt::Display for ActiveLibrarySearchInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TupleOwnerMismatch => "looked-at tuple owner differs from searched-zone owner",
+            Self::EffectiveLibraryOwnerMismatch => {
+                "effective library owner differs from searched-zone owner"
+            }
+            Self::LibraryTupleWithoutEffectiveLibrary => {
+                "library tuple exists without an effective library owner"
+            }
+        })
+    }
+}
+
+impl std::error::Error for ActiveLibrarySearchInvariantError {}
+
+impl ActiveLibrarySearch {
+    pub fn try_new(
+        searcher: PlayerId,
+        searched_zone_owner: PlayerId,
+        effective_library_owner: Option<PlayerId>,
+        learned_audience: Vec<PlayerId>,
+        looked_at: Vec<(PlayerId, Zone, ObjectIncarnationRef)>,
+    ) -> Result<Self, ActiveLibrarySearchInvariantError> {
+        if looked_at
+            .iter()
+            .any(|(owner, _, _)| *owner != searched_zone_owner)
+        {
+            return Err(ActiveLibrarySearchInvariantError::TupleOwnerMismatch);
+        }
+        if effective_library_owner.is_some_and(|owner| owner != searched_zone_owner) {
+            return Err(ActiveLibrarySearchInvariantError::EffectiveLibraryOwnerMismatch);
+        }
+        if effective_library_owner.is_none()
+            && looked_at.iter().any(|(_, zone, _)| *zone == Zone::Library)
+        {
+            return Err(ActiveLibrarySearchInvariantError::LibraryTupleWithoutEffectiveLibrary);
+        }
+        Ok(Self {
+            searcher,
+            searched_zone_owner,
+            effective_library_owner,
+            learned_audience,
+            looked_at,
+        })
+    }
+
+    pub fn searcher(&self) -> PlayerId {
+        self.searcher
+    }
+    pub fn searched_zone_owner(&self) -> PlayerId {
+        self.searched_zone_owner
+    }
+    pub fn effective_library_owner(&self) -> Option<PlayerId> {
+        self.effective_library_owner
+    }
+    pub fn learned_audience(&self) -> &[PlayerId] {
+        &self.learned_audience
+    }
+    pub fn looked_at(&self) -> &[(PlayerId, Zone, ObjectIncarnationRef)] {
+        &self.looked_at
+    }
+    pub(crate) fn remove_from_audience(&mut self, player: PlayerId) {
+        self.learned_audience.retain(|viewer| *viewer != player);
+    }
+}
+
+#[derive(Deserialize)]
+struct ActiveLibrarySearchWire {
+    searcher: PlayerId,
+    searched_zone_owner: PlayerId,
+    #[serde(default)]
+    effective_library_owner: Option<PlayerId>,
+    learned_audience: Vec<PlayerId>,
+    looked_at: Vec<(PlayerId, Zone, ObjectIncarnationRef)>,
+}
+
+impl<'de> Deserialize<'de> for ActiveLibrarySearch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ActiveLibrarySearchWire::deserialize(deserializer)?;
+        Self::try_new(
+            wire.searcher,
+            wire.searched_zone_owner,
+            wire.effective_library_owner,
+            wire.learned_audience,
+            wire.looked_at,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ActiveSearchDecisionAuthority {
+    LatchedController { controller: PlayerId },
+    SearcherFallback,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// CR 723.5: While one player controls another, the controller makes the
+/// controlled player's choices and decisions.
+pub struct ActiveSearchDecisionControl {
+    pub searcher: PlayerId,
+    /// Owner of the zones this search instruction examines. This protocol
+    /// provenance exists even when no hidden-zone tuples are exposed.
+    pub searched_zone_owner: PlayerId,
+    pub authority: ActiveSearchDecisionAuthority,
+}
+
+macro_rules! validating_search_map {
+    ($name:ident, $value:ty) => {
+        #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(BTreeMap<PlayerId, $value>);
+
+        impl $name {
+            pub fn is_empty(&self) -> bool {
+                self.0.is_empty()
+            }
+            pub fn get(&self, player: &PlayerId) -> Option<&$value> {
+                self.0.get(player)
+            }
+            pub fn get_mut(&mut self, player: &PlayerId) -> Option<&mut $value> {
+                self.0.get_mut(player)
+            }
+            pub fn remove(&mut self, player: &PlayerId) -> Option<$value> {
+                self.0.remove(player)
+            }
+            pub fn iter(&self) -> impl Iterator<Item = (&PlayerId, &$value)> {
+                self.0.iter()
+            }
+            pub fn retain(&mut self, mut f: impl FnMut(&PlayerId, &mut $value) -> bool) {
+                self.0.retain(|k, v| f(k, v));
+            }
+        }
+    };
+}
+
+validating_search_map!(ActiveLibrarySearches, ActiveLibrarySearch);
+validating_search_map!(ActiveSearchDecisionControls, ActiveSearchDecisionControl);
+
+impl ActiveLibrarySearches {
+    pub fn insert(&mut self, record: ActiveLibrarySearch) -> Option<ActiveLibrarySearch> {
+        self.0.insert(record.searcher(), record)
+    }
+}
+
+impl ActiveSearchDecisionControls {
+    pub fn insert(
+        &mut self,
+        record: ActiveSearchDecisionControl,
+    ) -> Option<ActiveSearchDecisionControl> {
+        self.0.insert(record.searcher, record)
+    }
+}
+
+macro_rules! deserialize_validating_search_map {
+    ($name:ident, $value:ty, $searcher:expr) => {
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
+                    type Value = $name;
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("a searcher-keyed map")
+                    }
+                    fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+                    where
+                        M: serde::de::MapAccess<'de>,
+                    {
+                        let mut values = BTreeMap::new();
+                        while let Some((key, value)) = access.next_entry::<PlayerId, $value>()? {
+                            let searcher: PlayerId = $searcher(&value);
+                            if key != searcher {
+                                return Err(serde::de::Error::custom(
+                                    "search map key differs from embedded searcher",
+                                ));
+                            }
+                            if values.insert(key, value).is_some() {
+                                return Err(serde::de::Error::custom("duplicate searcher key"));
+                            }
+                        }
+                        Ok($name(values))
+                    }
+                }
+                deserializer.deserialize_map(Visitor)
+            }
+        }
+    };
+}
+
+deserialize_validating_search_map!(
+    ActiveLibrarySearches,
+    ActiveLibrarySearch,
+    |value: &ActiveLibrarySearch| value.searcher()
+);
+deserialize_validating_search_map!(
+    ActiveSearchDecisionControls,
+    ActiveSearchDecisionControl,
+    |value: &ActiveSearchDecisionControl| value.searcher
+);
 
 /// CR 701.23e: Whether cards surviving a SearchFound replacement batch are
 /// publicly revealed by the containing search instruction. The enum remains
@@ -1645,8 +2139,10 @@ pub struct PendingSearchFoundBatch {
     /// from an individual selected card's current zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_owner: Option<PlayerId>,
-    pub remaining: Vec<ObjectId>,
-    pub survivors: Vec<ObjectId>,
+    pub remaining: Vec<ObjectIncarnationRef>,
+    pub survivors: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<ObjectIncarnationRef>,
     pub continuation: PendingSearchFoundContinuation,
     #[serde(default, rename = "reveal")]
     pub visibility: SearchFoundVisibility,
@@ -1781,9 +2277,8 @@ pub struct PendingCounterRemovalQueue {
 /// from the replacement-choice resume path after the chosen event delivers; the
 /// drain re-parks when the next object surfaces its own choice.
 ///
-/// Shared by every batch flow that delivers many objects to one destination
-/// through the pipeline (mill: library→graveyard/exile/hand; mass bounce:
-/// battlefield→hand/library; reveal-until library-bottom placement). Serializes
+/// Shared by every batch flow that delivers one simultaneous set through the
+/// pipeline, including heterogeneous destinations and causes. Serializes
 /// as a plain struct (the type name never appears on the wire), so the rename
 /// from the original mill-only `PendingMillDeliveries` is wire-transparent; the
 /// field-name alias on the holding `GameState` field carries the only readable
@@ -1800,9 +2295,9 @@ pub struct PendingBatchDeliveries {
     /// `ZoneMoveRequest::effect(obj, dest, obj)`); `Some` carries a shared
     /// ability source (the seek idiom) so battlefield entries record
     /// `entered_via_ability_source` and exile links key off the right source
-    /// across the pause boundary. Batch-uniform by the same design that makes
-    /// `destination` batch-wide (single-destination batches; per-card
-    /// heterogeneity is a flagged design extension, not forced in).
+    /// across the pause boundary. This and the other uniform fields are a
+    /// backward-compatible projection for old saves; `requests` is authoritative
+    /// for newly parked actions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<ObjectId>,
     /// CR 614.1c tap-state re-seeded on each rebuilt tail request (the seek
@@ -1832,6 +2327,74 @@ pub struct PendingBatchDeliveries {
     /// either modified event.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    /// Exact heterogeneous undelivered suffix. New saves use this authority;
+    /// the uniform fields above remain as a compatibility projection for older
+    /// serialized states.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<PendingBatchZoneMoveRequest>,
+    /// Every object announced in the original simultaneous action.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempted: Vec<ObjectId>,
+    /// Index where this action's authoritative per-turn zone-change records
+    /// begin. Terminal completion stamps the entire range once.
+    #[serde(default)]
+    pub zone_change_record_start: usize,
+    /// Events produced by already-delivered members. They remain hidden until
+    /// the full action settles so one co-departure/LKI batch is observable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_events: Vec<GameEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PendingBatchZoneChangeCause {
+    Effect {
+        source: ObjectId,
+    },
+    Cost {
+        source: ObjectId,
+    },
+    SpellResolutionDefault,
+    StateBasedAction,
+    CommanderRuleReturn,
+    Draw {
+        #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+        seed_applied: HashSet<AppliedReplacementKey>,
+    },
+    CastingToStack {
+        source: ObjectId,
+    },
+    PregameProcedure,
+    PlayerLeftGame,
+    MergedComponentRouting,
+    DebugCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBatchZoneMoveRequest {
+    pub object_id: ObjectId,
+    pub destination: Zone,
+    pub cause: PendingBatchZoneChangeCause,
+    #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
+    pub enter_tapped: EtbTapState,
+    #[serde(default)]
+    pub enter_transformed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_override: Option<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enter_with_counters: Vec<(CounterType, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_down_profile: Option<FaceDownProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_to: Option<AttachTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_placement: Option<LibraryPosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_duration: Option<Duration>,
+    #[serde(default)]
+    pub exile_tracking: ZoneDeliveryExileTracking,
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub replacement_applied: HashSet<AppliedReplacementKey>,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -1847,7 +2410,44 @@ pub struct PendingBatchDeliveries {
 /// on true completion, mirroring the `PendingCounterPostAction` continuation
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloakExileMember {
+    /// The tracked pile member that was proposed to leave the battlefield.
+    pub object_id: ObjectId,
+    /// CR 603.10a: the host's pre-departure attachments. Delivery clears the
+    /// live host list before LTB collection, so the cloak tail uses this list to
+    /// sever the former attachments' back-edges after the batch settles.
+    pub attachments: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
+    /// CR 303.4g + CR 614.1 + CR 616.1: A return-as-Aura host had no legal
+    /// object to enchant, and its proposed Battlefield→Graveyard move settled.
+    /// The completion event waits for any replacement choice without carrying
+    /// redundant move data.
+    ReturnAsAuraNoTargetComplete { source_id: ObjectId },
+    /// CR 701.44a + CR 701.44b + CR 614.1 + CR 616.1: A revealed explore land's
+    /// proposed Library→Hand delivery settled. The explore completion event is
+    /// deferred so its trigger boundary cannot precede a replacement choice.
+    ExploreLandDeliveryComplete { explorer_id: ObjectId },
+    /// CR 701.58a + CR 603.10a + CR 614.1 + CR 616.1: A tracked cloak pile's
+    /// Battlefield→Exile batch settled. Keep its pre-departure attachment
+    /// snapshots so the tail can detach every actual departure and manifest
+    /// only cards that actually reached Exile.
+    CloakExileDeliveryComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        members: Vec<CloakExileMember>,
+    },
+    /// CR 614.1 + CR 616.1 + CR 611.2a: A `CastFromZone` current-zone-to-Exile
+    /// batch settled. Keep the resolved ability and its two target partitions
+    /// so the permission is recorded only after the exile delivery, while
+    /// established in-place Hand/Graveyard/Exile grants remain unchanged.
+    CastFromZoneExileDeliveryComplete {
+        ability: Box<ResolvedAbility>,
+        in_place_ids: Vec<ObjectId>,
+        exile_delivery_ids: Vec<ObjectId>,
+    },
     /// CR 702.85a + CR 614.1 + CR 616.1: One proposed cascade exile settled.
     /// Keep the current card, source threshold, controller, and already-exiled
     /// misses with the batch so a replacement choice resumes the loop correctly.
@@ -2090,11 +2690,15 @@ pub enum BatchCompletion {
     /// selected card has entered, continue with the once-after-all-searches
     /// tail; the tail retains its `PlayerFilter::PerformedActionThisWay` ledger
     /// and therefore shuffles only players who actually searched.
-    ScopedLibrarySearchDelivery {
-        player: PlayerId,
+    LibrarySearchDeliverySettled { resume: LibrarySearchDeliveryResume },
+    /// CR 701.23a + CR 616.1: The primary pile of a split search has settled.
+    /// Route the second, destination-uniform pile through its own replacement-
+    /// aware batch, then settle the shared search visibility exactly once.
+    SearchPartitionPrimaryDelivered {
+        rest_ids: Vec<ObjectId>,
+        rest_destination: Zone,
         source_id: ObjectId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        after_scope: Option<Box<ResolvedAbility>>,
+        resume: LibrarySearchDeliveryResume,
     },
     /// CR 701.23a + CR 616.1: A found-card replacement sent the card through a
     /// zone move that itself paused for replacement ordering. Resume the saved
@@ -2120,6 +2724,26 @@ pub enum BatchCompletion {
     /// second physical card has completed its independently replaceable move,
     /// carrying the originating event's applied-set through every pause.
     MeldRedirect { source_id: ObjectId },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LibrarySearchDeliveryResume {
+    Standard {
+        searcher: PlayerId,
+    },
+    Scoped {
+        player: PlayerId,
+        source_id: ObjectId,
+        search_keys: Vec<PlayerId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        grants: Vec<(
+            ObjectIncarnationRef,
+            crate::types::proposed_event::BoundSearchFoundGrant,
+        )>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_scope: Option<Box<ResolvedAbility>>,
+    },
 }
 
 /// Resolution-stable identity for one selected meld pair. Live filters choose
@@ -3947,6 +4571,11 @@ pub struct CastingVariantChoiceOption {
 #[serde(tag = "type")]
 pub enum PayCostKind {
     Discard,
+    /// CR 701.20a + CR 601.2b: Reveal a card from hand matching the cost's
+    /// filter as an additional/alternative cast cost. The chosen card stays
+    /// in hand (revealing doesn't move it) and becomes the resolving
+    /// ability's cost-paid-object referent (CR 608.2k).
+    Reveal,
     Sacrifice,
     ReturnToHand,
     /// Exile objects from the specified zone.
@@ -7888,7 +8517,31 @@ pub struct GameState {
     pub priority_player: PlayerId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_decision_controller: Option<PlayerId>,
-
+    /// CR 723.1a: Creation timestamp of the player-control effect currently
+    /// latched in `turn_decision_controller`. This remains independent from
+    /// future scheduled effects that may replace the consumed schedule entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_decision_control_timestamp: Option<u64>,
+    /// CR 723.1a: Identity of the full-turn player-control effect that is
+    /// currently applicable. Kept separately from the winning decision latch
+    /// so a newer phase-scoped effect can temporarily override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_full_turn_control: Option<ActivePlayerControl>,
+    /// CR 723.1a + CR 723.2: Identity of the combat-phase player-control effect
+    /// that is currently applicable. The newest applicable identity wins, and
+    /// the full-turn identity resumes after this window ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_combat_phase_control: Option<ActivePlayerControl>,
+    #[serde(default, skip_serializing_if = "ActiveLibrarySearches::is_empty")]
+    pub active_library_searches: ActiveLibrarySearches,
+    #[serde(
+        default,
+        skip_serializing_if = "ActiveSearchDecisionControls::is_empty"
+    )]
+    pub active_search_decision_controls: ActiveSearchDecisionControls,
+    /// Viewer-filtering sidecar: the authoritative prompt submitter projected
+    /// before private search-control records are stripped. Double Option keeps
+    /// "not filtered" distinct from an authoritative multi/no-actor `None`.
     // Central object store. Uses FxBuildHasher (fast, deterministic) instead of
     // the default SipHash RandomState: ObjectId is a thin integer key and this
     // map is looked up millions of times per large-board resolution — profiling
@@ -9191,6 +9844,11 @@ pub struct GameState {
     /// so the action phase cannot begin before every player has chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_scoped_library_search: Option<PendingScopedLibrarySearch>,
+    /// Typed cleanup waiting for an ordinary search's leading ChangeZone to
+    /// settle. The chain walker consumes it synchronously; the paused
+    /// ChangeZone drain consumes the same value after its final member lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_library_search_delivery: Option<LibrarySearchDeliveryResume>,
     /// CR 616.1: search-found replacement batch parked across a choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
@@ -9755,6 +10413,14 @@ pub struct GameState {
     /// Cleared on phase/step transitions via `advance_phase()`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub lki_cache: HashMap<ObjectId, LKISnapshot>,
+
+    /// CR 400.7 + CR 608.2h: LKI keyed by exact object incarnation. The legacy
+    /// `lki_cache` remains the broad ObjectId-only authority for existing callers;
+    /// resolution paths that carry an incarnation use this history so a later
+    /// departure of a re-entered object cannot overwrite the earlier object's LKI.
+    /// Cleared with `lki_cache` on phase/step transitions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub lki_by_incarnation: HashMap<ObjectId, HashMap<u64, LKISnapshot>>,
 
     /// CR 607.2b + CR 603.10e: Last-known "cards exiled with [source]" linkage,
     /// captured when a source with `TrackedBySource` exile links leaves the
@@ -10606,6 +11272,11 @@ pub struct PendingMutateMerge {
 pub struct ScheduledTurnControl {
     pub target_player: PlayerId,
     pub controller: PlayerId,
+    /// CR 723.1a: Creation timestamp used only to compare this player-control
+    /// effect with other currently applicable player-control effects. Legacy
+    /// saves deserialize to zero, making them deterministically oldest.
+    #[serde(default)]
+    pub timestamp: u64,
     #[serde(default)]
     pub grant_extra_turn_after: bool,
     /// CR 723.1 / CR 723.2: which window this control binds to. `NextTurn` is
@@ -10614,6 +11285,15 @@ pub struct ScheduledTurnControl {
     /// games predating this field load unchanged.
     #[serde(default)]
     pub window: ControlWindow,
+}
+
+/// CR 723.1a: Stable identity of one currently applicable player-control
+/// effect. Controller alone is insufficient when the same player creates
+/// multiple effects; creation timestamp distinguishes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivePlayerControl {
+    pub controller: PlayerId,
+    pub timestamp: u64,
 }
 
 /// CR 500.8: An extra phase added to a turn by an effect, anchored to the
@@ -10903,6 +11583,11 @@ impl GameState {
             players,
             priority_player: starting_player,
             turn_decision_controller: None,
+            turn_decision_control_timestamp: None,
+            active_full_turn_control: None,
+            active_combat_phase_control: None,
+            active_library_searches: ActiveLibrarySearches::default(),
+            active_search_decision_controls: ActiveSearchDecisionControls::default(),
             objects: im::HashMap::default(),
             next_object_id: 1,
             // CR 118.3a: start at 1 so minted pip ids never collide with the
@@ -11094,6 +11779,7 @@ impl GameState {
             pending_per_player_zone_choice: None,
             pending_player_scope_sacrifice_choice: None,
             pending_scoped_library_search: None,
+            pending_library_search_delivery: None,
             pending_search_found_batch: None,
             pending_per_category_zone_choice: None,
             pending_counter_moves: None,
@@ -11155,6 +11841,7 @@ impl GameState {
             last_discover_value: None,
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
+            lki_by_incarnation: HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
             pending_taps_for_mana_overrides: std::collections::HashMap::new(),
@@ -11738,6 +12425,112 @@ impl GameState {
         for epic in clone.epic_effects.iter_mut() {
             epic.spell.set_source_incarnation_recursive(None);
         }
+
+        // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
+        // state, not independently loop-material state. Retain only snapshots
+        // reachable from trigger-event carriers that can still resume or resolve:
+        // stack/resolving entries, pending/deferred/ordering triggers, current and
+        // batched trigger contexts, and continuation/optional-choice sidecars.
+        // WaitingFor copies are intentionally not a separate authority: every
+        // trigger-event-bearing prompt has one of those pending/continuation
+        // carriers, and loop samples are taken at the post-pipeline Priority frame.
+        let mut referenced_lki = HashSet::new();
+        let mut record_event = |event: &GameEvent| {
+            if let GameEvent::ZoneChanged {
+                object_id, record, ..
+            } = event
+            {
+                if let Some(incarnation) = record.entered_incarnation {
+                    referenced_lki.insert(ObjectIncarnationRef::of(*object_id, incarnation));
+                }
+            }
+        };
+
+        for entry in &clone.stack {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &entry.kind
+            {
+                record_event(event);
+            }
+        }
+        if let Some(entry) = clone.resolving_stack_entry.as_ref() {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &entry.kind
+            {
+                record_event(event);
+            }
+        }
+        if let Some(pending) = clone.pending_trigger.as_ref() {
+            if let Some(event) = pending.trigger_event.as_ref() {
+                record_event(event);
+            }
+        }
+        for event in &clone.pending_trigger_event_batch {
+            record_event(event);
+        }
+        for context in &clone.deferred_triggers {
+            if let Some(event) = context.pending.trigger_event.as_ref() {
+                record_event(event);
+            }
+            for event in &context.trigger_events {
+                record_event(event);
+            }
+        }
+        if let Some(order) = clone.pending_trigger_order.as_ref() {
+            for context in order.groups.iter().flat_map(|group| group.triggers.iter()) {
+                if let Some(event) = context.pending.trigger_event.as_ref() {
+                    record_event(event);
+                }
+                for event in &context.trigger_events {
+                    record_event(event);
+                }
+            }
+        }
+        if let Some(event) = clone.current_trigger_event.as_ref() {
+            record_event(event);
+        }
+        for event in &clone.current_trigger_events {
+            record_event(event);
+        }
+        for events in clone.stack_trigger_event_batches.values() {
+            for event in events {
+                record_event(event);
+            }
+        }
+        if let Some(event) = clone.pending_optional_trigger_event.as_ref() {
+            record_event(event);
+        }
+        if let Some(context) = clone.pending_choose_zone_trigger_context.as_ref() {
+            if let Some(event) = context.event.as_ref() {
+                record_event(event);
+            }
+            for event in &context.events {
+                record_event(event);
+            }
+        }
+        if let Some(context) = clone
+            .pending_continuation
+            .as_ref()
+            .and_then(|continuation| continuation.trigger_context.as_ref())
+        {
+            if let Some(event) = context.event.as_ref() {
+                record_event(event);
+            }
+            for event in &context.events {
+                record_event(event);
+            }
+        }
+
+        clone.lki_by_incarnation.retain(|object_id, history| {
+            history.retain(|incarnation, _| {
+                referenced_lki.contains(&ObjectIncarnationRef::of(*object_id, *incarnation))
+            });
+            !history.is_empty()
+        });
         clone
     }
 
@@ -11905,6 +12698,11 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players: _,
         priority_player: _,
         turn_decision_controller: _,
+        turn_decision_control_timestamp: _,
+        active_full_turn_control: _,
+        active_combat_phase_control: _,
+        active_library_searches: _,
+        active_search_decision_controls: _,
         objects: _,
         next_object_id: _,
         next_pip_id: _,
@@ -12155,6 +12953,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         current_trigger_events: _,
         stack_trigger_event_batches: _,
         lki_cache: _,
+        lki_by_incarnation: _,
         linked_exile_lki: _,
         cost_payment_failed_flag: _,
         pending_taps_for_mana_overrides: _,
@@ -12196,6 +12995,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     copy-token loop, so COMPARING never suppresses a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
         pending_scoped_library_search: _,
+        pending_library_search_delivery: _,
         pending_search_found_batch: _,
         post_replacement_token_substitution_count: _,
         //   - `last_recast_context` (PR-7 Phase 4d-ii object-growth recast snapshot):
@@ -12233,6 +13033,11 @@ impl PartialEq for GameState {
             && self.players == other.players
             && self.priority_player == other.priority_player
             && self.turn_decision_controller == other.turn_decision_controller
+            && self.turn_decision_control_timestamp == other.turn_decision_control_timestamp
+            && self.active_full_turn_control == other.active_full_turn_control
+            && self.active_combat_phase_control == other.active_combat_phase_control
+            && self.active_library_searches == other.active_library_searches
+            && self.active_search_decision_controls == other.active_search_decision_controls
             && self.objects.len() == other.objects.len()
             && self.next_object_id == other.next_object_id
             && self.next_pip_id == other.next_pip_id
@@ -12418,6 +13223,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
+            && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_counter_removals == other.pending_counter_removals
@@ -12454,6 +13260,7 @@ impl PartialEq for GameState {
             && self.optional_cost_payments_this_resolution
                 == other.optional_cost_payments_this_resolution
             && self.lki_cache == other.lki_cache
+            && self.lki_by_incarnation == other.lki_by_incarnation
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
@@ -12464,6 +13271,103 @@ impl PartialEq for GameState {
 }
 
 impl Eq for GameState {}
+
+#[cfg(test)]
+mod active_search_provenance_tests {
+    use super::*;
+
+    fn record() -> ActiveLibrarySearch {
+        ActiveLibrarySearch::try_new(
+            PlayerId(1),
+            PlayerId(2),
+            Some(PlayerId(2)),
+            vec![PlayerId(1), PlayerId(3)],
+            vec![(
+                PlayerId(2),
+                Zone::Library,
+                ObjectIncarnationRef::of(ObjectId(9), 4),
+            )],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn active_search_rejects_each_contradictory_provenance_shape() {
+        assert_eq!(
+            ActiveLibrarySearch::try_new(
+                PlayerId(1),
+                PlayerId(2),
+                Some(PlayerId(2)),
+                vec![PlayerId(1)],
+                vec![(
+                    PlayerId(3),
+                    Zone::Hand,
+                    ObjectIncarnationRef::of(ObjectId(9), 4),
+                )],
+            ),
+            Err(ActiveLibrarySearchInvariantError::TupleOwnerMismatch)
+        );
+        assert_eq!(
+            ActiveLibrarySearch::try_new(
+                PlayerId(1),
+                PlayerId(2),
+                Some(PlayerId(3)),
+                vec![PlayerId(1)],
+                Vec::new(),
+            ),
+            Err(ActiveLibrarySearchInvariantError::EffectiveLibraryOwnerMismatch)
+        );
+        assert_eq!(
+            ActiveLibrarySearch::try_new(
+                PlayerId(1),
+                PlayerId(2),
+                None,
+                vec![PlayerId(1)],
+                vec![(
+                    PlayerId(2),
+                    Zone::Library,
+                    ObjectIncarnationRef::of(ObjectId(9), 4),
+                )],
+            ),
+            Err(ActiveLibrarySearchInvariantError::LibraryTupleWithoutEffectiveLibrary)
+        );
+        assert!(ActiveLibrarySearch::try_new(
+            PlayerId(1),
+            PlayerId(2),
+            Some(PlayerId(2)),
+            vec![PlayerId(1)],
+            Vec::new(),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validating_maps_reject_key_mismatch_and_duplicate_keys() {
+        let mut searches = ActiveLibrarySearches::default();
+        searches.insert(record());
+        let json = serde_json::to_string(&searches).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ActiveLibrarySearches>(&json).unwrap(),
+            searches
+        );
+
+        let value = serde_json::to_value(record()).unwrap();
+        let mismatch = serde_json::json!({ "0": value });
+        assert!(serde_json::from_value::<ActiveLibrarySearches>(mismatch).is_err());
+
+        let value = serde_json::to_string(&record()).unwrap();
+        let duplicate = format!(r#"{{"1":{value},"1":{value}}}"#);
+        assert!(serde_json::from_str::<ActiveLibrarySearches>(&duplicate).is_err());
+
+        let decision = serde_json::json!({
+            "0": {
+                "searcher": 1,
+                "authority": { "type": "searcher_fallback" }
+            }
+        });
+        assert!(serde_json::from_value::<ActiveSearchDecisionControls>(decision).is_err());
+    }
+}
 
 /// Default pile source is Battlefield (backward-compatible with pre-existing
 /// serialized `WaitingFor::SeparatePiles*` states).
@@ -12651,13 +13555,344 @@ mod tests {
         ResolvedAbility, TargetFilter,
     };
 
+    fn scoped_selection_wire_fixture() -> PendingScopedLibrarySearch {
+        let first = ObjectIncarnationRef::of(ObjectId(10), 1);
+        let second = ObjectIncarnationRef::of(ObjectId(20), 2);
+        PendingScopedLibrarySearch {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(99),
+                PlayerId(0),
+            )),
+            phase: ScopedLibrarySearchPhase::CollectSelections {
+                prepared_choices: vec![
+                    PreparedScopedLibrarySearchChoice {
+                        player: PlayerId(0),
+                        library_owner: Some(PlayerId(0)),
+                        candidates: vec![first],
+                        offered_count: Some(1),
+                        announced_selection: Some(vec![first]),
+                        filter: TargetFilter::Any,
+                        count: 1,
+                        reveal: true,
+                        up_to: false,
+                        allows_partial_find: false,
+                        constraint: SearchSelectionConstraint::None,
+                    },
+                    PreparedScopedLibrarySearchChoice {
+                        player: PlayerId(1),
+                        library_owner: Some(PlayerId(1)),
+                        candidates: vec![second],
+                        offered_count: Some(1),
+                        announced_selection: Some(vec![second]),
+                        filter: TargetFilter::Any,
+                        count: 1,
+                        reveal: true,
+                        up_to: false,
+                        allows_partial_find: false,
+                        constraint: SearchSelectionConstraint::None,
+                    },
+                ],
+                next_selection_index: 2,
+                current_player: None,
+                selections: vec![(PlayerId(0), vec![first]), (PlayerId(1), vec![second])],
+                frozen_dispositions: vec![
+                    FrozenScopedSearchFoundDisposition {
+                        searcher: PlayerId(0),
+                        identity: first,
+                        disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
+                    },
+                    FrozenScopedSearchFoundDisposition {
+                        searcher: PlayerId(1),
+                        identity: second,
+                        disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
+                    },
+                ],
+                pending_reveals: vec![(PlayerId(0), vec![first])],
+            },
+            after_scope: None,
+        }
+    }
+
+    #[test]
+    fn scoped_selection_wire_rejects_foreign_and_cross_player_exact_refs() {
+        let valid = serde_json::to_value(scoped_selection_wire_fixture()).expect("serialize");
+        serde_json::from_value::<PendingScopedLibrarySearch>(valid.clone())
+            .expect("fixture satisfies scoped invariants");
+
+        let mut foreign_selection = valid.clone();
+        foreign_selection["phase"]["selections"][0][1][0]["object_id"] = 999.into();
+        assert!(serde_json::from_value::<PendingScopedLibrarySearch>(foreign_selection).is_err());
+
+        let mut cross_player_frozen = valid.clone();
+        cross_player_frozen["phase"]["frozen_dispositions"][0]["searcher"] = 1.into();
+        assert!(serde_json::from_value::<PendingScopedLibrarySearch>(cross_player_frozen).is_err());
+
+        let mut cross_player_reveal = valid;
+        cross_player_reveal["phase"]["pending_reveals"][0][0] = 1.into();
+        assert!(serde_json::from_value::<PendingScopedLibrarySearch>(cross_player_reveal).is_err());
+    }
+
+    #[test]
+    fn scoped_selection_wire_round_trips_modified_completed_player_while_next_chooses() {
+        let mut pending = scoped_selection_wire_fixture();
+        let ScopedLibrarySearchPhase::CollectSelections {
+            prepared_choices,
+            next_selection_index,
+            current_player,
+            selections,
+            frozen_dispositions,
+            pending_reveals,
+        } = &mut pending.phase
+        else {
+            unreachable!("fixture is in selection phase")
+        };
+        let second = prepared_choices[1].candidates[0];
+        prepared_choices.push(PreparedScopedLibrarySearchChoice {
+            player: PlayerId(2),
+            library_owner: Some(PlayerId(2)),
+            candidates: vec![ObjectIncarnationRef::of(ObjectId(30), 3)],
+            offered_count: Some(1),
+            announced_selection: None,
+            filter: TargetFilter::Any,
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: SearchSelectionConstraint::None,
+        });
+        *next_selection_index = 3;
+        *current_player = Some(PlayerId(2));
+        *selections = vec![
+            (PlayerId(0), vec![prepared_choices[0].candidates[0]]),
+            (PlayerId(1), Vec::new()),
+        ];
+        *frozen_dispositions = vec![
+            FrozenScopedSearchFoundDisposition {
+                searcher: PlayerId(0),
+                identity: prepared_choices[0].candidates[0],
+                disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
+            },
+            FrozenScopedSearchFoundDisposition {
+                searcher: PlayerId(1),
+                identity: second,
+                disposition: crate::types::proposed_event::SearchFoundDisposition::Modified(
+                    crate::types::proposed_event::BoundSearchFoundDisposition {
+                        destination: Zone::Exile,
+                        source: ObjectIncarnationRef::of(ObjectId(99), 0),
+                        grant: None,
+                    },
+                ),
+            },
+        ];
+        pending_reveals.clear();
+
+        let json = serde_json::to_value(&pending).expect("serialize production phase");
+        let restored = serde_json::from_value::<PendingScopedLibrarySearch>(json)
+            .expect("modified completed player remains valid while the next player chooses");
+        assert_eq!(restored, pending);
+    }
+
+    #[test]
+    fn scoped_selection_wire_round_trips_parked_modified_prefix() {
+        let mut pending = scoped_selection_wire_fixture();
+        let ScopedLibrarySearchPhase::CollectSelections {
+            prepared_choices,
+            next_selection_index,
+            current_player,
+            selections,
+            frozen_dispositions,
+            pending_reveals,
+        } = &mut pending.phase
+        else {
+            unreachable!("fixture is in selection phase")
+        };
+        let identity = prepared_choices[0].candidates[0];
+        *next_selection_index = 1;
+        *current_player = Some(PlayerId(0));
+        selections.clear();
+        pending_reveals.clear();
+        prepared_choices[1].offered_count = None;
+        prepared_choices[1].announced_selection = None;
+        *frozen_dispositions = vec![FrozenScopedSearchFoundDisposition {
+            searcher: PlayerId(0),
+            identity,
+            disposition: crate::types::proposed_event::SearchFoundDisposition::Modified(
+                crate::types::proposed_event::BoundSearchFoundDisposition {
+                    destination: Zone::Exile,
+                    source: ObjectIncarnationRef::of(ObjectId(99), 0),
+                    grant: None,
+                },
+            ),
+        }];
+
+        let json = serde_json::to_value(&pending).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PendingScopedLibrarySearch>(json).unwrap(),
+            pending
+        );
+    }
+
+    #[test]
+    fn scoped_selection_wire_round_trips_current_original_and_modified_prefix() {
+        let mut pending = scoped_selection_wire_fixture();
+        let ScopedLibrarySearchPhase::CollectSelections {
+            prepared_choices,
+            next_selection_index,
+            current_player,
+            selections,
+            frozen_dispositions,
+            pending_reveals,
+        } = &mut pending.phase
+        else {
+            unreachable!("fixture is in selection phase")
+        };
+        let original = prepared_choices[0].candidates[0];
+        let modified = ObjectIncarnationRef::of(ObjectId(11), 4);
+        prepared_choices[0].candidates.push(modified);
+        prepared_choices[0].count = 2;
+        prepared_choices[0].offered_count = Some(2);
+        prepared_choices[0].announced_selection = Some(vec![original, modified]);
+        prepared_choices[1].offered_count = None;
+        prepared_choices[1].announced_selection = None;
+        *next_selection_index = 1;
+        *current_player = Some(PlayerId(0));
+        selections.clear();
+        pending_reveals.clear();
+        *frozen_dispositions = vec![
+            FrozenScopedSearchFoundDisposition {
+                searcher: PlayerId(0),
+                identity: original,
+                disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
+            },
+            FrozenScopedSearchFoundDisposition {
+                searcher: PlayerId(0),
+                identity: modified,
+                disposition: crate::types::proposed_event::SearchFoundDisposition::Modified(
+                    crate::types::proposed_event::BoundSearchFoundDisposition {
+                        destination: Zone::Exile,
+                        source: ObjectIncarnationRef::of(ObjectId(99), 0),
+                        grant: None,
+                    },
+                ),
+            },
+        ];
+
+        let json = serde_json::to_value(&pending).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PendingScopedLibrarySearch>(json).unwrap(),
+            pending
+        );
+    }
+
+    #[test]
+    fn scoped_selection_wire_round_trips_exact_search_capped_by_live_candidates() {
+        let mut pending = scoped_selection_wire_fixture();
+        let ScopedLibrarySearchPhase::CollectSelections {
+            prepared_choices,
+            next_selection_index,
+            current_player,
+            selections,
+            frozen_dispositions,
+            pending_reveals,
+        } = &mut pending.phase
+        else {
+            unreachable!("fixture is in selection phase")
+        };
+        let only_live_candidate = prepared_choices[0].candidates[0];
+        prepared_choices.truncate(1);
+        prepared_choices[0].count = 2;
+        prepared_choices[0].offered_count = Some(1);
+        prepared_choices[0].announced_selection = Some(vec![only_live_candidate]);
+        *next_selection_index = 1;
+        *current_player = None;
+        *selections = vec![(PlayerId(0), vec![only_live_candidate])];
+        *frozen_dispositions = vec![FrozenScopedSearchFoundDisposition {
+            searcher: PlayerId(0),
+            identity: only_live_candidate,
+            disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
+        }];
+        *pending_reveals = vec![(PlayerId(0), vec![only_live_candidate])];
+
+        let json = serde_json::to_value(&pending).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PendingScopedLibrarySearch>(json).unwrap(),
+            pending
+        );
+    }
+
+    #[test]
+    fn scoped_selection_wire_round_trips_zero_candidate_then_active_searcher() {
+        let mut pending = scoped_selection_wire_fixture();
+        let ScopedLibrarySearchPhase::CollectSelections {
+            prepared_choices,
+            next_selection_index,
+            current_player,
+            selections,
+            frozen_dispositions,
+            pending_reveals,
+        } = &mut pending.phase
+        else {
+            unreachable!("fixture is in selection phase")
+        };
+        prepared_choices[0].candidates.clear();
+        prepared_choices[0].offered_count = Some(0);
+        prepared_choices[0].announced_selection = Some(Vec::new());
+        prepared_choices[1].offered_count = Some(1);
+        prepared_choices[1].announced_selection = None;
+        *next_selection_index = 2;
+        *current_player = Some(PlayerId(1));
+        *selections = vec![(PlayerId(0), Vec::new())];
+        frozen_dispositions.clear();
+        pending_reveals.clear();
+
+        let json = serde_json::to_value(&pending).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PendingScopedLibrarySearch>(json).unwrap(),
+            pending
+        );
+    }
+
+    #[test]
+    fn scoped_selection_wire_allows_shared_exact_candidate_across_searchers() {
+        let mut pending = scoped_selection_wire_fixture();
+        let ScopedLibrarySearchPhase::CollectSelections {
+            prepared_choices,
+            selections,
+            frozen_dispositions,
+            ..
+        } = &mut pending.phase
+        else {
+            unreachable!("fixture is in selection phase")
+        };
+        let shared = prepared_choices[0].candidates[0];
+        prepared_choices[1].candidates = vec![shared];
+        prepared_choices[1].announced_selection = Some(vec![shared]);
+        selections[1].1 = vec![shared];
+        frozen_dispositions
+            .iter_mut()
+            .find(|frozen| frozen.searcher == PlayerId(1))
+            .unwrap()
+            .identity = shared;
+
+        let json = serde_json::to_value(&pending).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PendingScopedLibrarySearch>(json).unwrap(),
+            pending
+        );
+    }
+
     #[test]
     fn search_found_visibility_preserves_legacy_boolean_wire_shape() {
         let batch = PendingSearchFoundBatch {
             searcher: PlayerId(1),
             library_owner: Some(PlayerId(1)),
-            remaining: vec![ObjectId(7)],
-            survivors: vec![ObjectId(8)],
+            remaining: vec![ObjectIncarnationRef::of(ObjectId(7), 1)],
+            survivors: vec![ObjectIncarnationRef::of(ObjectId(8), 2)],
+            current: None,
             continuation: PendingSearchFoundContinuation::Standard { split: None },
             visibility: SearchFoundVisibility::Public,
         };
@@ -12932,6 +14167,119 @@ mod tests {
         assert!(
             loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
             "normalize_for_loop must zero source_incarnation across delayed_triggers + stack"
+        );
+    }
+
+    /// CR 104.4b + CR 732.2a: repeated same-step zone cycles accumulate
+    /// incarnation-versioned LKI, but snapshots no pending trigger can consume
+    /// are history rather than a change to the recurring game state. A snapshot
+    /// still named by a trigger event remains rules-material and must distinguish
+    /// normalized states.
+    #[test]
+    fn normalize_for_loop_prunes_unreferenced_lki_incarnations_but_keeps_referenced_snapshot() {
+        use crate::types::ability::Effect;
+
+        fn snapshot(power: i32) -> LKISnapshot {
+            LKISnapshot {
+                name: "Loop Entrant".to_string(),
+                token_image_ref: None,
+                power: Some(power),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                attachments: Vec::new(),
+            }
+        }
+
+        let entrant = ObjectId(50);
+        let referenced_incarnation = 7;
+        let mut record =
+            ZoneChangeRecord::test_minimal(entrant, Some(Zone::Exile), Zone::Battlefield);
+        record.entered_incarnation = Some(referenced_incarnation);
+        let trigger_event = GameEvent::ZoneChanged {
+            object_id: entrant,
+            from: Some(Zone::Exile),
+            to: Zone::Battlefield,
+            record: Box::new(record),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+
+        let mut a = GameState::new_two_player(7);
+        a.stack.push_back(StackEntry {
+            id: ObjectId(20),
+            source_id: ObjectId(5),
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(5),
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(trigger_event),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        a.lki_by_incarnation
+            .entry(entrant)
+            .or_default()
+            .insert(referenced_incarnation, snapshot(5));
+        a.lki_by_incarnation
+            .entry(entrant)
+            .or_default()
+            .insert(8, snapshot(2));
+
+        let mut b = a.clone();
+        b.lki_by_incarnation
+            .entry(entrant)
+            .or_default()
+            .insert(9, snapshot(2));
+        assert_ne!(a, b, "fixture differs by irrelevant accumulated LKI");
+
+        let normalized_a = a.normalize_for_loop();
+        let normalized_b = b.normalize_for_loop();
+        assert!(
+            loop_states_equal(&normalized_a, &normalized_b),
+            "irrelevant incarnation history must not block loop recurrence"
+        );
+        assert_eq!(
+            normalized_a.lki_by_incarnation[&entrant]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![referenced_incarnation],
+            "the trigger-referenced incarnation remains available"
+        );
+
+        let mut changed_reference = a;
+        changed_reference
+            .lki_by_incarnation
+            .get_mut(&entrant)
+            .unwrap()
+            .insert(referenced_incarnation, snapshot(4));
+        assert!(
+            !loop_states_equal(&normalized_a, &changed_reference.normalize_for_loop()),
+            "different LKI for a still-referenced incarnation remains meaningful"
         );
     }
 
@@ -13480,6 +14828,89 @@ mod tests {
         let state = GameState::default();
         assert_eq!(state.lands_played_this_turn, 0);
         assert_eq!(state.max_lands_per_turn, 1);
+    }
+
+    /// Phase-0 migration oracle for Amendment B's shipped, split authority.
+    /// This is intentionally test-only: Phase 2/3 will replace these labels
+    /// with resolution frames, but must preserve the current nesting order for
+    /// each valid mixed shape. `PostReplacementDrainStack` is positional today
+    /// (there are no drain ids), while draw work is addressed by frame id and
+    /// the connive tail has its dedicated slot.
+    #[test]
+    fn phase0_migration_oracle_shipped_mixed_slots_preserve_drain_order() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum ShippedLegacySlot {
+            GeneralPostReplacement,
+            DrawSequence,
+            ConniveTail,
+        }
+
+        fn outer_to_inner(state: &GameState) -> Vec<ShippedLegacySlot> {
+            let mut order = Vec::new();
+            if state.pending_connive_reentry.is_some() {
+                order.push(ShippedLegacySlot::ConniveTail);
+            }
+            if state.post_replacement_drains.has_ready() {
+                order.push(ShippedLegacySlot::GeneralPostReplacement);
+            }
+            if state.draw_sequences.active().is_some() {
+                order.push(ShippedLegacySlot::DrawSequence);
+            }
+            order
+        }
+
+        let draw = |state: &mut GameState| {
+            state.draw_sequences.push(PlayerId(0), 1);
+        };
+        let general = |state: &mut GameState| {
+            state.install_ready_continuation(
+                crate::types::ability::PostReplacementContinuation::Template(Box::new(
+                    crate::types::ability::AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Spell,
+                        crate::types::ability::Effect::Draw {
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            target: crate::types::ability::TargetFilter::Controller,
+                        },
+                    ),
+                )),
+            );
+        };
+
+        // A general drain that has entered a true draw keeps the general work
+        // outside the draw sequence; the child draw is the active (inner) work.
+        let mut general_then_draw = GameState::new_two_player(42);
+        general(&mut general_then_draw);
+        draw(&mut general_then_draw);
+        assert!(general_then_draw.post_replacement_drains.has_ready());
+        assert!(general_then_draw.draw_sequences.active().is_some());
+        assert_eq!(
+            outer_to_inner(&general_then_draw),
+            vec![
+                ShippedLegacySlot::GeneralPostReplacement,
+                ShippedLegacySlot::DrawSequence,
+            ],
+            "outer-to-inner migration order for a general drain that started a draw"
+        );
+
+        // Leader-style "draw, then connive" carries its tail separately. The
+        // connive tail is outer work and the draw remains the active inner work.
+        let mut draw_then_connive = GameState::new_two_player(42);
+        draw(&mut draw_then_connive);
+        draw_then_connive.pending_connive_reentry = Some(PendingConniveReentry {
+            conniver: ObjectId(99),
+            count: 1,
+            applied: HashSet::new(),
+        });
+        assert!(draw_then_connive.draw_sequences.active().is_some());
+        assert!(draw_then_connive.pending_connive_reentry.is_some());
+        assert_eq!(
+            outer_to_inner(&draw_then_connive),
+            vec![
+                ShippedLegacySlot::ConniveTail,
+                ShippedLegacySlot::DrawSequence,
+            ],
+            "outer-to-inner migration order for the dedicated connive tail and its draw"
+        );
     }
 
     #[test]

@@ -31,8 +31,8 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
-    use engine::types::game_state::WaitingFor;
-    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::game_state::{ActiveLibrarySearch, WaitingFor};
+    use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
     use engine::types::zones::Zone;
     use proptest::prelude::*;
@@ -783,6 +783,54 @@ mod tests {
             p1_own.pending.description.as_deref(),
             Some("p1 deferred description")
         );
+    }
+
+    #[test]
+    fn wrapper_preserves_only_viewer_entitled_search_records_and_events() {
+        let mut state = setup_state();
+        let p0_library = state.players[0].library[0];
+        let p1_library = state.players[1].library[0];
+        for (searcher, owner, object_id, audience) in [
+            (PlayerId(0), PlayerId(0), p0_library, vec![PlayerId(0)]),
+            (PlayerId(1), PlayerId(1), p1_library, vec![PlayerId(1)]),
+        ] {
+            let identity = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
+            state.active_library_searches.insert(
+                ActiveLibrarySearch::try_new(
+                    searcher,
+                    owner,
+                    Some(owner),
+                    audience,
+                    vec![(owner, Zone::Library, identity)],
+                )
+                .unwrap(),
+            );
+        }
+        let events = vec![
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                cards: Vec::new(),
+                audience: vec![PlayerId(0)],
+            },
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(1),
+                cards: Vec::new(),
+                audience: vec![PlayerId(1)],
+            },
+        ];
+
+        let filtered = filter_state_for_player(&state, PlayerId(0));
+        assert!(filtered.active_library_searches.get(&PlayerId(0)).is_some());
+        assert!(filtered.active_library_searches.get(&PlayerId(1)).is_none());
+        let filtered_events = filter_events_for_player(&events, &state, PlayerId(0));
+        assert_eq!(filtered_events.len(), 1);
+        assert!(matches!(
+            filtered_events[0],
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                ..
+            }
+        ));
     }
 
     proptest! {

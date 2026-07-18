@@ -543,6 +543,53 @@ pub(crate) fn parse_restrict_search_to_top(
     )
 }
 
+fn parse_control_players_during_own_library_search_clause(
+    input: &str,
+) -> OracleResult<'_, ProhibitionScope> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("you control ").parse(input)?;
+    let (input, who) = alt((
+        value(ProhibitionScope::Opponents, tag("your opponents")),
+        value(ProhibitionScope::AllPlayers, tag("players")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" while ").parse(input)?;
+    let (input, _) = alt((tag("they're "), tag("they are "))).parse(input)?;
+    let (input, _) = tag("searching their libraries").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((input, who))
+}
+
+/// Single parser-authoritative classifier for the search-scoped player-control
+/// static. Keeping routing and semantic parsing on the same nom production
+/// prevents the classifier from accepting a sentence the leaf parser rejects.
+pub(crate) fn is_control_players_during_own_library_search(lower: &str) -> bool {
+    nom_parse_lower(
+        lower,
+        parse_control_players_during_own_library_search_clause,
+    )
+    .is_some()
+}
+
+/// CR 723.1a + CR 723.5: Parse the class that controls scoped players only
+/// while they search their own libraries. The scope remains parameterized so
+/// this is an engine building block rather than an Opposition Agent special
+/// case.
+pub(crate) fn parse_control_players_during_own_library_search(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (who, _) = nom_on_lower(
+        tp.original,
+        tp.lower,
+        parse_control_players_during_own_library_search_clause,
+    )?;
+    Some(
+        StaticDefinition::new(StaticMode::ControlPlayersDuringOwnLibrarySearch { who })
+            .description(text.to_string()),
+    )
+}
+
 /// CR 603.2 + CR 101.2: Parse "Triggered abilities <scope> can't cause you to
 /// sacrifice or exile <affected>." statics (The Master, Multiplied class). The
 /// "can't" effect takes precedence over the triggered ability directing the action.

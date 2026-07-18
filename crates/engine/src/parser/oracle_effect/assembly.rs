@@ -11,8 +11,8 @@
 
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind,
+    ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier,
+    ReplaceMeaningKind, ReplicateKind,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
@@ -60,13 +60,14 @@ use super::{
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate,
+    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate, draw_object_count_filter,
     fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
     mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
     publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
     rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
+    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -1100,6 +1101,7 @@ impl AssemblyEnv {
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
+    let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
 
     // ── Phase 1: ClauseIr → AbilityDefinition ──────────────────────────
     let mut defs: Vec<AbilityDefinition> = Vec::new();
@@ -2088,6 +2090,23 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         rewrite_parent_targets_to_tracked_set(&mut current.effect);
                     }
                 }
+            } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
+                // CR 603.7 + issue #6065: "those creatures gain <keyword>" after a
+                // "draw a card for each <creature filter>" clause (Inspiring Call).
+                // Draw publishes no tracked set (its target is the drawing player),
+                // so the branch above skips it and the grant's ParentTarget would
+                // resolve to the controller. Bind it directly to the nearest prior
+                // Draw's count filter — the counted creatures the pronoun names.
+                if let Some(filter) = defs
+                    .iter()
+                    .rev()
+                    .find_map(|d| draw_object_count_filter(&d.effect))
+                    .cloned()
+                {
+                    for current in &mut current_defs {
+                        rewrite_grant_parent_to_filter(&mut current.effect, &filter);
+                    }
+                }
             }
 
             // CR 608.2c: Re-anchor this clause's set-anaphor AGGREGATE ("their
@@ -2294,12 +2313,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // R1 — a SHAPE REPAIR, not materialization.
             merge_search_tail_into_additional_cost_else(&mut prev, &chain);
             // A node attached as a `sub_ability` is a resolution continuation
-            // of its parent, not an independently activatable ability.
-            // Normalize its kind to `Spell` (the "resolves alongside parent"
-            // kind) before linking. This matches the convention used by
-            // dedicated clause builders that construct sub-abilities directly
-            // (e.g., `try_parse_pump_with_damage_sub` at line 3220).
-            chain.kind = AbilityKind::Spell;
+            // of its parent, not an independently activatable ability. Ordinary
+            // chains normalize it to `Spell`; an IR producer can preserve a
+            // legacy enclosing kind when that is part of its lowered shape.
+            chain.kind = continuation_kind;
             // R2 — a SHAPE REPAIR, not materialization.
             normalize_linked_exile_cast_pair(&mut prev, &mut chain);
             if prev.sub_ability.is_some() {
@@ -2333,12 +2350,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         })
     };
 
-    // CR 608.2 + CR 107.2: Wherever an ability in the chain carries
-    // `player_scope` (outermost OR a nested sub-ability), rewrite target-scoped
-    // refs ("their life", "their hand") to their per-iterating-player
-    // equivalents. Walks the whole tree so a scoped clause buried under earlier
-    // non-scoped clauses (Betor, Kin to All) is still rewritten.
-    apply_player_scope_rewrites(&mut result);
+    // CR 608.2 + CR 107.2: Ordinary parsed clauses rewrite target-scoped refs
+    // ("their life", "their hand") to their per-iterating-player equivalents.
+    // Whole-body recognizers can preserve explicitly constructed scoped fields;
+    // the walk still covers a scoped clause buried under earlier non-scoped
+    // clauses (Betor, Kin to All).
+    if matches!(ir.player_scope_rewrite, PlayerScopeRewrite::Apply) {
+        apply_player_scope_rewrites(&mut result);
+    }
 
     // CR 107.1a: Apply the chain-level rounding annotation (captured above)
     // to every DivideRounded in the built tree. No-op when the sentence was

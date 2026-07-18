@@ -1,13 +1,13 @@
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardTypeSetSource,
-    CastManaSpentMetric, CombatRelationSubject, ControllerRef, CounterMoveSelection, DamageSource,
-    Effect, EffectScope, FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+    CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ControllerRef,
+    CounterMoveSelection, DamageSource, Effect, EffectScope, FilterProp, GameRestriction,
+    ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
+    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition,
+    TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -385,6 +385,14 @@ pub fn kicker_instead_spell_has_legal_targets(
     object_id: ObjectId,
     player: PlayerId,
 ) -> bool {
+    let has_kicker_cost = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.as_ref())
+        .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
+    if !has_kicker_cost {
+        return false;
+    }
     let Some(sub) = ability_def.sub_ability.as_deref() else {
         return false;
     };
@@ -4164,31 +4172,50 @@ fn collect_target_slot_specs(
 /// CR 601.2c / CR 602.2b: Targets are chosen before costs are paid. This
 /// engine pays a non-self Sacrifice/Discard/Exile activation cost BEFORE
 /// target selection as a documented architectural shortcut (see the ordering
-/// note in `push_activated_ability_to_stack`), so the object that cost just
+/// note in `push_activated_ability_to_stack`), so any object that cost just
 /// moved off the battlefield must not become newly eligible for an unrelated
 /// target slot just because it now sits in the destination zone. Cauldron of
 /// Essence's official ruling states this explicitly: "the target ... can't be
 /// the creature sacrificed to pay its cost." Costs that leave the object on
 /// the battlefield (Tap, Blight, RemoveCounter) never made it newly eligible
 /// for a different zone, so they are correctly left untouched by this gate.
+///
+/// Issue #4948 — Samwise Gamgee: checks EVERY object the cost
+/// consumed (`ability.cost_paid_object_ids`), not just the single referent in
+/// `ability.cost_paid_object`. A multi-object non-self cost (e.g. "Sacrifice
+/// three Foods") can move several objects into the same zone this ability's
+/// own target searches at once; excluding only the first left the rest
+/// eligible, so a just-sacrificed token could be chosen as its own ability's
+/// target and then cease to exist (CR 704.5d) before resolution, silently
+/// fizzling it (CR 608.2b). `cost_paid_object`'s id is folded in too as a
+/// defense-in-depth fallback for any cost-payment site that stamps the
+/// singular referent without also calling
+/// `add_cost_paid_object_ids_recursive`.
 fn exclude_cost_paid_object_that_left_battlefield(
     state: &GameState,
     ability: &ResolvedAbility,
     targets: Vec<TargetRef>,
 ) -> Vec<TargetRef> {
-    let Some(snapshot) = ability.cost_paid_object.as_ref() else {
+    if ability.cost_paid_object_ids.is_empty() && ability.cost_paid_object.is_none() {
         return targets;
-    };
-    let left_battlefield = match state.objects.get(&snapshot.object_id) {
+    }
+    let left_battlefield = |id: ObjectId| match state.objects.get(&id) {
         Some(obj) => obj.zone != Zone::Battlefield,
         None => true,
     };
-    if !left_battlefield {
-        return targets;
-    }
     targets
         .into_iter()
-        .filter(|target| !matches!(target, TargetRef::Object(id) if *id == snapshot.object_id))
+        .filter(|target| match target {
+            TargetRef::Object(id) => {
+                let was_paid_as_cost = ability.cost_paid_object_ids.contains(id)
+                    || ability
+                        .cost_paid_object
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.object_id == *id);
+                !(was_paid_as_cost && left_battlefield(*id))
+            }
+            TargetRef::Player(_) => true,
+        })
         .collect()
 }
 

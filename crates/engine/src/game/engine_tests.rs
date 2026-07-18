@@ -12,7 +12,7 @@ use crate::types::ability::{
     StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CardType;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::format::FormatConfig;
 use crate::types::game_state::{CastPaymentMode, CastingVariant};
@@ -402,6 +402,71 @@ fn setup_game_at_main_phase() -> GameState {
         player: PlayerId(0),
     };
     state
+}
+
+#[test]
+fn shigeki_channel_x_zero_resolves_from_stack_without_zone_choice() {
+    let mut state = setup_game_at_main_phase();
+    let shigeki = create_object(
+        &mut state,
+        CardId(9200),
+        PlayerId(0),
+        "Shigeki, Jukai Visionary".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&shigeki).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+    }
+    apply_oracle_to_object(
+        &mut state,
+        shigeki,
+        "Shigeki, Jukai Visionary",
+        "{1}{G}, {T}, Return Shigeki to its owner's hand: Reveal the top four cards of your library. You may put a land card from among them onto the battlefield tapped. Put the rest into your graveyard.\nChannel — {X}{X}{G}{G}, Discard this card: Return X target nonlegendary cards from your graveyard to your hand.",
+    );
+    let rage = create_object(
+        &mut state,
+        CardId(9201),
+        PlayerId(0),
+        "Worldsoul's Rage".to_string(),
+        Zone::Graveyard,
+    );
+    let overlook = create_object(
+        &mut state,
+        CardId(9202),
+        PlayerId(0),
+        "Riveteers Overlook".to_string(),
+        Zone::Graveyard,
+    );
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, shigeki, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, shigeki, false, vec![]));
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: shigeki,
+            ability_index: 1,
+        },
+    )
+    .unwrap();
+    assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+    apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+    assert!(state.stack.iter().any(|entry| entry.source_id == shigeki));
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.players[0].graveyard.contains(&rage));
+    assert!(state.players[0].graveyard.contains(&overlook));
+    assert!(state.players[0].graveyard.contains(&shigeki));
+    assert!(state.players[0].hand.is_empty());
 }
 
 /// Perf guard for go-wide mana-board slowness (turn-40 Cryptolith-Rite

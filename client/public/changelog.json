@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 175,
+      "date": "2026-07-17",
+      "title": "Oathbreaker format arrives",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "ai",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Oathbreaker deck-building: build around a planeswalker commander and its signature spell, with commander companions supported end to end\n• Demon of Fate's Design — once each turn, cast an enchantment by paying life equal to its mana value instead of its cost\n• Volcanic Offering and similar spells now let your opponent pick their half of the targets (\"of an opponent's choice\")\n• Conjurer's Ban — name a card to stop it from being cast or played as a land\n• Ashes of the Fallen — the chosen creature type now reaches cards in your graveyard\n• Minimus Containment — grants its owner a Treasure and shuts off the enchanted permanent's abilities\n• Fated Firepower & Neriv — damage-boosting replacement effects now scale with the situation\n• Susan Foreman — planeswalking rearranges the top of the planar deck (Planechase)\n\n🛠️ Cards That Now Work Right\n• Snow lands and other snow sources now produce snow mana, so {S} costs are payable\n• Sakashima keeps its own abilities when it copies another creature\n• Bumi and Riku — \"choose up to X\" modes now scale to the current count\n• Zhulodok — spells cast this way now get double cascade\n• Nissa, Ascended Animist — abilities that count her loyalty now read the right number\n• Aurification and similar type-changers now apply their granted keyword alongside the type change\n• Invasion of Gobakhan — casting the exiled card now correctly costs the extra {2}\n• Intermediate Chirography — Class-level triggers keep their \"if\" conditions instead of firing unconditionally\n• Samwise Gamgee and similar — an object sacrificed, discarded, or exiled to pay a cost can no longer be chosen as that ability's own target\n• Tovolar's Packleader, Stone of Erech, and Alien Invasion — parsing fixes so their abilities target and resolve as printed\n• \"Defending player\" edicts, \"each other\" attachment triggers, and \"each other creature\" damage now hit the right players and sources\n\n⚔️ Combat & Gameplay\n• Commander returns to hand or library are now a true replacement effect: your commander no longer briefly \"arrives\" where triggers like Warped Devotion could wrongly react to it\n• Replacement effects (Rest in Peace, Leyline of the Void, \"if it would be exiled or put into your library instead\") now correctly apply during cascade, discover, explore, cloak, impulse draws, and library searches\n• You can now decline the extra combat tax on creatures that are required to attack\n• When two or more combat-damage triggers fire at once, you're prompted to order them\n• Sacrifice and ward payments now survive a replacement choice made mid-resolution\n• Auto-tap now accounts for painful mana sources like City of Brass when a free source is available\n• Mulliganed cards and other hidden information stay private from opponents, including in the game log\n• Optional choices no longer get stuck after a game-state restore\n\n🤖 AI\n• Cycling is now a deliberate, evaluated decision\n• Targeted removal prioritizes the most threatening opponent\n• Smarter about spending life to protect itself\n• Keeps a lone optional sacrifice source available instead of wasting it\n• Decision-making is now fully deterministic\n\n🖥️ Interface\n• The deck library keeps its import action available even when your filters match nothing",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1527790086094061569"
+    },
+    {
       "id": 174,
       "date": "2026-07-15",
       "title": "Hogaak truly casts without mana",

@@ -154,7 +154,8 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind, ReplicateKind,
+    EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind,
+    ReplicateKind,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -1951,6 +1952,53 @@ fn try_parse_global_damage_modification_replacement(text: &str) -> Option<Effect
     // lifetime to end-of-turn so it expires after the current turn (CR 514.2).
     if replacement.expiry.is_none() {
         replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
+    }
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::None,
+    })
+}
+
+/// CR 614.1a + CR 514.2 + CR 611.2c: Recognize the one-shot spell/trigger form
+/// of the life-floor damage replacement — "damage that would reduce your life
+/// total to less than N reduces it to N instead" (Angel's Grace, Angel of
+/// Grace's ETB trigger) — and lift it to an
+/// `Effect::AddTargetReplacement { target: None }` that installs a floating
+/// turn-bound replacement in `pending_damage_replacements`. Unlike the
+/// one-shot "the next time …" shields (`CreateDamageReplacement`), the
+/// installed definition keeps `ShieldKind::None`, so it re-applies to every
+/// damage event until it expires (the floor is continuous for the turn). The
+/// permanent-static form of the same sentence (Worship, Fortune Thief, Ali
+/// from Cairo, Sustaining Spirit) routes at document level through the
+/// replacement parser and never reaches this dispatch.
+///
+/// `lower` is the already-lowercased, duration-stripped clause text — the
+/// leading "until end of turn," is consumed upstream by
+/// `strip_leading_duration` and re-attached via `with_clause_duration`, so
+/// `expiry` is left `None` on the produced definition; the install resolver
+/// derives it from `ability.duration` via `expiry_from_duration` (mirrors
+/// `parse_enter_from_zone_redirect_replacement` below).
+///
+/// Parsing is delegated to `parse_replacement_line` — the single authority
+/// for replacement sentences (it reaches the all-consuming
+/// `parse_unconditional_life_floor_damage_replacement`). The typed acceptance
+/// check keeps the lift scoped to the life-floor family; the
+/// "if [source] would deal … instead" family is owned by
+/// `try_parse_global_damage_modification_replacement`.
+fn try_parse_global_life_floor_replacement(text: &str, lower: &str) -> Option<Effect> {
+    use super::oracle_replacement::parse_replacement_line;
+    // Structural nom prefix gate; the parse itself is delegated below.
+    tag::<_, _, OracleError<'_>>("damage that would reduce ")
+        .parse(lower)
+        .ok()?;
+    let replacement = parse_replacement_line(text, "")?;
+    if !matches!(replacement.event, ReplacementEvent::DamageDone)
+        || !matches!(
+            replacement.damage_modification,
+            Some(DamageModification::LifeFloor { .. })
+        )
+    {
+        return None;
     }
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
@@ -8011,6 +8059,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // CR 614.1a + CR 514.2: floating turn-bound life-floor replacement
+    // ("Until end of turn, damage that would reduce your life total to less
+    // than 1 reduces it to 1 instead." — Angel's Grace; Angel of Grace's ETB
+    // trigger). Dispatched after `strip_leading_duration` for the same reason
+    // as the zone-redirect lift above: the recursive (duration-stripped) call
+    // reaches it, and `AbilityDefinition.duration == UntilEndOfTurn` reaches
+    // `expiry_from_duration` in the install resolver.
+    if let Some(effect) = try_parse_global_life_floor_replacement(text, &lower) {
+        return parsed_clause(effect);
+    }
+
     // "it's still a/an [type]" / "that's still a/an [type]" — type-retention clause
     // CR 205.1a: Retains the original type in addition to new types from animation effects
     if let Some(clause) = try_parse_still_a_type(tp) {
@@ -11841,10 +11900,11 @@ fn clause_is_pay_to_end_effect_termination(source_text: &str) -> bool {
     )
 }
 
-pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
+pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
     let ((), _) = nom_on_lower(text, &lower, |input| {
         let (input, _) = tag("exile the top card of each player's library").parse(input)?;
@@ -11889,17 +11949,20 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
     )
     .sub_ability(grant);
 
-    let mut def = AbilityDefinition::new(
+    let mut clause = parsed_clause(Effect::ExileTop {
+        player: TargetFilter::Controller,
+        count: QuantityExpr::Fixed { value: 1 },
+        face_down: false,
+    });
+    clause.sub_ability = Some(Box::new(put_counter));
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        Effect::ExileTop {
-            player: TargetFilter::Controller,
-            count: QuantityExpr::Fixed { value: 1 },
-            face_down: false,
-        },
-    );
-    def.player_scope = Some(PlayerFilter::All);
-    def.sub_ability = Some(Box::new(put_counter));
-    Some(def)
+        clause,
+        Some(PlayerFilter::All),
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// CR 702.138a + CR 601.2f / CR 601.2g / CR 601.2h: a targeted/triggered one-shot
@@ -12531,7 +12594,7 @@ fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, Targe
     Ok((input, pairs))
 }
 
-/// CR 107.1 + CR 608.2e: Whole-line interceptor for the Balance equalization
+/// CR 107.1 + CR 608.2e: Whole-chain recognizer for the Balance equalization
 /// class (Balance, Restore Balance, Balancing Act).
 ///
 /// Arm B parses the first sentence and Arm C parses the "the same way"
@@ -12540,10 +12603,11 @@ fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, Targe
 /// count; the clauses are chained via `sub_ability` as three independent steps
 /// (CR 608.2e — each clause computes its own minimum at its own resolution
 /// time, guaranteed by the §8 per-link clause-minimum snapshot).
-pub(crate) fn try_parse_balance_equalization(
+fn parse_balance_equalization_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
 
     let parsed = nom_on_lower(text, &lower, |input| {
@@ -12561,29 +12625,69 @@ pub(crate) fn try_parse_balance_equalization(
     clauses.push(first);
     clauses.extend(rest);
 
-    // Lower each (verb, filter) into a `player_scope: All` link, chained via
-    // `sub_ability` (CR 608.2e — three independent steps).
-    let mut links: Vec<AbilityDefinition> = clauses
-        .into_iter()
-        .map(|(verb, filter)| {
-            let filter = balance_filter_you_control(filter);
-            let mut def = AbilityDefinition::new(kind, balance_clause_effect(verb, filter));
-            def.player_scope = Some(PlayerFilter::All);
-            def.sub_link = SubAbilityLink::SequentialSibling;
-            def
-        })
-        .collect();
-
-    // Fold the chain back-to-front so each link's `sub_ability` is the next.
-    let mut chain = links.pop()?;
-    while let Some(mut prev) = links.pop() {
-        prev.sub_ability = Some(Box::new(chain));
-        chain = prev;
+    // Provenance bookkeeping only: the grammar above has already validated
+    // both sentences. Split the continuation's explicit "and" list into the
+    // source fragments for the corresponding parsed arms.
+    let (first_source, continuation_source) =
+        super::oracle_nom::bridge::split_once_on_lower(text, &lower, ". ")?;
+    let continuation_lower = &lower[lower.len() - continuation_source.len()..];
+    let continuation = TextPair::new(continuation_source, continuation_lower);
+    // allow-noncombinator: structural punctuation cleanup on a clause already parsed by nom
+    let continuation = continuation.strip_suffix(".").unwrap_or(continuation);
+    let (continuation, _) = continuation.rsplit_around(" the same way")?;
+    let mut continuation_sources = Vec::with_capacity(clauses.len().saturating_sub(1));
+    let mut remaining = continuation;
+    while let Some((source, rest)) = remaining.split_around(" and ") {
+        continuation_sources.push(source.original);
+        remaining = rest;
     }
-    Some(chain)
+    continuation_sources.push(remaining.original);
+    if continuation_sources.len() != clauses.len().saturating_sub(1) {
+        return None;
+    }
+
+    let mut builder = ClauseIrBuilder::new(text);
+    let clause_count = clauses.len();
+    for (index, (verb, filter)) in clauses.into_iter().enumerate() {
+        let source_text = if index == 0 {
+            first_source
+        } else {
+            continuation_sources[index - 1]
+        };
+        // CR 608.2c: the boundary after each nonterminal clause makes the
+        // FOLLOWING lowered definition a SequentialSibling. The root has no
+        // previous boundary and is stamped by the AbilityShellIr below.
+        let boundary = (index + 1 < clause_count).then_some(ClauseBoundary::Sentence);
+        builder
+            .clause(
+                source_text,
+                parsed_clause(balance_clause_effect(
+                    verb,
+                    balance_filter_you_control(filter),
+                )),
+                boundary,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .player_scope(Some(PlayerFilter::All))
+            .push();
+    }
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Preserve,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
-/// CR 101.4 + CR 701.21a + CR 701.23i: Whole-line parser for the generic
+/// CR 101.4 + CR 701.21a + CR 701.23i: Whole-line recognizer for the generic
 /// threshold-land keeper/search/shuffle grammar represented by Natural Balance.
 ///
 /// Every textual axis is parsed independently with nom: the upper threshold,
@@ -12591,10 +12695,11 @@ pub(crate) fn try_parse_balance_equalization(
 /// shuffle are not a verbatim card-name/text special case. The lowering uses
 /// the existing player-count filter, exact keeper constraint, self-library
 /// search, ParentTarget delivery, and PerformedActionThisWay ledger.
-pub(crate) fn try_parse_threshold_land_balance(
+fn parse_threshold_land_balance_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
     let ((sacrifice_threshold, keep_count, search_threshold, x_base), _) = nom_on_lower(
         text,
@@ -12653,21 +12758,7 @@ pub(crate) fn try_parse_threshold_land_balance(
         }),
     };
 
-    let mut shuffle = AbilityDefinition::new(
-        kind,
-        Effect::Shuffle {
-            target: TargetFilter::Controller,
-        },
-    );
-    // CR 701.23i + CR 701.24a: only a player who accepted and performed the
-    // prior library search shuffles, including a player who found zero cards.
-    shuffle.player_scope = Some(PlayerFilter::PerformedActionThisWay {
-        relation: PlayerRelation::All,
-        action: crate::types::events::PlayerActionKind::SearchedLibrary,
-    });
-    shuffle.sub_link = SubAbilityLink::SequentialSibling;
-
-    let mut delivery = AbilityDefinition::new(
+    let delivery = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
             origin: Some(Zone::Library),
@@ -12685,61 +12776,122 @@ pub(crate) fn try_parse_threshold_land_balance(
             enters_modified_if: None,
         },
     );
-    delivery.sub_ability = Some(Box::new(shuffle));
 
-    let mut search = AbilityDefinition::new(
-        kind,
-        Effect::SearchLibrary {
-            filter: basic_land,
-            // CR 107.1b: This is directed subtraction, not the engine's
-            // absolute-value `Difference` expression. `SearchLibrary` clamps
-            // a negative upper bound to zero, so this remains correct for every
-            // threshold/base combination accepted by the generic grammar.
-            count: QuantityExpr::up_to(QuantityExpr::Sum {
-                exprs: vec![
-                    QuantityExpr::Fixed { value: x_base },
-                    QuantityExpr::Multiply {
-                        factor: -1,
-                        inner: Box::new(QuantityExpr::Ref {
-                            qty: QuantityRef::ObjectCount {
-                                filter: scoped_land,
-                            },
-                        }),
-                    },
-                ],
-            }),
-            reveal: false,
-            target_player: None,
-            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
-            split: None,
-            source_zones: vec![Zone::Library],
-        },
-    );
-    search.player_scope = Some(search_scope);
-    search.optional = true;
+    let mut search = parsed_clause(Effect::SearchLibrary {
+        filter: basic_land,
+        // CR 107.1b: This is directed subtraction, not the engine's
+        // absolute-value `Difference` expression. `SearchLibrary` clamps
+        // a negative upper bound to zero, so this remains correct for every
+        // threshold/base combination accepted by the generic grammar.
+        count: QuantityExpr::up_to(QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Fixed { value: x_base },
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: scoped_land,
+                        },
+                    }),
+                },
+            ],
+        }),
+        reveal: false,
+        target_player: None,
+        selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+        split: None,
+        source_zones: vec![Zone::Library],
+    });
     search.sub_ability = Some(Box::new(delivery));
 
-    let mut sacrifice = AbilityDefinition::new(
-        kind,
-        Effect::ChooseAndSacrificeRest {
-            categories: Vec::new(),
-            chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
-            choose_filter: land.clone(),
-            sacrifice_filter: land,
-            total_power_cap: None,
-            keeper_constraint: Some(KeeperConstraint::ExactCount {
-                count: QuantityExpr::Fixed { value: keep_count },
+    // Provenance bookkeeping only: the nom grammar above already validated the
+    // complete instruction. Keep the final "Then" with its own clause so the
+    // sentence boundary before it stamps the legacy SequentialSibling link.
+    let (sacrifice_source, remainder_source) =
+        super::oracle_nom::bridge::split_once_on_lower(text, &lower, ". ")?;
+    let remainder_lower = &lower[lower.len() - remainder_source.len()..];
+    let (search_source, _) = super::oracle_nom::bridge::split_once_on_lower(
+        remainder_source,
+        remainder_lower,
+        ". then ",
+    )?;
+    // allow-noncombinator: source-span slicing after nom validated the sentence separator
+    let shuffle_source = remainder_source.get(search_source.len() + 2..)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            sacrifice_source,
+            parsed_clause(Effect::ChooseAndSacrificeRest {
+                categories: Vec::new(),
+                chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+                choose_filter: land.clone(),
+                sacrifice_filter: land,
+                total_power_cap: None,
+                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                    count: QuantityExpr::Fixed { value: keep_count },
+                }),
             }),
-        },
-    );
-    sacrifice.player_scope = Some(sacrifice_scope);
-    sacrifice.sub_ability = Some(Box::new(search));
-    Some(sacrifice)
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .player_scope(Some(sacrifice_scope))
+        .push();
+    // CR 608.2c: leave the first sentence's boundary unset so the search stays
+    // the legacy ContinuationStep; its intrinsic delivery remains a search result.
+    builder
+        .clause(
+            search_source,
+            search,
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .is_optional(true)
+        .player_scope(Some(search_scope))
+        .push();
+    // CR 701.23i + CR 701.24a: only a player who accepted and performed the
+    // prior library search shuffles, including a player who found zero cards.
+    // The preceding sentence boundary makes this a SequentialSibling exactly as
+    // the legacy recognizer did.
+    builder
+        .clause(
+            shuffle_source,
+            parsed_clause(Effect::Shuffle {
+                target: TargetFilter::Controller,
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .player_scope(Some(PlayerFilter::PerformedActionThisWay {
+            relation: PlayerRelation::All,
+            action: crate::types::events::PlayerActionKind::SearchedLibrary,
+        }))
+        .push();
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 /// CR 121.1 + CR 402.1 + CR 608.2e: Whole-line interceptor for the "catch up to
 /// the player with the most cards in hand" equalize-upward draw (Tales of the
-/// Ancestors). Structured like [`try_parse_balance_equalization`]: the
+/// Ancestors). Structured like [`parse_balance_equalization_ir`]: the
 /// cross-player extremum operand is PRODUCED by the typed
 /// [`nom_quantity::parse_player_with_extremum_cards_in_hand`] combinator (not a
 /// literal tag), and a `Verify`-style structural guard (mirroring
@@ -12754,7 +12906,11 @@ pub(crate) fn try_parse_threshold_land_balance(
 /// `.abs()` and `Draw` clamps `.max(0)` (CR 107.1b), so the leader(s) draw 0 and
 /// the "with fewer cards in hand" subject restriction needs no separate
 /// `PlayerFilter`.
-pub(crate) fn try_parse_catch_up_draw(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+pub(crate) fn parse_catch_up_draw_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
 
     let (extremum, _) = nom_on_lower(text, &lower, |input| {
@@ -12798,16 +12954,18 @@ pub(crate) fn try_parse_catch_up_draw(text: &str, kind: AbilityKind) -> Option<A
             },
         }),
     };
-    let mut def = AbilityDefinition::new(
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        Effect::Draw {
+        parsed_clause(Effect::Draw {
             count,
             target: TargetFilter::Controller,
-        },
-    );
-    // CR 101.4: APNAP fan-out over every player.
-    def.player_scope = Some(PlayerFilter::All);
-    Some(def)
+        }),
+        // CR 101.4: APNAP fan-out over every player.
+        Some(PlayerFilter::All),
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
@@ -19748,13 +19906,22 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
         });
     }
 
-    // Try to parse the emblem text as a static ability line.
-    if let Some(mut static_def) = super::oracle_static::parse_static_line(inner) {
+    // Try to parse the emblem text as one or more static ability lines.
+    // CR 604.1 + CR 114.4: a compound emblem body ("… you can't lose the game
+    // and your opponents can't win the game" — Gideon of the Trials) defines
+    // several statics at once; `parse_static_line_multi` emits them all and
+    // internally falls back to the single-def parser for simple bodies. An
+    // empty result still routes to the honest `EmblemStatic` fallback below,
+    // so an unparseable body stays a visible coverage gap.
+    let mut static_defs = super::oracle_static::parse_static_line_multi(inner);
+    if !static_defs.is_empty() {
         // CR 114: retain the emblem's granted rules text for the display
-        // tooltip, mirroring the trigger and fallback branches.
-        static_def.description = Some(inner.to_string());
+        // tooltip on the first def only, mirroring the trigger branch.
+        if let Some(first) = static_defs.first_mut() {
+            first.description = Some(inner.to_string());
+        }
         Some(Effect::CreateEmblem {
-            statics: vec![static_def],
+            statics: static_defs,
             triggers: Vec::new(),
         })
     } else {
@@ -23042,6 +23209,64 @@ fn rewrite_filter_parent_to_tracked_set(filter: &mut TargetFilter) {
     }
 }
 
+/// issue #6065: If `effect` is "draw a card for each `<filter>`" — a `Draw` whose
+/// count is `ObjectCount { filter }` — return that count filter. This is the
+/// antecedent a following "those creatures" grant refers to. Unlike a tracked-set
+/// publisher, `Draw` does not publish the counted objects at resolution (its
+/// `target` is the drawing player), so a `ParentTarget` grant chained after it
+/// must bind directly to this filter rather than to the tracked-set sentinel.
+pub(super) fn draw_object_count_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Draw {
+            count:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            ..
+        } => Some(filter),
+        _ => None,
+    }
+}
+
+/// Re-anchor a `ParentTarget` anaphor in `filter` to `replacement`. Mirrors
+/// `rewrite_filter_parent_to_tracked_set` but binds to a concrete antecedent
+/// filter (issue #6065: "those creatures" → the counted-creature filter).
+fn rewrite_filter_parent_to(filter: &mut TargetFilter, replacement: &TargetFilter) {
+    match filter {
+        TargetFilter::ParentTarget => *filter = replacement.clone(),
+        TargetFilter::Not { filter } => rewrite_filter_parent_to(filter, replacement),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for f in filters {
+                rewrite_filter_parent_to(f, replacement);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CR 603.7 + issue #6065: Re-anchor a "those creatures gain `<keyword>`" grant's
+/// `ParentTarget` to `replacement` — the filter of a preceding "draw a card for
+/// each `<creature filter>`" count (Inspiring Call). Only the grant surface
+/// (`GenericEffect`) is rewritten; the tracked-set path (`PutCounterAll` etc.)
+/// is untouched and keeps producing `TrackedSet(0)`.
+pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &TargetFilter) {
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    {
+        if let Some(target) = target {
+            rewrite_filter_parent_to(target, replacement);
+        }
+        for static_def in static_abilities {
+            if let Some(affected) = &mut static_def.affected {
+                rewrite_filter_parent_to(affected, replacement);
+            }
+        }
+    }
+}
+
 fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     let mut index = 0;
     while index + 1 < defs.len() {
@@ -24565,10 +24790,11 @@ fn try_parse_conditional_protection_grant_ability(
 /// [`CopyChooseScope`]: "<type> they control" → `Chooser` (Human—Time Lord
 /// Meta-Crisis), "<type> controlled by the player to their {left|right}" →
 /// `Neighbor { direction }` (Caught in a Parallel Universe).
-pub(crate) fn try_parse_each_player_copy_chosen(
+pub(crate) fn parse_each_player_copy_chosen_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     let i = lower.as_str();
 
@@ -24656,25 +24882,27 @@ pub(crate) fn try_parse_each_player_copy_chosen(
         return None;
     }
 
-    let mut def = AbilityDefinition::new(
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        Effect::EachPlayerCopyChosen {
+        parsed_clause(Effect::EachPlayerCopyChosen {
             choose_filter,
             min,
             max,
             copy_modifications,
             scale,
             choose_scope,
-        },
-    );
-    // CR 101.4: "each player" → scope over all players; the self-iterating
-    // resolver reads this and walks the scoped set itself.
-    def.player_scope = Some(PlayerFilter::All);
-    Some(def)
+        }),
+        // CR 101.4: "each player" → scope over all players; the self-iterating
+        // resolver reads this and walks the scoped set itself.
+        Some(PlayerFilter::All),
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// CR 122.1 + CR 208.1: Parse the optional scaling sentence of
-/// [`try_parse_each_player_copy_chosen`] — "then each player who chose a second
+/// [`parse_each_player_copy_chosen_ir`] — "then each player who chose a second
 /// <noun> puts a number of <counter> counters on the token they created equal to
 /// the <property> of the second <noun> they chose." Returns the `CopyScale` and
 /// the remaining text.
@@ -24909,16 +25137,16 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
 ///
 /// | mode | bypasses | bypass #1's `ParseContext` |
 /// |---|---|---|
-/// | `Standalone` | 8 | a fresh `default()`, discarded |
-/// | `WithContext` | the same 8 as a strict prefix, plus `try_parse_exile_pile_shuffle_cloak` | the caller's real `ctx` |
+/// | `Standalone` | remaining shared recognizers | a fresh `default()`, discarded |
+/// | `WithContext` | the same recognizers as a strict prefix, plus `try_parse_exile_pile_shuffle_cloak` | the caller's real `ctx` |
 ///
 /// Callers split cleanly: die-result branch bodies (`oracle_special.rs`) take
 /// `Standalone`; spell/activated dispatch takes `WithContext`.
 ///
 /// **The asymmetry is suspected-accidental and is preserved byte-for-byte on
 /// purpose.** Nothing about a die-roll branch body should exclude the cloak
-/// recognizer, but unifying to 9 makes die branches newly take it and unifying
-/// to 8 makes spells lose it — either is silent lowered drift across the
+/// recognizer, but unifying the two sets makes die branches newly take it or
+/// makes spells lose it — either is silent lowered drift across the
 /// die-result cards. Fixing it is a separate, reviewed change with its own
 /// discriminating card; a parity migration never absorbs a bug fix.
 ///
@@ -24939,30 +25167,12 @@ fn try_parse_chain_bypass(
     mode: ChainLoweringMode,
     ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    // The eight shared bypasses, in their established order. Only the first
+    // The remaining shared bypasses, in their established order. Only the first
     // consults `ctx`.
     if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
         return Some(def);
     }
-    if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
-        return Some(def);
-    }
     if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_balance_equalization(text, kind) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_threshold_land_balance(text, kind) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_each_player_copy_chosen(text, kind) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_catch_up_draw(text, kind) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
         return Some(def);
     }
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
@@ -24995,6 +25205,25 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     def
 }
 
+fn parse_ability_ir(text: &str, kind: AbilityKind, ctx: &mut ParseContext) -> AbilityIr {
+    if let Some(body) = parse_balance_equalization_ir(text, kind, ctx) {
+        return AbilityIr {
+            source_text: text.to_string(),
+            body,
+            // CR 608.2c: Balance's root is an independent equalization step;
+            // no preceding ClauseBoundary can stamp its link.
+            shell: AbilityShellIr {
+                sub_link: Some(SubAbilityLink::SequentialSibling),
+            },
+        };
+    }
+    AbilityIr {
+        source_text: text.to_string(),
+        body: parse_effect_chain_ir(text, kind, ctx),
+        shell: AbilityShellIr::default(),
+    }
+}
+
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     // A fresh context per call, exactly as before: the bypasses may mutate `ctx`
     // before declining, and those mutations must not reach `parse_effect_chain_ir`.
@@ -25006,11 +25235,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     ) {
         return def;
     }
-    lower_ability_ir(&AbilityIr {
-        source_text: text.to_string(),
-        body: parse_effect_chain_ir(text, kind, &mut ParseContext::default()),
-        shell: AbilityShellIr::default(),
-    })
+    lower_ability_ir(&parse_ability_ir(text, kind, &mut ParseContext::default()))
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
@@ -25024,11 +25249,7 @@ pub(crate) fn parse_effect_chain_with_context(
     if let Some(def) = try_parse_chain_bypass(text, kind, ChainLoweringMode::WithContext, ctx) {
         return def;
     }
-    lower_ability_ir(&AbilityIr {
-        source_text: text.to_string(),
-        body: parse_effect_chain_ir(text, kind, ctx),
-        shell: AbilityShellIr::default(),
-    })
+    lower_ability_ir(&parse_ability_ir(text, kind, ctx))
 }
 
 /// CR 701.24a + CR 701.58a/e + CR 608.2c: Expose the Culprit mode 2 — "Exile any
@@ -25288,10 +25509,11 @@ fn try_parse_for_each_attacker_copy_blocker(
     Some(def)
 }
 
-fn try_parse_return_target_and_same_name_from_your_graveyard(
+fn parse_return_target_and_same_name_from_your_graveyard_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     let (_, rest) = nom_on_lower(text, &lower, |input| value((), tag("return ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest.len()..];
@@ -25315,47 +25537,75 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
         add_inferred_origin_constraints_to_target(target, Some(Zone::Graveyard), rest_lower);
     let enter_tapped =
         crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped.unwrap_or(false));
-    let mut def = AbilityDefinition::new(
+    let first_source_len = text.len() - rest.len() + target_tp.original.len();
+    let first_source = text.get(..first_source_len)?;
+    let second_source = text.get(first_source_len..)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            first_source,
+            parsed_clause(Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    builder
+        .clause(
+            second_source,
+            parsed_clause(Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::SameNameAsParentTarget,
+                ])),
+                enters_under: None,
+                enter_tapped,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    Some(EffectChainIr {
+        clauses: builder.finish(),
         kind,
-        Effect::ChangeZone {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
-            target,
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: None,
-            enter_tapped,
-            enters_attacking: false,
-            up_to: false,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
-            face_down_profile: None,
-            enters_modified_if: None,
-        },
-    );
-    def.sub_ability = Some(Box::new(AbilityDefinition::new(
-        kind,
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
-            target: TargetFilter::Typed(TypedFilter::default().properties(vec![
-                FilterProp::InZone {
-                    zone: Zone::Graveyard,
-                },
-                FilterProp::Owned {
-                    controller: ControllerRef::You,
-                },
-                FilterProp::SameNameAsParentTarget,
-            ])),
-            enters_under: None,
-            enter_tapped,
-            enter_with_counters: vec![],
-            face_down_profile: None,
-            library_position: None,
-            random_order: false,
-        },
-    )));
-    Some(def)
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 /// CR 508.1c + CR 611.2c: Parse "only X can attack during that combat phase"
@@ -25575,6 +25825,24 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    if let Some(ir) = parse_catch_up_draw_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_each_player_copy_chosen_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_exile_top_each_library_with_collection_counter_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_balance_equalization_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_threshold_land_balance_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_return_target_and_same_name_from_your_graveyard_ir(text, kind, ctx) {
+        return ir;
+    }
     let text = strip_trailing_activation_restriction_sentence(text);
     // CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
     // sentence before chain splitting — it is a chain-level rounding annotation
@@ -25665,6 +25933,8 @@ pub(crate) fn parse_effect_chain_ir(
             return EffectChainIr {
                 clauses: meld_builder.finish(),
                 kind,
+                continuation_kind: None,
+                player_scope_rewrite: PlayerScopeRewrite::Apply,
                 chain_rounding,
                 actor: ctx.actor.clone(),
                 in_trigger: ctx.in_trigger,
@@ -27864,6 +28134,20 @@ pub(crate) fn parse_effect_chain_ir(
             let (suffix_repeat_for, stripped_text_no_qty) =
                 strip_for_each_repeat_suffix(&text_no_qty);
             let mut stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
+            // CR 701.16a + CR 608.2c: a fieldless Investigate (no count slot) drops a
+            // trailing "[once] for each <set>" multiplier. Precompute the lift,
+            // gated to Investigate + no prior repeat_for, so ONLY the repeatable-for-each
+            // Investigate class (player-set OR object-set) enters the branch below; every
+            // other Investigate chunk (plain "Investigate.", non-Investigate for-each)
+            // falls through to the unchanged final else.
+            // `for_each_repeatable_repeat_for` returns None without a real
+            // "for each <set>" suffix.
+            let investigate_repeatable_lift =
+                if repeat_for.is_none() && matches!(stripped_clause.effect, Effect::Investigate) {
+                    lower::for_each_repeatable_repeat_for(&text_no_qty)
+                } else {
+                    None
+                };
             if suffix_repeat_for.is_some()
                 && matches!(stripped_clause.effect, Effect::CopySpell { .. })
             {
@@ -27894,6 +28178,12 @@ pub(crate) fn parse_effect_chain_ir(
                 *ctx = fanout_ctx;
                 multi_target = Some(fanout_spec);
                 (fanout_clause, None)
+            } else if let Some(lifted_qty) = investigate_repeatable_lift {
+                // CR 608.2c: re-parse `text_no_qty` EXACTLY as the final else does
+                // (clause + ctx byte-identical), attaching ONLY the lifted repeat_for.
+                // The gate guaranteed `repeat_for.is_none()`, so `Some(lifted_qty)`
+                // cannot clobber a prior count.
+                (parse_effect_clause(&text_no_qty, ctx), Some(lifted_qty))
             } else {
                 (parse_effect_clause(&text_no_qty, ctx), repeat_for)
             }
@@ -28718,11 +29008,34 @@ pub(crate) fn parse_effect_chain_ir(
 
         // Non-absorbed followup continuation — store on the current clause
         // (it applies to the PREVIOUS clause in lowering).
-        let followup_for_this = if followup_continuation.is_some() && !absorb_followup {
+        let mut followup_for_this = if followup_continuation.is_some() && !absorb_followup {
             followup_continuation
         } else {
             None
         };
+
+        if let Some(ContinuationAst::RevealHandFilter {
+            card_filter,
+            choice_optional: true,
+        }) = &mut followup_for_this
+        {
+            if matches!(
+                card_filter,
+                None | Some(TargetFilter::Any | TargetFilter::None)
+            ) {
+                if let Effect::ChangeZone { target, .. } = &clause.effect {
+                    *card_filter = Some(target.clone());
+                }
+            }
+        }
+        let is_optional = is_optional
+            && !matches!(
+                followup_for_this,
+                Some(ContinuationAst::RevealHandFilter {
+                    choice_optional: true,
+                    ..
+                })
+            );
 
         // CR 603.6 + CR 608.2k: A reflexive zone-change trigger body ("When a
         // creature is put onto the battlefield this way, it deals damage equal to
@@ -28870,6 +29183,8 @@ pub(crate) fn parse_effect_chain_ir(
     EffectChainIr {
         clauses,
         kind,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding,
         actor: ctx.actor.clone(),
         in_trigger: ctx.in_trigger,
@@ -29110,6 +29425,11 @@ fn try_parse_put_zone_change_parts(
             };
             let up_to = parse_up_to_one_target_prefix(before.lower) || choice_count.is_some();
             let (target, _) = parse_target(target_text);
+            let multi_origin_zones = put_hand_graveyard_origin_zones(before.lower);
+            let target = match multi_origin_zones.as_ref() {
+                Some(zones) => add_put_multi_origin_constraint(target, zones),
+                None => target,
+            };
             // CR 202.3 + CR 107.3i: A trailing "where X is <expression>"
             // defining clause (Birthing Ritual: "...with mana value X or less
             // ..., where X is 1 plus the sacrificed creature's mana value")
@@ -29197,7 +29517,7 @@ fn try_parse_put_zone_change_parts(
             // graveyard"); "into your graveyard" then yields `origin: None`,
             // matching the hand branch and letting the injected reveal target
             // drive the move uniformly across the whole destination class.
-            let origin = if is_tracked_anaphor {
+            let origin = if is_tracked_anaphor || multi_origin_zones.is_some() {
                 None
             } else {
                 let origin_text = format!("{}{}", before.lower, after.lower);
@@ -29287,6 +29607,44 @@ fn try_parse_put_zone_change_parts(
     }
 
     None
+}
+
+fn put_hand_graveyard_origin_zones(lower: &str) -> Option<Vec<Zone>> {
+    if [
+        "from your hand and/or graveyard",
+        "from your hand or graveyard",
+    ]
+    .iter()
+    .any(|phrase| scan_contains_phrase(lower, phrase))
+    {
+        Some(vec![Zone::Hand, Zone::Graveyard])
+    } else if [
+        "from your graveyard and/or hand",
+        "from your graveyard or hand",
+    ]
+    .iter()
+    .any(|phrase| scan_contains_phrase(lower, phrase))
+    {
+        Some(vec![Zone::Graveyard, Zone::Hand])
+    } else {
+        None
+    }
+}
+
+fn add_put_multi_origin_constraint(target: TargetFilter, zones: &[Zone]) -> TargetFilter {
+    match target {
+        TargetFilter::Typed(mut typed) => {
+            typed
+                .properties
+                .retain(|prop| !matches!(prop, FilterProp::InZone { .. }));
+            typed.properties.push(FilterProp::InAnyZone {
+                zones: zones.to_vec(),
+            });
+            typed.controller = Some(ControllerRef::You);
+            TargetFilter::Typed(typed)
+        }
+        other => other,
+    }
 }
 
 fn strip_put_resolution_choice_quantifier(target_text: &str) -> (&str, Option<MultiTargetSpec>) {

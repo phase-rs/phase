@@ -197,6 +197,10 @@ pub struct TurnOrderSlotView {
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// The sole player currently authorized to answer the live prompt. Omitted
+    /// when there is no actor or multiple distinct authorized submitters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_authorized_submitter: Option<PlayerId>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -306,13 +310,27 @@ pub struct ClientGameStateRef<'a> {
 }
 
 impl<'a> ClientGameStateRef<'a> {
-    /// Wrap a borrowed `GameState` with its derived projections.
-    /// Invoke AFTER any viewer-side filtering (e.g. `filter_state_for_player`)
-    /// so the derived shape reflects what the viewer will actually see.
+    /// Wrap an unfiltered borrowed `GameState` with its derived projections.
+    /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
+    /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
         Self {
             state,
             derived: derive_views(state, viewer),
+        }
+    }
+
+    /// Wrap a viewer-filtered state while deriving rules-authoritative fields
+    /// from the pre-filter state. Filtering may redact control/session records;
+    /// it must not change who can submit the current decision.
+    pub fn wrap_filtered(
+        authoritative_state: &GameState,
+        filtered_state: &'a GameState,
+        viewer: Option<PlayerId>,
+    ) -> Self {
+        Self {
+            state: filtered_state,
+            derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
         }
     }
 }
@@ -402,7 +420,10 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
 }
 
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
-    let mut views = DerivedViews::default();
+    let mut views = DerivedViews {
+        unique_authorized_submitter: unique_authorized_submitter(state),
+        ..DerivedViews::default()
+    };
 
     // JIT short-circuit: grouping an empty stack is free, but this also
     // avoids the per-entry allocation path entirely for the dominant case
@@ -550,6 +571,26 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
     views
+}
+
+/// Derive a viewer-safe presentation from `filtered_state`, retaining only the
+/// decision-authority projection from the pre-filter rules state. This keeps
+/// rules state pure and makes repeated filtering idempotent.
+pub fn derive_filtered_views(
+    authoritative_state: &GameState,
+    filtered_state: &GameState,
+    viewer: Option<PlayerId>,
+) -> DerivedViews {
+    let mut views = derive_views(filtered_state, viewer);
+    views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views
+}
+
+fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
+    let mut submitters = crate::game::turn_control::authorized_submitters(state);
+    submitters.sort_unstable_by_key(|player| player.0);
+    submitters.dedup();
+    (submitters.len() == 1).then(|| submitters[0])
 }
 
 fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
@@ -986,6 +1027,7 @@ fn stack_trigger_context(state: &GameState, entry: &StackEntry) -> Vec<TriggerCo
 
 fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<TriggerContextDisplay> {
     match event {
+        GameEvent::HiddenSearchViewed { .. } => None,
         GameEvent::ZoneChanged {
             object_id,
             record,
@@ -1678,8 +1720,12 @@ mod tests {
         };
 
         let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
-        let json = serde_json::to_string(&ClientGameStateRef::wrap(&filtered, Some(PlayerId(1))))
-            .expect("serialize filtered opponent view");
+        let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(1)),
+        ))
+        .expect("serialize filtered opponent view");
         let client: ClientGameState = serde_json::from_str(&json).expect("deserialize client view");
         let details = client
             .derived
@@ -2382,5 +2428,117 @@ mod tests {
             !empty_json.contains("unbounded_resources"),
             "empty unbounded resources must omit the wire key"
         );
+    }
+
+    #[test]
+    fn unique_submitter_projection_uses_search_latch_and_omits_no_actor() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::game_state::{
+            ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, WaitingFor,
+        };
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        state.turn_decision_controller = Some(PlayerId(2));
+
+        assert_eq!(
+            derive_views(&state, None).unique_authorized_submitter,
+            Some(PlayerId(1))
+        );
+
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        assert_eq!(derive_views(&state, None).unique_authorized_submitter, None);
+    }
+
+    #[test]
+    fn filtered_search_views_preserve_latched_submitter_for_every_audience_role() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::game_state::{
+            ActiveLibrarySearch, ActiveSearchDecisionAuthority, ActiveSearchDecisionControl,
+            WaitingFor,
+        };
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        state.active_library_searches.insert(
+            ActiveLibrarySearch::try_new(
+                PlayerId(0),
+                PlayerId(0),
+                Some(PlayerId(0)),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("valid search"),
+        );
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        // Live turn control has changed since the search decision was latched.
+        state.turn_decision_controller = Some(PlayerId(2));
+
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+            let filtered_twice =
+                crate::game::visibility::filter_state_for_viewer(&filtered, viewer);
+            assert_eq!(filtered_twice, filtered, "filtering must be idempotent");
+            assert_eq!(
+                derive_filtered_views(&state, &filtered, Some(viewer)).unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "searcher, latched controller, and observer must share one authority projection"
+            );
+            let mut mutated_filtered = filtered.clone();
+            mutated_filtered
+                .active_search_decision_controls
+                .remove(&PlayerId(0));
+            mutated_filtered.turn_decision_controller = Some(PlayerId(2));
+            assert_eq!(
+                derive_filtered_views(&state, &mutated_filtered, Some(viewer))
+                    .unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "filtered-state mutation must not alter authoritative submission rights"
+            );
+            let wire = serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &filtered,
+                Some(viewer),
+            ))
+            .expect("serialize filtered search view");
+            assert_eq!(wire["derived"]["unique_authorized_submitter"], 1);
+        }
     }
 }

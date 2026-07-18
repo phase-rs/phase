@@ -653,6 +653,14 @@ pub struct GameObject {
     /// currently resolves the count.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 700.2a + CR 700.2d: The modal-mode indices chosen for this spell as it
+    /// was cast (ascending, with repeats per CR 700.2d), latched from
+    /// `SpellContext.chosen_modes` at cast finalize and surviving on the stack
+    /// object so cast-triggers resolving above it (Riku:
+    /// `QuantityRef::EventContextSourceModesChosen`) read the mode count. Empty
+    /// for non-modal spells.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_modes: Vec<usize>,
 
     /// CR 702.103b + CR 702.103f: `Some(_)` while this object is in the
     /// "bestowed Aura" form. Set by `apply_bestow_aura_form`; cleared per
@@ -1128,6 +1136,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         additional_cost_payment_count: _,
         additional_cost_payments: _,
         convoked_creatures: _,
+        chosen_modes: _,
         bestow_form: _,
         prototype_form: _,
         mutate_form: _,
@@ -1719,6 +1728,7 @@ impl GameObject {
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
+            chosen_modes: Vec::new(),
             bestow_form: None,
             prototype_form: None,
             mutate_form: None,
