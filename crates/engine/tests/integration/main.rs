@@ -629,6 +629,7 @@ mod mill_double_redirect_choice_continuation;
 mod mill_rest_in_peace_redirect;
 mod mimeoplasm_interactive_exile;
 mod mindblade_render_warrior_intervening_if_2867;
+mod mizzixs_mastery;
 mod mjolnir_hammer_double_damage;
 mod mogg_war_marshal_echo_dies_trigger;
 mod morbid_curiosity_cost_paid_mana_value_draw;
