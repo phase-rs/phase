@@ -11899,10 +11899,11 @@ fn clause_is_pay_to_end_effect_termination(source_text: &str) -> bool {
     )
 }
 
-pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
+pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
     let ((), _) = nom_on_lower(text, &lower, |input| {
         let (input, _) = tag("exile the top card of each player's library").parse(input)?;
@@ -11947,17 +11948,20 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
     )
     .sub_ability(grant);
 
-    let mut def = AbilityDefinition::new(
+    let mut clause = parsed_clause(Effect::ExileTop {
+        player: TargetFilter::Controller,
+        count: QuantityExpr::Fixed { value: 1 },
+        face_down: false,
+    });
+    clause.sub_ability = Some(Box::new(put_counter));
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        Effect::ExileTop {
-            player: TargetFilter::Controller,
-            count: QuantityExpr::Fixed { value: 1 },
-            face_down: false,
-        },
-    );
-    def.player_scope = Some(PlayerFilter::All);
-    def.sub_ability = Some(Box::new(put_counter));
-    Some(def)
+        clause,
+        Some(PlayerFilter::All),
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// CR 702.138a + CR 601.2f / CR 601.2g / CR 601.2h: a targeted/triggered one-shot
@@ -25069,9 +25073,6 @@ fn try_parse_chain_bypass(
     if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
         return Some(def);
     }
-    if let Some(def) = try_parse_exile_top_each_library_with_collection_counter(text, kind) {
-        return Some(def);
-    }
     if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
         return Some(def);
     }
@@ -25698,6 +25699,9 @@ pub(crate) fn parse_effect_chain_ir(
         return ir;
     }
     if let Some(ir) = parse_each_player_copy_chosen_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_exile_top_each_library_with_collection_counter_ir(text, kind, ctx) {
         return ir;
     }
     let text = strip_trailing_activation_restriction_sentence(text);
