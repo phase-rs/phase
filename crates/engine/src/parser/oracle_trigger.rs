@@ -16,7 +16,7 @@ use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::EffectChainIr;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
-use super::oracle_modal::try_parse_inline_modal;
+use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
 use super::oracle_nom::error::{oracle_err, OracleResult};
@@ -1485,11 +1485,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // parsed with the trigger's established relative_player_scope (e.g.
                 // TriggeringPlayer for DamageDone triggers) so "that player" in mode
                 // bodies resolves to the damaged player (CR 603.7c).
-                if let Some(modal_ability) = try_parse_inline_modal(
-                    &effect_for_parse,
-                    effect_ctx.relative_player_scope.clone(),
-                ) {
-                    return Some(TriggerBody::PreLowered(Box::new(modal_ability)));
+                if let Some(modal) = try_parse_inline_modal_ir(&effect_for_parse, &effect_ctx) {
+                    return Some(TriggerBody::Modal(Box::new(modal)));
                 }
                 let ir =
                     parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
@@ -1574,6 +1571,48 @@ fn mode_exposes_subject_batch(mode: &TriggerMode) -> bool {
     )
 }
 
+/// Lower a trigger body through the ordinary effect-chain transforms.
+///
+/// CR 603.5 + CR 115.1d: Typed trigger bodies with root metadata (such as an
+/// inline modal) use this same path before attaching that metadata, so the
+/// trigger's optionality and target semantics cannot diverge from a plain
+/// `EffectChain` body.
+fn lower_trigger_effect_chain(
+    chain_ir: &EffectChainIr,
+    modifiers: &TriggerModifiers,
+) -> AbilityDefinition {
+    let mut ability = lower_effect_chain_ir(chain_ir);
+    crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
+    if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
+        && matches!(
+            ability.effect.as_ref(),
+            crate::types::ability::Effect::Mana { .. }
+        )
+    {
+        ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+    }
+    // CR 115.1d: Singleton "up to one target ..." effects that lower
+    // without a `multi_target` spec still permit choosing zero targets.
+    // Do not stamp this onto non-target head clauses in chains like
+    // "draw a card. Attach any number of target Equipment ..."
+    if modifiers.has_up_to
+        && ability.multi_target.is_none()
+        && ability
+            .effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref())
+    {
+        ability.optional_targeting = true;
+    }
+    // CR 603.5: A triggered ability whose effect is optional ("may") goes
+    // on the stack regardless; the choice is made when it resolves. Carry
+    // that optionality onto the execute ability, which is what resolves.
+    if modifiers.optional {
+        ability.optional = true;
+    }
+    ability
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -1581,41 +1620,16 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // Lower the body
     let execute = match &ir.body {
         Some(TriggerBody::EffectChain(chain_ir)) => {
-            let mut ability = lower_effect_chain_ir(chain_ir);
-            crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
-            if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
-                && matches!(
-                    ability.effect.as_ref(),
-                    crate::types::ability::Effect::Mana { .. }
-                )
-            {
-                ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
-            }
-            // CR 115.1d: Singleton "up to one target ..." effects that lower
-            // without a `multi_target` spec still permit choosing zero targets.
-            // Do not stamp this onto non-target head clauses in chains like
-            // "draw a card. Attach any number of target Equipment ..."
-            if modifiers.has_up_to
-                && ability.multi_target.is_none()
-                && ability
-                    .effect
-                    .target_filter()
-                    .is_some_and(|filter| !filter.is_context_ref())
-            {
-                ability.optional_targeting = true;
-            }
-            // CR 603.5: A triggered ability whose effect is optional ("may") goes
-            // on the stack regardless; the choice is made when it resolves. Carry
-            // that optionality onto the execute ability, which is what resolves.
-            if modifiers.optional {
-                ability.optional = true;
-            }
-            Some(Box::new(ability))
+            Some(Box::new(lower_trigger_effect_chain(chain_ir, modifiers)))
         }
+        Some(TriggerBody::Modal(modal)) => Some(Box::new(
+            lower_trigger_effect_chain(&modal.marker, modifiers)
+                .with_modal(modal.choice.clone(), modal.mode_abilities.clone()),
+        )),
         Some(TriggerBody::PreLowered(ability)) => {
-            // CR 603.5: Pre-lowered bodies (inline modals, vote blocks, etc.)
-            // may not have stamped `optional` during extraction even when the
-            // trigger effect began with "you may".
+            // CR 603.5: Remaining pre-lowered bodies may not have stamped
+            // `optional` during extraction even when the trigger effect began
+            // with "you may".
             let mut ability = ability.clone();
             if modifiers.optional {
                 ability.optional = true;

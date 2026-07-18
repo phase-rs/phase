@@ -8,8 +8,8 @@ use serde::Serialize;
 
 use super::effect_chain::EffectChainIr;
 use crate::types::ability::{
-    AbilityDefinition, ControllerRef, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, UnlessPayModifier,
+    AbilityDefinition, ControllerRef, ModalChoice, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, UnlessPayModifier,
 };
 use crate::types::triggers::TriggerMode;
 
@@ -26,7 +26,7 @@ pub(crate) struct TriggerIr {
     /// Carries typed fields (`valid_card`, `origin`, `destination`, `phase`,
     /// `damage_kind`, etc.) that lowering merges into the final output.
     pub(crate) partial_def: TriggerDefinition,
-    /// The parsed effect body as an IR (or pre-lowered for vote blocks).
+    /// The parsed effect body as typed IR.
     pub(crate) body: Option<TriggerBody>,
     /// Extracted modifier fields.
     pub(crate) modifiers: TriggerModifiers,
@@ -34,14 +34,31 @@ pub(crate) struct TriggerIr {
     pub(crate) source_text: String,
 }
 
-/// The body of a trigger: either an effect chain IR (normal path) or a
-/// pre-lowered `AbilityDefinition` (vote block fallback).
+/// The body of a trigger. Whole-body recognizers retain their typed payloads
+/// here so trigger lowering owns all root-level transforms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum TriggerBody {
     /// Normal effect chain — lowering calls `lower_effect_chain_ir`.
     EffectChain(EffectChainIr),
+    /// CR 700.2: An inline modal's marker clause and its already-lowered mode
+    /// bodies. The marker still flows through ordinary trigger-chain lowering;
+    /// this payload carries the modal metadata no clause can represent.
+    Modal(Box<ModalIr>),
     /// Pre-lowered ability (vote blocks produce `AbilityDefinition` directly).
     PreLowered(Box<AbilityDefinition>),
+}
+
+/// CR 700.2: Typed inline-modal trigger body.
+///
+/// The root marker is an ordinary effect chain so trigger lowering applies the
+/// same finalization, mana-scope, optional-targeting, and optional transforms
+/// as every other trigger. `ModalChoice` and the independently parsed mode
+/// bodies are root metadata rather than a pre-lowered root definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ModalIr {
+    pub(crate) marker: EffectChainIr,
+    pub(crate) choice: ModalChoice,
+    pub(crate) mode_abilities: Vec<AbilityDefinition>,
 }
 
 /// Modifier fields extracted during IR production.
