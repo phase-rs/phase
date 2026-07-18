@@ -546,11 +546,11 @@ impl ApprovedZoneChange {
     /// and double-apply Moved definitions / redo CR 616.1 ordering.
     pub(crate) fn approve_post_replacement(
         event: ProposedEvent,
-    ) -> Result<ApprovedZoneChange, ProposedEvent> {
+    ) -> Result<ApprovedZoneChange, Box<ProposedEvent>> {
         if matches!(event, ProposedEvent::ZoneChange { .. }) {
             Ok(ApprovedZoneChange { event, _seal: () })
         } else {
-            Err(event)
+            Err(Box::new(event))
         }
     }
 
@@ -2135,20 +2135,20 @@ pub(crate) fn deliver_replaced_zone_change(
         if entered_battlefield {
             if let Some(copy) = enter_as_copy {
                 let copy = *copy;
+                let payload = crate::game::effects::become_copy::PrecomputedCopyValues {
+                    source_id: copy.source_id,
+                    controller: copy.controller,
+                    target_id: copy.source_id,
+                    duration: copy.sacrifice_at.unwrap_or(Duration::Permanent),
+                    values: *copy.values,
+                    display_source: copy.display_source,
+                    printed_ref: copy.printed_ref,
+                    token_image_ref: copy.token_image_ref,
+                    additional_modifications: copy.additional_modifications,
+                    effect_kind: EffectKind::BecomeCopy,
+                };
                 let _ = crate::game::effects::become_copy::apply_precomputed_copy_values(
-                    state,
-                    object_id,
-                    copy.source_id,
-                    copy.controller,
-                    copy.source_id,
-                    copy.sacrifice_at.unwrap_or(Duration::Permanent),
-                    *copy.values,
-                    copy.display_source,
-                    copy.printed_ref,
-                    copy.token_image_ref,
-                    copy.additional_modifications,
-                    EffectKind::BecomeCopy,
-                    events,
+                    state, object_id, payload, events,
                 );
             }
         }

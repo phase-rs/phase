@@ -1,11 +1,15 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::DisplaySource;
 use crate::game::layers::compute_current_copiable_values;
 use crate::types::ability::{
     ContinuousModification, CopiableValues, Duration, Effect, EffectError, EffectKind,
     ResolvedAbility, TargetFilter, TargetRef,
 };
+use crate::types::card::{PrintedCardRef, TokenImageRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
+use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
 pub fn resolve(
@@ -69,19 +73,34 @@ pub fn resolve(
         })
         .unwrap_or_default();
 
-    apply_copy_values_to_recipients(
-        state,
-        ability,
-        &recipient,
+    let copy = PrecomputedCopyValues {
+        source_id: ability.source_id,
+        controller: ability.controller,
         target_id,
         duration,
         values,
-        source_display_source,
-        source_printed_ref,
-        source_token_image_ref,
+        display_source: source_display_source,
+        printed_ref: source_printed_ref,
+        token_image_ref: source_token_image_ref,
         additional_modifications,
-        events,
-    )
+        effect_kind: EffectKind::from(&ability.effect),
+    };
+
+    apply_copy_values_to_recipients(state, ability, &recipient, copy, events)
+}
+
+#[derive(Clone)]
+pub(crate) struct PrecomputedCopyValues {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub target_id: ObjectId,
+    pub duration: Duration,
+    pub values: CopiableValues,
+    pub display_source: DisplaySource,
+    pub printed_ref: Option<PrintedCardRef>,
+    pub token_image_ref: Option<TokenImageRef>,
+    pub additional_modifications: Vec<ContinuousModification>,
+    pub effect_kind: EffectKind,
 }
 
 /// CR 707.2 + CR 613.1a: Install a precomputed copiable-values payload as a
@@ -90,19 +109,23 @@ pub fn resolve(
 /// values were chosen earlier in the replacement pipeline (CR 614.12a).
 pub(crate) fn apply_precomputed_copy_values(
     state: &mut GameState,
-    recipient_id: crate::types::identifiers::ObjectId,
-    source_id: crate::types::identifiers::ObjectId,
-    controller: crate::types::player::PlayerId,
-    target_id: crate::types::identifiers::ObjectId,
-    duration: Duration,
-    mut values: CopiableValues,
-    display_source: crate::game::game_object::DisplaySource,
-    printed_ref: Option<crate::types::card::PrintedCardRef>,
-    token_image_ref: Option<crate::types::card::TokenImageRef>,
-    additional_modifications: Vec<ContinuousModification>,
-    effect_kind: EffectKind,
+    recipient_id: ObjectId,
+    copy: PrecomputedCopyValues,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let PrecomputedCopyValues {
+        source_id,
+        controller,
+        target_id,
+        duration,
+        mut values,
+        display_source,
+        printed_ref,
+        token_image_ref,
+        additional_modifications,
+        effect_kind,
+    } = copy;
+
     // CR 202.1b + CR 707.9: "except it has no mana cost" is a copy-value
     // exception consumed at resolution — strip the copied mana cost from the
     // values themselves so the continuous copy carries mana value 0 on every
@@ -241,32 +264,14 @@ fn apply_copy_values_to_recipients(
     state: &mut GameState,
     ability: &ResolvedAbility,
     recipient: &TargetFilter,
-    target_id: crate::types::identifiers::ObjectId,
-    duration: Duration,
-    values: CopiableValues,
-    display_source: crate::game::game_object::DisplaySource,
-    printed_ref: Option<crate::types::card::PrintedCardRef>,
-    token_image_ref: Option<crate::types::card::TokenImageRef>,
-    additional_modifications: Vec<ContinuousModification>,
+    copy: PrecomputedCopyValues,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     match &recipient {
         // Existing single-subject cards install one copy effect on the source.
-        TargetFilter::SelfRef => apply_precomputed_copy_values(
-            state,
-            ability.source_id,
-            ability.source_id,
-            ability.controller,
-            target_id,
-            duration,
-            values,
-            display_source,
-            printed_ref,
-            token_image_ref,
-            additional_modifications,
-            EffectKind::from(&ability.effect),
-            events,
-        ),
+        TargetFilter::SelfRef => {
+            apply_precomputed_copy_values(state, ability.source_id, copy, events)
+        }
         // CR 611.2c: mass recipient set. `ParentTarget` reads the inherited
         // object target(s); a typed group filter resolves against the
         // battlefield at resolution (Niko: "Shards you control").
@@ -286,26 +291,12 @@ fn apply_copy_values_to_recipients(
                         .battlefield
                         .iter()
                         .copied()
-                        .filter(|id| matches_target_filter(state, *id, &recipient, &ctx))
+                        .filter(|id| matches_target_filter(state, *id, recipient, &ctx))
                         .collect()
                 }
             };
             for id in recipient_ids {
-                apply_precomputed_copy_values(
-                    state,
-                    id,
-                    ability.source_id,
-                    ability.controller,
-                    target_id,
-                    duration.clone(),
-                    values.clone(),
-                    display_source,
-                    printed_ref.clone(),
-                    token_image_ref.clone(),
-                    additional_modifications.clone(),
-                    EffectKind::from(&ability.effect),
-                    events,
-                )?;
+                apply_precomputed_copy_values(state, id, copy.clone(), events)?;
             }
             Ok(())
         }
