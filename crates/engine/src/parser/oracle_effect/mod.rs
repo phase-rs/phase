@@ -24769,17 +24769,20 @@ fn try_parse_repeat_process_directive(
 /// stripper peels the final clause's "if ..." and re-applies it across the whole
 /// grant. Each color keeps its own land condition, so no spurious outer condition
 /// is created.
-fn try_parse_conditional_protection_grant_ability(
+fn parse_conditional_protection_grant_ir(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> Option<EffectChainIr> {
     let clause = subject::try_parse_conditional_protection_grant_clause(text, ctx)?;
-    let mut def = AbilityDefinition::new(kind, clause.effect);
-    if let Some(duration) = clause.duration {
-        def = def.duration(duration);
-    }
-    Some(def)
+    Some(EffectChainIr::single_clause(
+        text,
+        kind,
+        clause,
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// CR 101.4 + CR 707.2 + CR 122.1: Whole-body detector for the WHO phenomena
@@ -25166,20 +25169,17 @@ pub(crate) enum ChainLoweringMode {
     WithContext,
 }
 
-/// Run the whole-body recognizers that build a definition directly, in order.
+/// U3 completion seam: dispatch any remaining whole-body recognizers in order.
 ///
-/// Returns `None` when the text falls through to the ordinary clause pipeline.
+/// The shared list is intentionally retained until U6 removes this escape hatch.
+/// Returns `None` when the text falls through to the ordinary IR pipeline.
 fn try_parse_chain_bypass(
     text: &str,
     kind: AbilityKind,
     mode: ChainLoweringMode,
-    ctx: &mut ParseContext,
+    _ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    // The remaining shared bypasses, in their established order. Only the first
-    // consults `ctx`.
-    if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
-        return Some(def);
-    }
+    // The remaining shared bypasses do not consult `ctx`.
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
         return Some(def);
     }
@@ -25210,7 +25210,31 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     def
 }
 
-fn parse_ability_ir(text: &str, kind: AbilityKind, ctx: &mut ParseContext) -> AbilityIr {
+fn parse_ability_ir(
+    text: &str,
+    kind: AbilityKind,
+    mode: ChainLoweringMode,
+    ctx: &mut ParseContext,
+) -> AbilityIr {
+    // The conditional protection recognizer may mutate `ParseContext` before
+    // declining. Preserve the two legacy entry-point semantics exactly: the
+    // standalone bypass context was fresh and discarded on decline, while the
+    // with-context entry point passed its caller context through to the ordinary
+    // chain path after a decline.
+    let conditional_protection = match mode {
+        ChainLoweringMode::Standalone => {
+            let mut bypass_ctx = ParseContext::default();
+            parse_conditional_protection_grant_ir(text, kind, &mut bypass_ctx)
+        }
+        ChainLoweringMode::WithContext => parse_conditional_protection_grant_ir(text, kind, ctx),
+    };
+    if let Some(body) = conditional_protection {
+        return AbilityIr {
+            source_text: text.to_string(),
+            body,
+            shell: AbilityShellIr::default(),
+        };
+    }
     if let Some(body) = parse_balance_equalization_ir(text, kind, ctx) {
         return AbilityIr {
             source_text: text.to_string(),
@@ -25240,7 +25264,12 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     ) {
         return def;
     }
-    lower_ability_ir(&parse_ability_ir(text, kind, &mut ParseContext::default()))
+    lower_ability_ir(&parse_ability_ir(
+        text,
+        kind,
+        ChainLoweringMode::Standalone,
+        &mut ParseContext::default(),
+    ))
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
@@ -25254,7 +25283,12 @@ pub(crate) fn parse_effect_chain_with_context(
     if let Some(def) = try_parse_chain_bypass(text, kind, ChainLoweringMode::WithContext, ctx) {
         return def;
     }
-    lower_ability_ir(&parse_ability_ir(text, kind, ctx))
+    lower_ability_ir(&parse_ability_ir(
+        text,
+        kind,
+        ChainLoweringMode::WithContext,
+        ctx,
+    ))
 }
 
 /// CR 701.24a + CR 701.58a/e + CR 608.2c: Expose the Culprit mode 2 — "Exile any

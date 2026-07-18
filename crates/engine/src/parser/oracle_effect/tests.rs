@@ -14152,6 +14152,29 @@ fn grant_graveyard_keyword_ir_declines_self_mana_cost_siblings() {
     assert!(def.sub_ability.is_none());
 }
 
+#[test]
+fn conditional_protection_grant_routes_through_ability_ir() {
+    let def = parse_effect_chain(
+        "Until end of turn, creatures you control gain protection from white if you control a Plains, from blue if you control an Island, from black if you control a Swamp, from red if you control a Mountain, and from green if you control a Forest.",
+        AbilityKind::Spell,
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "expected conditional protection grant, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(static_abilities.len(), 5);
+    assert!(def.sub_ability.is_none());
+}
+
 /// The extracted keyword-word → kind combinator (deduplicated with the static
 /// `each … has <kw>` clause) recognizes every graveyard-cast keyword.
 #[test]
