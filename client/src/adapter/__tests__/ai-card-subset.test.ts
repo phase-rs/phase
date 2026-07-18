@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadAiPoolCardDb } from "../card-db-subset";
-import type { EngineWorkerClient } from "../engine-worker-client";
+import { applyAiPoolCardDbPlan, resolveAiPoolCardDbPlan } from "../card-db-subset";
+import { EngineWorkerClient } from "../engine-worker-client";
 import type { AiWorkerPool } from "../ai-worker-pool";
 
 // The mocked EngineWorkerClient is shared by both the main engine and every AI
@@ -30,8 +30,8 @@ vi.mock("../engine-worker-client", () => ({
   }),
 }));
 
-// ── VM-4: loadAiPoolCardDb dispatch ───────────────────────────────────────
-describe("loadAiPoolCardDb", () => {
+// ── VM-4: plan resolution + application ───────────────────────────────────
+describe("resolveAiPoolCardDbPlan / applyAiPoolCardDbPlan", () => {
   function makeMocks() {
     const mainEngine = {
       buildAiCardSubset: vi.fn<() => Promise<string>>(),
@@ -48,36 +48,44 @@ describe("loadAiPoolCardDb", () => {
     return { mainEngine, aiPool };
   }
 
-  it("escalates a Momir game (kind:full) to the full DB, never the subset", async () => {
-    const { mainEngine, aiPool } = makeMocks();
+  it("resolves an unbounded universe (kind:full, e.g. Momir) without touching any pool", async () => {
+    const { mainEngine } = makeMocks();
     mainEngine.buildAiCardSubset.mockResolvedValue(JSON.stringify({ kind: "full" }));
 
-    await loadAiPoolCardDb("subset", mainEngine, aiPool);
+    const plan = await resolveAiPoolCardDbPlan("subset", mainEngine);
 
-    expect(aiPool.loadCardDb).toHaveBeenCalledOnce();
-    expect(aiPool.loadCardDbText).not.toHaveBeenCalled();
+    // The caller must skip creating (or dispose) the pool instead of fanning
+    // the full corpus (~380MB WASM linear memory per worker) across workers.
+    expect(plan).toEqual({ kind: "unbounded" });
   });
 
-  it("loads the subset JSON for a bounded (non-Momir) game", async () => {
+  it("resolves and applies the subset for a bounded (non-Momir) game", async () => {
     const { mainEngine, aiPool } = makeMocks();
     const innerJson = '{"Bounded Card":{}}';
     mainEngine.buildAiCardSubset.mockResolvedValue(
       JSON.stringify({ kind: "subset", json: innerJson, count: 1 }),
     );
 
-    await loadAiPoolCardDb("subset", mainEngine, aiPool);
+    const plan = await resolveAiPoolCardDbPlan("subset", mainEngine);
+    expect(plan).toEqual({ kind: "subset", json: innerJson });
+    if (plan.kind === "unbounded") throw new Error("unreachable");
 
+    await applyAiPoolCardDbPlan(plan, aiPool);
     expect(aiPool.loadCardDbText).toHaveBeenCalledWith(innerJson);
     expect(aiPool.loadCardDb).not.toHaveBeenCalled();
   });
 
-  it("mode=full loads the full DB without consulting the engine", async () => {
+  it("mode=full resolves without consulting the engine and applies the full DB", async () => {
     const { mainEngine, aiPool } = makeMocks();
 
-    await loadAiPoolCardDb("full", mainEngine, aiPool);
-
-    expect(aiPool.loadCardDb).toHaveBeenCalledOnce();
+    const plan = await resolveAiPoolCardDbPlan("full", mainEngine);
+    // Explicit user opt-in to the memory cost — the pool is kept.
+    expect(plan).toEqual({ kind: "full" });
     expect(mainEngine.buildAiCardSubset).not.toHaveBeenCalled();
+    if (plan.kind === "unbounded") throw new Error("unreachable");
+
+    await applyAiPoolCardDbPlan(plan, aiPool);
+    expect(aiPool.loadCardDb).toHaveBeenCalledOnce();
     expect(aiPool.loadCardDbText).not.toHaveBeenCalled();
   });
 });
@@ -132,5 +140,44 @@ describe("WasmAdapter AI-pool subset lifecycle", () => {
     // leaves the pool loaded with subset A, so both assertions flip.
     expect(loadedB).toContain("Game B Card");
     expect(loadedB).not.toContain("Game A Card");
+  });
+
+  it("drops the pool for an unbounded game (Momir) and restores it next game", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    mockWorkerClient.buildAiCardSubset
+      .mockResolvedValueOnce(JSON.stringify({ kind: "full" }))
+      .mockResolvedValueOnce(
+        JSON.stringify({ kind: "subset", json: '{"Bounded Card":{}}', count: 1 }),
+      );
+    mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    await adapter.warmCardDatabase();
+    const workersBefore = vi.mocked(EngineWorkerClient).mock.calls.length;
+
+    // Momir game: the plan resolves to `unbounded` BEFORE any pool worker is
+    // spawned — no new EngineWorkerClient instances are created, and the AI
+    // answers via the single-worker path.
+    const action = await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(action).toEqual({ type: "PassPriority" });
+    expect(vi.mocked(EngineWorkerClient).mock.calls.length).toBe(workersBefore);
+    // Revert guard: without the unbounded branch the pool is created and the
+    // scored-candidates path answers instead of engine.getAiAction.
+    expect(mockWorkerClient.getAiAction).toHaveBeenCalled();
+
+    // Second decision in the same game: the pool is NOT recreated just to
+    // escalate again — the subset build ran exactly once.
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(1);
+
+    // Next game is bounded: the pool comes back with that game's subset.
+    await adapter.resetGameState();
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(2);
+    const calls = mockWorkerClient.loadCardDb.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[calls.length - 1][0] as string).toContain("Bounded Card");
   });
 });
