@@ -6649,7 +6649,7 @@ fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     .parse(input)
 }
 
-fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
     // CR 301.5 + CR 702.6: host-relative subjects ("equipped creature",
     // "enchanted creature") resolve to the attached object before the generic
     // typed-source grammar, which would otherwise treat "creature" as a type.
@@ -6689,8 +6689,20 @@ fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
     let mut props = Vec::new();
 
     let mut tail = tail.trim();
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control").parse(tail) {
+    // CR 609.7b: controller-axis restriction on the damage source.
+    // "you don't control" and "an opponent controls" both mean the source's
+    // controller is not the shield controller — for a single-controller object
+    // these are equivalent to `ControllerRef::Opponent` (Comeuppance: "by
+    // sources you don't control"). "you control" is `ControllerRef::You`
+    // (a self-source restriction). Most specific ("don't") first.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you don't control").parse(tail) {
+        filter = filter.controller(ControllerRef::Opponent);
+        tail = rest.trim();
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control").parse(tail) {
         filter = filter.controller(ControllerRef::You);
+        tail = rest.trim();
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an opponent controls").parse(tail) {
+        filter = filter.controller(ControllerRef::Opponent);
         tail = rest.trim();
     }
 
@@ -6837,12 +6849,14 @@ fn damage_target_opponent() -> DamageTargetFilter {
 fn damage_target_opponent_or_permanents() -> DamageTargetFilter {
     DamageTargetFilter::PlayerOrPermanentsControlledBy {
         player: DamageTargetPlayerScope::Opponent,
+        permanent_type: None,
     }
 }
 
 fn damage_target_source_chosen_player_or_permanents() -> DamageTargetFilter {
     DamageTargetFilter::PlayerOrPermanentsControlledBy {
         player: DamageTargetPlayerScope::SourceChosenPlayer,
+        permanent_type: None,
     }
 }
 
@@ -10189,17 +10203,105 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
 /// own sentence, so the prevention resolver installs it as the shield's
 /// `runtime_execute` instead of dropping it (New Way Forward, Phyrexian
 /// Vindicator, Outfitted Jouster).
+#[cfg(test)]
 pub(crate) fn clause_is_prevented_this_way_rider(fragment: &str) -> bool {
-    preceded(
+    prevented_this_way_rider_source_gate(fragment).is_some()
+}
+
+/// CR 615.5 + CR 120.1: Classify a `"(When|Whenever|If) damage [from a[n]
+/// `<type>` source] is prevented this way, …"` rider and, when present, extract
+/// its source-type gate.
+///
+/// Returns:
+/// - `None` — the clause is not a prevented-this-way rider.
+/// - `Some(None)` — the bare rider ("damage is prevented this way"); fires for
+///   any prevented damage (New Way Forward, Channel Harm, Deflecting Palm).
+/// - `Some(Some(filter))` — the qualified rider ("damage from a creature source
+///   is prevented this way" / "from a noncreature source …"), gated on the
+///   prevented event's damage-source type (Comeuppance's two reflection riders).
+///   The gate is a `TargetFilter` the assembler lowers to
+///   `AbilityCondition::PostReplacementDamageSourceMatchesFilter`.
+///
+/// Composed nom combinators — the type word is a single `alt()` axis reusing the
+/// same `noncreature`/core-type spellings as the damage-source head grammar.
+pub(crate) fn prevented_this_way_rider_source_gate(fragment: &str) -> Option<Option<TargetFilter>> {
+    let (rest, _) = preceded(
         alt((
             tag_no_case::<_, _, OracleError<'_>>("when "),
             tag_no_case::<_, _, OracleError<'_>>("whenever "),
             tag_no_case::<_, _, OracleError<'_>>("if "),
         )),
-        tag_no_case::<_, _, OracleError<'_>>("damage is prevented this way,"),
+        tag_no_case::<_, _, OracleError<'_>>("damage"),
     )
     .parse(fragment.trim_start())
-    .is_ok()
+    .ok()?;
+
+    // Qualified form: "... from a[n] <type> source is prevented this way,".
+    if let Ok((after_source, type_filter)) = parse_prevented_source_type_qualifier(rest) {
+        if tag::<_, _, OracleError<'_>>(" is prevented this way,")
+            .parse(after_source)
+            .is_ok()
+        {
+            return Some(Some(TargetFilter::Typed(
+                TypedFilter::default().with_type(type_filter),
+            )));
+        }
+        return None;
+    }
+
+    // Bare form: "damage is prevented this way,".
+    tag::<_, _, OracleError<'_>>(" is prevented this way,")
+        .parse(rest)
+        .is_ok()
+        .then_some(None)
+}
+
+/// CR 120.1 + CR 205.2a: Parse the " from a[n] `<type>` source" qualifier on a
+/// prevented-this-way rider into a `TypeFilter`. "noncreature" negates via
+/// `TypeFilter::Non`; core types map directly. Mirrors the head-noun spellings
+/// of the `DamageDone` source grammar (`oracle_trigger.rs`).
+fn parse_prevented_source_type_qualifier(input: &str) -> OracleResult<'_, TypeFilter> {
+    let (input, _) = tag(" from a").parse(input)?;
+    let (input, _) = opt(tag("n")).parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    let (input, type_filter) = alt((
+        value(
+            TypeFilter::Non(Box::new(TypeFilter::Creature)),
+            tag("noncreature"),
+        ),
+        value(TypeFilter::Creature, tag("creature")),
+        value(TypeFilter::Artifact, tag("artifact")),
+        value(TypeFilter::Enchantment, tag("enchantment")),
+        value(TypeFilter::Planeswalker, tag("planeswalker")),
+        value(TypeFilter::Land, tag("land")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" source").parse(input)?;
+    Ok((input, type_filter))
+}
+
+/// CR 615.5 + CR 120.1: In a prevented-this-way rider, the reflection anaphor
+/// "that creature"/"that source" lowers to `TargetFilter::TriggeringSource` (the
+/// spell-side chain has no trigger event to bind it). It refers to the prevented
+/// event's damage SOURCE object, so rewrite it to
+/// `TargetFilter::PostReplacementDamageSource`. Invoked only on a qualified
+/// source-type rider (Comeuppance's creature-source reflection), so no bare
+/// prevented-this-way rider that legitimately carries a `TriggeringSource` is
+/// affected.
+pub(crate) fn rewrite_triggering_source_to_post_replacement_damage_source(
+    def: &mut AbilityDefinition,
+) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::TriggeringSource) {
+            *f = TargetFilter::PostReplacementDamageSource;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_triggering_source_to_post_replacement_damage_source(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_triggering_source_to_post_replacement_damage_source(else_branch);
+    }
 }
 
 /// CR 614.1a: Parse event substitution replacement effects.
@@ -12642,6 +12744,47 @@ mod tests {
         assert!(!clause_is_prevented_this_way_rider("You draw a card."));
     }
 
+    /// CR 615.5 + CR 120.1: the source-type-qualified rider forms (Comeuppance)
+    /// classify as riders AND yield a source-type gate; the bare form yields no
+    /// gate; the unqualified Deflecting Palm form (bare) is unchanged.
+    #[test]
+    fn prevented_this_way_rider_gate_extracts_source_type() {
+        // Qualified: creature source → gate on Creature.
+        let creature = prevented_this_way_rider_source_gate(
+            "If damage from a creature source is prevented this way, \
+             Comeuppance deals that much damage to that creature.",
+        );
+        let Some(Some(TargetFilter::Typed(tf))) = creature else {
+            panic!("expected creature-source gate, got {creature:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+
+        // Qualified: noncreature source → gate on Non(Creature).
+        let noncreature = prevented_this_way_rider_source_gate(
+            "If damage from a noncreature source is prevented this way, \
+             Comeuppance deals that much damage to the source's controller.",
+        );
+        let Some(Some(TargetFilter::Typed(tf))) = noncreature else {
+            panic!("expected noncreature-source gate, got {noncreature:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Non(Box::new(TypeFilter::Creature))]
+        );
+
+        // Bare form (Channel Harm, Deflecting Palm): rider, but no source gate.
+        assert_eq!(
+            prevented_this_way_rider_source_gate(
+                "If damage is prevented this way, you may have Channel Harm \
+                 deal that much damage to target creature."
+            ),
+            Some(None)
+        );
+
+        // Not a rider at all.
+        assert!(prevented_this_way_rider_source_gate("You draw a card.").is_none());
+    }
+
     /// CR 615.5 + CR 609.7 (issue #5658): New Way Forward's separate-sentence
     /// "When damage is prevented this way, …" rider must fold into the preceding
     /// prevention as a `ContinuationStep` (so `prevent_damage.rs` installs it as
@@ -12677,6 +12820,229 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 615 + CR 615.5 + CR 120.1: Comeuppance parses fully — compound
+    /// recipient, controller-axis source filter, and TWO source-type-gated
+    /// reflection riders (creature → the source object; noncreature → the
+    /// source's controller) — with NO swallowed-clause warning.
+    #[test]
+    fn comeuppance_full_card_parses_two_gated_reflection_riders() {
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::card_type::CoreType;
+
+        let parsed = parse_oracle_text(
+            "Prevent all damage that would be dealt to you and planeswalkers you control \
+             this turn by sources you don't control. If damage from a creature source is \
+             prevented this way, Comeuppance deals that much damage to that creature. If \
+             damage from a noncreature source is prevented this way, Comeuppance deals \
+             that much damage to the source's controller.",
+            "Comeuppance",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "Comeuppance must parse with no warnings; got {:?}",
+            parsed.parse_warnings
+        );
+
+        let prevent = &parsed.abilities[0];
+        let Effect::PreventDamage {
+            target,
+            damage_source_filter,
+            ..
+        } = &*prevent.effect
+        else {
+            panic!("expected PreventDamage, got {:?}", prevent.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: Some(CoreType::Planeswalker)
+            }
+        );
+        assert!(matches!(
+            damage_source_filter,
+            Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::Opponent)
+        ));
+
+        // Rider 1 (creature source): gated on Creature, reflects to the source.
+        let rider1 = prevent
+            .sub_ability
+            .as_ref()
+            .expect("creature rider present");
+        assert_eq!(rider1.sub_link, SubAbilityLink::ContinuationStep);
+        assert!(matches!(
+            rider1.condition.as_ref(),
+            Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                filter: TargetFilter::Typed(tf)
+            }) if tf.type_filters == vec![TypeFilter::Creature]
+        ));
+        assert!(matches!(
+            &*rider1.effect,
+            Effect::DealDamage {
+                target: TargetFilter::PostReplacementDamageSource,
+                ..
+            }
+        ));
+
+        // Rider 2 (noncreature source): gated on Non(Creature), reflects to the
+        // source's controller.
+        let rider2 = rider1
+            .sub_ability
+            .as_ref()
+            .expect("noncreature rider present");
+        assert_eq!(rider2.sub_link, SubAbilityLink::ContinuationStep);
+        assert!(matches!(
+            rider2.condition.as_ref(),
+            Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                filter: TargetFilter::Typed(tf)
+            }) if tf.type_filters == vec![TypeFilter::Non(Box::new(TypeFilter::Creature))]
+        ));
+        assert!(matches!(
+            &*rider2.effect,
+            Effect::DealDamage {
+                target: TargetFilter::PostReplacementSourceController,
+                ..
+            }
+        ));
+    }
+
+    /// CR 615 + CR 609.7b: Channel Harm carries the compound recipient AND the
+    /// controller-axis source filter that were both silently dropped before this
+    /// change; its bare "you may have …" rider stays a ContinuationStep with no
+    /// source-type gate (regression: Gap A + Gap B on the second consumer).
+    #[test]
+    fn channel_harm_carries_compound_recipient_and_source_filter() {
+        let parsed = parse_oracle_text(
+            "Prevent all damage that would be dealt to you and permanents you control \
+             this turn by sources you don't control. If damage is prevented this way, \
+             you may have Channel Harm deal that much damage to target creature.",
+            "Channel Harm",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let Effect::PreventDamage {
+            target,
+            damage_source_filter,
+            ..
+        } = &*parsed.abilities[0].effect
+        else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: None
+            },
+            "Channel Harm's \"you and permanents you control\" is unrestricted"
+        );
+        assert!(
+            matches!(
+                damage_source_filter,
+                Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::Opponent)
+            ),
+            "Channel Harm's \"by sources you don't control\" filter must not be dropped"
+        );
+        // The bare rider has no source-type gate (it is not qualified).
+        let rider = parsed.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("Channel Harm rider present");
+        assert!(
+            rider.condition.is_none()
+                || !matches!(
+                    rider.condition.as_ref(),
+                    Some(crate::types::ability::AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })
+                ),
+            "bare rider must not carry a source-type gate"
+        );
+    }
+
+    /// CR 615.5: Deflecting Palm's unqualified rider parse is unchanged — a bare
+    /// prevented-this-way rider that reflects to the source's controller, with no
+    /// source-type gate (regression guard for the qualifier extension).
+    #[test]
+    fn deflecting_palm_unqualified_rider_unchanged() {
+        use crate::types::ability::SubAbilityLink;
+        let parsed = parse_oracle_text(
+            "The next time a source of your choice would deal damage to you this turn, \
+             prevent that damage. If damage is prevented this way, Deflecting Palm deals \
+             that much damage to that source's controller.",
+            "Deflecting Palm",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let prevent = &parsed.abilities[0];
+        assert!(matches!(*prevent.effect, Effect::PreventDamage { .. }));
+        let rider = prevent.sub_ability.as_ref().expect("rider present");
+        assert_eq!(rider.sub_link, SubAbilityLink::ContinuationStep);
+        assert!(
+            rider.condition.is_none(),
+            "Deflecting Palm's bare rider carries no source-type gate"
+        );
+        assert!(matches!(
+            &*rider.effect,
+            Effect::DealDamage {
+                target: TargetFilter::PostReplacementSourceController,
+                ..
+            }
+        ));
+    }
+
+    /// CR 608.2c + CR 615.5: when a source-type-gated reflection rider ALSO
+    /// carries a co-existing game-state condition, the parser must conjoin both —
+    /// the source-type gate is composed onto the existing condition via
+    /// `merge_ability_condition`, never substituted for it. Regression guard for
+    /// the "gate dropped when a condition already exists" bug (Finding L1). Uses a
+    /// synthetic-but-grammatical Comeuppance-class line (no printed card carries
+    /// both today) in the existing parser-test style.
+    #[test]
+    fn gated_reflection_rider_conjoins_coexisting_condition() {
+        use crate::types::ability::AbilityCondition;
+        let parsed = parse_oracle_text(
+            "Prevent all damage that would be dealt to you this turn by sources you \
+             don't control. If damage from a creature source is prevented this way, \
+             if you control an artifact, Comeuppance deals that much damage to that \
+             creature.",
+            "Comeuppance",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let rider = parsed.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("gated rider present");
+        let Some(AbilityCondition::And { conditions }) = rider.condition.as_ref() else {
+            panic!(
+                "expected the gate conjoined with the co-existing condition, got {:?}",
+                rider.condition
+            );
+        };
+        // BOTH survive: the source-type gate AND the embedded game-state condition.
+        assert!(
+            conditions.iter().any(|c| matches!(
+                c,
+                AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                    filter: TargetFilter::Typed(tf)
+                } if tf.type_filters == vec![TypeFilter::Creature]
+            )),
+            "the creature-source gate must be one conjunct; got {conditions:?}"
+        );
+        assert!(
+            conditions.iter().any(|c| !matches!(
+                c,
+                AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            )),
+            "the co-existing 'if you control an artifact' condition must survive as a \
+             conjunct; got {conditions:?}"
+        );
     }
 
     #[test]

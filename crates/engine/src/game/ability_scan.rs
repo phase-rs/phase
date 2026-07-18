@@ -2299,6 +2299,16 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
+        // CR 615.5: gates on the prevented event's damage source — an event read.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_target_filter(filter));
+            acc
+        }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             filter,
             origin: _,
@@ -2550,6 +2560,12 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 615.5: resolves the prevented event's damage source — an event read.
+        TargetFilter::PostReplacementDamageSource => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TargetFilter::PostReplacementDamageTarget => Axes {
             event: true,
             sibling: false,
@@ -2576,6 +2592,8 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         TargetFilter::Named { name: _ } => Axes::NONE,
         TargetFilter::Owner => Axes::NONE,
         TargetFilter::AllPlayers => Axes::NONE,
+        // CR 615: controller-relative compound recipient — no event/sibling axes.
+        TargetFilter::ControllerAndControlledPermanents { .. } => Axes::NONE,
     }
 }
 

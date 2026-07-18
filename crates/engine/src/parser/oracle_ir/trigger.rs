@@ -51,10 +51,6 @@ pub(crate) enum TriggerBody {
     Vote(Box<VoteIr>),
     /// CR 700.3: A pile-separation block retains its semantic root effect.
     Pile(Box<PileIr>),
-    #[allow(dead_code)]
-    /// P05-U4 completion: no construction sites remain. U6 owns removal of
-    /// this transitional variant and its lowering arm.
-    PreLowered(Box<AbilityDefinition>),
 }
 
 /// CR 700.2: Typed inline-modal trigger body.

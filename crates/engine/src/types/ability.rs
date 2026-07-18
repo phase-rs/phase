@@ -4560,6 +4560,21 @@ pub enum TargetFilter {
     Any,
     Player,
     Controller,
+    /// CR 615 + CR 614.1a: Compound damage recipient "you and [type] permanents
+    /// you control" (Comeuppance's "you and planeswalkers you control"; Channel
+    /// Harm's "you and permanents you control"). A PARSE-LAYER recipient
+    /// reference only: it exists to carry the compound player+permanent recipient
+    /// through `Effect::PreventDamage.target` serialization, and is lowered at
+    /// shield-creation time (`prevent_damage.rs::untargeted_damage_filter`) into
+    /// the dedicated `DamageTargetFilter::PlayerOrPermanentsControlledBy`. It is
+    /// never routed to the object-only `valid_card` slot (the player leg would be
+    /// dropped) — `typed_recipient_valid_card_filter` returns `None` for it and
+    /// `untargeted_damage_filter` always yields `Some`. `permanent_type` restricts
+    /// the permanent leg (`Some(Planeswalker)` for Comeuppance; `None` = any
+    /// permanent you control).
+    ControllerAndControlledPermanents {
+        permanent_type: Option<CoreType>,
+    },
     /// CR 102.2 + CR 102.3 + CR 601.2c: A player reference to an opponent of the
     /// ability's controller, used as the announcing player (`target_chooser`) for
     /// a slot whose Oracle text reads "of an opponent's choice". The casting
@@ -4859,6 +4874,20 @@ pub enum TargetFilter {
     /// controller" can stay consolidated in `parse_target` for non-prevention
     /// callers.
     PostReplacementSourceController,
+    /// CR 615.5 + CR 120.1: Resolves to the *object* that was the damage source
+    /// of the prevented event. Event-driven analog of a self/parent object
+    /// reference, exactly as `PostReplacementSourceController` is the
+    /// event-driven analog of a controller reference. Reads
+    /// `state.post_replacement_event_source()` and returns it as
+    /// `TargetRef::Object`. Used by reflection follow-ups that deal the
+    /// prevented damage back to the source itself — "Comeuppance deals that much
+    /// damage to that creature" (Comeuppance), where "that creature" is the
+    /// prevented event's creature damage source (CR 120.1: an object that deals
+    /// damage is the source of that damage). Distinct from
+    /// `PostReplacementSourceController` (its controller, a player) — this
+    /// returns the source object itself. Returns `None` outside the
+    /// post-replacement window.
+    PostReplacementDamageSource,
     /// CR 615.5: Resolves to the player or permanent that was the target of the
     /// prevented damage event. Used by prevention follow-up sentences such as
     /// "that player exiles that many cards" where the affected player is the
@@ -13588,8 +13617,14 @@ impl TargetFilter {
                 | TargetFilter::ParentTargetOwner
                 | TargetFilter::SourceChosenPlayer
                 | TargetFilter::PostReplacementSourceController
+                // CR 615.5: the prevented event's damage source (reflection
+                // target) and the compound "you and permanents you control"
+                // recipient are both resolved at resolution / shield-match time,
+                // never declared as player-chosen target slots.
+                | TargetFilter::PostReplacementDamageSource
                 | TargetFilter::PostReplacementDamageTarget
                 | TargetFilter::PostReplacementDamageTargetOwner
+                | TargetFilter::ControllerAndControlledPermanents { .. }
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
         )
@@ -17074,6 +17109,22 @@ pub enum AbilityCondition {
     /// the ability's source object matches the filter. Used by leveler-style cards
     /// (e.g. Figure of Fable) where each activated ability gates on the source's current type.
     SourceMatchesFilter { filter: TargetFilter },
+    /// CR 615.5 + CR 120.1: Post-replacement analog of `SourceMatchesFilter`.
+    /// Matches the *prevented event's damage source object* (read from
+    /// `state.post_replacement_event_source()`) against `filter`, instead of the
+    /// ability's own source. Gates a prevention rider on the type of the source
+    /// whose damage was just prevented — "If damage from a creature source is
+    /// prevented this way, …" (Comeuppance's two reflection riders).
+    ///
+    /// Deliberately a SIBLING of `SourceMatchesFilter`, not a parameterization of
+    /// it: the subject lies in a DIFFERENT CR section (CR 615.5 prevention-event
+    /// context vs CR 608.2c/603.4 source-bound intervening-if), so per the
+    /// categorical-boundary rule the leaf-reference layer must not unify them.
+    /// This mirrors the established source-vs-event split already modeled by the
+    /// parallel `TriggerCondition` enum (`SourceMatchesFilter` vs
+    /// `EventDamageSourceMatchesFilter`). Evaluated at rider-fire time, when the
+    /// post-replacement continuation drains and the source snapshot is populated.
+    PostReplacementDamageSourceMatchesFilter { filter: TargetFilter },
     /// CR 603.4 + CR 603.6 + CR 603.10: In a trigger-body condition, match the
     /// object from the current zone-change trigger event against a filter. ETB
     /// conditions check the live object in its destination zone; death/LTB
@@ -19554,8 +19605,18 @@ pub enum DamageTargetFilter {
     /// "to a player" / "to that player" / "to an opponent"
     Player { player: DamageTargetPlayerScope },
     /// "to an opponent or a permanent an opponent controls" /
-    /// "to that player or a permanent that player controls".
-    PlayerOrPermanentsControlledBy { player: DamageTargetPlayerScope },
+    /// "to that player or a permanent that player controls" /
+    /// "to you and planeswalkers you control".
+    ///
+    /// CR 614.1a: `permanent_type` optionally restricts the permanent leg to a
+    /// single card type — `Some(Planeswalker)` for Comeuppance ("you and
+    /// planeswalkers you control"), `None` for the unrestricted "you/that player
+    /// and permanents they control" (Channel Harm, the opponent-redirect cycle).
+    /// The player leg is always matched regardless of this restriction.
+    PlayerOrPermanentsControlledBy {
+        player: DamageTargetPlayerScope,
+        permanent_type: Option<CoreType>,
+    },
 }
 
 /// CR 614.1a: Restricts whether a damage replacement applies to combat, noncombat, or all damage.

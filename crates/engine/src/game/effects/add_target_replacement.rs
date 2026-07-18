@@ -259,6 +259,7 @@ pub fn resolve(
                         replacement.damage_target_filter =
                             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                                 player: DamageTargetPlayerScope::Specific(player),
+                                permanent_type: None,
                             });
                     }
                     state.pending_damage_replacements.push(replacement);
@@ -467,7 +468,8 @@ mod tests {
         assert_eq!(
             pending.damage_target_filter,
             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                player: DamageTargetPlayerScope::Specific(PlayerId(1))
+                player: DamageTargetPlayerScope::Specific(PlayerId(1)),
+                permanent_type: None,
             })
         );
         assert_eq!(

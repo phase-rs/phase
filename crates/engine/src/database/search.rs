@@ -102,7 +102,10 @@ impl CardDatabase {
         // (relevance rank, lowercased name for tiebreak, result)
         let mut matched: Vec<(u8, String, CardSearchResult)> = Vec::new();
 
-        for (key, face) in self.face_index.iter() {
+        for key in &self.search_face_keys {
+            let Some(face) = self.face_index.get(key) else {
+                continue;
+            };
             let name_lower = face.name.to_lowercase();
 
             if !words.is_empty() && !self.text_matches(&name_lower, face, &words) {
@@ -146,9 +149,10 @@ impl CardDatabase {
                 }
             }
 
-            // Deduplicate multi-face cards: keep the first matching face per
-            // oracle id. The frontend re-derives the combined display name from
-            // the image map, so which face won here doesn't affect display.
+            // CR 712.8a: Outside the game or in a zone other than the
+            // battlefield or stack, a double-faced card has only its front-face
+            // characteristics. Deduplicate multi-face cards by oracle id while
+            // scanning the precomputed front-face order.
             if let Some(oracle_id) = face.scryfall_oracle_id.as_deref() {
                 if !seen_oracle.insert(oracle_id) {
                     continue;
@@ -160,7 +164,7 @@ impl CardDatabase {
             } else {
                 1
             };
-            matched.push((rank, name_lower, self.build_result(key, face)));
+            matched.push((rank, name_lower, self.build_result(key.as_str(), face)));
         }
 
         let total = matched.len();
@@ -603,6 +607,55 @@ mod tests {
         });
         assert_eq!(res.results.len(), 1, "both faces share an oracle id");
         assert_eq!(res.total, 1);
+    }
+
+    #[test]
+    fn transform_dfc_search_dedupes_to_exported_front_face() {
+        let mut front = card(
+            "The Legend of Kyoshi",
+            "o-kyoshi",
+            &["Green", "Green"],
+            4,
+            "Enchantment",
+            &["Green"],
+            "Exile this Saga, then return it to the battlefield transformed under your control.",
+            json!({ "standard": "legal" }),
+            &["TLA"],
+        );
+        front["layout"] = json!("transform");
+        front["face_index"] = json!(0);
+        let mut back = card(
+            "Avatar Kyoshi",
+            "o-kyoshi",
+            &[],
+            0,
+            "Creature",
+            &["Green"],
+            "Lands you control have trample and hexproof.",
+            json!({ "standard": "legal" }),
+            &["TLA"],
+        );
+        back["mana_cost"] = json!({ "type": "NoCost" });
+        back["layout"] = json!("transform");
+        back["face_index"] = json!(1);
+
+        let db = db_from(&[("avatar kyoshi", back), ("the legend of kyoshi", front)]);
+
+        let res = db.search(&CardSearchQuery {
+            text: "avatar kyoshi".into(),
+            ..Default::default()
+        });
+        assert_eq!(res.results.len(), 1);
+        assert_eq!(
+            result_names(&res),
+            vec!["The Legend of Kyoshi"],
+            "CR 712.8a: transform DFCs are represented by their front face outside the battlefield"
+        );
+        assert_eq!(
+            db.get_face_by_oracle_id("o-kyoshi")
+                .map(|face| face.name.as_str()),
+            Some("The Legend of Kyoshi")
+        );
     }
 
     #[test]

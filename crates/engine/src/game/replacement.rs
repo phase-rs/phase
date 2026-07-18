@@ -1299,6 +1299,56 @@ fn shield_has_per_event_execute_followup(state: &GameState, rid: ReplacementId) 
     repl.is_some_and(|r| r.execute.is_some() && r.runtime_execute.is_none())
 }
 
+/// CR 615.5 + CR 120.1: True when a prevention `runtime_execute` rider reflects
+/// against the PER-EVENT prevented damage source — a `PostReplacementDamageSource`
+/// reflection target or a `PostReplacementDamageSourceMatchesFilter` source-type
+/// gate (Comeuppance). Such riders cannot ride the aggregate combat-batch path
+/// (which only pins a single chosen source), so this excludes them from
+/// `batched_combat_all_shield` and routes them through the per-event stash where
+/// each prevented event supplies its own damage source. Walks the whole rider
+/// chain.
+fn rider_reflects_per_event_damage_source(rider: &ResolvedAbility) -> bool {
+    if matches!(
+        &rider.condition,
+        Some(
+            crate::types::ability::AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        )
+    ) {
+        return true;
+    }
+    let mut effect = rider.effect.clone();
+    let mut found = false;
+    crate::parser::oracle_effect::each_target_filter_mut(&mut effect, &mut |f| {
+        if matches!(f, TargetFilter::PostReplacementDamageSource) {
+            found = true;
+        }
+    });
+    if found {
+        return true;
+    }
+    rider
+        .sub_ability
+        .as_deref()
+        .is_some_and(rider_reflects_per_event_damage_source)
+}
+
+/// CR 615.5 + CR 120.1: True when the shield identified by `rid` carries a
+/// per-event-source-reflecting `runtime_execute` rider (Comeuppance). Such a
+/// shield must NOT aggregate into the combat batch tally — it fires per prevented
+/// event so each reflection binds to its own damage source and prevented amount.
+fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> bool {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    repl.and_then(|r| r.runtime_execute.as_deref())
+        .is_some_and(rider_reflects_per_event_damage_source)
+}
+
 /// CR 614.9: Read back the captured chosen-object recipient stashed in the
 /// matched replacement's `redirect_target` field (set at resolution time for
 /// `DamageRedirectTarget::ChosenObjectTarget` — "to target creature").
@@ -1658,6 +1708,10 @@ fn damage_done_applier(
     };
 
     let applied_key = AppliedReplacementKey::for_event(&event, rid);
+    // CR 615.5 + CR 120.1: A per-source-reflecting shield (Comeuppance) must NOT
+    // aggregate into the combat batch tally — it fires per prevented event so
+    // each reflection binds its own damage source and prevented amount.
+    let reflects_per_event = shield_rider_reflects_per_event(state, rid);
     if let Some(ShieldKind::Prevention { amount }) = shield_kind {
         if let ProposedEvent::Damage {
             source_id,
@@ -1733,9 +1787,11 @@ fn damage_done_applier(
                     // prevented amount into the per-shield aggregate keyed by
                     // `rid`. The single rider firing happens post-batch in
                     // `combat_damage.rs` against the summed total.
-                    if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                        *tally.entry(applied_key).or_insert(0) += prevented_amount as i32;
-                        accumulated_in_batch = true;
+                    if !reflects_per_event {
+                        if let Some(tally) = state.combat_prevention_tally.as_mut() {
+                            *tally.entry(applied_key).or_insert(0) += prevented_amount as i32;
+                            accumulated_in_batch = true;
+                        }
                     }
                 }
                 PreventionAmount::AllBut(keep) => {
@@ -4614,12 +4670,22 @@ fn matches_damage_target_filter(
             }
             TargetRef::Object(_) => false,
         },
-        DamageTargetFilter::PlayerOrPermanentsControlledBy { player } => match target {
+        DamageTargetFilter::PlayerOrPermanentsControlledBy {
+            player,
+            permanent_type,
+        } => match target {
             TargetRef::Player(pid) => {
                 player_scope_matches(player, *pid, repl_controller, repl_source, state)
             }
+            // CR 614.1a: the permanent leg matches only permanents controlled by
+            // the scoped player AND, when `permanent_type` is set, of that card
+            // type (Comeuppance protects "planeswalkers you control", not every
+            // permanent you control).
             TargetRef::Object(oid) => state.objects.get(oid).is_some_and(|obj| {
                 player_scope_matches(player, obj.controller, repl_controller, repl_source, state)
+                    && permanent_type
+                        .as_ref()
+                        .is_none_or(|ct| obj.card_types.core_types.contains(ct))
             }),
         },
         DamageTargetFilter::CreatureOnly => match target {
@@ -7005,8 +7071,23 @@ fn apply_single_replacement(
             // `runtime_execute`. These must fire per-event inline so the event
             // target (`PostReplacementDamageTarget`) is correctly populated for
             // each victim creature. Do NOT suppress their stash.
+            // CR 615.5 + CR 120.1: A rider that reflects PER SOURCE (Comeuppance:
+            // "if damage from a creature source is prevented this way, deal that
+            // much damage to that creature") cannot ride the aggregate batch path
+            // — `fire_combat_prevention_riders` only pins a single CHOSEN source
+            // (`shield_specific_source`), so a class-scoped `damage_source_filter`
+            // leaves the drain's `event_source` unset and the per-source
+            // reflection/gate never resolves. Such riders must fire per-event so
+            // each prevented event stashes its own damage source. The gate
+            // condition `PostReplacementDamageSourceMatchesFilter` (and/or a
+            // `PostReplacementDamageSource` reflection target) is the per-source
+            // marker; Inkshield/New Way Forward carry neither and keep batching.
             let batched_combat_all_shield = state.combat_prevention_tally.is_some()
                 && repl_def.runtime_execute.is_some()
+                && !repl_def
+                    .runtime_execute
+                    .as_deref()
+                    .is_some_and(rider_reflects_per_event_damage_source)
                 && matches!(
                     repl_def.shield_kind,
                     ShieldKind::Prevention {
@@ -13373,6 +13454,7 @@ mod tests {
             ))
             .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Opponent,
+                permanent_type: None,
             });
 
         // Hawkeye = ObjectId(10), controlled by P0, power 2.
@@ -13662,6 +13744,7 @@ mod tests {
         })
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
+            permanent_type: None,
         });
         // Replacement on P0's object
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
@@ -13686,6 +13769,7 @@ mod tests {
         })
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
+            permanent_type: None,
         });
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
@@ -13710,6 +13794,7 @@ mod tests {
         })
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
+            permanent_type: None,
         });
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
@@ -13745,6 +13830,7 @@ mod tests {
         let repl = damage_repl(DamageModification::Double).damage_target_filter(
             DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::SourceChosenPlayer,
+                permanent_type: None,
             },
         );
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
@@ -13786,6 +13872,7 @@ mod tests {
         let repl = damage_repl(DamageModification::Double).damage_target_filter(
             DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::SourceChosenPlayer,
+                permanent_type: None,
             },
         );
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);

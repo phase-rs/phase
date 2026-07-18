@@ -4314,7 +4314,21 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     // input (matches the convention used by `parse_earthbend_params`'s sole
     // imperative caller, which passes a `rest_lower` slice).
     let lower_rest = rest.to_ascii_lowercase();
-    let (target, counter_count) = imperative::parse_earthbend_count_expr(tp.original, &lower_rest);
+    // CR 107.3: an "earthbend X, where X is …" body naming a quantity the shared
+    // parsers don't recognize yet returns `None`. Emitting the Animate +
+    // PutCounter chain with a fabricated `Variable{X}` (→ 0 for a triggered
+    // ability) would report the card as supported while applying the wrong
+    // counter count — a well-typed lie. Surface an honest strict-failure gap so
+    // coverage counts the card as unsupported until the quantity is handled.
+    // (matthewevans review, PR #5881.)
+    let Some((target, counter_count)) =
+        imperative::parse_earthbend_count_expr(tp.original, &lower_rest)
+    else {
+        return Some(parsed_clause(Effect::unimplemented(
+            "where_x_binding",
+            tp.original.to_string(),
+        )));
+    };
 
     let register_bending = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -14257,6 +14271,18 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         }
     }
 
+    // CR 707.12 + CR 707.12a + CR 118.9: "Copy <exiled-card anaphor>, and you may
+    // cast the copy without paying its mana cost" (Mizzix's Mastery) — the copy and
+    // its coordinated free-cast tail are a single printed clause glued by a comma
+    // conjunction. Split it into the copy half (CopySpell) plus the shared cast
+    // half (CastFromZone) so `fold_cast_copy_of_card_defs` fuses them, exactly as
+    // the period-split two-sentence form (Mnemonic Deluge) already does. Must run
+    // before the generic compound/copy paths, which would otherwise swallow the
+    // cast tail.
+    if let Some(clause) = try_split_copy_cast_compound(text, ctx) {
+        return clause;
+    }
+
     // Compound shuffle subjects: "shuffle ~ and target creature ... into their owners' libraries"
     // Must come before try_split_targeted_compound because "shuffle" is the verb, not the subject.
     if let Some(clause) = try_parse_compound_shuffle(text) {
@@ -16490,6 +16516,99 @@ fn parse_bare_damage_continuation<'a>(
         },
         rem,
     ))
+}
+
+/// CR 707.12 + CR 707.12a + CR 118.9: "Copy `<exiled-card anaphor>`, and you may
+/// cast the copy without paying its mana cost" — Mizzix's Mastery's single-sentence
+/// copy-then-cast idiom. The comma conjunction glues the copy instruction to its
+/// coordinated free-cast tail; the chunk splitter keeps the whole thing as one
+/// clause because it sits inside the `for each … , ` iteration prefix (which
+/// suppresses internal splitting). Left alone, the copy path parses "copy it" and
+/// silently drops the cast tail.
+///
+/// This splits the clause into the two halves the period-split two-sentence form
+/// (Mnemonic Deluge: "Copy that card three times. You may cast the copies …")
+/// already produces as separate chunks: a `CopySpell` primary plus a `CastFromZone`
+/// sub-ability. The cast half is produced by the shared `try_parse_cast_effect`, so
+/// it is byte-identical to the two-sentence form's cast clause. Assembly promotes
+/// the sub-ability to a sibling def, and `fold_cast_copy_of_card_defs` (Case 2)
+/// fuses the `CopySpell{ParentTarget}` + `CastFromZone{ParentTarget, without_paying,
+/// Cast}` pair into the single `Effect::CastCopyOfCard` engine primitive. The parser
+/// never constructs `CastCopyOfCard` directly — the fold remains the one fusion
+/// authority. A bare "copy it" with no coordinated cast tail fails the connector
+/// match and falls through to the plain `CopySpell` path (Fork / Reverberate class).
+/// Copy head + coordinating connector for [`try_split_copy_cast_compound`].
+/// Composed one `alt` per axis: the copy-object exiled-card anaphor, then the
+/// comma/bare `and` conjunction (CR 608.2c) that coordinates the cast tail. The
+/// returned remainder is the lowercase cast half.
+fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("copy ").parse(input)?;
+    let (input, _) = alt((
+        tag("those exiled cards"),
+        tag("the copies"),
+        tag("those cards"),
+        tag("that card"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((tag(", and "), tag(" and "))).parse(input)?;
+    Ok((input, ()))
+}
+
+fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+
+    // Copy head + coordinating connector; the remainder is the cast half (lowercase).
+    let (tail_lower, ()) = parse_copy_cast_head_connector(&lower).ok()?;
+
+    // The cast half must reference the copy just made — never fuse an unrelated
+    // "cast <other>" conjunct.
+    if !scan_contains_phrase(tail_lower, "the copy")
+        && !scan_contains_phrase(tail_lower, "the copies")
+    {
+        return None;
+    }
+
+    // CR 118.9 + CR 707.12: delegate to the shared cast parser so the emitted
+    // `CastFromZone` is identical to the period-split two-sentence form's cast
+    // clause (which the fold already fuses). Only the free-cast-of-a-copy form
+    // qualifies for fusion.
+    let cast_effect = try_parse_cast_effect(tail_lower, ctx)?;
+    if !matches!(
+        &cast_effect,
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    // CR 707.10: the copy half. `ParentTarget` is required for the fold's Case 2 —
+    // it binds to the cards exiled by the preceding clause (the same shape the
+    // two-sentence "copy it" clause produces).
+    let copy_effect = Effect::CopySpell {
+        target: TargetFilter::ParentTarget,
+        retarget: CopyRetargetPermission::KeepOriginalTargets,
+        copier: None,
+        additional_modifications: Vec::new(),
+        starting_loyalty_from_casualty_sacrifice: false,
+    };
+
+    let sub_ability = AbilityDefinition::new(AbilityKind::Spell, cast_effect);
+    Some(ParsedEffectClause {
+        effect: copy_effect,
+        duration: None,
+        sub_ability: Some(Box::new(sub_ability)),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
 }
 
 fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
@@ -25223,12 +25342,11 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
     }
 }
 
-/// Which whole-body entry-point mode a chain-lowering call runs.
+/// Which whole-body entry-point mode an ability-IR parse runs.
 ///
-/// `try_parse_chain_bypass` is intentionally empty after U3c, but the two entry
-/// points still do **not** run the same whole-body recognizer set. The difference
-/// is carried here as typed data rather than duplicated as two hand-maintained
-/// `if let` stacks:
+/// The two entry points do **not** run the same whole-body recognizer set. The
+/// difference is carried here as typed data rather than duplicated as two
+/// hand-maintained `if let` stacks:
 ///
 /// | mode | whole-body recognizers | context |
 /// |---|---|---|
@@ -25251,27 +25369,6 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
 pub(crate) enum ChainLoweringMode {
     Standalone,
     WithContext,
-}
-
-/// U3 completion seam: retain the now-empty bypass dispatcher until U6 deletes
-/// this escape hatch.
-///
-/// `ChainLoweringMode` remains the typed mode gate for the WithContext-only cloak
-/// IR producer in `parse_ability_ir`; removing either here would silently absorb
-/// the documented mode-asymmetry bug fix into this parity migration.
-/// Returns `None` so every recognizer lowers through ordinary ability IR.
-fn try_parse_chain_bypass(
-    _text: &str,
-    _kind: AbilityKind,
-    mode: ChainLoweringMode,
-    _ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
-    // U3c completed the shared list and the formerly mode-exclusive cloak
-    // recognizer. Keep explicit arms: a future entry point must choose its mode.
-    match mode {
-        ChainLoweringMode::Standalone => None,
-        ChainLoweringMode::WithContext => None,
-    }
 }
 
 /// Lowering: assemble an `AbilityDefinition` from an `AbilityIr`.
@@ -25355,16 +25452,6 @@ fn parse_ability_ir(
 }
 
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    // A fresh context per call, exactly as before: the bypasses may mutate `ctx`
-    // before declining, and those mutations must not reach `parse_effect_chain_ir`.
-    if let Some(def) = try_parse_chain_bypass(
-        text,
-        kind,
-        ChainLoweringMode::Standalone,
-        &mut ParseContext::default(),
-    ) {
-        return def;
-    }
     lower_ability_ir(&parse_ability_ir(
         text,
         kind,
@@ -25381,9 +25468,6 @@ pub(crate) fn parse_effect_chain_with_context(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    if let Some(def) = try_parse_chain_bypass(text, kind, ChainLoweringMode::WithContext, ctx) {
-        return def;
-    }
     lower_ability_ir(&parse_ability_ir(
         text,
         kind,

@@ -81,13 +81,48 @@ test("toDataPoint prepends the envelope blobs and sets the single index", () => 
   );
   const point = toDataPoint(e);
   assert.deepEqual(point.indexes, ["chunk_reload"]);
-  // blobs: [event, app_version, build_hash, platform, ...schema.blobs]
-  assert.deepEqual(point.blobs, ["chunk_reload", "0.42.1", "02b26c3", "web", "preload-error", "c.js"]);
+  // blobs: [event, app_version, build_hash, platform, ...schema.blobs].
+  // Absent probe_* fields project as ""/0 in their appended positions.
+  assert.deepEqual(point.blobs, [
+    "chunk_reload",
+    "0.42.1",
+    "02b26c3",
+    "web",
+    "preload-error",
+    "c.js",
+    "",
+    "",
+  ]);
   // deferred=true coerces to 1.
-  assert.deepEqual(point.doubles, [1]);
+  assert.deepEqual(point.doubles, [1, 0, 0]);
   assert.equal(point.indexes.length, 1);
   assert.ok(point.blobs.length <= 20);
   assert.ok(point.doubles.length <= 20);
+});
+
+test("chunk_reload probe fields land in the appended columns", () => {
+  const [e] = sanitizeTelemetryBatch(
+    batch([
+      {
+        event: "chunk_reload",
+        reason: "loop-abort",
+        deferred: false,
+        chunk: "Failed to fetch dynamically imported module: https://x/a.js",
+        probe_cache: "HIT",
+        probe_ray: "8f3a2-SJC",
+        probe_status: 200,
+        probe_sw: 1,
+      },
+    ]),
+  );
+  const point = toDataPoint(e);
+  assert.deepEqual(point.blobs.slice(4), [
+    "loop-abort",
+    "Failed to fetch dynamically imported module: https://x/a.js",
+    "HIT",
+    "8f3a2-SJC",
+  ]);
+  assert.deepEqual(point.doubles, [0, 200, 1]);
 });
 
 test("unknown events are dropped, not errors", () => {

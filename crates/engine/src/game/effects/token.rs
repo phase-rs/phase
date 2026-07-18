@@ -1072,31 +1072,7 @@ pub(crate) fn apply_copiable_values_to_liminal_object(
     object.printed_ref = printed_ref.clone();
     object.base_printed_ref = printed_ref;
     object.token_image_ref = token_image_ref;
-    object.name = values.name.clone();
-    object.base_name = values.name.clone();
-    object.mana_cost = values.mana_cost.clone();
-    object.base_mana_cost = values.mana_cost.clone();
-    object.base_color = values.color.clone();
-    object.color = values.color.clone();
-    object.base_card_types = values.card_types.clone();
-    object.card_types = values.card_types.clone();
-    object.base_power = values.power;
-    object.power = values.power;
-    object.base_toughness = values.toughness;
-    object.toughness = values.toughness;
-    object.base_loyalty = values.loyalty;
-    object.loyalty = values.loyalty;
-    object.base_keywords = values.keywords.clone();
-    object.keywords = values.keywords.clone();
-    object.base_abilities = Arc::clone(&values.abilities);
-    object.abilities = Arc::clone(&values.abilities);
-    object.base_trigger_definitions = Arc::clone(&values.trigger_definitions);
-    object.trigger_definitions = Arc::clone(&values.trigger_definitions).into();
-    object.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
-    object.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
-    object.base_static_definitions = Arc::clone(&values.static_definitions);
-    object.static_definitions = Arc::clone(&values.static_definitions).into();
-    object.base_characteristics_initialized = true;
+    crate::game::printed_cards::install_copiable_values_as_base(object, values);
 }
 
 pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
@@ -3191,14 +3167,18 @@ mod tests {
         build_resolved_from_def, build_resolved_from_def_with_targets,
     };
     use crate::game::engine::apply_as_current;
+    use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::zones::create_object;
+    use crate::types::ability::TriggerDefinition;
     use crate::types::actions::GameAction;
     use crate::types::card_type::CardType;
     use crate::types::game_state::WaitingFor;
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+    use std::sync::Arc;
 
     // ── Parser unit tests ───────────────────────────────────────────────
 
@@ -3211,6 +3191,39 @@ mod tests {
         assert!(a.core_types.contains(&CoreType::Creature));
         assert_eq!(a.colors, vec![ManaColor::White]);
         assert_eq!(a.subtypes, vec!["Soldier"]);
+    }
+
+    #[test]
+    fn liminal_copy_token_trigger_state_serializes() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Trigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_trigger_definitions =
+                Arc::new(vec![TriggerDefinition::new(TriggerMode::ChangesZone)]);
+            source.materialize_base_trigger_definitions();
+        }
+        let values = intrinsic_copiable_values(state.objects.get(&source_id).unwrap());
+        let (token_id, mut token) =
+            reserve_liminal_token_object(&mut state, PlayerId(0), values.name.clone());
+        token.is_token = true;
+        apply_copiable_values_to_liminal_object(
+            &mut token,
+            &values,
+            DisplaySource::Token,
+            None,
+            None,
+        );
+        state.objects.insert(token_id, token);
+
+        serde_json::to_string(&state)
+            .expect("a liminal copy token with triggered abilities must serialize");
     }
 
     #[test]

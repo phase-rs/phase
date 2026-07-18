@@ -13491,6 +13491,91 @@ fn earthbend_x_where_x_is_experience_counters() {
     );
 }
 
+/// CR 701.66a + CR 107.3: The Boulder, Ready to Rumble — "earthbend X, where X
+/// is the number of creatures you control with power 4 or greater" (issue
+/// #4729). End-to-end synthesis: the animated land must be a land (target
+/// "target land you control", NOT `TargetFilter::Any`), and the PutCounter
+/// count must be the typed object count that preserves the "power 4 or greater"
+/// restriction — not the bare `Variable{X}` that resolved to 0.
+#[test]
+fn earthbend_x_where_x_is_object_count_with_power_restriction() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        Comparator, ControllerRef, FilterProp, PtStat, QuantityExpr, QuantityRef, TargetFilter,
+        TypeFilter,
+    };
+
+    let def = parse_effect_chain(
+        "Earthbend X, where X is the number of creatures you control with power 4 or greater.",
+        crate::types::ability::AbilityKind::Spell,
+    );
+
+    // The animated land must remain a land you control, not degrade to Any.
+    match &*def.effect {
+        Effect::Animate { target, .. } => {
+            assert!(
+                matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Land)),
+                "earthbend should animate a land you control, got {target:?}"
+            );
+        }
+        other => panic!("outer effect should be Animate, got {other:?}"),
+    }
+
+    let put_counters = def
+        .sub_ability
+        .as_deref()
+        .expect("Animate should have a PutCounter sub_ability");
+    match &*put_counters.effect {
+        Effect::PutCounter { count, .. } => {
+            let QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } = count
+            else {
+                panic!("PutCounter count should be a typed ObjectCount, got {count:?}");
+            };
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected a Typed object-count filter, got {filter:?}");
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        comparator: Comparator::GE,
+                        ..
+                    }
+                )),
+                "the 'power 4 or greater' restriction must survive synthesis: {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("Expected PutCounter, got {other:?}"),
+    }
+}
+
+/// CR 107.3: an earthbend "where X is …" clause naming a quantity the shared
+/// parsers don't recognize yet must surface as a strict-failure
+/// `Effect::Unimplemented` gap — NOT the Animate + PutCounter chain with a
+/// fabricated `Variable{X}` (→ 0 for a triggered ability), which would report
+/// the card as supported while applying the wrong counter count.
+/// (matthewevans review, PR #5881.)
+#[test]
+fn earthbend_x_where_x_is_unrecognized_quantity_is_unimplemented() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+
+    let def = parse_effect_chain(
+        "Earthbend X, where X is the number of glorbs you frobnicate.",
+        crate::types::ability::AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "an unrecognized earthbend where-clause must be an honest unimplemented gap, got {:?}",
+        def.effect
+    );
+}
+
 #[test]
 fn search_put_onto_battlefield_tapped() {
     use crate::parser::oracle_effect::parse_effect_chain;

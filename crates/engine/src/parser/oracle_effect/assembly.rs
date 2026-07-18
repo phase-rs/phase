@@ -1745,18 +1745,24 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 SubAbilityLink::ContinuationStep
             }
         };
-        // CR 615.5: A "(When|Whenever|If) damage is prevented this way, …" rider
-        // is printed as its own sentence but is not an independent instruction —
-        // its "this way" back-reference binds to the preceding prevention. Detect
-        // it (only when the previous clause is the prevention it references) so the
-        // clause is folded into that prevention rather than dropped as a sibling.
-        let is_prevented_this_way_rider = matches!(
-            defs.last().map(|d| &*d.effect),
-            Some(Effect::PreventDamage { .. })
-        )
-            && crate::parser::oracle_replacement::clause_is_prevented_this_way_rider(
+        // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is
+        // prevented this way, …" rider is printed as its own sentence but is not
+        // an independent instruction — its "this way" back-reference binds to the
+        // prevention in the chain. Detect it (only when the chain root is that
+        // prevention — `any` covers Comeuppance's TWO riders, whose second rider's
+        // immediate predecessor is the first rider, not the PreventDamage) so the
+        // clause is folded into the prevention rather than dropped as a sibling.
+        let prevented_this_way_gate = if defs
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
+        {
+            crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(
                 clause_ir.source.fragment().unwrap_or_default(),
-            );
+            )
+        } else {
+            None
+        };
+        let is_prevented_this_way_rider = prevented_this_way_gate.is_some();
         // The Sentence boundary would mark the rider `SequentialSibling`, which the
         // prevention resolver never installs as the shield's `runtime_execute` (the
         // payoff silently does nothing — New Way Forward, Phyrexian Vindicator,
@@ -2053,6 +2059,35 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 crate::parser::oracle_replacement::rewrite_parent_target_controller_to_post_replacement_source(
                     current,
                 );
+            }
+            // CR 615.5 + CR 120.1: A source-type-qualified rider ("if damage from
+            // a creature source is prevented this way, …" — Comeuppance) gates the
+            // reflection on the prevented event's source type and reflects to that
+            // source object. Attach the gate as
+            // `PostReplacementDamageSourceMatchesFilter` and rewrite the "that
+            // creature"/"that source" anaphor (`TriggeringSource`) to
+            // `PostReplacementDamageSource`. The bare rider (`Some(None)`) keeps
+            // its existing unconditional behavior.
+            if let Some(Some(gate_filter)) = &prevented_this_way_gate {
+                for current in &mut current_defs {
+                    crate::parser::oracle_replacement::rewrite_triggering_source_to_post_replacement_damage_source(
+                        current,
+                    );
+                    // CR 608.2c: The reflection gate is conjoined with any
+                    // co-existing rider condition, not substituted for it — a rider
+                    // that already carries a game-state condition (e.g. an embedded
+                    // "if you control …") must satisfy BOTH. Compose through the
+                    // single-authority `merge_ability_condition` building block so
+                    // the gate is never silently dropped when a condition is present.
+                    let gate =
+                        crate::types::ability::AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                            filter: gate_filter.clone(),
+                        };
+                    current.condition = Some(crate::parser::oracle::merge_ability_condition(
+                        current.condition.take(),
+                        gate,
+                    ));
+                }
             }
         }
 

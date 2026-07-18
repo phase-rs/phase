@@ -520,6 +520,7 @@ fn sawhorn_nemesis_damage_replacement_scopes_to_source_chosen_player() {
         replacement.damage_target_filter,
         Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::SourceChosenPlayer,
+            permanent_type: None,
         })
     );
 }

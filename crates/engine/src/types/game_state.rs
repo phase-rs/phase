@@ -4146,13 +4146,24 @@ pub enum CombatTaxContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CombatTaxPending {
+    /// CR 508.1k + CR 400.7: the paused attack declaration snapshots each proposed
+    /// attacker and band member as an `ObjectIncarnationRef`, not a bare `ObjectId`.
+    /// On accept, only refs whose incarnation still matches the live object (and
+    /// which remain controlled by the attacking team) become attackers — a creature
+    /// that left and re-entered the battlefield during the tax pause is a new object
+    /// (CR 400.7) and is dropped. Legacy saves that stored bare `ObjectId` numbers
+    /// deserialize through `ObjectIncarnationRefCompat::Legacy` (→ `LEGACY_INCARNATION`),
+    /// which never matches a live incarnation, so those stale attackers are also dropped.
     Attack {
-        attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+        attacks: Vec<(
+            crate::types::identifiers::ObjectIncarnationRef,
+            crate::game::combat::AttackTarget,
+        )>,
         /// CR 702.22c: attacking-band declarations captured alongside the
         /// attacks so the resume path (after combat-tax payment) stamps
-        /// `band_id` via `declare_attackers_with_bands` and groups the band for
-        /// blocking (CR 702.22h).
-        bands: Vec<Vec<ObjectId>>,
+        /// `band_id` via `commit_attack_declaration_from_snapshot` and groups the
+        /// band for blocking (CR 702.22h).
+        bands: Vec<Vec<crate::types::identifiers::ObjectIncarnationRef>>,
     },
     Block {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -5156,6 +5167,15 @@ pub enum WaitingFor {
         valid_attacker_ids: Vec<ObjectId>,
         #[serde(default)]
         valid_attack_targets: Vec<crate::game::combat::AttackTarget>,
+        /// CR 508.1a–d: engine-authoritative per-attacker legal `AttackTarget`s.
+        /// `None` = legacy serialized state (consumers fall back to the aggregate
+        /// `valid_attack_targets`). `Some(map)` = authoritative; a missing attacker
+        /// key means "no legal targets" (no fallback). New prompts always emit
+        /// `Some` — computed by the same engine constraints model that enforces
+        /// legality in `validate_attack_declaration`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        valid_attack_targets_by_attacker:
+            Option<HashMap<ObjectId, Vec<crate::game::combat::AttackTarget>>>,
         /// CR 508.1c / CR 508.1d: per-creature combat requirement/restriction
         /// (must-attack / can't-attack) for display badges and Confirm gating.
         /// Display-only — computed by `combat::attacker_constraints_for_active_player`,
@@ -15224,6 +15244,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::DeclareBlockers {
