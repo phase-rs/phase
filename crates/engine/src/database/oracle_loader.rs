@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::database::bracket_lists::BracketSignals;
 use crate::database::card_db::{
-    build_name_alias_index, collect_creature_type_vocabulary, CardDatabase,
+    build_name_alias_index, build_search_face_keys, collect_creature_type_vocabulary, CardDatabase,
 };
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::load_atomic_cards;
@@ -134,12 +134,14 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
     }
 
     let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
+    let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
     Ok(CardDatabase {
         cards,
         name_alias_index: build_name_alias_index(face_index.keys()),
         face_index,
         oracle_id_index,
         face_order_index,
+        search_face_keys,
         layout_index,
         legalities,
         printings_index: HashMap::new(),
@@ -167,7 +169,9 @@ fn runtime_layout_kind(layout_kind: LayoutKind) -> Option<crate::types::card::La
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::search::CardSearchQuery;
     use std::path::Path;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn load_from_mtgjson_test_fixture() {
@@ -183,5 +187,59 @@ mod tests {
         let bolt = db.get_face_by_name("Lightning Bolt").unwrap();
         assert_eq!(bolt.name, "Lightning Bolt");
         assert!(bolt.oracle_text.is_some());
+    }
+
+    #[test]
+    fn load_from_mtgjson_transform_dfc_search_uses_front_face_order() {
+        let fixture = NamedTempFile::new().expect("temporary AtomicCards fixture");
+        std::fs::write(
+            fixture.path(),
+            r#"{
+                "data": {
+                    "The Legend of Kyoshi // Avatar Kyoshi": [
+                        {
+                            "name": "The Legend of Kyoshi",
+                            "colors": ["G"],
+                            "colorIdentity": ["G"],
+                            "layout": "transform",
+                            "types": ["Enchantment"],
+                            "subtypes": ["Saga"],
+                            "supertypes": ["Legendary"],
+                            "manaCost": "{4}{G}{G}",
+                            "manaValue": 6.0,
+                            "text": "",
+                            "identifiers": { "scryfallOracleId": "o-kyoshi-raw" }
+                        },
+                        {
+                            "name": "Avatar Kyoshi",
+                            "colors": ["G"],
+                            "colorIdentity": ["G"],
+                            "layout": "transform",
+                            "types": ["Creature"],
+                            "subtypes": ["Avatar"],
+                            "manaValue": 0.0,
+                            "text": "",
+                            "identifiers": { "scryfallOracleId": "o-kyoshi-raw" }
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write AtomicCards fixture");
+
+        let db = load_from_mtgjson(fixture.path()).expect("raw MTGJSON fixture loads");
+
+        assert_eq!(
+            db.get_face_by_oracle_id("o-kyoshi-raw")
+                .map(|face| face.name.as_str()),
+            Some("The Legend of Kyoshi")
+        );
+
+        let results = db.search(&CardSearchQuery {
+            text: "avatar kyoshi".into(),
+            ..Default::default()
+        });
+        assert_eq!(results.total, 1);
+        assert_eq!(results.results[0].name, "The Legend of Kyoshi");
     }
 }

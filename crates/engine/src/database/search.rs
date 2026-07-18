@@ -102,29 +102,10 @@ impl CardDatabase {
         // (relevance rank, lowercased name for tiebreak, result)
         let mut matched: Vec<(u8, String, CardSearchResult)> = Vec::new();
 
-        let mut face_entries: Vec<_> = self.face_index.iter().collect();
-        face_entries.sort_by(|(left_key, left_face), (right_key, right_face)| {
-            let left_oracle = left_face.scryfall_oracle_id.as_deref().unwrap_or("");
-            let right_oracle = right_face.scryfall_oracle_id.as_deref().unwrap_or("");
-            left_oracle
-                .cmp(right_oracle)
-                .then_with(|| {
-                    self.face_order_index
-                        .get(left_key.as_str())
-                        .copied()
-                        .unwrap_or(usize::MAX)
-                        .cmp(
-                            &self
-                                .face_order_index
-                                .get(right_key.as_str())
-                                .copied()
-                                .unwrap_or(usize::MAX),
-                        )
-                })
-                .then_with(|| left_key.cmp(right_key))
-        });
-
-        for (key, face) in face_entries {
+        for key in &self.search_face_keys {
+            let Some(face) = self.face_index.get(key) else {
+                continue;
+            };
             let name_lower = face.name.to_lowercase();
 
             if !words.is_empty() && !self.text_matches(&name_lower, face, &words) {
@@ -168,10 +149,10 @@ impl CardDatabase {
                 }
             }
 
-            // Deduplicate multi-face cards: keep the front face per oracle id
-            // when the export carries face order. The chosen face still matters
-            // for deck addition when the presentation sidecar is missing, and it
-            // must be the physical front face for transform DFCs (CR 712.8a).
+            // CR 712.8a: Outside the game or in a zone other than the
+            // battlefield or stack, a double-faced card has only its front-face
+            // characteristics. Deduplicate multi-face cards by oracle id while
+            // scanning the precomputed front-face order.
             if let Some(oracle_id) = face.scryfall_oracle_id.as_deref() {
                 if !seen_oracle.insert(oracle_id) {
                     continue;
