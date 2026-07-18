@@ -110,6 +110,7 @@ fn declared_exercises_appear_in_attribution() {
         attribution: AttributionMode::Enabled,
         git_sha: None,
         card_data_hash: None,
+        harvest_output: None,
     };
     let report = run_suite(&db, &opts).expect("suite run");
 
