@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-07-17T00:00:00Z",
+  "updated": "2026-07-18T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -163,24 +163,28 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Mishra's Bauble"
+          "count": 2,
+          "name": "Arcbound Ravager"
+        },
+        {
+          "count": 1,
+          "name": "Krang, Master Mind"
         },
         {
           "count": 1,
           "name": "Pithing Needle"
         },
         {
-          "count": 4,
-          "name": "Urza's Saga"
-        },
-        {
-          "count": 4,
-          "name": "Pinnacle Emissary"
-        },
-        {
           "count": 2,
           "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Engineered Explosives"
+        },
+        {
+          "count": 4,
+          "name": "Skateboard"
         },
         {
           "count": 4,
@@ -191,20 +195,48 @@
           "name": "Mox Opal"
         },
         {
+          "count": 1,
+          "name": "Shadowspear"
+        },
+        {
+          "count": 1,
+          "name": "Welding Jar"
+        },
+        {
+          "count": 1,
+          "name": "Aether Spellbomb"
+        },
+        {
+          "count": 4,
+          "name": "Mishra's Bauble"
+        },
+        {
+          "count": 4,
+          "name": "Pinnacle Emissary"
+        },
+        {
+          "count": 3,
+          "name": "Sink into Stupor"
+        },
+        {
+          "count": 4,
+          "name": "Weapons Manufacturing"
+        },
+        {
           "count": 3,
           "name": "Tormod's Crypt"
         },
         {
-          "count": 3,
-          "name": "Claws of Gix"
+          "count": 4,
+          "name": "Spirebluff Canal"
         },
         {
-          "count": 1,
-          "name": "Krang, Master Mind"
-        },
-        {
-          "count": 1,
+          "count": 2,
           "name": "Steam Vents"
+        },
+        {
+          "count": 2,
+          "name": "Emry, Lurker of the Loch"
         },
         {
           "count": 3,
@@ -212,73 +244,21 @@
         },
         {
           "count": 2,
-          "name": "Arcbound Ravager"
-        },
-        {
-          "count": 2,
-          "name": "Welding Jar"
-        },
-        {
-          "count": 1,
-          "name": "Shadowspear"
-        },
-        {
-          "count": 2,
-          "name": "Emry, Lurker of the Loch"
-        },
-        {
-          "count": 4,
-          "name": "Engineered Explosives"
-        },
-        {
-          "count": 2,
           "name": "Fiery Islet"
         },
         {
-          "count": 2,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 1,
-          "name": "Skateboard"
-        },
-        {
           "count": 4,
-          "name": "Spirebluff Canal"
+          "name": "Urza's Saga"
         },
         {
-          "count": 4,
-          "name": "Weapons Manufacturing"
-        },
-        {
-          "count": 2,
-          "name": "Shivan Reef"
+          "count": 3,
+          "name": "Claws of Gix"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Galvanic Blast"
-        },
-        {
           "count": 1,
-          "name": "Grafdigger's Cage"
-        },
-        {
-          "count": 2,
-          "name": "Blood Moon"
-        },
-        {
-          "count": 2,
-          "name": "Whipflare"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
+          "name": "Vexing Bauble"
         },
         {
           "count": 2,
@@ -286,7 +266,31 @@
         },
         {
           "count": 1,
-          "name": "Swan Song"
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Blood Moon"
+        },
+        {
+          "count": 2,
+          "name": "Force of Negation"
+        },
+        {
+          "count": 2,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 1,
+          "name": "Grafdigger's Cage"
+        },
+        {
+          "count": 2,
+          "name": "Whipflare"
+        },
+        {
+          "count": 2,
+          "name": "Galvanic Blast"
         }
       ]
     },
@@ -1280,37 +1284,17 @@
       "name": "Jeskai Energy",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
+        "R",
         "W",
-        "R"
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Sacred Foundry"
-        },
-        {
           "count": 4,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Flooded Strand"
+          "name": "Ajani, Nacatl Pariah"
         },
         {
           "count": 4,
@@ -1318,43 +1302,19 @@
         },
         {
           "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 3,
-          "name": "Teferi, Time Raveler"
-        },
-        {
-          "count": 3,
-          "name": "Ephemerate"
-        },
-        {
-          "count": 2,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 4,
-          "name": "Ragavan, Nimble Pilferer"
-        },
-        {
-          "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
           "name": "Elegant Parlor"
         },
         {
-          "count": 4,
-          "name": "Consign to Memory"
+          "count": 2,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 1,
+          "name": "Teferi, Time Raveler"
+        },
+        {
+          "count": 2,
+          "name": "Sacred Foundry"
         },
         {
           "count": 4,
@@ -1362,57 +1322,97 @@
         },
         {
           "count": 2,
-          "name": "Arena of Glory"
+          "name": "Plains"
         },
         {
-          "count": 2,
-          "name": "Wrath of the Skies"
+          "count": 4,
+          "name": "Ocelot Pride"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 1,
+          "name": "Meticulous Archive"
         },
         {
           "count": 4,
           "name": "Phelia, Exuberant Shepherd"
         },
         {
-          "count": 2,
+          "count": 1,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 4,
           "name": "Quantum Riddler"
         },
         {
           "count": 3,
-          "name": "Casey Jones, Vigilante"
+          "name": "Ragavan, Nimble Pilferer"
         },
         {
           "count": 2,
-          "name": "Quantum Riddler"
+          "name": "Goblin Bombardment"
+        },
+        {
+          "count": 4,
+          "name": "Solitude"
+        },
+        {
+          "count": 4,
+          "name": "Flooded Strand"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 1,
+          "name": "Arena of Glory"
+        },
+        {
+          "count": 4,
+          "name": "Guide of Souls"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 4,
-          "name": "Obsidian Charmaw"
-        },
-        {
           "count": 3,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Strix Serenade"
+          "name": "Consign to Memory"
         },
         {
           "count": 2,
           "name": "Wrath of the Skies"
         },
         {
+          "count": 3,
+          "name": "High Noon"
+        },
+        {
+          "count": 4,
+          "name": "Mystical Dispute"
+        },
+        {
           "count": 1,
-          "name": "Ghost Vacuum"
+          "name": "Teferi, Time Raveler"
+        },
+        {
+          "count": 2,
+          "name": "Blood Moon"
         }
       ]
     }
