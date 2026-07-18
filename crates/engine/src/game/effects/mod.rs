@@ -7423,6 +7423,37 @@ fn resolve_chain_body(
         }
     }
 
+    let optional_is_infeasible = ability.optional && optional_effect_is_infeasible(state, ability);
+
+    // CR 608.2c + CR 608.2d: A missing exact parent makes "you may cast/play
+    // that card" impossible, so the instruction does not happen. Route that
+    // outcome through the existing decline authority instead of merely
+    // suppressing the prompt and falling through to `resolve_effect`: normal
+    // target inheritance may have copied an unrelated object onto this node,
+    // and CastFromZone would otherwise consume it as the missing "that card."
+    // The decline path also preserves the printed tail semantics: dependent
+    // "if you do" riders stay gated while independent sequential siblings and
+    // explicit decline branches continue. Other infeasible optional effects
+    // (PutChosenCounter/RemoveCounter) retain their established resolver no-op.
+    if optional_is_infeasible
+        && matches!(
+            ability.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )
+        && ability.parent_target_missing_reason.is_some()
+    {
+        return resolve_optional_effect_decision(
+            state,
+            ability.clone(),
+            AutoMayChoice::Decline,
+            events,
+            depth + 1,
+        );
+    }
+
     // CR 608.2d + CR 101.4: "Any opponent may" / "Any player may" / "Any other
     // player may" — prompt the eligible players in APNAP order. The scope decides
     // who is excluded: AnyOpponent excludes the controller (unchanged); AnyPlayer
@@ -7504,7 +7535,7 @@ fn resolve_chain_body(
         && !has_kind_driven_repeat(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
         && !is_repeated_optional_payment(ability)
-        && !optional_effect_is_infeasible(state, ability)
+        && !optional_is_infeasible
     {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);

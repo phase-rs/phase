@@ -1,9 +1,13 @@
 //! Issue #5996: Planetarium of Wan Shi Tong's private look must bind its
 //! immediate optional cast to the exact looked-at library card.
 
+use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    CardPlayMode, CastFromZoneDriver, DigSource, Effect, QuantityExpr, ResolvedAbility,
+    SubAbilityLink, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -242,4 +246,115 @@ fn planetarium_empty_post_surveil_library_does_not_offer_cast() {
     assert!(runner.state().players[0].library.is_empty());
     assert_eq!(runner.state().objects[&surveilled].zone, Zone::Graveyard);
     assert!(runner.state().last_revealed_ids.is_empty());
+}
+
+/// CR 608.2c + CR 608.2d: when an empty look produces no exact "that card"
+/// referent, normal chain target inheritance cannot substitute an unrelated
+/// object. The impossible optional instruction is skipped, while its independent
+/// sequential sibling still resolves.
+#[test]
+fn missing_look_referent_does_not_play_inherited_unrelated_object() {
+    let mut scenario = GameScenario::new();
+    let source = scenario.add_creature(P0, "Empty Look Source", 1, 1).id();
+    let unrelated = scenario
+        .add_spell_to_graveyard(P0, "Unrelated Inherited Spell", true)
+        .id();
+    let mut runner = scenario.build();
+
+    let mut independent_tail = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    independent_tail.sub_link = SubAbilityLink::SequentialSibling;
+
+    let mut optional_play = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Play,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        },
+        vec![],
+        source,
+        P0,
+    )
+    .sub_ability(independent_tail);
+    optional_play.optional = true;
+
+    let ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            destination: None,
+            keep_count: Some(0),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+            reveal: false,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+        vec![TargetRef::Object(unrelated)],
+        source,
+        P0,
+    )
+    .sub_ability(optional_play);
+
+    // Reach guards: the Dig has no card to publish, while its unrelated object
+    // target is available for the generic parent-to-child inheritance branch.
+    assert!(runner.state().players[0].library.is_empty());
+    assert_eq!(ability.targets, vec![TargetRef::Object(unrelated)]);
+    let cast = ability.sub_ability.as_deref().expect("cast child");
+    assert!(cast.targets.is_empty());
+    assert!(matches!(
+        cast.effect,
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            mode: CardPlayMode::Play,
+            driver: CastFromZoneDriver::LingeringPermission,
+            ..
+        }
+    ));
+
+    let starting_life = runner.state().players[0].life;
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("empty-look chain resolves");
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "an impossible exact-parent play must not prompt"
+    );
+    assert!(runner.state().pending_optional_effect.is_none());
+    assert!(runner.state().last_revealed_ids.is_empty());
+    assert!(
+        runner.state().last_parent_target_missing_reason.is_none(),
+        "the exact missing-parent provenance must be consumed by this handoff"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        starting_life + 1,
+        "skipping the optional play must preserve its independent sequential tail"
+    );
+    assert_eq!(runner.state().objects[&unrelated].zone, Zone::Graveyard);
+    assert!(
+        runner.state().objects[&unrelated]
+            .casting_permissions
+            .is_empty(),
+        "the unrelated inherited object must receive no play permission"
+    );
 }
