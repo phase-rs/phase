@@ -8854,6 +8854,8 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
             opponent_player_filter(),
             alt((
                 preceded(tag("an "), tag("opponent")),
+                preceded(tag("your "), tag("opponents")),
+                tag("opponents"),
                 preceded(tag("one of your "), tag("opponents")),
                 preceded(tag("one or more of your "), tag("opponents")),
                 preceded(tag("another "), tag("player")),
@@ -12483,34 +12485,49 @@ fn try_parse_one_or_more_combat_damage_to_player(
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
+        let Ok((after_subject, subject_text)) =
+            take_until::<_, _, OracleError<'_>>(" deal").parse(rest)
+        else {
+            continue;
+        };
+        let Ok((after_verb, _)) =
+            (tag::<_, _, OracleError<'_>>(" deal"), opt(tag("s"))).parse(after_subject)
+        else {
+            continue;
+        };
+        let Ok((after_damage, (damage_kind, _))) = preceded(
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_damage_predicate_tail,
+        )
+        .parse(after_verb) else {
+            continue;
+        };
+        if matches!(damage_kind, DamageKindFilter::NoncombatOnly) {
+            continue;
+        }
+
         // CR 120.1a: Try battle-inclusive suffixes first (longer match wins).
         // Covers "deal(s) combat damage to a player or (a )battle".
-        let (subject_text, recipient_filter) = if let Ok(("", t)) = terminated(
-            take_until::<_, _, OracleError<'_>>(" deal"),
-            (
-                tag(" deal"),
-                opt(tag("s")),
-                tag(" combat damage to a player or "),
-                opt(tag("a ")),
-                tag("battle"),
-            ),
+        let recipient_filter = if let Ok(("", _)) = (
+            tag::<_, _, OracleError<'_>>(" to a player or "),
+            opt(tag("a ")),
+            tag("battle"),
         )
-        .parse(rest)
+            .parse(after_damage)
         {
-            (
-                t,
-                TargetFilter::Or {
-                    filters: vec![
-                        TargetFilter::Player,
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
-                    ],
-                },
-            )
-        } else if let Some(t) = rest
-            .strip_suffix(" deal combat damage to a player")
-            .or_else(|| rest.strip_suffix(" deals combat damage to a player"))
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
+                ],
+            }
+        } else if let Ok(("", filter)) = preceded(
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_damage_to_qualifier_with_rest,
+        )
+        .parse(after_damage)
         {
-            (t, TargetFilter::Player)
+            filter
         } else {
             continue;
         };
@@ -12538,14 +12555,25 @@ fn try_parse_one_or_more_combat_damage_to_player(
                     }
                     other => other,
                 }
+            } else if let Some(subtype_filter) = parse_controlled_subtype_subject(subject_text) {
+                subtype_filter
             } else {
-                continue;
+                let mut ctx = ParseContext::default();
+                let (subject_filter, subject_remainder) =
+                    parse_trigger_subject(subject_text, &mut ctx);
+                if subject_remainder.trim().is_empty()
+                    && !matches!(subject_filter, TargetFilter::Any)
+                {
+                    subject_filter
+                } else {
+                    continue;
+                }
             }
         };
 
         let mut def = make_base();
         def.mode = TriggerMode::DamageDoneOnceByController;
-        def.damage_kind = DamageKindFilter::CombatOnly;
+        def.damage_kind = damage_kind;
         def.valid_source = Some(filter);
         def.valid_target = Some(recipient_filter);
         def.batched = true;
@@ -12553,6 +12581,30 @@ fn try_parse_one_or_more_combat_damage_to_player(
     }
 
     None
+}
+
+fn parse_controlled_subtype_subject(subject_text: &str) -> Option<TargetFilter> {
+    let (rest, subtype_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(" you control"),
+        tag(" you control"),
+    )
+    .parse(subject_text)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let subtype_text = subtype_text.trim();
+    let (subtype, consumed) = parse_subtype(subtype_text)?;
+    if consumed != subtype_text.len() {
+        return None;
+    }
+
+    Some(TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .subtype(subtype),
+    ))
 }
 
 /// CR 205.3m: Try to split "subtype or subtype [card_type] [you control]" into an Or filter.
