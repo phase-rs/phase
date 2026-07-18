@@ -2397,6 +2397,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }

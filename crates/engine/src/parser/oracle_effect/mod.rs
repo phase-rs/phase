@@ -7502,6 +7502,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some(effect) = parse_token_creation_replacement_effect(&lower) {
         return parsed_clause(effect);
     }
+    // CR 614.1a + CR 614.12 + CR 707.2: Mystic Reflection-style resolving-spell
+    // shield. Route before the generic clause dispatch so the leading "the next
+    // time" subject is not treated as non-imperative text.
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_oneshot_enter_as_copy_replacement(&lower)
+    {
+        return parsed_clause(effect);
+    }
     // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
     // the planar die, [effect] instead" (Fixed Point in Time). Routed here in the
     // replacement chain — BEFORE the leading-"if" strip further down would peel

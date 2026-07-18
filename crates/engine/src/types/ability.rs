@@ -5633,6 +5633,12 @@ pub enum QuantityRef {
     /// CR 603.7c: Numeric value from the triggering event.
     /// Extracts amount/count from DamageDealt, LifeChanged, CardsDrawn, CounterAdded, etc.
     EventContextAmount,
+    /// CR 120.1 + CR 603.2c + CR 608.2c: Count distinct players named by the
+    /// current triggering event batch, after applying a player filter relative
+    /// to the resolving ability's controller. Used by "for each opponent dealt
+    /// damage" on one-or-more damage triggers: the count is the number of
+    /// opponents in the trigger event batch, not the amount of damage dealt.
+    EventContextPlayerCount { filter: PlayerFilter },
     /// CR 603.10a + CR 603.6e: Count of attachments of a given kind that were attached
     /// to the leaving-battlefield object at the moment it left, optionally filtered by
     /// attachment controller. Resolved via the triggering `ZoneChangeRecord`'s

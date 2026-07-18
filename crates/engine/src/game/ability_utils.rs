@@ -2868,7 +2868,34 @@ fn quantity_expr_contains_amassed_army_ref(expr: &QuantityExpr) -> bool {
 }
 
 fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
-    target_filter_contains_chosen_x_ref(filter) || target_filter_contains_amassed_army_ref(filter)
+    target_filter_contains_chosen_x_ref(filter)
+        || target_filter_contains_amassed_army_ref(filter)
+        || target_filter_contains_scoped_player_ref(filter)
+}
+
+// CR 102.1 + CR 608.2c: "that player controls" filters lowered to
+// ControllerRef::ScopedPlayer need the resolving ability's scoped-player binding
+// when enumerating legal targets; source-controller-only enumeration would fall
+// back to "you".
+fn target_filter_contains_scoped_player_ref(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            typed.controller == Some(ControllerRef::ScopedPlayer)
+                || typed.properties.iter().any(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::Owned {
+                            controller: ControllerRef::ScopedPlayer
+                        }
+                    )
+                })
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_contains_scoped_player_ref)
+        }
+        TargetFilter::Not { filter } => target_filter_contains_scoped_player_ref(filter),
+        _ => false,
+    }
 }
 
 /// CR 601.2c: A negated prop (`FilterProp::Not`) can wrap an X-bearing prop

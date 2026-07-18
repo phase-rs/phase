@@ -2075,6 +2075,11 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             // `last_effect_count`).
             | WaitingFor::RemoveCountersChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
+            // CR 118.12 + CR 608.2c: resolution-time costs that need object
+            // selection, such as "you may tap two untapped creatures you
+            // control", pause the parent effect before any `WhenYouDo` rider can
+            // check whether the cost was paid.
+            | WaitingFor::PayCost { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }

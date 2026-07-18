@@ -742,6 +742,27 @@ fn parse_token_description_with_context(
         }
     }
 
+    // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style trigger-context player
+    // counts do not always carry the literal "this way" ("for each opponent
+    // dealt damage"). Recognize that phrase before the tracked-set block below,
+    // whose object-set fallback would be the wrong anaphor class.
+    {
+        let suffix_lower = suffix.to_lowercase();
+        if let Ok((clause, _)) = take_until::<_, _, OracleError<'_>>("for each ")
+            .parse(suffix_lower.as_str())
+            .and_then(|(rest, _)| tag("for each ").parse(rest))
+        {
+            let clause = clause.trim_end_matches('.').trim();
+            if let Ok(("", qty)) =
+                crate::parser::oracle_nom::quantity::parse_event_context_opponent_dealt_damage(
+                    clause,
+                )
+            {
+                count = QuantityExpr::Ref { qty };
+            }
+        };
+    }
+
     // CR 608.2c: "for each [thing] this way" -- the "this way" anaphor counts from
     // the preceding zone moves in the same effect.
     // Matches "for each card put into a graveyard this way", "for each creature
@@ -768,6 +789,16 @@ fn parse_token_description_with_context(
                     .ok()
                     .filter(|(rest, _)| rest.is_empty())
                     .map(|(_, qty)| QuantityExpr::Ref { qty })
+                    // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style token
+                    // counts named players in the current trigger event batch,
+                    // not the previous chain tracked object set.
+                    .or_else(|| {
+                        crate::parser::oracle_quantity::parse_for_each_clause(clause)
+                            .filter(|qty| {
+                                matches!(qty, QuantityRef::EventContextPlayerCount { .. })
+                            })
+                            .map(|qty| QuantityExpr::Ref { qty })
+                    })
                     // CR 608.2c + CR 205.2a: a TYPE-restricted "for each <type> card
                     // <verb> this way" (Dread Summons: "for each creature card put
                     // into a graveyard this way") counts only the matching cards
@@ -1575,7 +1606,9 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TypeFilter};
+    use crate::types::ability::{
+        ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, RoundingMode, TypeFilter,
+    };
     use crate::types::card_type::CoreType;
 
     #[test]
@@ -1887,6 +1920,26 @@ mod tests {
                 qty: QuantityRef::TrackedSetSize,
             },
             "bare 'card discarded this way' must keep TrackedSetSize"
+        );
+    }
+
+    #[test]
+    fn treasure_for_each_opponent_dealt_damage_counts_trigger_players() {
+        let txt = "Create a Treasure token for each opponent dealt damage.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Malcolm token effect");
+        let Effect::Token { name, count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(name, "Treasure");
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextPlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+            "Malcolm must count damaged opponents, not damage amount or tracked objects"
         );
     }
 

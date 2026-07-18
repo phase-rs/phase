@@ -3379,18 +3379,15 @@ pub(crate) fn tap_creatures_total_power(state: &GameState, ids: &[ObjectId]) -> 
         .sum()
 }
 
-/// CR 702.34a: Tap creatures cost — complete the tap-creatures cost after player selection.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_tap_creatures_for_spell_cost(
+/// CR 118.3 + CR 701.26a: Complete the tap-creatures cost after player selection.
+pub(crate) fn pay_tap_creatures_selection(
     state: &mut GameState,
-    player: PlayerId,
-    pending: PendingCast,
     count: usize,
     aggregate: Option<TapCreaturesAggregate>,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
+) -> Result<(), EngineError> {
     // CR 601.2b: Validate the chosen set against the cost's requirement shape.
     // `aggregate == None` is fixed-count (tap exactly `count`); `Some(a)` is the
     // aggregate Crew/Saddle/Teamwork form (tap any number whose total positive
@@ -3430,6 +3427,22 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
         crate::game::restrictions::tap_permanent_for_cost(state, id, events)?;
     }
 
+    Ok(())
+}
+
+/// CR 118.3 + CR 701.26a: Complete the tap-creatures cost after player selection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_tap_creatures_for_spell_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    count: usize,
+    aggregate: Option<TapCreaturesAggregate>,
+    legal_creatures: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    pay_tap_creatures_selection(state, count, aggregate, legal_creatures, chosen, events)?;
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 

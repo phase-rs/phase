@@ -405,10 +405,11 @@ export type PayCostKind =
   | { type: "TapCreatures" }
   | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
 
-// CR 601.2b + CR 605.3b: resumption context after a `PayCost` choice. The
-// frontend treats the inner pending payload as opaque pass-through.
+// CR 118.12 + CR 601.2b + CR 605.3b: resumption context after a `PayCost`
+// choice. The frontend treats the inner pending payload as opaque pass-through.
 export type CostResume =
   | { type: "Spell"; Spell: PendingCast }
+  | { type: "Resolution" }
   | { type: "ManaAbility"; ManaAbility: unknown };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";

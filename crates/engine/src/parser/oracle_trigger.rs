@@ -15,7 +15,9 @@ use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::EffectChainIr;
-use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
+use super::oracle_ir::trigger::{
+    FirstTimeLimit, ReflexivePaymentIr, TriggerBody, TriggerIr, TriggerModifiers,
+};
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
@@ -40,15 +42,15 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCostOrigin,
-    AdditionalCostPaymentSource, AggregateFunction, AttachmentKind, AttackersDeclaredCountSubject,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
-    ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter, DestinationConstraint,
-    DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint, ParsedCondition,
-    PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
-    TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
+    AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
+    CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
+    DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
+    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality,
+    StaticCondition, TapCreaturesRequirement, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -1265,7 +1267,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         .strip_prefix("if ") // allow-noncombinator: structural if-clause skip when condition is unrecognized
         .and_then(|rest| rest.split_once(", "))
         .map(|(_cond, body)| body);
-    let optional = starts_with_you_may(effect_lower.as_str())
+    let mut optional = starts_with_you_may(effect_lower.as_str())
         || starts_with_you_may(effect_without_if.trim_start())
         || after_structural_if.is_some_and(starts_with_you_may);
 
@@ -1327,7 +1329,28 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
         || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
-        if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
+        if let Some((cost, reflexive_effect_text)) =
+            split_reflexive_optional_payment(&effect_for_parse)
+        {
+            optional = false;
+            let effect_chain =
+                parse_effect_chain_ir(&reflexive_effect_text, AbilityKind::Spell, &mut effect_ctx);
+            Some(TriggerBody::ReflexivePayment(Box::new(
+                ReflexivePaymentIr { cost, effect_chain },
+            )))
+        } else if is_unsupported_disjunctive_reflexive_optional_payment(&effect_for_parse) {
+            Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
+                &effect_for_parse,
+                AbilityKind::Spell,
+                parsed_clause(Effect::unimplemented(
+                    "reflexive optional payment",
+                    &effect_for_parse,
+                )),
+                None,
+                effect_ctx.actor.clone(),
+                effect_ctx.in_trigger,
+            )))
+        } else if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
             Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
                 &effect_for_parse,
                 AbilityKind::Spell,
@@ -1535,6 +1558,23 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let execute = match &ir.body {
         Some(TriggerBody::EffectChain(chain_ir)) => {
             Some(Box::new(lower_trigger_effect_chain(chain_ir, modifiers)))
+        }
+        Some(TriggerBody::ReflexivePayment(reflexive)) => {
+            let mut reflexive_ability =
+                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers);
+            reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
+
+            let mut pay_ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PayCost {
+                    cost: reflexive.cost.clone(),
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+            );
+            pay_ability.optional = true;
+            pay_ability.sub_ability = Some(Box::new(reflexive_ability));
+            Some(Box::new(pay_ability))
         }
         Some(TriggerBody::Modal(modal)) => Some(Box::new(
             lower_trigger_effect_chain(&modal.marker, modifiers)
@@ -2759,6 +2799,29 @@ fn extract_unless_pay_modifier(
 }
 
 fn condition_introduces_scoped_phase_player(cond_lower: &str) -> bool {
+    // CR 102.1: "on each player's turn" binds "that player" to the active
+    // player for that turn (Kitt Kanto's beginning-of-combat trigger).
+    if let Ok((after_beginning, _)) =
+        tag::<_, _, OracleError<'_>>("at the beginning of ").parse(cond_lower)
+    {
+        if let Ok((turn_scope, phase_text)) =
+            terminated(take_until::<_, _, OracleError<'_>>(" on "), tag(" on "))
+                .parse(after_beginning)
+        {
+            let scoped_turn = all_consuming(alt((
+                tag::<_, _, OracleError<'_>>("each player's turn"),
+                tag("each players turn"),
+                tag("each opponent's turn"),
+                tag("each opponents turn"),
+            )))
+            .parse(turn_scope)
+            .is_ok();
+            if scoped_turn && scan_for_phase(phase_text).is_some() {
+                return true;
+            }
+        }
+    }
+
     let phase_scope = preceded(
         tag::<_, _, OracleError<'_>>("at the beginning of "),
         alt((
@@ -2849,6 +2912,115 @@ fn infer_pronoun_unless_payer(
         return Some(TargetFilter::ParentTargetController);
     }
     None
+}
+
+/// CR 118.12 + CR 603.12: Split a resolution-time optional cost followed by a
+/// reflexive trigger body:
+///
+///   "you may <cost>. When you do, <effect>"
+///
+/// The cost is parsed through the same `AbilityCost` authority used for
+/// activation/additional costs, then filtered through the subset payable by the
+/// straight-line resolution `PayCost` prompt. Returns `None` unless the cost is
+/// fully recognized and payable during resolution; unsupported or branch-choice
+/// costs should remain honest parser gaps rather than becoming a broad no-op
+/// `PayCost`.
+fn split_reflexive_optional_payment(effect_text: &str) -> Option<(AbilityCost, String)> {
+    let lower = effect_text.to_lowercase();
+    let (after_prefix, _) = tag::<_, _, OracleError<'_>>("you may ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (connector, cost_lower) = terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
+        .parse(after_prefix)
+        .ok()?;
+    let (body_lower, _) = tag::<_, _, OracleError<'_>>("when you do, ")
+        .parse(connector)
+        .ok()?;
+
+    let cost_start = effect_text.len() - after_prefix.len();
+    let cost_len = cost_lower.len();
+    let body_start = effect_text.len() - body_lower.len();
+    if take_until::<_, _, OracleError<'_>>(" if ")
+        .parse(cost_lower)
+        .is_ok()
+    {
+        return None;
+    }
+    let cost_text = effect_text.get(cost_start..cost_start + cost_len)?.trim();
+    let body_text = effect_text.get(body_start..)?.trim();
+    let cost = super::oracle_cost::parse_oracle_cost(cost_text);
+    if matches!(cost, AbilityCost::Unimplemented { .. })
+        || !reflexive_optional_cost_payable_by_resolution_prompt(&cost)
+    {
+        return None;
+    }
+    Some((cost, body_text.to_string()))
+}
+
+fn is_unsupported_disjunctive_reflexive_optional_payment(effect_text: &str) -> bool {
+    let lower = effect_text.to_lowercase();
+    let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>("you may ").parse(lower.as_str())
+    else {
+        return false;
+    };
+    let Ok((connector, cost_lower)) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". ")).parse(after_prefix)
+    else {
+        return false;
+    };
+    if take_until::<_, _, OracleError<'_>>(" if ")
+        .parse(cost_lower)
+        .is_ok()
+    {
+        return false;
+    }
+    let parsed_reflexive_connector = tag::<_, _, OracleError<'_>>("when you do, ").parse(connector);
+    if parsed_reflexive_connector.is_err() {
+        return false;
+    }
+
+    let cost_start = effect_text.len() - after_prefix.len();
+    let cost_len = cost_lower.len();
+    let Some(cost_text) = effect_text.get(cost_start..cost_start + cost_len) else {
+        return false;
+    };
+    cost_contains_one_of(&super::oracle_cost::parse_oracle_cost(cost_text.trim()))
+}
+
+fn cost_contains_one_of(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::OneOf { .. } => true,
+        AbilityCost::Composite { costs } => costs.iter().any(cost_contains_one_of),
+        _ => false,
+    }
+}
+
+fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> bool {
+    if !crate::game::costs::supported_at_resolution(cost) {
+        return false;
+    }
+    match cost {
+        AbilityCost::Composite { costs } => {
+            costs
+                .iter()
+                .all(reflexive_optional_cost_payable_by_resolution_prompt)
+                && costs.iter().any(cost_contains_tap_creatures)
+        }
+        // `OneOf` needs an interactive branch-choice prompt before a concrete
+        // branch can be paid. Do not let the generic reflexive splitter mark
+        // those cards supported until that flow exists.
+        AbilityCost::OneOf { .. } => false,
+        AbilityCost::TapCreatures { .. } => true,
+        _ => false,
+    }
+}
+
+fn cost_contains_tap_creatures(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::TapCreatures { .. } => true,
+        AbilityCost::Composite { costs } => costs.iter().any(cost_contains_tap_creatures),
+        _ => false,
+    }
 }
 
 fn parse_inferred_pronoun_unless_alt_cost(
@@ -3038,7 +3210,7 @@ pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
         return parse_unless_return_to_hand(rest);
     }
 
-    // CR 118.12 + CR 701.20a: "you tap [count] untapped [filter] you control".
+    // CR 118.12 + CR 701.26a: "you tap [count] untapped [filter] you control".
     // The tail parser extracts count and filter via shared target parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you tap ").parse(after_unless) {
         if let Some(cost) = parse_unless_tap_untapped_cost(rest) {
@@ -3074,7 +3246,7 @@ pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     None
 }
 
-/// CR 118.12 + CR 701.20a: Parse the tail of "you tap ..." unless costs.
+/// CR 118.12 + CR 701.26a: Parse the tail of "you tap ..." unless costs.
 /// Supports articles and numeric counts before delegating the filter phrase to
 /// the shared target parser.
 fn parse_unless_tap_untapped_cost(rest: &str) -> Option<AbilityCost> {
@@ -8854,6 +9026,8 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
             opponent_player_filter(),
             alt((
                 preceded(tag("an "), tag("opponent")),
+                preceded(tag("your "), tag("opponents")),
+                tag("opponents"),
                 preceded(tag("one of your "), tag("opponents")),
                 preceded(tag("one or more of your "), tag("opponents")),
                 preceded(tag("another "), tag("player")),
@@ -12483,34 +12657,49 @@ fn try_parse_one_or_more_combat_damage_to_player(
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
+        let Ok((after_subject, subject_text)) =
+            take_until::<_, _, OracleError<'_>>(" deal").parse(rest)
+        else {
+            continue;
+        };
+        let Ok((after_verb, _)) =
+            (tag::<_, _, OracleError<'_>>(" deal"), opt(tag("s"))).parse(after_subject)
+        else {
+            continue;
+        };
+        let Ok((after_damage, (damage_kind, _))) = preceded(
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_damage_predicate_tail,
+        )
+        .parse(after_verb) else {
+            continue;
+        };
+        if matches!(damage_kind, DamageKindFilter::NoncombatOnly) {
+            continue;
+        }
+
         // CR 120.1a: Try battle-inclusive suffixes first (longer match wins).
         // Covers "deal(s) combat damage to a player or (a )battle".
-        let (subject_text, recipient_filter) = if let Ok(("", t)) = terminated(
-            take_until::<_, _, OracleError<'_>>(" deal"),
-            (
-                tag(" deal"),
-                opt(tag("s")),
-                tag(" combat damage to a player or "),
-                opt(tag("a ")),
-                tag("battle"),
-            ),
+        let recipient_filter = if let Ok(("", _)) = (
+            tag::<_, _, OracleError<'_>>(" to a player or "),
+            opt(tag("a ")),
+            tag("battle"),
         )
-        .parse(rest)
+            .parse(after_damage)
         {
-            (
-                t,
-                TargetFilter::Or {
-                    filters: vec![
-                        TargetFilter::Player,
-                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
-                    ],
-                },
-            )
-        } else if let Some(t) = rest
-            .strip_suffix(" deal combat damage to a player")
-            .or_else(|| rest.strip_suffix(" deals combat damage to a player"))
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
+                ],
+            }
+        } else if let Ok(("", filter)) = preceded(
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_damage_to_qualifier_with_rest,
+        )
+        .parse(after_damage)
         {
-            (t, TargetFilter::Player)
+            filter
         } else {
             continue;
         };
@@ -12538,14 +12727,25 @@ fn try_parse_one_or_more_combat_damage_to_player(
                     }
                     other => other,
                 }
+            } else if let Some(subtype_filter) = parse_controlled_subtype_subject(subject_text) {
+                subtype_filter
             } else {
-                continue;
+                let mut ctx = ParseContext::default();
+                let (subject_filter, subject_remainder) =
+                    parse_trigger_subject(subject_text, &mut ctx);
+                if subject_remainder.trim().is_empty()
+                    && !matches!(subject_filter, TargetFilter::Any)
+                {
+                    subject_filter
+                } else {
+                    continue;
+                }
             }
         };
 
         let mut def = make_base();
         def.mode = TriggerMode::DamageDoneOnceByController;
-        def.damage_kind = DamageKindFilter::CombatOnly;
+        def.damage_kind = damage_kind;
         def.valid_source = Some(filter);
         def.valid_target = Some(recipient_filter);
         def.batched = true;
@@ -12553,6 +12753,30 @@ fn try_parse_one_or_more_combat_damage_to_player(
     }
 
     None
+}
+
+fn parse_controlled_subtype_subject(subject_text: &str) -> Option<TargetFilter> {
+    let (rest, subtype_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(" you control"),
+        tag(" you control"),
+    )
+    .parse(subject_text)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let subtype_text = subtype_text.trim();
+    let (subtype, consumed) = parse_subtype(subtype_text)?;
+    if consumed != subtype_text.len() {
+        return None;
+    }
+
+    Some(TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .subtype(subtype),
+    ))
 }
 
 /// CR 205.3m: Try to split "subtype or subtype [card_type] [you control]" into an Or filter.

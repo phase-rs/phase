@@ -463,6 +463,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectCountDistinct { .. }
         | QuantityRef::ObjectCountBySharedQuality { .. }
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::PlayerCounter { .. }
@@ -742,6 +743,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -938,6 +940,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -1978,6 +1981,14 @@ fn resolve_ref(
         }
         QuantityRef::PlayerCount { filter } => {
             resolve_player_count(state, filter, controller, source_id)
+        }
+        // CR 120.1 + CR 603.2c + CR 608.2c: "for each opponent dealt damage"
+        // on a batched damage trigger counts DISTINCT damaged players carried by
+        // the resolving trigger event batch. This intentionally does not read
+        // `total_damage`; the scalar damage amount remains the job of
+        // `EventContextAmount`.
+        QuantityRef::EventContextPlayerCount { filter } => {
+            resolve_event_context_player_count(state, filter, controller, source_id)
         }
         // CR 122.1: Counters on an object, scoped via ObjectScope (Π-5).
         // Replaces CountersOnSelf / CountersOnTarget / AnyCountersOnSelf /
@@ -5372,6 +5383,39 @@ pub(crate) fn resolve_player_count(
     )
 }
 
+/// CR 603.2c + CR 608.2c: a resolving triggered ability that says "for each
+/// [player] dealt damage" counts distinct players from the triggering event
+/// context, not the whole turn ledger.
+fn resolve_event_context_player_count(
+    state: &GameState,
+    filter: &PlayerFilter,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> i32 {
+    let mut players = HashSet::new();
+    let mut record_player = |event: &crate::types::events::GameEvent| {
+        if let Some(player) = crate::game::targeting::extract_player_from_event(event, state) {
+            if crate::game::effects::matches_player_scope(
+                state, player, filter, controller, source_id,
+            ) {
+                players.insert(player);
+            }
+        }
+    };
+
+    if state.current_trigger_events.is_empty() {
+        if let Some(event) = &state.current_trigger_event {
+            record_player(event);
+        }
+    } else {
+        for event in &state.current_trigger_events {
+            record_player(event);
+        }
+    }
+
+    usize_to_i32_saturating(players.len())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -5385,7 +5429,7 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
-    use crate::types::events::PlayerActionKind;
+    use crate::types::events::{GameEvent, PlayerActionKind};
     use crate::types::game_state::{
         DamageRecord, ExileLink, ExileLinkKind, ManaSpentSourceSnapshot, ZoneChangeRecord,
     };
@@ -8953,6 +8997,46 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style "for each opponent
+    /// dealt damage" counts distinct damaged opponents in the resolving trigger
+    /// event batch, not combat-damage amount and not duplicate events for the
+    /// same player.
+    #[test]
+    fn event_context_player_count_counts_distinct_damaged_opponents_from_batch() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.current_trigger_events = vec![
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(ObjectId(11), 4)],
+                total_damage: 4,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(2),
+                source_amounts: vec![(ObjectId(12), 9)],
+                total_damage: 9,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(ObjectId(13), 2)],
+                total_damage: 2,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(0),
+                source_amounts: vec![(ObjectId(14), 7)],
+                total_damage: 7,
+            },
+        ];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
     }
 
     /// CR 120.1 + CR 510.1: Resolving `PlayerCount { OpponentDealtDamage }`

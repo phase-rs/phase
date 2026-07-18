@@ -1709,14 +1709,20 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     {
         return Some(expr);
     }
+    // CR 120.1 + CR 603.2c + CR 608.2c: "opponents dealt damage this way" in
+    // trigger-context effects counts the damaged opponents, not the numeric
+    // damage amount. Must precede the passive-voice "dealt damage" numeric
+    // parser below.
+    if let Ok(("", qty)) = nom_quantity::parse_event_context_opponent_dealt_damage(lower) {
+        return Some(QuantityExpr::Ref { qty });
+    }
     // CR 608.2c + CR 608.2h: "the X <verb>ed/<verb> this way" — numeric result from the
     // preceding effect (or trigger event) in the same resolution. Must check
     // before "that much" to avoid false match on "this way" vs. "this turn".
     // Verb-phrase combinators cover:
     //   - life-payment/loss: "life lost", "life paid"
     //   - combat-damage triggers: "damage dealt" (active voice),
-    //     "dealt damage" (passive voice — e.g. Hordewing Skaab's
-    //     "opponents dealt damage this way")
+    //     "dealt damage" (passive voice)
     //   - counter-removal chains: "counters removed", "counter removed"
     //     (Sensational Spider-Man's "stun counters removed this way";
     //     `state.last_effect_amount` is stamped by the preceding RemoveCounter).
@@ -2961,6 +2967,14 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
+    // CR 120.1 + CR 603.2c + CR 608.2c: "opponent(s) dealt damage this way"
+    // in a trigger effect counts damaged players from the current trigger
+    // event batch. It must not fall through to `TrackedSetSize` (object-set
+    // anaphor) or `PreviousEffectAmount` (numeric producer amount).
+    if let Ok(("", qty)) = nom_quantity::parse_event_context_opponent_dealt_damage(clause) {
+        return Some(qty);
+    }
+
     // "card put into a graveyard this way" / "creature card exiled this way" / etc.
     // "this way" references objects from the preceding effect's tracked set.
     if clause.contains("this way") {
@@ -3069,6 +3083,13 @@ fn parse_for_each_clause_with_they_controller(
                 min_sources: 1,
             },
         });
+    }
+
+    // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style trigger-context count
+    // ("for each opponent dealt damage") has no "this turn" duration and must
+    // read the resolving trigger event batch, not the turn damage ledger.
+    if let Ok(("", qty)) = nom_quantity::parse_event_context_opponent_dealt_damage(clause) {
+        return Some(qty);
     }
 
     // CR 508.6: "opponent you attacked this turn".
@@ -5424,7 +5445,6 @@ mod tests {
             "the life lost this way",
             "the amount of life paid this way",
             "the damage dealt this way",
-            "opponents dealt damage this way",
             "the number of stun counters removed this way",
         ] {
             assert_eq!(
@@ -5435,6 +5455,25 @@ mod tests {
                     },
                 }),
                 "phrase {phrase:?} must map to PreviousEffectAmount on the TOTAL channel"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_event_context_quantity_opponents_dealt_damage_counts_event_players() {
+        for phrase in [
+            "opponents dealt damage this way",
+            "the number of opponents dealt damage this way",
+            "number of opponents dealt damage this way",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextPlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                }),
+                "phrase {phrase:?} must count damaged players"
             );
         }
     }

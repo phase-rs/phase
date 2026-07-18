@@ -6114,6 +6114,77 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     })
 }
 
+fn parse_entering_copy_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+            ],
+        },
+        alt((
+            tag("one or more creatures or planeswalkers"),
+            tag("one or more planeswalkers or creatures"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 614.1a + CR 614.12 + CR 707.2: Parse a resolving-spell replacement shield
+/// of the form "the next time one or more creatures or planeswalkers enter this
+/// turn, they enter as copies of the chosen creature" (Mystic Reflection).
+///
+/// The shield is global (`AddTargetReplacement { target: None }`) because it
+/// watches the next matching battlefield-entry event, not the chosen creature.
+/// The copy source is emitted as `ParentTarget` and concretized to the already
+/// selected target when `AddTargetReplacement` installs the shield.
+pub(crate) fn parse_oneshot_enter_as_copy_replacement(norm_lower: &str) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the next time ")
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, valid_card) = parse_entering_copy_subject(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" enter this turn, ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("they enter as copies of "),
+        tag("they enter as a copy of "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the chosen creature"),
+        tag("the chosen permanent"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+        .valid_card(valid_card)
+        .destination_zone(Zone::Battlefield)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::BecomeCopy {
+                target: TargetFilter::ParentTarget,
+                recipient: TargetFilter::SelfRef,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: Vec::new(),
+            },
+        ));
+    replacement.consume_on_apply = true;
+    replacement.expiry = Some(crate::types::ability::RestrictionExpiry::EndOfTurn);
+
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::None,
+    })
+}
+
 /// CR 614.1a + CR 701.31 + CR 901.15: Parse "if [you|a player] would planeswalk,
 /// instead look at the top N cards of your planar deck, put M on the bottom …
 /// and the other[s] on top[, then planeswalk]" into a `ReplacementEvent::Planeswalk`
@@ -20282,6 +20353,7 @@ mod tests {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+    use crate::parser::parse_oracle_text;
 
     #[test]
     fn replacement_enters_tapped() {
@@ -20701,6 +20773,112 @@ mod snapshot_tests {
             )
             .is_none(),
             "Words of Waste (each-opponent payload) must remain an honest gap"
+        );
+    }
+
+    #[test]
+    fn oneshot_enter_as_copy_replacement_parses_mystic_reflection() {
+        let effect = parse_oneshot_enter_as_copy_replacement(
+            "the next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature",
+        )
+        .expect("Mystic Reflection delayed copy replacement must parse");
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = effect
+        else {
+            panic!("expected AddTargetReplacement");
+        };
+        assert_eq!(target, TargetFilter::None, "shield is a global install");
+        assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(
+            replacement.expiry,
+            Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
+        );
+        assert!(
+            replacement.consume_on_apply,
+            "the next matching entry consumes the shield"
+        );
+        let Some(TargetFilter::Or { filters }) = replacement.valid_card else {
+            panic!("entry filter must be creature-or-planeswalker");
+        };
+        assert!(
+            filters.contains(&TargetFilter::Typed(TypedFilter::creature())),
+            "entry filter must include creatures"
+        );
+        assert!(
+            filters.contains(&TargetFilter::Typed(TypedFilter::new(
+                TypeFilter::Planeswalker
+            ))),
+            "entry filter must include planeswalkers"
+        );
+        let execute = replacement.execute.as_ref().expect("copy execute");
+        let Effect::BecomeCopy {
+            target, recipient, ..
+        } = &*execute.effect
+        else {
+            panic!("expected BecomeCopy execute, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::ParentTarget,
+            "the chosen creature is frozen when the shield is installed"
+        );
+        assert_eq!(*recipient, TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn mystic_reflection_full_oracle_threads_chosen_target_into_replacement() {
+        let parsed = parse_oracle_text(
+            "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.",
+            "Mystic Reflection",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let ability = parsed.abilities.first().expect("spell ability");
+        assert!(
+            matches!(&*ability.effect, Effect::TargetOnly { .. }),
+            "the first sentence must declare the chosen target, got {:?}",
+            ability.effect
+        );
+        let sub = ability
+            .sub_ability
+            .as_deref()
+            .expect("replacement shield must be chained after target choice");
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = &*sub.effect
+        else {
+            panic!(
+                "expected AddTargetReplacement sub-ability, got {:?}",
+                sub.effect
+            );
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::None,
+            "Mystic installs a global entry shield"
+        );
+        let execute = replacement.execute.as_ref().expect("copy execute");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::BecomeCopy {
+                    target: TargetFilter::ParentTarget,
+                    recipient: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "the shield must copy from the chosen parent target, got {:?}",
+            execute.effect
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "Mystic Reflection should parse without warnings: {:?}",
+            parsed.parse_warnings
         );
     }
 

@@ -47,7 +47,8 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ManaAbilityResume, PendingCostMoveCompletion, PendingCostMoveResume, WaitingFor,
+    CostResume, GameState, ManaAbilityResume, PayCostKind, PendingCostMoveCompletion,
+    PendingCostMoveResume, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -157,6 +158,27 @@ fn find_eligible_exile_targets(
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn find_eligible_tap_creatures_targets(
+    state: &GameState,
+    player: PlayerId,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = FilterContext::from_ability(ability);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.controller == player
+                    && !obj.tapped
+                    && super::filter::matches_target_filter(state, obj.id, filter, &ctx)
+            })
+        })
+        .collect()
 }
 
 /// Selects the payment regime for `pay_ability_cost_inner`. The two variants
@@ -1011,6 +1033,68 @@ fn pay_ability_cost_inner(
                 };
             }
         }
+        // CR 118.12 + CR 701.26a: Resolution-time optional "tap N untapped
+        // creatures you control" costs need a player selection before the
+        // reflexive "When you do" rider can resolve. Surface the same PayCost
+        // object-selection state used by activation/casting costs, but resume
+        // the current effect chain instead of a spell cast.
+        AbilityCost::TapCreatures {
+            requirement,
+            filter,
+        } if matches!(scope, PaymentScope::Resolution { .. }) => {
+            let PaymentScope::Resolution { ability, .. } = scope else {
+                unreachable!("guarded above");
+            };
+            let eligible = find_eligible_tap_creatures_targets(state, player, ability, filter);
+            let (kind, count) = match requirement {
+                crate::types::ability::TapCreaturesRequirement::Count { count } => {
+                    let count = *count as usize;
+                    if eligible.len() < count {
+                        return Ok(payment_failed("not enough creatures to tap"));
+                    }
+                    (PayCostKind::TapCreatures { aggregate: None }, count)
+                }
+                crate::types::ability::TapCreaturesRequirement::Aggregate {
+                    stat,
+                    comparator,
+                    value,
+                } => {
+                    let aggregate = crate::types::ability::TapCreaturesAggregate {
+                        stat: *stat,
+                        comparator: *comparator,
+                        value: *value,
+                    };
+                    let total_positive_power =
+                        super::casting_costs::tap_creatures_total_power(state, &eligible);
+                    if !aggregate.satisfied_by(total_positive_power) {
+                        return Ok(payment_failed(
+                            "eligible creatures do not satisfy tap-creatures aggregate cost",
+                        ));
+                    }
+                    (
+                        PayCostKind::TapCreatures {
+                            aggregate: Some(aggregate),
+                        },
+                        eligible.len(),
+                    )
+                }
+            };
+            if count == 0 {
+                state.last_effect_count = Some(0);
+                return Ok(PaymentOutcome::Paid);
+            }
+            state.waiting_for = WaitingFor::PayCost {
+                player,
+                kind,
+                choices: eligible,
+                count,
+                min_count: 0,
+                resume: CostResume::Resolution,
+            };
+            return Ok(PaymentOutcome::Paused {
+                remaining_cost: None,
+            });
+        }
         // CR 118.3: A self-ref "exile this card" activation cost — the source
         // exiles itself from whatever zone the cost names. Covers exile-from-
         // graveyard costs (CR 702.97a Scavenge, Renew), the exile-from-hand
@@ -1600,7 +1684,7 @@ pub(crate) fn can_pay(
 /// `RemoveCounter { target: None }`, `Exert`, `Unattach`, `EffectCost`,
 /// source-card `Discard`). Both outcomes violate CR 118.3 / CR 601.2h, so the
 /// guard refuses them with `Failed`.
-fn supported_at_resolution(cost: &AbilityCost) -> bool {
+pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
     match cost {
         AbilityCost::Mana { .. }
@@ -1608,6 +1692,7 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::PayLife { .. }
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
+        | AbilityCost::TapCreatures { .. }
         | AbilityCost::Composite { .. }
         | AbilityCost::OneOf { .. } => true,
         // Only the chosen-from-hand discard has a resolution arm (the
@@ -1634,7 +1719,6 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         // (paid by the interactive `PayCost { ExileAggregate }` detour); it has
         // no resolution-time payment path.
         | AbilityCost::ExileWithAggregate { .. }
-        | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Mill { .. }
@@ -1743,6 +1827,34 @@ fn can_pay_resolution(
             );
             eligible.len() >= count
         }
+        // CR 118.12 + CR 701.26a: Resolution-time optional tap-creatures costs
+        // are payable when enough currently untapped matching creatures can be
+        // selected. The concrete selection is surfaced through WaitingFor::PayCost.
+        AbilityCost::TapCreatures {
+            requirement,
+            filter,
+        } => {
+            let eligible = find_eligible_tap_creatures_targets(state, payer, ability, filter);
+            match requirement {
+                crate::types::ability::TapCreaturesRequirement::Count { count } => {
+                    eligible.len() >= *count as usize
+                }
+                crate::types::ability::TapCreaturesRequirement::Aggregate {
+                    stat,
+                    comparator,
+                    value,
+                } => {
+                    let aggregate = crate::types::ability::TapCreaturesAggregate {
+                        stat: *stat,
+                        comparator: *comparator,
+                        value: *value,
+                    };
+                    let total_positive_power =
+                        super::casting_costs::tap_creatures_total_power(state, &eligible);
+                    aggregate.satisfied_by(total_positive_power)
+                }
+            }
+        }
         // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable.
         AbilityCost::Composite { costs } => costs
             .iter()
@@ -1783,7 +1895,6 @@ fn can_pay_resolution(
         | AbilityCost::CollectEvidence { .. }
         // CR 117.1: `ExileWithAggregate` is paid at activation, not resolution.
         | AbilityCost::ExileWithAggregate { .. }
-        | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Mill { .. }

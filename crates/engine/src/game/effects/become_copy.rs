@@ -1,11 +1,15 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::DisplaySource;
 use crate::game::layers::compute_current_copiable_values;
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetFilter, TargetRef,
+    ContinuousModification, CopiableValues, Duration, Effect, EffectError, EffectKind,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
+use crate::types::card::{PrintedCardRef, TokenImageRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
+use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
 pub fn resolve(
@@ -69,13 +73,69 @@ pub fn resolve(
         })
         .unwrap_or_default();
 
+    let copy = PrecomputedCopyValues {
+        source_id: ability.source_id,
+        controller: ability.controller,
+        duration_subject_id: target_id,
+        duration,
+        values,
+        display_source: source_display_source,
+        printed_ref: source_printed_ref,
+        token_image_ref: source_token_image_ref,
+        additional_modifications,
+        effect_kind: EffectKind::from(&ability.effect),
+    };
+
+    apply_copy_values_to_recipients(state, ability, &recipient, copy, events)
+}
+
+#[derive(Clone)]
+pub(crate) struct PrecomputedCopyValues {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    /// CR 611.2b: the concrete object a target- or recipient-relative
+    /// `ForAsLongAs` duration tracks. For self-copy effects this is the copy
+    /// target; for effects applied to another recipient (Assimilation Aegis), this
+    /// is the recipient while `values` carries the copied object's characteristics.
+    pub duration_subject_id: ObjectId,
+    pub duration: Duration,
+    pub values: CopiableValues,
+    pub display_source: DisplaySource,
+    pub printed_ref: Option<PrintedCardRef>,
+    pub token_image_ref: Option<TokenImageRef>,
+    pub additional_modifications: Vec<ContinuousModification>,
+    pub effect_kind: EffectKind,
+}
+
+/// CR 707.2 + CR 613.1a: Install a precomputed copiable-values payload as a
+/// layer-1 copy effect on one concrete recipient. This is shared by ordinary
+/// `BecomeCopy` resolution and pre-entry copy replacements, whose copied
+/// values were chosen earlier in the replacement pipeline (CR 614.12a).
+pub(crate) fn apply_precomputed_copy_values(
+    state: &mut GameState,
+    recipient_id: ObjectId,
+    copy: PrecomputedCopyValues,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let PrecomputedCopyValues {
+        source_id,
+        controller,
+        duration_subject_id,
+        duration,
+        mut values,
+        display_source,
+        printed_ref,
+        token_image_ref,
+        additional_modifications,
+        effect_kind,
+    } = copy;
+
     // CR 202.1b + CR 707.9: "except it has no mana cost" is a copy-value
     // exception consumed at resolution — strip the copied mana cost from the
     // values themselves so the continuous copy carries mana value 0 on every
     // layer pass (BecomeCopy re-applies `CopyValues` each pass; a one-shot bake
     // would be overwritten). Mirrors token_copy.rs, which bakes the strip into
     // the freshly created token's base mana cost.
-    let mut values = values;
     if additional_modifications
         .iter()
         .any(|m| matches!(m, ContinuousModification::RemoveManaCost))
@@ -106,78 +166,21 @@ pub fn resolve(
 
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
-        display_source: source_display_source,
-        printed_ref: source_printed_ref,
-        token_image_ref: source_token_image_ref,
+        display_source,
+        printed_ref,
+        token_image_ref,
     }];
     modifications.extend(layered_mods);
 
-    // CR 611.2c: resolve the locked recipient set at resolution time. `SelfRef`
-    // (every existing single-subject card) is the source `~`; a typed group
-    // filter ("Shards you control", Niko) or `ParentTarget` selects a mass set,
-    // snapshotted to concrete ids now — later-entering members never join.
-    match &recipient {
-        // Existing single-subject cards — EXACT prior behavior, byte-identical.
-        TargetFilter::SelfRef => {
-            let tce_id = state.add_transient_continuous_effect(
-                ability.source_id,
-                ability.controller,
-                duration,
-                TargetFilter::SpecificObject {
-                    id: ability.source_id,
-                },
-                modifications,
-                None,
-            );
-            // CR 611.2b + CR 110.5d: the copy modification applies to the SOURCE
-            // (`affected = SpecificObject { source_id }`), but a "for as long as
-            // that creature remains tapped" duration (Zygon Infiltrator) tracks
-            // the copy *target*'s tap state — a third object distinct from both
-            // source and affected. Bind the donor as the duration subject so the
-            // target-relative `IsTapped { scope: Target }` condition resolves
-            // against the copy target.
-            state.set_transient_duration_subject(tce_id, target_id);
-        }
-        // CR 611.2c: mass recipient set. `ParentTarget` reads the inherited
-        // object target(s); a typed group filter resolves against the
-        // battlefield at resolution (Niko: "Shards you control").
-        _ => {
-            let recipient_ids: Vec<crate::types::identifiers::ObjectId> = match &recipient {
-                TargetFilter::ParentTarget => ability
-                    .targets
-                    .iter()
-                    .filter_map(|t| match t {
-                        TargetRef::Object(id) => Some(*id),
-                        TargetRef::Player(_) => None,
-                    })
-                    .collect(),
-                _ => {
-                    let ctx = FilterContext::from_ability(ability);
-                    state
-                        .battlefield
-                        .iter()
-                        .copied()
-                        .filter(|id| matches_target_filter(state, *id, &recipient, &ctx))
-                        .collect()
-                }
-            };
-            for id in recipient_ids {
-                let tce_id = state.add_transient_continuous_effect(
-                    ability.source_id,
-                    ability.controller,
-                    duration.clone(),
-                    TargetFilter::SpecificObject { id },
-                    modifications.clone(),
-                    None,
-                );
-                state.set_transient_duration_subject(tce_id, id);
-            }
-            // ponytail: `resolution_mods` (enter-as-copy counter / mana-cost
-            // exceptions, applied below on `source_id`) apply only on the SelfRef
-            // path — no mass become-copy card class carries those exceptions
-            // (Niko has none), so they stay a no-op here.
-        }
-    }
+    let tce_id = state.add_transient_continuous_effect(
+        source_id,
+        controller,
+        duration,
+        TargetFilter::SpecificObject { id: recipient_id },
+        modifications,
+        None,
+    );
+    state.set_transient_duration_subject(tce_id, duration_subject_id);
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — flush the layer re-evaluation
@@ -199,13 +202,9 @@ pub fn resolve(
                 if_type,
             } = modification
             {
-                let n = crate::game::quantity::resolve_quantity(
-                    state,
-                    &count,
-                    ability.controller,
-                    ability.source_id,
-                )
-                .max(0) as u32;
+                let n =
+                    crate::game::quantity::resolve_quantity(state, &count, controller, source_id)
+                        .max(0) as u32;
                 if n == 0 {
                     continue;
                 }
@@ -213,7 +212,7 @@ pub fn resolve(
                     None => true,
                     Some(t) => state
                         .objects
-                        .get(&ability.source_id)
+                        .get(&recipient_id)
                         .map(|obj| obj.card_types.core_types.contains(&t))
                         .unwrap_or(false),
                 };
@@ -221,8 +220,8 @@ pub fn resolve(
                     continue;
                 }
                 additions.push(PendingCounterAddition::Object {
-                    actor: ability.controller,
-                    object_id: ability.source_id,
+                    actor: controller,
+                    object_id: recipient_id,
                     counter_type,
                     count: n,
                 });
@@ -249,10 +248,7 @@ pub fn resolve(
                 super::counters::stash_pending_counter_additions(
                     state,
                     additions[index + 1..].to_vec(),
-                    PendingEffectResolved::new(
-                        EffectKind::from(&ability.effect),
-                        ability.source_id,
-                    ),
+                    PendingEffectResolved::new(effect_kind, source_id),
                 );
                 return Ok(());
             }
@@ -260,12 +256,61 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
+        kind: effect_kind,
+        source_id,
         subject: None,
     });
 
     Ok(())
+}
+
+fn apply_copy_values_to_recipients(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    recipient: &TargetFilter,
+    copy: PrecomputedCopyValues,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    match &recipient {
+        // Existing single-subject cards install one copy effect on the source.
+        TargetFilter::SelfRef => {
+            apply_precomputed_copy_values(state, ability.source_id, copy, events)
+        }
+        // CR 611.2c: mass recipient set. `ParentTarget` reads the inherited
+        // object target(s); a typed group filter resolves against the
+        // battlefield at resolution (Niko: "Shards you control").
+        _ => {
+            let recipient_ids: Vec<crate::types::identifiers::ObjectId> = match &recipient {
+                TargetFilter::ParentTarget => ability
+                    .targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect(),
+                _ => {
+                    let ctx = FilterContext::from_ability(ability);
+                    state
+                        .battlefield
+                        .iter()
+                        .copied()
+                        .filter(|id| matches_target_filter(state, *id, recipient, &ctx))
+                        .collect()
+                }
+            };
+            for id in recipient_ids {
+                let mut recipient_copy = copy.clone();
+                // CR 611.2b: recipient-relative durations ("for as long as ~
+                // remains attached to it") track the concrete object receiving
+                // the copy effect, while the copied values may come from a
+                // different object ("a creature card exiled with ~").
+                recipient_copy.duration_subject_id = id;
+                apply_precomputed_copy_values(state, id, recipient_copy, events)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
