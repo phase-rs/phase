@@ -100,6 +100,26 @@ struct PreparedIncrementalFlush {
     active_effects: Vec<ActiveContinuousEffect>,
 }
 
+/// Identity of one continuous effect whose modifications may apply in several
+/// layers. The identity deliberately excludes `mod_index`: every modification
+/// produced by the same effect shares the CR 613.6 affected-object set.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ContinuousEffectGroupKey {
+    Static {
+        source: ObjectIncarnationRef,
+        definition_index: usize,
+    },
+    Transient {
+        continuous_effect_id: u64,
+    },
+    GrantedStatic {
+        grant_origin: TriggerProducerOrigin,
+        recipient: ObjectIncarnationRef,
+    },
+}
+
+type StartedContinuousEffectSets = HashMap<ContinuousEffectGroupKey, Vec<ObjectId>>;
+
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
 /// CR 205.1a: Whether a subtype correlates to at least one of the given core
 /// types — i.e. whether it survives a card-type replacement. Shared with the
@@ -1898,10 +1918,17 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     // Step 2: Apply copy effects first so copied static abilities exist before later layers.
     let mut zone_cache = LayerZoneObjectCache::default();
+    let mut started_effect_sets = StartedContinuousEffectSets::new();
     let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
     for effect in &ordered_copy {
-        apply_continuous_effect(state, effect, &mut abilities_suppressed, &mut zone_cache);
+        apply_continuous_effect(
+            state,
+            effect,
+            &mut abilities_suppressed,
+            &mut zone_cache,
+            &mut started_effect_sets,
+        );
     }
     if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids) {
         // Sticker ability text is appended after the top-of-pass reset/copy
@@ -1945,7 +1972,13 @@ pub fn evaluate_layers(state: &mut GameState) {
             };
 
             for effect in &ordered {
-                apply_continuous_effect(state, effect, &mut abilities_suppressed, &mut zone_cache);
+                apply_continuous_effect(
+                    state,
+                    effect,
+                    &mut abilities_suppressed,
+                    &mut zone_cache,
+                    &mut started_effect_sets,
+                );
             }
         }
 
@@ -2995,6 +3028,7 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     } = prepared;
     let mut abilities_suppressed = HashSet::new();
     let mut zone_cache = LayerZoneObjectCache::default();
+    let mut started_effect_sets = StartedContinuousEffectSets::new();
     // Step 1 (per-recipient subset) ran in `prepare_incremental_flush` before the
     // static-source index rebuild and shared active-effect collection.
 
@@ -3012,6 +3046,7 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
             &recipient_ids,
             &mut abilities_suppressed,
             &mut zone_cache,
+            &mut started_effect_sets,
         );
     }
 
@@ -3051,6 +3086,7 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
                     &recipient_ids,
                     &mut abilities_suppressed,
                     &mut zone_cache,
+                    &mut started_effect_sets,
                 );
             }
         }
@@ -3508,6 +3544,15 @@ fn active_continuous_effects_from_static_definitions(
             if is_combat_assignment_rule_modification(modification) {
                 continue;
             }
+            let trigger_producer_origin =
+                state
+                    .objects
+                    .get(&source_id)
+                    .map(|source| TriggerProducerOrigin::Static {
+                        source: ObjectIncarnationRef::from_object(source),
+                        definition_index: def_idx,
+                        modification_index: mod_index,
+                    });
             // CR 113.3d + CR 604.1 + CR 611.2c: A `GrantStaticAbility` modification
             // installs the inner static onto every recipient matching the host's
             // `affected_filter`. The recipient is the granted-static's *source*
@@ -3527,6 +3572,7 @@ fn active_continuous_effects_from_static_definitions(
                     timestamp,
                     &affected_filter,
                     inner.as_ref(),
+                    trigger_producer_origin.clone(),
                 ));
                 // Continue: also push the meta-effect below so layer-6 apply
                 // pushes the inner static onto the recipient's
@@ -3579,15 +3625,6 @@ fn active_continuous_effects_from_static_definitions(
                 ));
                 continue;
             }
-            let trigger_producer_origin =
-                state
-                    .objects
-                    .get(&source_id)
-                    .map(|source| TriggerProducerOrigin::Static {
-                        source: ObjectIncarnationRef::from_object(source),
-                        definition_index: def_idx,
-                        modification_index: mod_index,
-                    });
             effects.push(ActiveContinuousEffect {
                 source_id,
                 controller,
@@ -3641,6 +3678,7 @@ fn expand_granted_static_effects(
     host_timestamp: u64,
     host_affected_filter: &TargetFilter,
     inner: &StaticDefinition,
+    host_origin: Option<TriggerProducerOrigin>,
 ) -> Vec<ActiveContinuousEffect> {
     if inner.mode != StaticMode::Continuous {
         return Vec::new();
@@ -3685,7 +3723,10 @@ fn expand_granted_static_effects(
                 // confuse them with the host's `static_definitions[def_idx]`.
                 def_index: None,
                 transient_id: None,
-                trigger_producer_origin: None,
+                // Retain the exact host grant origin so every modification
+                // synthesized from this granted static shares one CR 613.6
+                // affected-object set for this recipient.
+                trigger_producer_origin: host_origin.clone(),
                 expanded_trigger_provider: None,
                 mod_index,
                 layer: modification.layer(),
@@ -4775,8 +4816,16 @@ fn apply_continuous_effect(
     effect: &ActiveContinuousEffect,
     abilities_suppressed: &mut HashSet<ObjectId>,
     zone_cache: &mut LayerZoneObjectCache,
+    started_effect_sets: &mut StartedContinuousEffectSets,
 ) {
-    apply_continuous_effect_filtered(state, effect, None, abilities_suppressed, zone_cache);
+    apply_continuous_effect_filtered(
+        state,
+        effect,
+        None,
+        abilities_suppressed,
+        zone_cache,
+        started_effect_sets,
+    );
 }
 
 /// Installs one Layer-6-produced trigger by producer identity, never by payload
@@ -4826,6 +4875,7 @@ fn apply_continuous_effect_to(
     restrict_to: &BTreeSet<ObjectId>,
     abilities_suppressed: &mut HashSet<ObjectId>,
     zone_cache: &mut LayerZoneObjectCache,
+    started_effect_sets: &mut StartedContinuousEffectSets,
 ) {
     apply_continuous_effect_filtered(
         state,
@@ -4833,7 +4883,57 @@ fn apply_continuous_effect_to(
         Some(restrict_to),
         abilities_suppressed,
         zone_cache,
+        started_effect_sets,
     );
+}
+
+fn continuous_effect_group_key(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> Option<ContinuousEffectGroupKey> {
+    if let Some(definition_index) = effect.def_index {
+        let source = state.objects.get(&effect.source_id)?;
+        return Some(ContinuousEffectGroupKey::Static {
+            source: ObjectIncarnationRef::from_object(source),
+            definition_index,
+        });
+    }
+    if let Some(continuous_effect_id) = effect.transient_id {
+        return Some(ContinuousEffectGroupKey::Transient {
+            continuous_effect_id,
+        });
+    }
+    let grant_origin = effect.trigger_producer_origin.clone()?;
+    let recipient = state.objects.get(&effect.source_id)?;
+    Some(ContinuousEffectGroupKey::GrantedStatic {
+        grant_origin,
+        recipient: ObjectIncarnationRef::from_object(recipient),
+    })
+}
+
+/// CR 613.1f + CR 613.6: Ability removal prevents an effect that has not begun
+/// applying from starting in a later layer. Synthesized granted statics depend
+/// on both the granting source and the recipient that carries the granted
+/// ability. Other synthetic effects (such as CR 123.8 P/T stickers) do not carry
+/// this explicit grant provenance and remain independent of ability removal.
+fn unstarted_effect_generator_is_suppressed(
+    effect: &ActiveContinuousEffect,
+    abilities_suppressed: &HashSet<ObjectId>,
+) -> bool {
+    if effect.def_index.is_some() {
+        return abilities_suppressed.contains(&effect.source_id);
+    }
+    if effect.transient_id.is_some() {
+        return false;
+    }
+
+    let Some(TriggerProducerOrigin::Static { source, .. }) =
+        effect.trigger_producer_origin.as_ref()
+    else {
+        return false;
+    };
+    abilities_suppressed.contains(&effect.source_id)
+        || abilities_suppressed.contains(&source.object_id)
 }
 
 /// CR 611.3a + CR 611.3b: computes the set of zones `apply_continuous_effect_filtered`
@@ -4992,39 +5092,63 @@ fn apply_continuous_effect_filtered(
     restrict_to: Option<&BTreeSet<ObjectId>>,
     abilities_suppressed: &mut HashSet<ObjectId>,
     zone_cache: &mut LayerZoneObjectCache,
+    started_effect_sets: &mut StartedContinuousEffectSets,
 ) {
+    let group_key = continuous_effect_group_key(state, effect);
+    let retained_affected_ids = group_key
+        .as_ref()
+        .and_then(|key| started_effect_sets.get(key));
+
     // CR 613.1f: A printed static on an object that lost all abilities this
     // pass must not re-apply in later layers (Death's Shadow CDA after
     // Abigale — issue #1321).
-    if effect.def_index.is_some() && abilities_suppressed.contains(&effect.source_id) {
+    // CR 613.6: Once a multi-layer effect started applying, its remaining
+    // parts continue over the same object set even if its source loses the
+    // ability that generated it during an intervening layer.
+    if retained_affected_ids.is_none()
+        && unstarted_effect_generator_is_suppressed(effect, abilities_suppressed)
+    {
         return;
     }
 
-    let scan_ids = effect_candidate_ids(state, &effect.affected_filter, zone_cache);
-    let ctx = FilterContext::from_source(state, effect.source_id);
-    let affected_ids: Vec<ObjectId> = scan_ids
-        .iter()
-        // Incremental fast path: re-apply only to the freshly-entered objects.
-        // The rest of the battlefield was not reset and keeps its prior derived
-        // values, so re-applying to it would double-apply.
-        .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
-        .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
-        .filter(|&&id| {
-            effect.condition.as_ref().is_none_or(|condition| {
-                evaluate_condition_with_recipient(
-                    state,
-                    condition,
-                    effect.controller,
-                    effect.source_id,
-                    id,
-                )
+    let newly_affected_ids;
+    let affected_ids: &[ObjectId] = if let Some(retained) = retained_affected_ids {
+        retained
+    } else {
+        let scan_ids = effect_candidate_ids(state, &effect.affected_filter, zone_cache);
+        let ctx = FilterContext::from_source(state, effect.source_id);
+        newly_affected_ids = scan_ids
+            .iter()
+            // Incremental fast path: re-apply only to the freshly-entered objects.
+            // The rest of the battlefield was not reset and keeps its prior derived
+            // values, so re-applying to it would double-apply.
+            .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
+            .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
+            .filter(|&&id| {
+                effect.condition.as_ref().is_none_or(|condition| {
+                    evaluate_condition_with_recipient(
+                        state,
+                        condition,
+                        effect.controller,
+                        effect.source_id,
+                        id,
+                    )
+                })
             })
-        })
-        .copied()
-        .collect();
+            .copied()
+            .collect();
+        if let Some(key) = group_key {
+            started_effect_sets
+                .entry(key)
+                .or_insert(newly_affected_ids)
+                .as_slice()
+        } else {
+            newly_affected_ids.as_slice()
+        }
+    };
 
-    record_remote_type_layer_recipients(state, effect, &affected_ids);
-    record_attribution(state, effect, &affected_ids);
+    record_remote_type_layer_recipients(state, effect, affected_ids);
+    record_attribution(state, effect, affected_ids);
 
     // Pre-read chosen subtype from source (avoids borrow conflict in the loop).
     // Populated for `AddChosenSubtype { kind }` (additive — creature type or
@@ -5258,7 +5382,7 @@ fn apply_continuous_effect_filtered(
     };
     let all_creature_types = state.all_creature_types.clone();
 
-    for id in affected_ids {
+    for &id in affected_ids {
         // CR 613.4c: When the dynamic modification's QuantityExpr depends on
         // the recipient, resolve here under a recipient-bound FilterContext.
         // The immutable read finishes before the mutable borrow of `obj` below.
