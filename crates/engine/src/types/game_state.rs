@@ -14557,6 +14557,89 @@ mod tests {
         assert_eq!(state.max_lands_per_turn, 1);
     }
 
+    /// Phase-0 migration oracle for Amendment B's shipped, split authority.
+    /// This is intentionally test-only: Phase 2/3 will replace these labels
+    /// with resolution frames, but must preserve the current nesting order for
+    /// each valid mixed shape. `PostReplacementDrainStack` is positional today
+    /// (there are no drain ids), while draw work is addressed by frame id and
+    /// the connive tail has its dedicated slot.
+    #[test]
+    fn phase0_migration_oracle_shipped_mixed_slots_preserve_drain_order() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum ShippedLegacySlot {
+            GeneralPostReplacement,
+            DrawSequence,
+            ConniveTail,
+        }
+
+        fn outer_to_inner(state: &GameState) -> Vec<ShippedLegacySlot> {
+            let mut order = Vec::new();
+            if state.pending_connive_reentry.is_some() {
+                order.push(ShippedLegacySlot::ConniveTail);
+            }
+            if state.post_replacement_drains.has_ready() {
+                order.push(ShippedLegacySlot::GeneralPostReplacement);
+            }
+            if state.draw_sequences.active().is_some() {
+                order.push(ShippedLegacySlot::DrawSequence);
+            }
+            order
+        }
+
+        let draw = |state: &mut GameState| {
+            state.draw_sequences.push(PlayerId(0), 1);
+        };
+        let general = |state: &mut GameState| {
+            state.install_ready_continuation(
+                crate::types::ability::PostReplacementContinuation::Template(Box::new(
+                    crate::types::ability::AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Spell,
+                        crate::types::ability::Effect::Draw {
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            target: crate::types::ability::TargetFilter::Controller,
+                        },
+                    ),
+                )),
+            );
+        };
+
+        // A general drain that has entered a true draw keeps the general work
+        // outside the draw sequence; the child draw is the active (inner) work.
+        let mut general_then_draw = GameState::new_two_player(42);
+        general(&mut general_then_draw);
+        draw(&mut general_then_draw);
+        assert!(general_then_draw.post_replacement_drains.has_ready());
+        assert!(general_then_draw.draw_sequences.active().is_some());
+        assert_eq!(
+            outer_to_inner(&general_then_draw),
+            vec![
+                ShippedLegacySlot::GeneralPostReplacement,
+                ShippedLegacySlot::DrawSequence,
+            ],
+            "outer-to-inner migration order for a general drain that started a draw"
+        );
+
+        // Leader-style "draw, then connive" carries its tail separately. The
+        // connive tail is outer work and the draw remains the active inner work.
+        let mut draw_then_connive = GameState::new_two_player(42);
+        draw(&mut draw_then_connive);
+        draw_then_connive.pending_connive_reentry = Some(PendingConniveReentry {
+            conniver: ObjectId(99),
+            count: 1,
+            applied: HashSet::new(),
+        });
+        assert!(draw_then_connive.draw_sequences.active().is_some());
+        assert!(draw_then_connive.pending_connive_reentry.is_some());
+        assert_eq!(
+            outer_to_inner(&draw_then_connive),
+            vec![
+                ShippedLegacySlot::ConniveTail,
+                ShippedLegacySlot::DrawSequence,
+            ],
+            "outer-to-inner migration order for the dedicated connive tail and its draw"
+        );
+    }
+
     #[test]
     fn new_two_player_creates_game_with_seed() {
         let state = GameState::new_two_player(12345);

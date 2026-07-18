@@ -1958,6 +1958,53 @@ fn try_parse_global_damage_modification_replacement(text: &str) -> Option<Effect
     })
 }
 
+/// CR 614.1a + CR 514.2 + CR 611.2c: Recognize the one-shot spell/trigger form
+/// of the life-floor damage replacement — "damage that would reduce your life
+/// total to less than N reduces it to N instead" (Angel's Grace, Angel of
+/// Grace's ETB trigger) — and lift it to an
+/// `Effect::AddTargetReplacement { target: None }` that installs a floating
+/// turn-bound replacement in `pending_damage_replacements`. Unlike the
+/// one-shot "the next time …" shields (`CreateDamageReplacement`), the
+/// installed definition keeps `ShieldKind::None`, so it re-applies to every
+/// damage event until it expires (the floor is continuous for the turn). The
+/// permanent-static form of the same sentence (Worship, Fortune Thief, Ali
+/// from Cairo, Sustaining Spirit) routes at document level through the
+/// replacement parser and never reaches this dispatch.
+///
+/// `lower` is the already-lowercased, duration-stripped clause text — the
+/// leading "until end of turn," is consumed upstream by
+/// `strip_leading_duration` and re-attached via `with_clause_duration`, so
+/// `expiry` is left `None` on the produced definition; the install resolver
+/// derives it from `ability.duration` via `expiry_from_duration` (mirrors
+/// `parse_enter_from_zone_redirect_replacement` below).
+///
+/// Parsing is delegated to `parse_replacement_line` — the single authority
+/// for replacement sentences (it reaches the all-consuming
+/// `parse_unconditional_life_floor_damage_replacement`). The typed acceptance
+/// check keeps the lift scoped to the life-floor family; the
+/// "if [source] would deal … instead" family is owned by
+/// `try_parse_global_damage_modification_replacement`.
+fn try_parse_global_life_floor_replacement(text: &str, lower: &str) -> Option<Effect> {
+    use super::oracle_replacement::parse_replacement_line;
+    // Structural nom prefix gate; the parse itself is delegated below.
+    tag::<_, _, OracleError<'_>>("damage that would reduce ")
+        .parse(lower)
+        .ok()?;
+    let replacement = parse_replacement_line(text, "")?;
+    if !matches!(replacement.event, ReplacementEvent::DamageDone)
+        || !matches!(
+            replacement.damage_modification,
+            Some(DamageModification::LifeFloor { .. })
+        )
+    {
+        return None;
+    }
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::None,
+    })
+}
+
 /// CR 614.1a + CR 614.1d + CR 601: Recognize a floating zone-change redirect
 /// replacement of the shape
 /// "if one or more <creatures/permanents> would enter [from <zone>]
@@ -8008,6 +8055,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // "shuffle them into their libraries" never collapses into a bare
     // `Effect::Shuffle`.
     if let Some(effect) = parse_enter_from_zone_redirect_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+
+    // CR 614.1a + CR 514.2: floating turn-bound life-floor replacement
+    // ("Until end of turn, damage that would reduce your life total to less
+    // than 1 reduces it to 1 instead." — Angel's Grace; Angel of Grace's ETB
+    // trigger). Dispatched after `strip_leading_duration` for the same reason
+    // as the zone-redirect lift above: the recursive (duration-stripped) call
+    // reaches it, and `AbilityDefinition.duration == UntilEndOfTurn` reaches
+    // `expiry_from_duration` in the install resolver.
+    if let Some(effect) = try_parse_global_life_floor_replacement(text, &lower) {
         return parsed_clause(effect);
     }
 

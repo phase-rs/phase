@@ -157,7 +157,8 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 
 # --- Group 1: card-data + card-names (expensive, independent of coverage) ---
 # Build every generator bin in ONE cargo invocation, then run the binaries
-# directly from target/tool/. Two reasons this matters for build time:
+# directly from the tool-profile output dir. Two reasons this matters for
+# build time:
 #   1. Unified feature set: mixing `--features cli` and no-feature invocations
 #      re-fingerprints the engine crate and recompiles it on each switch.
 #   2. Single invocation "shape": cargo's tool-profile artifacts stabilize per
@@ -165,7 +166,10 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 #      alone vs the others) recompiles the engine on each switch. One shape for
 #      every build keeps the warm case a true no-op.
 TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate --bin coverage-parse-diff)
-TOOL_BIN="target/tool"
+# Execute from the SAME target dir cargo built into: `cargo build` honors
+# CARGO_TARGET_DIR, so a hardcoded `target/tool` here would silently run stale
+# binaries from a different build whenever the variable is set.
+TOOL_BIN="${CARGO_TARGET_DIR:-target}/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
 # The token catalog is baked into the engine lib at compile time (build.rs

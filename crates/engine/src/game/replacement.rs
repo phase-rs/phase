@@ -6227,10 +6227,18 @@ pub fn find_applicable_replacements(
                     }
                     if let Some(ref tf) = repl_def.damage_target_filter {
                         if let ProposedEvent::Damage { target, .. } = event {
+                            // CR 109.4 + CR 614.1a: `Controller`/`Opponent` target
+                            // scopes resolve against the installing player anchored
+                            // at install time (`source_controller`, computed above) —
+                            // the sentinel host `ObjectId(0)` has no controller of
+                            // its own (Angel's Grace's "your life total" floor binds
+                            // to its caster). `Any`/`Specific` ignore the controller,
+                            // and `SourceChosenPlayer` consults the source object,
+                            // so only the two player-relative scopes read it.
                             if !matches_damage_target_filter(
                                 tf,
                                 target,
-                                PlayerId(0),
+                                source_controller,
                                 ObjectId(0),
                                 state,
                             ) {

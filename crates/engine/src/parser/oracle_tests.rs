@@ -16553,6 +16553,245 @@ fn everybody_lives_emits_cant_lose_life_lose_game_win_game_statics() {
     );
 }
 
+// CR 104.2b + CR 104.3e + CR 614.1a + CR 514.2: Angel's Grace prints a
+// two-subject restriction conjunction ("You can't lose the game this turn and
+// your opponents can't win the game this turn.") followed by the one-shot form
+// of the life-floor damage replacement ("Until end of turn, damage that would
+// reduce your life total to less than 1 reduces it to 1 instead."). SHAPE
+// test: the chain must emit a Controller-scoped `CantLoseTheGame`, an
+// Opponent-scoped `CantWinTheGame`, and an `AddTargetReplacement` carrying
+// `DamageDone` + `LifeFloor{1}` + `Player{Controller}` with duration
+// `UntilEndOfTurn` and `expiry: None` (derived from the ability duration at
+// install). Zero `Effect::Unimplemented` is the reach guard: before the fix,
+// the whole first sentence and the floor clause each routed to
+// `Effect::Unimplemented`. Runtime semantics are covered by
+// `tests/integration/angels_grace.rs`.
+#[test]
+fn angels_grace_emits_cant_lose_cant_win_and_life_floor() {
+    use crate::types::ability::{
+        DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Duration,
+    };
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+
+    let r = parse(
+        "Split second (As long as this spell is on the stack, players can't cast spells \
+         or activate abilities that aren't mana abilities.)\n\
+         You can't lose the game this turn and your opponents can't win the game this \
+         turn. Until end of turn, damage that would reduce your life total to less than \
+         1 reduces it to 1 instead.",
+        "Angel's Grace",
+        &[Keyword::SplitSecond],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "single chained spell ability");
+
+    let mut cant_lose_affected = None;
+    let mut cant_win_affected = None;
+    let mut life_floor = None;
+    let mut node = Some(&r.abilities[0]);
+    while let Some(def) = node {
+        assert!(
+            !matches!(*def.effect, Effect::Unimplemented { .. }),
+            "no Unimplemented chunk should remain, got {:?}",
+            def.effect
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                for s in static_abilities {
+                    match s.mode {
+                        StaticMode::CantLoseTheGame => {
+                            cant_lose_affected = s.affected.clone();
+                        }
+                        StaticMode::CantWinTheGame => {
+                            cant_win_affected = s.affected.clone();
+                        }
+                        _ => continue,
+                    }
+                    // CR 514.2: "this turn" — both restriction statics must be
+                    // duration-scoped so the transient effects end at cleanup;
+                    // a dropped duration would make the locks permanent.
+                    assert_eq!(
+                        def.duration,
+                        Some(Duration::UntilEndOfTurn),
+                        "restriction statics must carry the this-turn duration"
+                    );
+                }
+            }
+            Effect::AddTargetReplacement {
+                replacement,
+                target,
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::None,
+                    "self-contained floating replacement takes no per-target binding"
+                );
+                assert_eq!(
+                    def.duration,
+                    Some(Duration::UntilEndOfTurn),
+                    "the install resolver derives the EndOfTurn expiry from this duration"
+                );
+                life_floor = Some((**replacement).clone());
+            }
+            _ => {}
+        }
+        node = def.sub_ability.as_deref();
+    }
+
+    // CR 104.3b + CR 104.3e: "You can't lose the game" binds to the caster.
+    assert_eq!(
+        cant_lose_affected,
+        Some(TargetFilter::Controller),
+        "CantLoseTheGame must be Controller-scoped"
+    );
+    // CR 104.2b: "your opponents can't win the game" binds to the opponents.
+    assert!(
+        matches!(
+            cant_win_affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ),
+        "CantWinTheGame must be Opponent-scoped, got {cant_win_affected:?}"
+    );
+    // CR 614.1a: the life floor is a DamageDone replacement on the caster.
+    let repl = life_floor.expect("chain must emit the AddTargetReplacement life floor");
+    assert!(matches!(repl.event, ReplacementEvent::DamageDone));
+    assert_eq!(
+        repl.damage_modification,
+        Some(DamageModification::LifeFloor { minimum: 1 })
+    );
+    assert_eq!(
+        repl.damage_target_filter,
+        Some(DamageTargetFilter::Player {
+            player: DamageTargetPlayerScope::Controller
+        })
+    );
+    assert!(
+        repl.expiry.is_none(),
+        "expiry is derived from the ability duration at install, not parse time"
+    );
+}
+
+// CR 614.1a + CR 514.2: Angel of Grace carries the same life-floor sentence in
+// TRIGGER context ("When this creature enters, until end of turn, damage that
+// would reduce your life total to less than 1 reduces it to 1 instead.") —
+// the divergent production entry for the lift. The trigger's execute body must
+// lower to `AddTargetReplacement` with `Duration::UntilEndOfTurn` threaded
+// onto the executing ability (the install resolver derives the EndOfTurn
+// expiry from it via `expiry_from_duration`); a dropped duration would make
+// the floor permanent.
+#[test]
+fn angel_of_grace_trigger_lifts_life_floor_with_duration() {
+    use crate::types::ability::{DamageModification, Duration};
+
+    let r = parse(
+        "Flash\nFlying\nWhen this creature enters, until end of turn, damage that would \
+         reduce your life total to less than 1 reduces it to 1 instead.\n{4}{W}{W}, Exile \
+         this card from your graveyard: Your life total becomes 10.",
+        "Angel of Grace",
+        &[Keyword::Flash, Keyword::Flying],
+        &["Creature"],
+        &["Angel"],
+    );
+    let execute = r
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_ref())
+        .expect("ETB trigger should have an execute body");
+    assert!(
+        !has_unimplemented(execute),
+        "ETB trigger body must not contain Unimplemented effects: {execute:#?}"
+    );
+    let Effect::AddTargetReplacement {
+        replacement,
+        target,
+    } = &*execute.effect
+    else {
+        panic!("trigger body must lift to AddTargetReplacement, got {execute:#?}");
+    };
+    assert_eq!(*target, TargetFilter::None);
+    assert_eq!(
+        replacement.damage_modification,
+        Some(DamageModification::LifeFloor { minimum: 1 })
+    );
+    assert_eq!(
+        execute.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the trigger-context duration must ride on the executing ability"
+    );
+    assert!(replacement.expiry.is_none());
+}
+
+// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: Courageous Resolve's
+// fateful-hour tail is an Oxford-comma list of THREE restriction clauses
+// under one "you can't"-family subject axis, the last of which switches
+// subject to "your opponents" — the same tail Angel's Grace and Celestine
+// Reef print, but reached through a comma-list rather than a plain
+// bare-"and" pair. Regression for the class boundary this PR adds to
+// `starts_bare_and_clause_lower`: splitting "your opponents can't win the
+// game this turn" off the tail left the PRECEDING comma-list item ("you
+// can't lose the game this turn,") with its dangling list comma still
+// attached, which broke `parse_restriction_modes`'s `all_consuming` match
+// and silently regressed it to `Effect::Unimplemented`. Fixed at the shared
+// `push_clause_chunk` (trims a trailing list comma, not just the sentence-
+// final period) rather than in this one bare-and arm, since every chunk
+// boundary in the module routes through it. RED against the unfixed chunk
+// trim: the middle clause reverts to `Unimplemented { name: "can't", .. }`.
+#[test]
+fn courageous_resolve_fateful_hour_list_zero_unimplemented() {
+    let r = parse(
+        "Up to one target creature you control gains protection from each of your \
+         opponents until end of turn. Draw a card.\n\
+         Fateful hour — If you have 5 or less life, you can't lose life this turn, you \
+         can't lose the game this turn, and your opponents can't win the game this turn.",
+        "Courageous Resolve",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    let fateful = r
+        .abilities
+        .iter()
+        .find(|a| {
+            a.description
+                .as_deref()
+                .is_some_and(|d| d.starts_with("Fateful hour"))
+        })
+        .expect("Fateful hour ability present");
+
+    let mut modes = Vec::new();
+    let mut node = Some(fateful);
+    while let Some(def) = node {
+        assert!(
+            !matches!(*def.effect, Effect::Unimplemented { .. }),
+            "no Unimplemented chunk should remain in the fateful-hour chain, got {:?}",
+            def.effect
+        );
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        {
+            modes.extend(static_abilities.iter().map(|s| s.mode.clone()));
+        }
+        node = def.sub_ability.as_deref();
+    }
+    assert_eq!(
+        modes,
+        vec![
+            StaticMode::CantLoseLife,
+            StaticMode::CantLoseTheGame,
+            StaticMode::CantWinTheGame,
+        ],
+        "all three fateful-hour restrictions must resolve in order, got {modes:?}"
+    );
+}
+
 #[test]
 fn avatars_wrath_parses_airbend_chain_cast_restriction_and_self_exile() {
     let r = parse(
