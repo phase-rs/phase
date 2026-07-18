@@ -6,10 +6,12 @@
 
 use serde::Serialize;
 
+use super::ast::parsed_clause;
+use super::context::ParseContext;
 use super::effect_chain::EffectChainIr;
 use crate::types::ability::{
-    AbilityDefinition, ControllerRef, ModalChoice, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, UnlessPayModifier,
+    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ModalChoice, TargetFilter,
+    TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayModifier,
 };
 use crate::types::triggers::TriggerMode;
 
@@ -44,6 +46,9 @@ pub(crate) enum TriggerBody {
     /// bodies. The marker still flows through ordinary trigger-chain lowering;
     /// this payload carries the modal metadata no clause can represent.
     Modal(Box<ModalIr>),
+    /// CR 701.38: A vote block with its typed ballot effect and optional
+    /// pre-ballot random choice.
+    Vote(Box<VoteIr>),
     /// Pre-lowered ability (vote blocks produce `AbilityDefinition` directly).
     PreLowered(Box<AbilityDefinition>),
 }
@@ -59,6 +64,89 @@ pub(crate) struct ModalIr {
     pub(crate) marker: EffectChainIr,
     pub(crate) choice: ModalChoice,
     pub(crate) mode_abilities: Vec<AbilityDefinition>,
+}
+
+/// CR 701.38: Typed vote trigger body.
+///
+/// `vote` is always an `Effect::Vote`; `pre_vote_choose` captures the one
+/// structural wrapper in this class (Truth or Consequences' random opponent
+/// choice). Lowering reconstructs that wrapper around the typed vote effect and
+/// then sends the root through ordinary trigger-chain lowering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct VoteIr {
+    source_text: String,
+    vote: Effect,
+    pre_vote_choose: Option<ChoiceType>,
+    actor: Option<ControllerRef>,
+    in_trigger: bool,
+}
+
+impl VoteIr {
+    pub(crate) fn new(vote: Effect, pre_vote_choose: Option<ChoiceType>) -> Self {
+        debug_assert!(matches!(vote, Effect::Vote { .. }));
+        Self {
+            source_text: String::new(),
+            vote,
+            pre_vote_choose,
+            actor: None,
+            in_trigger: false,
+        }
+    }
+
+    pub(crate) fn with_source(mut self, source_text: &str) -> Self {
+        self.source_text = source_text.to_string();
+        self
+    }
+
+    pub(crate) fn with_context(mut self, ctx: &ParseContext) -> Self {
+        self.actor = ctx.actor.clone();
+        self.in_trigger = ctx.in_trigger;
+        self
+    }
+
+    /// Construct the trigger-context chain without allocating a pre-lowered
+    /// root definition. The nested vote definition is a continuation payload
+    /// of the typed random-choice wrapper, not the trigger body itself.
+    pub(crate) fn effect_chain(&self, kind: AbilityKind) -> EffectChainIr {
+        let parsed = match &self.pre_vote_choose {
+            Some(choice_type) => {
+                let mut root = parsed_clause(Effect::Choose {
+                    choice_type: choice_type.clone(),
+                    persist: true,
+                    selection: TargetSelectionMode::Random,
+                });
+                root.sub_ability = Some(Box::new(AbilityDefinition::new(kind, self.vote.clone())));
+                root
+            }
+            None => parsed_clause(self.vote.clone()),
+        };
+        EffectChainIr::single_clause(
+            &self.source_text,
+            kind,
+            parsed,
+            None,
+            self.actor.clone(),
+            self.in_trigger,
+        )
+    }
+
+    /// Compatibility lowering for non-trigger callers that have not yet moved
+    /// to trigger-body IR. Trigger parsing uses [`Self::effect_chain`] instead.
+    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
+        let vote = AbilityDefinition::new(kind, self.vote);
+        match self.pre_vote_choose {
+            Some(choice_type) => AbilityDefinition::new(
+                kind,
+                Effect::Choose {
+                    choice_type,
+                    persist: true,
+                    selection: TargetSelectionMode::Random,
+                },
+            )
+            .sub_ability(vote),
+            None => vote,
+        }
+    }
 }
 
 /// Modifier fields extracted during IR production.

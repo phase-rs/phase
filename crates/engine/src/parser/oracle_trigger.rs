@@ -1391,10 +1391,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
-    // CR 115.1d: Pre-lowered vote blocks do not flow through clause-level
-    // multi-target extraction, so keep their legacy optional-targeting marker
-    // local to that PreLowered path. Normal effect chains carry this metadata on
-    // the specific parsed clause.
+    // CR 115.1d: Record root-level optional-target phrasing for the shared
+    // trigger-chain lowerer. Clause-level multi-target extraction carries the
+    // richer per-clause form when a chain has one.
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
         || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
@@ -1410,26 +1409,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 effect_ctx.actor.clone(),
                 effect_ctx.in_trigger,
             )))
-        // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
-        } else if let Some(vote_def) =
-            crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
-        {
-            let mut ability = vote_def;
-            if has_up_to {
-                ability.optional_targeting = true;
-            }
-            if effect_adds_mana_to_triggering_player(&effect_lower)
-                && matches!(
-                    ability.effect.as_ref(),
-                    crate::types::ability::Effect::Mana { .. }
-                )
-            {
-                ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
-            }
-            if optional {
-                ability.optional = true;
-            }
-            Some(TriggerBody::PreLowered(Box::new(ability)))
+        // CR 701.38 + CR 207.2c: Whole vote blocks retain the ballot as typed
+        // IR and use the ordinary trigger-chain lowerer for root transforms.
+        } else if let Some(vote) = crate::parser::oracle_vote::parse_vote_block_ir(
+            &effect_for_parse,
+            AbilityKind::Spell,
+            &effect_ctx,
+        ) {
+            Some(TriggerBody::Vote(Box::new(vote)))
         // CR 700.3 + CR 701.20a: Pile-separation (Fact or Fiction / Sphinx of
         // Uthuun family). The multi-sentence block must be consumed as a single
         // unit — chain parsing would fragment it into Unimplemented chunks.
@@ -1626,6 +1613,10 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             lower_trigger_effect_chain(&modal.marker, modifiers)
                 .with_modal(modal.choice.clone(), modal.mode_abilities.clone()),
         )),
+        Some(TriggerBody::Vote(vote)) => Some(Box::new(lower_trigger_effect_chain(
+            &vote.effect_chain(AbilityKind::Spell),
+            modifiers,
+        ))),
         Some(TriggerBody::PreLowered(ability)) => {
             // CR 603.5: Remaining pre-lowered bodies may not have stamped
             // `optional` during extraction even when the trigger effect began
