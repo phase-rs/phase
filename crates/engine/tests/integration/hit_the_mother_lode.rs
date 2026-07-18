@@ -67,8 +67,8 @@ fn cast_and_resolve(scenario: GameScenario, spell: ObjectId) -> engine::game::sc
 }
 
 /// CR 701.57c + CR 608.2c: discover hits an MV-3 card; the caster keeps it (to
-/// hand). The follow-up creates exactly |3 - 10| = 7 Treasures, and CR 111.10a
-/// makes them enter tapped. Reverting the difference bind (7 → placeholder → 0)
+/// hand). The follow-up creates exactly |3 - 10| = 7 Treasures, and CR 111.10
+/// permits the creating effect to add the tapped characteristic. Reverting the difference bind (7 → placeholder → 0)
 /// or the tapped flag flips this assertion.
 #[test]
 fn discover_hit_mv3_to_hand_creates_seven_tapped_treasures() {
@@ -114,7 +114,7 @@ fn discover_hit_mv3_to_hand_creates_seven_tapped_treasures() {
     );
     assert!(
         created.iter().all(|id| runner.state().objects[id].tapped),
-        "every created Treasure must enter tapped (CR 111.10a)"
+        "every created Treasure must enter tapped (CR 111.10)"
     );
     assert!(
         treasures(runner.state(), P1).is_empty(),
