@@ -7154,12 +7154,21 @@ fn apply_single_replacement(
                         .map(|obj| obj.controller)
                         .unwrap_or(state.active_player)
                 };
-                let entry_copy = create_entry_copy_spec_for_replacement(
-                    state,
-                    repl_def,
-                    rid.source,
-                    replacement_controller,
-                );
+                // CR 614.12a + CR 707.2: only ChangeZone entry-copy shields
+                // (Mystic Reflection) precompute the copy payload into the
+                // event. Moved self-replacements still drain as post-effects so
+                // their entry event can pause on `CopyTargetChoice` before the
+                // final copy snapshot is chosen.
+                let entry_copy = if repl_def.event == ReplacementEvent::ChangeZone {
+                    create_entry_copy_spec_for_replacement(
+                        state,
+                        repl_def,
+                        rid.source,
+                        replacement_controller,
+                    )
+                } else {
+                    None
+                };
                 let ability = match branch {
                     ReplacementBranch::Execute => repl_def.execute.as_deref(),
                     ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
