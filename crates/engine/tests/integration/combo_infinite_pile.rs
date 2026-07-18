@@ -40,7 +40,7 @@ use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, LoopDetectionMode, WaitingFor};
+use engine::types::game_state::{GameState, LoopDetectionMode, PayableResource, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
@@ -672,4 +672,207 @@ fn real_4p_basalt_power_artifact_refills_colorless_only() {
             "{color:?} must NOT be fabricated — the loop produces only colorless (CR 106.1b/106.4)"
         );
     }
+}
+
+// ─────────────── PART 2: CR 732.2a boundary finite-resolution (TOKEN collapse) ───────────────
+//
+// USER DIRECTIVE (memory: real-game-fixtures-not-synthetic / combo-detector-must-fire-in-real-
+// games): these LOAD the real 4p dumps and DRIVE the REAL production path (`apply(..PassPriority)`
+// per priority holder) to the phase/step boundary. T1 is the primary token payoff; T2 is the
+// matched mana NEGATIVE discriminator.
+
+/// Every battlefield Saproling P0 controls (tapped or not) — the mint oracle.
+fn p0_saproling_ids(state: &GameState) -> BTreeSet<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == P0 && o.name == "Saproling")
+        })
+        .collect()
+}
+
+/// Drive the REAL production path — `apply(.., PassPriority)` for the actual priority
+/// holder each beat — until the current phase/step ends and the `enter_phase → drain`
+/// boundary runs. Returns as soon as the boundary surfaces a non-Priority prompt (e.g.
+/// the LoopCollapse `PayAmountChoice`) OR the phase advances back to a Priority window
+/// (the mana-negative case). Bounded so a wedged state fails loudly instead of hanging.
+fn drive_priority_to_next_boundary(state: &mut GameState) {
+    let start_phase = state.phase;
+    for _ in 0..64 {
+        let WaitingFor::Priority { player } = state.waiting_for.clone() else {
+            return; // a boundary prompt (or other non-Priority wait) already surfaced
+        };
+        apply(state, player, GameAction::PassPriority)
+            .expect("pass priority to advance toward the next phase boundary");
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return; // the phase transition surfaced a prompt (LoopCollapse, etc.)
+        }
+        if state.phase != start_phase {
+            return; // crossed a boundary with no prompt (mana-negative case)
+        }
+    }
+    panic!("drive_priority_to_next_boundary: no phase boundary reached within 64 passes");
+}
+
+/// T1 (TOKEN, PRIMARY payoff): a real accepted object-growth loop, at the next phase
+/// boundary, prompts the controller for a finite N via `PayableResource::LoopCollapse`,
+/// mints N tapped 1/1 green Saproling tokens, cashes out the ∞ status, and does NOT
+/// re-prompt.
+///
+/// REVERT-PROBE (non-vacuous): with the §7 boundary collapse pass removed (or on
+/// pre-Part-2 code) `drive_priority_to_next_boundary` surfaces NO `PayAmountChoice` and
+/// mints ZERO tokens → assertions (1), (2), and (3) all FLIP. Positive reach-guards (the
+/// stash-present assert after accept + the ≥1-token mint) prove non-vacuity.
+#[test]
+fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
+    use engine::analysis::resource::ResourceAxis;
+
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "fixture precondition: at the CR 732.2a LoopShortcut offer for P0, got {:?}",
+        state.waiting_for
+    );
+
+    drive_all_accept(&mut state);
+
+    // Reach-guard (accept-capture, §1): accepting the object-growth loop stashed the
+    // fodder's copiable profile for P0. Non-vacuity anchor for the negatives below.
+    assert!(
+        state.pending_unbounded_materialization.contains_key(&P0),
+        "accepting the object-growth loop must stash P0's fodder materialization profile"
+    );
+    // Part 1 preserved: the ∞ TokensCreated axis is marked (zero objects minted yet).
+    assert!(
+        state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|a| a.contains(&ResourceAxis::TokensCreated)),
+        "the accepted object-growth loop marks the TokensCreated ∞ axis"
+    );
+
+    let before = p0_saproling_ids(&state);
+    assert_eq!(
+        before.len(),
+        8,
+        "MEASURED: P0 controls 8 Saprolings pre-collapse (4 tapped ∞-pile + 4 untapped)"
+    );
+
+    drive_priority_to_next_boundary(&mut state);
+
+    // (1) PROMPT — the boundary surfaces the LoopCollapse pay-amount to the controller.
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+                if player == P0
+        ),
+        "the phase boundary must prompt P0 for the LoopCollapse count, got {:?}",
+        state.waiting_for
+    );
+
+    // (2) MINT — SubmitPayAmount{5} mints exactly 5 NEW tapped 1/1 green Saproling tokens.
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 5 })
+        .expect("P0 submits the finite loop-collapse count");
+    let after = p0_saproling_ids(&state);
+    assert_eq!(
+        after.len(),
+        before.len() + 5,
+        "SubmitPayAmount{{5}} mints exactly 5 more Saprolings for P0"
+    );
+    let minted: Vec<ObjectId> = after.difference(&before).copied().collect();
+    assert_eq!(minted.len(), 5, "exactly 5 newly-created Saproling ids");
+    for id in &minted {
+        let o = state.objects.get(id).expect("minted token present");
+        assert!(o.is_token, "minted {id:?} is a token");
+        assert!(o.tapped, "minted {id:?} enters tapped");
+        assert_eq!(o.power, Some(1), "minted {id:?} has power 1");
+        assert_eq!(o.toughness, Some(1), "minted {id:?} has toughness 1");
+        assert_eq!(o.color, vec![ManaColor::Green], "minted {id:?} is green");
+    }
+
+    // (3) CASH-OUT — the ∞ token status ends: axis, stash, and pile all gone.
+    assert!(
+        !state.unbounded_resources.contains_key(&P0),
+        "collapsing the token loop cashes out the ∞ TokensCreated axis"
+    );
+    assert!(
+        !state.pending_unbounded_materialization.contains_key(&P0),
+        "the materialization stash is consumed"
+    );
+    assert!(
+        !state.unbounded_loop_pile.contains_key(&P0),
+        "the token ∞ pile is cleared (display collapses from ∞ to ×N)"
+    );
+
+    // (4) CLEAN RESUME + NO RE-PROMPT.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "after the mint the boundary fixpoint restores Priority, got {:?}",
+        state.waiting_for
+    );
+    drive_priority_to_next_boundary(&mut state);
+    assert!(
+        !matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::LoopCollapse,
+                ..
+            }
+        ),
+        "the cashed-out loop must NOT re-prompt at the next boundary, got {:?}",
+        state.waiting_for
+    );
+}
+
+/// T2 (MANA NEGATIVE discriminator): a real infinite-COLORLESS mana loop (Basalt Monolith
+/// with Power Artifact) writes NO materialization stash (§5), so the boundary collapse
+/// pass does NOT prompt. Matched to T1: token axis → prompt+mint; mana axis → no prompt.
+///
+/// Non-vacuous: the reach-guard asserts P0 IS flagged unbounded (Mana(Colorless) axis
+/// present) yet holds no stash — the discriminator is the stash, not the flag.
+#[test]
+fn real_4p_basalt_mana_loop_boundary_does_not_prompt_collapse() {
+    use engine::analysis::resource::ResourceAxis;
+    use engine::types::mana::ManaType;
+
+    let mut state: GameState = serde_json::from_str(&BASALT_INFINITE_COLORLESS_STATE)
+        .expect("the real Basalt+Power Artifact dump must deserialize into the current GameState");
+
+    // Reach-guard: P0 IS flagged unbounded (mana axis) — but a mana loop writes no stash.
+    assert_eq!(
+        state.unbounded_resources.get(&P0),
+        Some(&BTreeSet::from([ResourceAxis::Mana(ManaType::Colorless)])),
+        "fixture precondition: P0's only unbounded axis is Mana(Colorless)"
+    );
+    assert!(
+        !state.pending_unbounded_materialization.contains_key(&P0),
+        "a mana loop must write NO materialization stash (the discriminator)"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "fixture precondition: ordinary priority for P0"
+    );
+
+    drive_priority_to_next_boundary(&mut state);
+
+    // The boundary ran (phase advanced or a non-collapse prompt surfaced) but produced NO
+    // LoopCollapse prompt — the mana axis writes no stash, so the collapse pass cannot fire.
+    assert!(
+        !matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::LoopCollapse,
+                ..
+            }
+        ),
+        "a mana loop must NOT surface a LoopCollapse prompt at the boundary, got {:?}",
+        state.waiting_for
+    );
 }

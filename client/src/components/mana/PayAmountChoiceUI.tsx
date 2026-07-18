@@ -39,6 +39,8 @@ export function PayAmountChoiceUI() {
         return t("mana.resourceCounters");
       case "Speed":
         return t("mana.resourceSpeed");
+      case "LoopCollapse":
+        return t("mana.resourceLoopCollapse");
     }
   }, [data, t]);
 

@@ -576,6 +576,7 @@
     "resourceMana": "mana",
     "resourceCounters": "marqueurs",
     "resourceSpeed": "vitesse",
+    "resourceLoopCollapse": "jetons",
     "manualMana": "Manuel",
     "manualManaTooltip": "Mana manuel — cette partie seulement. Engagez vos propres terrains et mana pour payer.",
     "spendHint": "Cliquez sur votre mana pour le dépenser pour ce coût",

@@ -2041,6 +2041,18 @@ fn materialize_object_growth_shortcut(
         let pile =
             crate::analysis::resource::tapped_fodder_members(state, proposal.proposer, &class);
         state.register_unbounded_loop_pile(proposal.proposer, pile);
+        // CR 732.2a / CR 707.2: Part 2 — capture the fodder's copiable profile NOW,
+        // while the recast sequence is still intact (`.clear()` below wipes it and
+        // `current_period_fodder_class` derives from it). At the next phase/step
+        // boundary the loop controller names a finite N and N tapped copy-tokens are
+        // minted from this profile (the deferred shortcut count). Stored as
+        // CopiableValues, NOT an ObjectId: the board is not frozen accept→boundary
+        // (the controller acts at priority in between), and a token's oracle_id is
+        // empty so a ResidualPermanent could not recreate it. A mana-engine loop has
+        // no fodder class (`None`) → no stash → no boundary prompt (the intended
+        // mana-negative discriminator).
+        let profile = crate::game::printed_cards::intrinsic_copiable_values(&class);
+        state.register_pending_materialization(proposal.proposer, Box::new(profile));
     }
     state.loop_detect_ring.clear();
     state.last_loop_action_sequence.clear();
@@ -2796,7 +2808,9 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
 // would force ~4.3e9 GameState clones — a byte cap cannot see it, only this count cap can.
 // 1_000 is generous vs any honest Fixed count (~10x KCI-style loops); worst-case bounded
 // cost is 1_000 cycles x <=10_000 beats = 1e7.
-const MAX_SHORTCUT_CYCLES: u32 = 1_000;
+// `pub(crate)`: also the CR 732.2a boundary-collapse `PayableResource::LoopCollapse`
+// prompt max (turns.rs), reusing the one existing loop-count safety bound.
+pub(crate) const MAX_SHORTCUT_CYCLES: u32 = 1_000;
 
 fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
     let living_players = state

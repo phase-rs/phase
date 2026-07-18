@@ -9090,9 +9090,12 @@ pub enum DistributionUnit {
     Life,
 }
 
-/// CR 107.14 + CR 118.8: Resource that can be paid in a "pay any amount of X"
-/// prompt. Typed so the same `WaitingFor::PayAmountChoice` variant generalizes
-/// to future classes (energy, life, mana) without re-introducing boolean flags.
+/// CR 107.14 + CR 118.8: Quantity named in a "pay any amount of X" prompt.
+/// Typed so the same `WaitingFor::PayAmountChoice` variant generalizes to future
+/// classes without re-introducing boolean flags. Most variants deduct a real
+/// resource (energy, life, generic mana, counters); `LoopCollapse` is the one
+/// non-payment member — its N is the finite count an accepted CR 732.2a
+/// object-growth loop collapses into, deducting nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PayableResource {
@@ -9113,6 +9116,15 @@ pub enum PayableResource {
     /// (CR 702.179f: no speed counts as 0). Mana-ability only — paid via the
     /// `PendingManaAbility::chosen_x` path, never the standalone resource branch.
     Speed,
+    /// CR 732.2a: NOT a resource payment. The finite count an accepted
+    /// object-growth loop shortcut collapses into, named by the loop controller
+    /// at the next phase/step boundary (the shortcut's ending point is a priority
+    /// window). The submit handler reads the deferred materialization stash by
+    /// player and mints N tokens — it deducts nothing. Unit variant: only a
+    /// `TokensCreated` token loop reaches this prompt today, so no axis field is
+    /// needed (a deferred mana/counter collapse would add the discriminator when a
+    /// real second value exists).
+    LoopCollapse,
 }
 
 fn default_one() -> u32 {
@@ -11428,6 +11440,28 @@ pub struct GameState {
     /// snapshots, or CR 104.4b/CR 732.2a loop detection yields false negatives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_loop_pile: BTreeMap<PlayerId, BTreeSet<ObjectId>>,
+
+    /// CR 732.2a / CR 707.2: for each controller that accepted an object-growth
+    /// loop shortcut (Part 1 marks the `TokensCreated` ∞ axis and mints ZERO
+    /// objects), the copiable profile of the fodder the period reproduces. Stored
+    /// at accept and consumed at the next phase/step boundary, where the controller
+    /// is prompted (`PayableResource::LoopCollapse`) for a finite N and N tapped
+    /// copy-tokens are minted from this profile (the CR 732.2a deferred count).
+    /// A `CopiableValues` mint recipe, NOT an `ObjectId` (the board is not frozen
+    /// accept→boundary — the controller acts at priority in between) and NOT a
+    /// `ResidualPermanent` (a token's `oracle_id` is empty, insufficient to
+    /// recreate it). Written ONLY by `register_pending_materialization`; taken by
+    /// `take_pending_materialization`; cleared axis-scoped by
+    /// `clear_unbounded_token_loop` (and, whole-player, by `clear_unbounded_loop`).
+    ///
+    /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same unbounded family as `unbounded_resources` /
+    /// `unbounded_loop_enablers` / `unbounded_loop_pile`): deferred-materialization
+    /// annotation, not rules state for equality — a populated live state must still
+    /// compare equal to the empty ring snapshots, or CR 104.4b loop detection
+    /// yields false negatives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_unbounded_materialization: BTreeMap<PlayerId, Box<CopiableValues>>,
 
     /// Oracle ids (fallback: object names) of cards whose abilities hit
     /// `Effect::Unimplemented` at resolution this game. Diagnostics only —
@@ -14478,6 +14512,7 @@ impl GameState {
             unbounded_resources: BTreeMap::new(),
             unbounded_loop_enablers: BTreeMap::new(),
             unbounded_loop_pile: BTreeMap::new(),
+            pending_unbounded_materialization: BTreeMap::new(),
             unimplemented_oracle_ids: BTreeSet::new(),
             pending_trigger_abandons: Vec::new(),
             loop_detection: LoopDetectionMode::Off,
@@ -15208,13 +15243,61 @@ impl GameState {
         self.unbounded_loop_pile.insert(controller, pile);
     }
 
+    /// CR 732.2a / CR 707.2: single write authority for
+    /// `pending_unbounded_materialization` — only
+    /// `game::engine::materialize_object_growth_shortcut` calls this, at accept,
+    /// with the fodder's copiable profile. Consumed at the next phase/step boundary
+    /// (`take_pending_materialization`) to mint the deferred finite count of tokens.
+    /// Overwrites (idempotent re-registration for the same controller).
+    pub fn register_pending_materialization(
+        &mut self,
+        controller: PlayerId,
+        profile: Box<CopiableValues>,
+    ) {
+        self.pending_unbounded_materialization
+            .insert(controller, profile);
+    }
+
+    /// CR 732.2a: take (remove and return) the deferred materialization profile for
+    /// `controller`, if any. Removing on take is load-bearing for the boundary
+    /// collapse fixpoint (§7): the `LoopCollapse` submit handler must clear the
+    /// stash — even on its error path — so the phase-transition re-drain terminates
+    /// rather than re-prompting forever.
+    pub fn take_pending_materialization(
+        &mut self,
+        controller: PlayerId,
+    ) -> Option<Box<CopiableValues>> {
+        self.pending_unbounded_materialization.remove(&controller)
+    }
+
     /// CR 732.2a: clear every unbounded-resource axis recorded for `controller`.
     /// Whole-player clear: with the infinite-mana toggle as the only PR-6 producer
     /// this matches today's all-or-nothing disable; an axis-scoped clear can be
     /// added when multiple producers coexist on one controller.
     pub fn clear_unbounded_loop(&mut self, controller: PlayerId) {
         self.unbounded_resources.remove(&controller);
-        self.unbounded_loop_enablers.remove(&controller); // keep the three maps in lockstep
+        self.unbounded_loop_enablers.remove(&controller); // keep the maps in lockstep
+        self.unbounded_loop_pile.remove(&controller);
+        self.pending_unbounded_materialization.remove(&controller);
+    }
+
+    /// CR 732.2a: end ONLY the accepted object-growth (token) loop for `controller`
+    /// after its deferred count has been materialized — an AXIS-SCOPED collapse, not
+    /// the whole-player `clear_unbounded_loop`. Removes the `TokensCreated` axis from
+    /// `unbounded_resources` (dropping the player key iff its axis set becomes empty),
+    /// the deferred materialization stash, and the token-specific `unbounded_loop_pile`
+    /// entry. PRESERVES any coexisting unbounded axis for the same controller (e.g. a
+    /// debug `SetInfiniteMana` `Mana(_)` axis, reachable during playtest) and the
+    /// `unbounded_loop_enablers` annotation. Collapsing the token loop must end that
+    /// loop and nothing else (build for the class, not the single-combo case).
+    pub fn clear_unbounded_token_loop(&mut self, controller: PlayerId) {
+        if let Some(axes) = self.unbounded_resources.get_mut(&controller) {
+            axes.remove(&ResourceAxis::TokensCreated);
+            if axes.is_empty() {
+                self.unbounded_resources.remove(&controller);
+            }
+        }
+        self.pending_unbounded_materialization.remove(&controller);
         self.unbounded_loop_pile.remove(&controller);
     }
 }
@@ -15432,6 +15515,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         unbounded_resources: _,
         unbounded_loop_enablers: _,
         unbounded_loop_pile: _,
+        pending_unbounded_materialization: _,
         unimplemented_oracle_ids: _,
         pending_trigger_abandons: _,
         loop_detection: _,
@@ -17174,6 +17258,62 @@ mod tests {
         );
     }
 
+    /// Minimal `CopiableValues` for the Part-2 exclusion / axis-clear tests — a
+    /// 1/1 token profile. Only the *presence* of the stash field, not its
+    /// contents, is under test.
+    fn dummy_copiable_profile(name: &str) -> Box<crate::types::ability::CopiableValues> {
+        Box::new(crate::types::ability::CopiableValues {
+            name: name.to_string(),
+            mana_cost: crate::types::mana::ManaCost::default(),
+            color: vec![],
+            card_types: crate::types::card_type::CardType::default(),
+            power: Some(1),
+            toughness: Some(1),
+            loyalty: None,
+            keywords: vec![],
+            abilities: std::sync::Arc::default(),
+            trigger_definitions: std::sync::Arc::default(),
+            replacement_definitions: std::sync::Arc::default(),
+            static_definitions: std::sync::Arc::default(),
+        })
+    }
+
+    /// PR-7 Part 2 (CR 732.2a token collapse): sibling of
+    /// `unbounded_loop_pile_excluded_from_loop_equality` — the new
+    /// `pending_unbounded_materialization` field follows the identical
+    /// exclusion-by-omission discipline (never appears in the `impl PartialEq`
+    /// `&&` chain, `normalize_for_loop`, or `loop_fingerprint`).
+    ///
+    /// REVERT-PROBE: add `&& self.pending_unbounded_materialization ==
+    /// other.pending_unbounded_materialization` to the manual `impl PartialEq for
+    /// GameState` → all three assertions below fail.
+    #[test]
+    fn pending_unbounded_materialization_excluded_from_loop_equality() {
+        use crate::analysis::resource::loop_states_equal_modulo_resources;
+
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.register_pending_materialization(PlayerId(0), dummy_copiable_profile("Saproling"));
+        // Sanity: the populated field really does differ between the two states.
+        assert_ne!(
+            a.pending_unbounded_materialization, b.pending_unbounded_materialization,
+            "fixture must actually differ in pending_unbounded_materialization"
+        );
+
+        assert!(
+            a == b,
+            "manual PartialEq must exclude pending_unbounded_materialization (annotation, not rules state)"
+        );
+        assert!(
+            loop_states_equal(&a, &b),
+            "loop_states_equal (CR 104.4b/732.2a) must exclude pending_unbounded_materialization"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "the PR-0/PR-2 modulo path must exclude pending_unbounded_materialization"
+        );
+    }
+
     /// PR-7 Phase 4c (B5 defuse): `clear_unbounded_loop` must remove ALL THREE
     /// `unbounded_resources` / `unbounded_loop_enablers` / `unbounded_loop_pile`
     /// maps for the controller in lockstep — the `zones.rs` defuse hook relies on
@@ -17204,6 +17344,80 @@ mod tests {
         assert!(
             !state.unbounded_loop_pile.contains_key(&PlayerId(0)),
             "clear_unbounded_loop must remove the unbounded_loop_pile entry"
+        );
+    }
+
+    /// PR-7 Part 2 (CR 732.2a): `clear_unbounded_token_loop` is AXIS-SCOPED — it
+    /// ends ONLY the accepted token loop (the `TokensCreated` axis + stash + token
+    /// pile) and PRESERVES any coexisting unbounded axis for the same controller
+    /// (e.g. a debug `SetInfiniteMana` `Mana(_)` axis). This is the building block
+    /// that keeps a token-loop collapse from wiping a coexisting infinite-mana
+    /// capability — collapse the token loop and nothing else.
+    ///
+    /// REVERT-PROBE (discriminating): swap the impl to the whole-player
+    /// `clear_unbounded_loop(PlayerId(0))` → `unbounded_resources[P0]` is removed
+    /// entirely → assertion (1) FLIPS (the mana axis is wrongly wiped).
+    #[test]
+    fn clear_unbounded_token_loop_preserves_coexisting_mana_axis() {
+        use crate::analysis::resource::ResourceAxis;
+        use crate::types::mana::ManaType;
+
+        let mut state = GameState::new_two_player(7);
+        // `mark_unbounded_loop` set-UNIONs axes, so one controller can hold both a
+        // token loop and a mana capability at once.
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::TokensCreated,
+                ResourceAxis::Mana(ManaType::Colorless),
+            ],
+        );
+        state.register_pending_materialization(PlayerId(0), dummy_copiable_profile("Saproling"));
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
+
+        state.clear_unbounded_token_loop(PlayerId(0));
+
+        // (1) the coexisting mana axis SURVIVES (the discriminating assertion).
+        assert_eq!(
+            state.unbounded_resources.get(&PlayerId(0)),
+            Some(&BTreeSet::from([ResourceAxis::Mana(ManaType::Colorless)])),
+            "clear_unbounded_token_loop must preserve the coexisting Mana axis"
+        );
+        // the token stash + token ∞ pile are gone.
+        assert!(
+            !state
+                .pending_unbounded_materialization
+                .contains_key(&PlayerId(0)),
+            "the deferred materialization stash must be removed"
+        );
+        assert!(
+            !state.unbounded_loop_pile.contains_key(&PlayerId(0)),
+            "the token ∞ pile must be removed"
+        );
+    }
+
+    /// `clear_unbounded_token_loop` drops the player key entirely when
+    /// `TokensCreated` was the ONLY axis (no coexisting capability) — parity with
+    /// the whole-player clear for the common single-loop case.
+    #[test]
+    fn clear_unbounded_token_loop_drops_key_when_only_axis() {
+        use crate::analysis::resource::ResourceAxis;
+
+        let mut state = GameState::new_two_player(7);
+        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
+        state.register_pending_materialization(PlayerId(0), dummy_copiable_profile("Saproling"));
+
+        state.clear_unbounded_token_loop(PlayerId(0));
+
+        assert!(
+            !state.unbounded_resources.contains_key(&PlayerId(0)),
+            "with TokensCreated the only axis, the player key must be dropped"
+        );
+        assert!(
+            !state
+                .pending_unbounded_materialization
+                .contains_key(&PlayerId(0)),
+            "the deferred materialization stash must be removed"
         );
     }
 

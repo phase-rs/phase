@@ -2191,7 +2191,10 @@ export type PayableResource =
   | { type: "Energy" }
   | { type: "ManaGeneric"; data: { per_x: number } }
   | { type: "Counters" }
-  | { type: "Speed" };
+  | { type: "Speed" }
+  // CR 732.2a: not a resource payment — the finite count an accepted
+  // object-growth loop shortcut collapses into (display-only; the engine mints).
+  | { type: "LoopCollapse" };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }

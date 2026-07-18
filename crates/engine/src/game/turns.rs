@@ -10,8 +10,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, ExtraPhase, GameState, PendingCounterAddition, PendingEffectResolved,
-    TurnBoundary, WaitingFor,
+    AutoPassMode, ExtraPhase, GameState, PayableResource, PendingCounterAddition,
+    PendingEffectResolved, TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -282,6 +282,18 @@ fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) 
     drain_pending_phase_transition_progress(state, events);
 }
 
+/// CR 732.2a: the APNAP-first player (turn order) who still holds a deferred
+/// object-growth materialization stash, or `None`. Filters `players::apnap_order`
+/// — the same helper `enter_phase` uses to seed the mana-empty drain — to the
+/// players with a `pending_unbounded_materialization` entry, so token collapse
+/// resolves in the same turn-based order and supports 2+ players (one prompt per
+/// drain iteration, each to its own controller).
+fn next_apnap_player_with_pending_materialization(state: &GameState) -> Option<PlayerId> {
+    super::players::apnap_order(state)
+        .into_iter()
+        .find(|p| state.pending_unbounded_materialization.contains_key(p))
+}
+
 /// CR 703.4q + CR 616.1: Per-phase APNAP-queue drain. Pops players one at a
 /// time, runs `clear_expiring_at_step_end` first (H2 invariant —
 /// expiry-bound units never enter the replacement pipeline), scans active
@@ -297,8 +309,37 @@ pub(super) fn drain_pending_phase_transition_progress(
 ) {
     while let Some(progress) = state.pending_phase_transition_progress.as_mut() {
         let Some(player_id) = progress.remaining_players.pop_front() else {
-            // Queue empty: complete the phase entry.
+            // Queue empty. Copy `next_phase` out first, releasing the `progress`
+            // borrow (NLL) so the collapse pass below can re-borrow `state`.
             let next_phase = progress.next_phase;
+            // CR 732.2a: SECOND pass, after the CR 500.5 mana-empty APNAP drain
+            // above — resolve any deferred object-growth (token) materializations
+            // from accepted loop shortcuts, in APNAP turn order. A stash is present
+            // iff a token loop was accepted (§4/§5), so it is always a
+            // `TokensCreated` profile; prompt its controller for the finite count.
+            if let Some(controller) = next_apnap_player_with_pending_materialization(state) {
+                state.waiting_for = WaitingFor::PayAmountChoice {
+                    player: controller,
+                    resource: PayableResource::LoopCollapse,
+                    // CR 732.2a: any finite count (incl. 0 — a legal collapse-to-
+                    // nothing; the ∞ still ends). `max` reuses the engine's loop
+                    // safety bound; the AI branch offers only N=1 so the wide range
+                    // never enters search. Tapped tokens carry no lethal driver.
+                    min: 0,
+                    max: crate::game::engine::MAX_SHORTCUT_CYCLES,
+                    accumulated: 0,
+                    source_id: ObjectId(0),
+                    pending_mana_ability: None,
+                };
+                // Leave the (now-empty) `pending_phase_transition_progress` INTACT
+                // (do NOT null it): the `SubmitPayAmount` handler re-drains after the
+                // mint, re-enters this queue-empty branch, and calls
+                // `finish_enter_phase`, restoring Priority in the same action. Nulling
+                // here would strand a stale `LoopCollapse` `waiting_for` until the
+                // next boundary. PAUSE — resumed by the `LoopCollapse` submit handler.
+                return;
+            }
+            // Stash empty AND queue empty → complete the phase entry.
             state.pending_phase_transition_progress = None;
             finish_enter_phase(state, next_phase, events);
             return;

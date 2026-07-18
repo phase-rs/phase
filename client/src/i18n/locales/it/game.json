@@ -576,6 +576,7 @@
     "resourceMana": "mana",
     "resourceCounters": "segnalini",
     "resourceSpeed": "velocità",
+    "resourceLoopCollapse": "pedine",
     "manualMana": "Manuale",
     "manualManaTooltip": "Mana manuale — solo questa partita. TAPpa le tue terre e il tuo mana per pagare.",
     "spendHint": "Clicca sul tuo mana per spenderlo per questo costo",

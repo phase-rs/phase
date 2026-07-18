@@ -576,6 +576,7 @@
     "resourceMana": "Mana",
     "resourceCounters": "Marken",
     "resourceSpeed": "Tempo",
+    "resourceLoopCollapse": "Spielsteine",
     "manualMana": "Manuell",
     "manualManaTooltip": "Manuelles Mana — nur für dieses Spiel. Tippe deine eigenen Länder und dein Mana an, um zu bezahlen.",
     "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",

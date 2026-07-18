@@ -2152,6 +2152,71 @@ pub(super) fn handle_resolution_choice(
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             match resource {
+                PayableResource::LoopCollapse => {
+                    // CR 732.2a: an accepted object-growth loop shortcut deferred its
+                    // finite count to this phase/step boundary; the controller has now
+                    // named N. Mint N tapped copy-tokens of the stashed fodder profile,
+                    // cash out the ∞ token status, and re-enter the boundary drain so
+                    // Priority is restored in this same action.
+                    //
+                    // This arm deducts NO resource and MUST early-return: the shared
+                    // pay-then-continue tail below (`last_effect_count` stamp +
+                    // `finish_with_continuation`) is for chained real-resource payments,
+                    // not a boundary collapse. Mirrors the `pending_mana_ability`
+                    // early-return above.
+                    //
+                    // `take_` removes the stash even on the error path so the boundary
+                    // fixpoint terminates (RISK-1) rather than re-prompting forever.
+                    let Some(profile) = state.take_pending_materialization(player) else {
+                        return Err(EngineError::InvalidAction(format!(
+                            "LoopCollapse pay-amount for {player:?} has no pending materialization stash"
+                        )));
+                    };
+                    // CR 707.2 (+ CR 111.10): the mint is copy-based — each token
+                    // acquires the fodder's copiable values (name, types, P/T, color,
+                    // abilities); a predefined token uses its printed definition. This
+                    // is a source-less mint (no live ability/source), so route through
+                    // `drive_copy_token_batches` (not `token_copy::resolve`, which needs
+                    // a live `ResolvedAbility` + source). `source_id: ObjectId(0)` is the
+                    // reserved sentinel; the fodder here is a token so `DisplaySource::Token`.
+                    let batch = crate::types::game_state::PendingCopyTokenBatch {
+                        owner: player,
+                        count: amount,
+                        copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
+                            values: profile,
+                            display_source: crate::game::game_object::DisplaySource::Token,
+                            printed_ref: None,
+                            token_image_ref: None,
+                            extra_keywords: vec![],
+                            additional_modifications: vec![],
+                            tapped: true,
+                            enters_attacking: false,
+                            sacrifice_at: None,
+                            source_id: ObjectId(0),
+                            controller: player,
+                        }),
+                    };
+                    crate::game::effects::token_copy::drive_copy_token_batches(
+                        state,
+                        std::collections::VecDeque::from([batch]),
+                        EffectKind::CopyTokenOf,
+                        ObjectId(0),
+                        events,
+                    );
+                    // CR 732.2a: cash out ONLY the token loop (axis-scoped) — end the
+                    // `TokensCreated` ∞ status, drop the stash and the token ∞ pile,
+                    // PRESERVING any coexisting axis (e.g. a debug infinite-mana
+                    // capability). The ∞ display collapses to an ordinary ×N (§9).
+                    state.clear_unbounded_token_loop(player);
+                    // Continue the boundary fixpoint (§7): the (now-empty)
+                    // phase-transition progress was left INTACT when this prompt was
+                    // surfaced, so re-draining either prompts the next APNAP player with
+                    // a stash or calls `finish_enter_phase` to restore Priority now.
+                    crate::game::turns::drain_pending_phase_transition_progress(state, events);
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
                 PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {

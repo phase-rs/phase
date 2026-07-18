@@ -576,6 +576,7 @@
     "resourceMana": "mana",
     "resourceCounters": "marcadores",
     "resourceSpeed": "velocidade",
+    "resourceLoopCollapse": "fichas",
     "manualMana": "Manual",
     "manualManaTooltip": "Mana manual — apenas esta partida. Vire suas próprias terras e mana para pagar.",
     "spendHint": "Clique no seu mana para gastá-lo neste custo",
