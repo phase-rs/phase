@@ -1555,6 +1555,98 @@ mod tests {
         );
     }
 
+    /// Phase-0 G1 red baseline. CR 400.7 says the returning permanent is a new
+    /// object; CR 701.50b/f nevertheless requires the original conniver's LKI
+    /// to finish the connive. Today `PendingConniveReentry` stores only an
+    /// `ObjectId`, so this deliberately pins the current wrong behavior: a
+    /// battlefield -> graveyard -> battlefield round trip under the same id lets
+    /// the deferred tail put a counter on the return. Phase 1 must carry exact
+    /// identity for the connive subject: the original completes by LKI and this
+    /// return remains untouched.
+    #[test]
+    fn phase0_g1_pending_connive_reentry_rebinds_same_id_return() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingConniveReentry;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let _leader = install_leader_replacement(&mut state, PlayerId(0));
+        let conniver = make_battlefield_creature(&mut state, PlayerId(0));
+
+        // Two one-shot draw replacements make Leader's replacement draw pause
+        // on a real CR 616.1 choice, leaving its connive tail in the dedicated
+        // carrier before it can resolve.
+        for modification in [
+            QuantityModification::Times { factor: 2 },
+            QuantityModification::Plus { value: 1 },
+        ] {
+            let host = make_battlefield_creature(&mut state, PlayerId(0));
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+                .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+            replacement.quantity_modification = Some(modification);
+            replacement.consume_on_apply = true;
+            state
+                .objects
+                .get_mut(&host)
+                .expect("replacement host exists")
+                .replacement_definitions
+                .push(replacement);
+        }
+        for index in 0..6 {
+            add_card_to_library(&mut state, PlayerId(0), &format!("Card {index}"), false);
+        }
+
+        let ability = make_connive_ability(conniver, conniver);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("Leader connive resolves to the pause");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. })
+                && matches!(state.pending_connive_reentry, Some(PendingConniveReentry { .. })),
+            "reach guard: Leader's deferred connive tail must be pending at the draw replacement choice"
+        );
+
+        let before = state.objects[&conniver].incarnation;
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Battlefield, &mut events);
+        assert!(
+            state.objects[&conniver].incarnation > before,
+            "reach guard: the same storage id must now identify a new CR 400.7 incarnation"
+        );
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume the parked Leader draw");
+        events.extend(result.events);
+        let waiting = state.waiting_for.clone();
+        let WaitingFor::ConniveDiscard { cards, .. } = waiting else {
+            panic!(
+                "the raw-id reentry must reach ConniveDiscard, got {:?}",
+                state.waiting_for
+            );
+        };
+        let waiting_for_discard = state.waiting_for.clone();
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            waiting_for_discard,
+            GameAction::SelectCards {
+                cards: vec![cards[0]],
+            },
+            &mut events,
+        )
+        .expect("discard for the re-bound connive");
+
+        assert_eq!(
+            state.objects[&conniver]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "CURRENT (wrong): raw PendingConniveReentry::conniver rebinds the connive tail to the same-id return; Phase 1 must leave the return at zero counters"
+        );
+    }
+
     /// CR 701.50a + CR 614.5 + CR 616.1f: the Leader connive replacement's
     /// leading draw is itself replaced by a draw-PREVENT replacement (Living
     /// Conundrum "skip that draw" shape). CR 701.50a's "instead you draw a card,

@@ -1112,7 +1112,29 @@ pub fn build_cost_permission_context(
 ///
 /// Checks both battlefield permanents and spell-applied transient effects
 /// (e.g., a sorcery that grants all players CantWinTheGame this turn).
+///
+/// CR 810.8a: "If an effect says that a player can't win the game, that
+/// player's team can't win the game" (the Platinum Angel / Angel's Grace
+/// example: neither player on the opposing team can win while the clause
+/// affects one of them). So in 2HG this is true for `player_id` if EITHER
+/// `player_id` itself or their teammate has the grant — mirrors the
+/// `player_has_cant_gain_life` / `player_has_cant_lose_life` teammate fold
+/// below (CR 810.9g/810.9h siblings) and `sba::player_has_cant_lose`'s
+/// identical CR 810.8a fold on the can't-lose side.
 pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
+    cant_win_active_for(state, player_id)
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| cant_win_active_for(state, teammate)))
+}
+
+/// Single-player check underlying `player_has_cant_win`: does `player_id`
+/// itself (battlefield permanent, command-zone emblem, or spell-applied
+/// transient effect) have an active `CantWinTheGame` grant? Does NOT fold in
+/// teammates — callers needing the CR 810.8a team-wide answer must go through
+/// `player_has_cant_win`.
+fn cant_win_active_for(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
         StaticMode::CantWinTheGame,

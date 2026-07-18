@@ -12,6 +12,8 @@ mod anax_instead_branch_not_chain;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;
+mod angels_grace;
+mod angels_grace_2hg;
 mod announce_locked_x_runtime;
 mod another_round_repeat;
 mod archmage_ascension_gated_draw_replacement;
