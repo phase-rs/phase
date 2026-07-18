@@ -402,7 +402,16 @@ pub(crate) fn prohibition_scope_matches_player(
         return false;
     };
     match scope {
-        ProhibitionScope::Opponents => player != source_obj.controller,
+        // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a multiplayer team
+        // game (e.g. Two-Headed Giant) a player's opponents are only players NOT on
+        // their team, so a naive `player != source_obj.controller` inequality wrongly
+        // treats a teammate as an opponent (barring them from casting). Route through
+        // the team-aware authority; in a two-player / FFA `IndividualSeats` topology
+        // `is_opponent` reduces to `!=`, so 2-player and free-for-all behavior is
+        // byte-identical. Mirrors the affected-filter fix in `static_filter_matches`.
+        ProhibitionScope::Opponents => {
+            crate::game::players::is_opponent(state, source_obj.controller, player)
+        }
         ProhibitionScope::AllPlayers => true,
         ProhibitionScope::Controller => player == source_obj.controller,
         // CR 303.4e: For an Aura attached to an object ("enchanted creature's
