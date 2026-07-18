@@ -10,9 +10,8 @@ import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
-import { loyaltyStartIconClasses } from "../../viewmodel/costLabel.ts";
-import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
+import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
@@ -69,10 +68,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
   const devotionValue = obj.devotion ?? null;
-  // mana-font shield glyph for the current loyalty total (null when out of the
-  // glyph range → the plain silver-ring badge below remains the fallback).
-  const loyaltyShield = obj.loyalty != null ? loyaltyStartIconClasses(obj.loyalty) : null;
-
   // --- Dynamic Text Sizing Logic ---
   let ptNumClass = "text-[14px]";
   let ptSlashClass = "text-[13px]";
@@ -85,16 +80,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     } else if (totalChars >= 4) {
       ptNumClass = "text-[12px] tracking-tight";
       ptSlashClass = "text-[11px]";
-    }
-  }
-
-  let loyaltyClass = "text-[14px]";
-  if (obj.loyalty != null) {
-    const loyaltyChars = String(obj.loyalty).length;
-    if (loyaltyChars >= 3) {
-      loyaltyClass = "text-[11px] tracking-tighter";
-    } else if (loyaltyChars >= 2) {
-      loyaltyClass = "text-[13px] tracking-tight";
     }
   }
 
@@ -274,31 +259,21 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
         </div>
       )}
 
-      {/* Floating loyalty — shifts left when P/T is also visible (animated
-          planeswalker-creature). mana-font shield glyph when a numeral exists,
-          else the plain silver-ring badge (also the FOUC fallback path). */}
-      {obj.loyalty != null && (loyaltyShield ? (
-        <div
-          className={`absolute -bottom-[5px] z-20 font-bold leading-none text-amber-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] ${ptDisplay ? "-left-[5px]" : "-right-[5px]"}`}
-          style={{ fontSize: "clamp(7px, calc(var(--art-crop-h) * 0.11), 12px)" }}
-        >
-          <ManaFontIcon
-            iconClass={loyaltyShield}
-            fallbackText={String(obj.loyalty)}
-            label={String(obj.loyalty)}
-          />
-        </div>
-      ) : (
-        <div className={`absolute -bottom-[3px] z-20 ${ptDisplay ? "-left-[3px]" : "-right-[3px]"}`}>
-          <div className="rounded-full bg-gradient-to-b from-[#e2e4e6] to-[#888c91] p-[2px] shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.8)] border border-black/80">
-            <div className="bg-gray-800 border-[1px] border-amber-600/50 rounded-full px-2.5 py-[1px] min-w-[2.75rem] flex justify-center items-center shadow-[inset_0_2px_4px_rgba(0,0,0,0.8),inset_0_1px_2px_rgba(0,0,0,0.9),0_1px_0_rgba(255,255,255,0.2)]">
-              <span className={`font-bold text-amber-400 leading-none ${loyaltyClass}`}>
-                {obj.loyalty}
-              </span>
-            </div>
-          </div>
-        </div>
-      ))}
+      {obj.loyalty != null && (
+        <LoyaltyBadge
+          amount={obj.loyalty}
+          kind="total"
+          size="battlefield"
+          reinforcedTopRim
+          className="absolute z-30"
+          style={{
+            position: "absolute",
+            fontSize: "clamp(13px, calc(var(--art-crop-h) * 0.19), 22px)",
+            bottom: "-5px",
+            ...(ptDisplay ? { left: "-5px" } : { right: "-5px" }),
+          }}
+        />
+      )}
     </div>
   );
 });

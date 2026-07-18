@@ -1072,31 +1072,7 @@ pub(crate) fn apply_copiable_values_to_liminal_object(
     object.printed_ref = printed_ref.clone();
     object.base_printed_ref = printed_ref;
     object.token_image_ref = token_image_ref;
-    object.name = values.name.clone();
-    object.base_name = values.name.clone();
-    object.mana_cost = values.mana_cost.clone();
-    object.base_mana_cost = values.mana_cost.clone();
-    object.base_color = values.color.clone();
-    object.color = values.color.clone();
-    object.base_card_types = values.card_types.clone();
-    object.card_types = values.card_types.clone();
-    object.base_power = values.power;
-    object.power = values.power;
-    object.base_toughness = values.toughness;
-    object.toughness = values.toughness;
-    object.base_loyalty = values.loyalty;
-    object.loyalty = values.loyalty;
-    object.base_keywords = values.keywords.clone();
-    object.keywords = values.keywords.clone();
-    object.base_abilities = Arc::clone(&values.abilities);
-    object.abilities = Arc::clone(&values.abilities);
-    object.base_trigger_definitions = Arc::clone(&values.trigger_definitions);
-    object.trigger_definitions = Arc::clone(&values.trigger_definitions).into();
-    object.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
-    object.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
-    object.base_static_definitions = Arc::clone(&values.static_definitions);
-    object.static_definitions = Arc::clone(&values.static_definitions).into();
-    object.base_characteristics_initialized = true;
+    crate::game::printed_cards::install_copiable_values_as_base(object, values);
 }
 
 pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
@@ -1268,6 +1244,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     entry.object.tapped = enter_tapped.resolve(entry.object.tapped);
     let owner = entry.object.owner;
     state.objects.insert(entry_ref, entry.object);
+    // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
     zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
 
     for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {
@@ -2409,7 +2386,7 @@ fn powerstone_ability() -> AbilityDefinition {
             },
             restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                ability: crate::types::mana::AbilityActivationScope::Any,
             }],
             grants: vec![],
             expiry: None,
@@ -3190,14 +3167,18 @@ mod tests {
         build_resolved_from_def, build_resolved_from_def_with_targets,
     };
     use crate::game::engine::apply_as_current;
+    use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::zones::create_object;
+    use crate::types::ability::TriggerDefinition;
     use crate::types::actions::GameAction;
     use crate::types::card_type::CardType;
     use crate::types::game_state::WaitingFor;
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+    use std::sync::Arc;
 
     // ── Parser unit tests ───────────────────────────────────────────────
 
@@ -3210,6 +3191,39 @@ mod tests {
         assert!(a.core_types.contains(&CoreType::Creature));
         assert_eq!(a.colors, vec![ManaColor::White]);
         assert_eq!(a.subtypes, vec!["Soldier"]);
+    }
+
+    #[test]
+    fn liminal_copy_token_trigger_state_serializes() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Trigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_trigger_definitions =
+                Arc::new(vec![TriggerDefinition::new(TriggerMode::ChangesZone)]);
+            source.materialize_base_trigger_definitions();
+        }
+        let values = intrinsic_copiable_values(state.objects.get(&source_id).unwrap());
+        let (token_id, mut token) =
+            reserve_liminal_token_object(&mut state, PlayerId(0), values.name.clone());
+        token.is_token = true;
+        apply_copiable_values_to_liminal_object(
+            &mut token,
+            &values,
+            DisplaySource::Token,
+            None,
+            None,
+        );
+        state.objects.insert(token_id, token);
+
+        serde_json::to_string(&state)
+            .expect("a liminal copy token with triggered abilities must serialize");
     }
 
     #[test]
@@ -4070,7 +4084,19 @@ mod tests {
     fn predefined_powerstone_has_colorless_mana() {
         let abilities = predefined_token_abilities("Powerstone");
         assert_eq!(abilities.len(), 1);
-        assert!(matches!(*abilities[0].effect, Effect::Mana { .. }));
+        assert!(matches!(
+            *abilities[0].effect,
+            Effect::Mana {
+                ref restrictions,
+                ..
+            } if matches!(
+                restrictions.as_slice(),
+                [crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type,
+                    ability: crate::types::mana::AbilityActivationScope::Any,
+                }] if spell_type == "Artifact"
+            )
+        ));
     }
 
     #[test]
@@ -4331,11 +4357,14 @@ mod tests {
             1,
             "catalog rules_text must install the attacks life trigger intrinsically"
         );
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::Attacks);
+        assert_eq!(
+            obj.trigger_definitions[0].definition.mode,
+            TriggerMode::Attacks
+        );
         assert!(
             !obj.trigger_definitions
                 .iter_all()
-                .any(|trigger| trigger.mode == TriggerMode::ChangesZone),
+                .any(|trigger| trigger.definition.mode == TriggerMode::ChangesZone),
             "SOS Pest must keep its printed attack trigger, not the older Pest dies trigger"
         );
         assert_eq!(
@@ -4369,11 +4398,11 @@ mod tests {
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = &obj.trigger_definitions[0];
-        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(trigger.definition.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
         assert_eq!(
-            trigger.trigger_zones,
+            trigger.definition.trigger_zones,
             vec![Zone::Battlefield],
             "CR 603.10a LKI scans a dying token as a Battlefield source"
         );
@@ -4609,10 +4638,14 @@ mod tests {
         );
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = &obj.trigger_definitions[0];
-        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
-        let execute = trigger.execute.as_ref().expect("Pest dies trigger effect");
+        assert_eq!(trigger.definition.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
+        let execute = trigger
+            .definition
+            .execute
+            .as_ref()
+            .expect("Pest dies trigger effect");
         assert!(matches!(
             *execute.effect,
             Effect::GainLife {
@@ -5904,6 +5937,8 @@ mod tests {
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: std::collections::HashSet::new(),
             },
         );
 

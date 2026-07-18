@@ -1,3 +1,5 @@
+use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::types::ability::{Effect, QuantityExpr, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CostResume, GameState, PayCostKind, WaitingFor};
 use engine::types::player::PlayerId;
@@ -10,7 +12,58 @@ use super::strategy_helpers::sacrifice_cost;
 
 pub struct SacrificeValuePolicy;
 
+/// Policy scores are card-equivalent units, so drawing one card is worth 1.0.
+const SINGLE_CARD_VALUE: f64 = 1.0;
+
 impl SacrificeValuePolicy {
+    fn optional_single_card_draw_sacrifices_only_source(ctx: &PolicyContext<'_>) -> Option<f64> {
+        let GameAction::DecideOptionalEffect { accept: true } = &ctx.candidate.action else {
+            return None;
+        };
+        let WaitingFor::OptionalEffectChoice { source_id, .. } = &ctx.decision.waiting_for else {
+            return None;
+        };
+        let ability = ctx.state.pending_optional_effect.as_deref()?;
+        if ability.source_id != *source_id || ability.controller != ctx.ai_player {
+            return None;
+        }
+
+        let Effect::Sacrifice {
+            target,
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        } = &ability.effect
+        else {
+            return None;
+        };
+        // Explicit SelfRef sacrifices are designed to consume their source. This
+        // guard is for filtered outlets whose source only happens to be the last
+        // matching permanent, such as a Zombie engine with no other Zombies.
+        if matches!(target, TargetFilter::SelfRef)
+            || ability.else_ability.is_some()
+            || ability.repeat_for.is_some()
+            || ability.player_scope.is_some()
+            || !single_card_draw_is_only_payoff(ability.sub_ability.as_deref())
+        {
+            return None;
+        }
+
+        let filter_ctx = FilterContext::from_ability(ability);
+        let mut eligible = ctx.state.battlefield.iter().copied().filter(|id| {
+            ctx.state.objects.get(id).is_some_and(|object| {
+                object.controller == ability.controller
+                    && !object.is_emblem
+                    && matches_target_filter(ctx.state, *id, target, &filter_ctx)
+            })
+        });
+        if eligible.next()? != *source_id || eligible.next().is_some() {
+            return None;
+        }
+
+        let cost = sacrifice_cost(ctx.state, *source_id, ctx.penalties());
+        (cost > SINGLE_CARD_VALUE).then_some(cost)
+    }
+
     pub fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
         // Guard: only score SelectCards during sacrifice decisions
         let GameAction::SelectCards { cards } = &ctx.candidate.action else {
@@ -40,6 +93,24 @@ impl SacrificeValuePolicy {
     }
 }
 
+fn single_card_draw_is_only_payoff(
+    ability: Option<&engine::types::ability::ResolvedAbility>,
+) -> bool {
+    let Some(ability) = ability else {
+        return false;
+    };
+    matches!(
+        &ability.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ) && ability.sub_ability.is_none()
+        && ability.else_ability.is_none()
+        && ability.repeat_for.is_none()
+        && ability.player_scope.is_none()
+}
+
 impl TacticalPolicy for SacrificeValuePolicy {
     fn id(&self) -> PolicyId {
         PolicyId::SacrificeValue
@@ -67,6 +138,22 @@ impl TacticalPolicy for SacrificeValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+        // VeryEasy and Easy do not search optional-effect continuations, so they
+        // need a hard guard against accepting this immediately losing exchange.
+        // Search-enabled difficulties must remain free to discover death-trigger,
+        // recursion, and other continuation value that outweighs the source.
+        let protected_source_cost = if ctx.config.search.enabled {
+            None
+        } else {
+            Self::optional_single_card_draw_sacrifices_only_source(ctx)
+        };
+        if let Some(cost) = protected_source_cost {
+            return PolicyVerdict::reject(
+                PolicyReason::new("optional_sacrifice_only_source_for_single_card")
+                    .with_fact("cost_milli", (cost * 1000.0) as i64),
+            );
+        }
+
         // Route through the band contract helper rather than hand-building a
         // raw `Score`: `self.score()` is an unbounded sum of per-card sacrifice
         // costs, and `PolicyVerdict::score` clamps its magnitude into the
@@ -79,16 +166,18 @@ impl TacticalPolicy for SacrificeValuePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AiConfig;
+    use crate::config::{create_config, AiConfig, AiDifficulty, Platform};
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility};
+    use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TypedFilter};
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{GameState, PendingCast};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     fn dummy_pending() -> Box<PendingCast> {
         Box::new(PendingCast::new(
@@ -105,6 +194,166 @@ mod tests {
             ),
             ManaCost::zero(),
         ))
+    }
+
+    fn optional_sacrifice_for_card_state() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sacrifice Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&source).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.power = Some(3);
+        object.toughness = Some(3);
+
+        // Keep the accept branch engine-legal: drawing the payoff card must not
+        // turn this policy regression into a draw-from-empty-library test.
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Library,
+        );
+
+        let mut sacrifice = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        sacrifice.optional = true;
+        sacrifice.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        )));
+        state.pending_optional_effect = Some(Box::new(sacrifice));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: source,
+            description: Some("You may sacrifice a creature. If you do, draw a card.".to_string()),
+            may_trigger_key: None,
+        };
+        (state, source)
+    }
+
+    fn optional_verdict(state: &GameState, accept: bool, config: &AiConfig) -> PolicyVerdict {
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::DecideOptionalEffect { accept },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Utility,
+            },
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        SacrificeValuePolicy.verdict(&ctx)
+    }
+
+    #[test]
+    fn easy_ai_declines_single_card_draw_when_only_filtered_sacrifice_is_source() {
+        let (state, _) = optional_sacrifice_for_card_state();
+
+        for difficulty in [AiDifficulty::VeryEasy, AiDifficulty::Easy] {
+            let config = create_config(difficulty, Platform::Native).into_measurement(42);
+            let mut rng = ChaCha20Rng::seed_from_u64(42);
+            let action = crate::search::choose_action(&state, PlayerId(0), &config, &mut rng)
+                .expect("the optional effect prompt has a legal decline action");
+            assert_eq!(
+                action,
+                GameAction::DecideOptionalEffect { accept: false },
+                "{difficulty:?} must preserve the filtered sacrifice source"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_source_preservation_guard_stands_down_with_another_sacrifice() {
+        let (mut state, _) = optional_sacrifice_for_card_state();
+        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
+        let fodder = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&fodder).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.power = Some(1);
+        object.toughness = Some(1);
+
+        assert!(matches!(
+            optional_verdict(&state, true, &config),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
+    #[test]
+    fn optional_source_preservation_guard_does_not_block_explicit_self_sacrifice() {
+        let (mut state, _) = optional_sacrifice_for_card_state();
+        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
+        let ability = state.pending_optional_effect.as_mut().unwrap();
+        let Effect::Sacrifice { target, .. } = &mut ability.effect else {
+            panic!("fixture must contain a sacrifice effect");
+        };
+        *target = TargetFilter::SelfRef;
+
+        assert!(matches!(
+            optional_verdict(&state, true, &config),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
+    #[test]
+    fn search_enabled_ai_can_evaluate_single_source_sacrifice() {
+        let (state, _) = optional_sacrifice_for_card_state();
+
+        for difficulty in [
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
+        ] {
+            let config = create_config(difficulty, Platform::Native);
+            assert!(
+                config.search.enabled,
+                "test premise: {difficulty:?} must search continuations"
+            );
+            assert!(
+                matches!(
+                    optional_verdict(&state, true, &config),
+                    PolicyVerdict::Score { .. }
+                ),
+                "{difficulty:?} must not hard-veto the sacrifice before search"
+            );
+        }
     }
 
     #[test]

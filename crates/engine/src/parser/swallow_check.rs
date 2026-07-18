@@ -25,15 +25,17 @@ use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
 use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
-use super::oracle_ir::feature::{audit_units, scope_to_unit, ItemIdTracks, OracleSemanticFeature};
+use super::oracle_ir::feature::{
+    audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
+};
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
-    ContinuousModification, CopyRetargetPermission, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementMode,
-    RestrictionExpiry, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
+    DoubleTarget, Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint,
+    OpponentMayScope, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementMode, RestrictionExpiry, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -82,23 +84,42 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
-/// Stamp the owning item's source line onto everything that item's detectors
-/// emitted.
+/// Stamp the owning unit's provenance — line, span, and evidence items — onto
+/// everything that unit's detectors emitted.
 ///
-/// Detectors are deliberately provenance-agnostic: a detector knows *evidence*,
-/// not line numbers. Attribution belongs to the loop that scoped the item, because
-/// that loop is the only thing that knows which line it scoped. Threading a
-/// `line_index` parameter through all fourteen detectors instead would mean a
-/// single forgotten call site silently keeps `line_index: 0` — which does not read
-/// as "unattributed", it reads as *line 1*.
+/// Detectors are deliberately provenance-agnostic: a detector knows *evidence*, not
+/// where it is. Attribution belongs to the loop that scoped the unit, because that loop
+/// is the only thing that knows which unit it scoped. Threading provenance through all
+/// fifteen detectors instead would mean a single forgotten call site silently keeps the
+/// unattributed default — and `line_index: 0` does not read as "unattributed", it reads
+/// as *line 1*. (That is also why the span is an `Option` and not a zeroed
+/// `OracleSourceSpan`: absence must be expressible.)
+///
+/// The provenance is the UNIT's, not an item's, and that is the honest scope: the
+/// audit's evidence half is the unit's pooled items, so no single item can be named. See
+/// `OracleDiagnostic::SwallowedClause`.
 ///
 /// Exhaustive on purpose: a future audit-emitted diagnostic variant must make a
-/// deliberate decision about how it carries provenance rather than silently
-/// inheriting line 0.
-fn stamp_line(item_diagnostics: &mut [OracleDiagnostic], first_line: usize) {
-    for diagnostic in item_diagnostics {
+/// deliberate decision about how it carries provenance rather than silently inheriting
+/// the unattributed default.
+fn stamp_provenance(unit_diagnostics: &mut [OracleDiagnostic], unit: &AuditUnit<'_>) {
+    for diagnostic in unit_diagnostics {
         match diagnostic {
-            OracleDiagnostic::SwallowedClause { line_index, .. } => *line_index = first_line,
+            OracleDiagnostic::SwallowedClause {
+                line_index,
+                unit_span,
+                items,
+                ..
+            } => {
+                *line_index = unit.first_line;
+                *unit_span = Some(unit.span.clone());
+                *items = unit.item_ids();
+                debug_assert!(
+                    unit.span.first_line <= unit.first_line
+                        && unit.first_line <= unit.span.last_line,
+                    "a unit's attributed line must lie inside the span of the text it owns",
+                );
+            }
             // The swallow audit emits `SwallowedClause` and nothing else. These
             // three are parse-time diagnostics that reach the document's channel by
             // other routes and are never constructed here.
@@ -197,7 +218,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
         detect_modal_dynamic_max_dropped(&cleaned, fragment, &evidence, &mut found);
 
-        stamp_line(&mut found, unit.first_line);
+        stamp_provenance(&mut found, &unit);
         diagnostics.append(&mut found);
     }
 }
@@ -363,11 +384,10 @@ fn detect_replacement(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::Replacement.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::Replacement.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector A: Replacement_Instead ─────────────────────────────────────
@@ -418,13 +438,10 @@ fn detect_replacement_instead(
     if any_ability_has_replacement_carrier(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ReplacementInstead
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ReplacementInstead.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector B: ActivateOnlyDuring ──────────────────────────────────────
@@ -445,13 +462,10 @@ fn detect_activate_only_during(
     if any_ability_has_constraint(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ActivateOnlyDuring
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ActivateOnlyDuring.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector C: ActivateLimit ───────────────────────────────────────────
@@ -476,11 +490,10 @@ fn detect_activate_limit(
     if any_ability_has_limit(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ActivateLimit.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ActivateLimit.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector D: Duration_UntilEndOfTurn ─────────────────────────────────
@@ -543,13 +556,10 @@ fn detect_duration_until_eot(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationUntilEndOfTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationUntilEndOfTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector E: Optional_YouMay ─────────────────────────────────────────
@@ -624,13 +634,10 @@ fn detect_optional_you_may(
     if any_static_has_granted_trigger_with_optional(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::OptionalYouMay
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::OptionalYouMay.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── AST predicates ──────────────────────────────────────────────────────
@@ -1414,9 +1421,12 @@ fn effect_is_replacement_carrier(effect: &Effect) -> bool {
         // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
         // the planar die, [effect] instead" (Fixed Point in Time).
         | Effect::CreatePlaneswalkReplacement { .. }
-        // CR 608.2m: "exile it instead of putting it into its owner's graveyard" — the
-        // variant name IS the replacement, and it takes no parameters to inspect.
-        | Effect::ExileResolvingSpellInsteadOfGraveyard => true,
+        // CR 614.1a + CR 608.2n: "exile it instead of putting it into its owner's
+        // graveyard" replaces the CR 608.2n graveyard-put default — the variant
+        // name IS the replacement, with or without the `on_exile` rider (the
+        // Feather return / Lilah plot parameterization is a second consequence
+        // folded into the same carrier, so it stays exempt either way).
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => true,
         _ => false,
     }
 }
@@ -2020,6 +2030,21 @@ fn any_ability_has_apnap_ordering(parsed: &ParsedAbilities) -> bool {
 
 // ── Detector F: DynamicQty ──────────────────────────────────────────────
 
+/// Dynamic-quantity marker phrases other than " twice " (which each caller
+/// handles per-site: the has_marker gate ORs it with its activation-limit
+/// guard; the *_is_only_dynamic_marker helpers treat it as the sole/second
+/// marker). Extracted so the list can't drift across the three call sites.
+const OTHER_DYNAMIC_MARKERS: &[&str] = &[
+    " equal to ",
+    "for each ",
+    "where x is ",
+    "the number of ",
+    "half your ",
+    "half their ",
+    "half its ",
+    "half the ",
+];
+
 /// Oracle text contains dynamic-quantity grammar ("equal to", "for each",
 /// "twice", "where x is", "the number of", "half [poss]") but the parsed
 /// AST contains no dynamic carrier (Ref, Multiply, DivideRounded, Offset,
@@ -2039,15 +2064,8 @@ fn detect_dynamic_qty(
     let twice_is_activation_limit = cleaned.contains("twice each turn") // allow-noncombinator: swallow detector marker scan on classified text
         && !cleaned.contains("twice that") // allow-noncombinator: swallow detector marker scan on classified text
         && !cleaned.contains("twice x"); // allow-noncombinator: swallow detector marker scan on classified text
-    let has_marker = cleaned.contains(" equal to ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("for each ") // allow-noncombinator: swallow detector marker scan on classified text
-        || (cleaned.contains(" twice ") && !twice_is_activation_limit) // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("where x is ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("the number of ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("half your ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("half their ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("half its ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("half the "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_marker = (cleaned.contains(" twice ") && !twice_is_activation_limit) // allow-noncombinator: swallow detector marker scan on classified text
+        || OTHER_DYNAMIC_MARKERS.iter().any(|m| cleaned.contains(m));
     if !has_marker {
         return;
     }
@@ -2204,8 +2222,24 @@ fn detect_dynamic_qty(
     {
         return;
     }
+    // CR 701.10e: The counter-multiplier escape hatch. Both `MultiplyCounter`
+    // ("double the number of +1/+1 counters") and the "each kind" form
+    // (`Effect::Double { target_kind: DoubleTarget::Counters, .. }`, counter.rs)
+    // carry the doubled amount intrinsically in the resolver ("give as many of
+    // those counters as already present"), never as a `QuantityExpr`. So the
+    // "the number of" dynamic marker IS represented by the effect itself — the
+    // DynamicQty warning would be a false positive.
     if cleaned_has_only_counter_multiplier_dynamic(cleaned)
-        && evidence.any_effect(|e| matches!(e, Effect::MultiplyCounter { .. }))
+        && evidence.any_effect(|e| {
+            matches!(
+                e,
+                Effect::MultiplyCounter { .. }
+                    | Effect::Double {
+                        target_kind: DoubleTarget::Counters { .. },
+                        ..
+                    }
+            )
+        })
     {
         return;
     }
@@ -2217,6 +2251,26 @@ fn detect_dynamic_qty(
     // When "twice" is the SOLE dynamic marker and the AST carries a `repeat_for`,
     // the quantity IS represented; the warning is a false positive.
     if cleaned_twice_is_only_dynamic_marker(cleaned) && evidence.has_slot("repeat_for") {
+        return;
+    }
+    // CR 614.1a + CR 701.10g: "...it deals twice that much damage instead"
+    // (Neriv, Heart of the Storm) is a damage-doubling value-modifier
+    // replacement whose ×2 is carried by `ReplacementDefinition.damage_modification`
+    // (`Double`/`Triple`), NOT a `QuantityExpr` node — the sibling of the
+    // `quantity_modification` slot ("twice that many", Doubling Season) and the
+    // `repeat_for` clause above. `Double` is a UNIT variant with no `QuantityExpr`
+    // field, so it also escapes the `any_quantity_expr` carrier. When
+    // "twice that much damage" is the SOLE dynamic marker and the AST carries such
+    // a modification, the multiplier IS represented — runtime resolves it
+    // end-to-end via the `damage_done_applier` Double/Triple arm. Distinct from
+    // the `repeat_for` guard above (repeat-count "twice", which deliberately
+    // rejects the "twice that" multiplier form): here that multiplier IS the
+    // carried modification, so it is the accepted marker.
+    if cleaned_twice_damage_double_is_only_dynamic_marker(cleaned)
+        && evidence.any_at::<DamageModification>(&["damage_modification"], |m| {
+            matches!(m, DamageModification::Double | DamageModification::Triple)
+        })
+    {
         return;
     }
     // CR 608.2e + CR 109.5: "For each opponent who doesn't, <body>" is a
@@ -2288,11 +2342,10 @@ fn detect_dynamic_qty(
             return;
         }
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DynamicQty.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DynamicQty.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector M: Modal_DynamicMaxDropped ─────────────────────────────────
@@ -2353,13 +2406,10 @@ fn detect_modal_dynamic_max_dropped(
     if evidence.has_slot("dynamic_max_choices") {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ModalDynamicMaxDropped
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ModalDynamicMaxDropped.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// CR 701.38: True when every dynamic-quantity marker in `cleaned` belongs to a
@@ -2481,8 +2531,16 @@ fn decline_iteration_prefix(input: &str) -> bool {
 }
 
 fn cleaned_has_only_counter_multiplier_dynamic(cleaned: &str) -> bool {
+    // The counter multiplier phrase: either the "+1/+1 counters" form
+    // (`Effect::MultiplyCounter`) or the "each kind of counter" form
+    // (`Effect::Double { DoubleTarget::Counters }`, counter.rs).
+    let has_counter_multiplier = [
+        "double the number of +1/+1 counters",
+        "double the number of each kind of counter",
+    ]
+    .iter()
     // allow-noncombinator: swallow detector phrase scan on classified text
-    let has_counter_multiplier = cleaned.contains("double the number of +1/+1 counters");
+    .any(|phrase| cleaned.contains(phrase));
     if !has_counter_multiplier {
         return false;
     }
@@ -2529,19 +2587,30 @@ fn cleaned_twice_is_only_dynamic_marker(cleaned: &str) -> bool {
         return false;
     }
     // No OTHER dynamic marker may be present.
-    ![
-        " equal to ",
-        "for each ",
-        "where x is ",
-        "the number of ",
-        "half your ",
-        "half their ",
-        "half its ",
-        "half the ",
-    ]
-    .iter()
     // allow-noncombinator: swallow detector marker scan on classified text
-    .any(|marker| cleaned.contains(marker))
+    !OTHER_DYNAMIC_MARKERS.iter().any(|m| cleaned.contains(m))
+}
+
+/// True when the sole dynamic-quantity marker in `cleaned` is the
+/// damage-doubling phrase "twice that much damage" — the surface form Neriv,
+/// Heart of the Storm lowers to `DamageModification::Double`. Sibling of
+/// `cleaned_twice_is_only_dynamic_marker` (repeat-count "twice") for the
+/// damage-modification carrier: that helper deliberately REJECTS "twice that" (a
+/// multiplier needing a real `QuantityExpr`), but here the ×2 IS the
+/// "twice that much damage" phrase, already carried by `DamageModification`, so
+/// it is the accepted marker. Every OTHER dynamic marker — a second, independent
+/// "twice", "for each", "equal to", "the number of", "where x is", "half …" —
+/// keeps the warning, so a genuinely-swallowed second clause is never masked.
+fn cleaned_twice_damage_double_is_only_dynamic_marker(cleaned: &str) -> bool {
+    // allow-noncombinator: swallow detector phrase scan on classified text
+    if !cleaned.contains("twice that much damage") {
+        return false;
+    }
+    // Strip the accepted doubling phrase, then require no dynamic marker to
+    // remain — a residual " twice " catches a second, independent doubling.
+    let residual = cleaned.replace("twice that much damage", " ");
+    // allow-noncombinator: swallow detector marker scan on classified text
+    !(residual.contains(" twice ") || OTHER_DYNAMIC_MARKERS.iter().any(|m| residual.contains(m)))
 }
 
 /// CR 702.170c + CR 608.2c: "[you may] exile a card. If you do, it becomes
@@ -2629,6 +2698,63 @@ fn any_optional_ability_has_dig(parsed: &ParsedAbilities) -> bool {
 }
 
 fn dig_if_you_do_is_only_if_marker(stripped: &str) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !stripped.contains("if you do") {
+        return false;
+    }
+    let without_link = stripped.replace("if you do", "");
+    let has_if_marker = without_link.contains(" if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_as_if_marker = without_link.contains(" as if "); // allow-noncombinator: swallow detector marker scan on classified text
+    let has_even_if_marker = without_link.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !(has_if_marker && !has_as_if_marker && !has_even_if_marker)
+}
+
+/// CR 603.7a + CR 608.2c + CR 702.170c: the exile-instead carrier
+/// (`Effect::ExileResolvingSpellInsteadOfGraveyard`) carries an `on_exile`
+/// rider representing the "If you do, ..." consequence — Feather, the Redeemed's
+/// "return it to your hand at the beginning of the next end step" or Lilah,
+/// Undefeated Slickshot's "it becomes plotted". `on_exile: Some(_)` means the
+/// consequence clause is modelled (the riderless Rod of Absorption form is
+/// `None` and has no "if you do" text to account for).
+fn any_ability_has_exile_resolving_rider(parsed: &ParsedAbilities) -> bool {
+    parsed.triggers.iter().any(|t| {
+        t.execute
+            .as_deref()
+            .is_some_and(def_tree_has_exile_resolving_rider)
+    }) || parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_exile_resolving_rider)
+}
+
+fn def_tree_has_exile_resolving_rider(def: &AbilityDefinition) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(_) }
+    ) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_exile_resolving_rider(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_exile_resolving_rider(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_exile_resolving_rider)
+}
+
+/// CR 608.2c: the "if you do" linking the exile-instead consequence (Feather's
+/// return, Lilah's plot) to its exile is a back-reference, not an independent
+/// game-state condition — represented by the `on_exile` rider. Suppress only
+/// when "if you do" is the sole bare "if" marker left in the classified text
+/// (mirrors `dig_if_you_do_is_only_if_marker`).
+fn exile_resolving_rider_if_you_do_is_only_if_marker(stripped: &str) -> bool {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !stripped.contains("if you do") {
         return false;
@@ -3040,6 +3166,20 @@ fn detect_condition_if(
     if any_optional_ability_has_dig(parsed) && dig_if_you_do_is_only_if_marker(&stripped) {
         return;
     }
+    // CR 603.7a + CR 608.2c + CR 702.170c: "exile that {card,spell} instead of
+    // putting it into your graveyard as it resolves. If you do, [return it to
+    // your hand at the beginning of the next end step | it becomes plotted]"
+    // (Feather, the Redeemed / Lilah, Undefeated Slickshot). The "if you do" is
+    // the CR 608.2c back-reference linking the consequence to the exile actually
+    // being applied — represented by the typed `on_exile` rider on
+    // `Effect::ExileResolvingSpellInsteadOfGraveyard` (the consequence is
+    // applied only when the replacement applies). Not a swallowed game-state
+    // condition.
+    if any_ability_has_exile_resolving_rider(parsed)
+        && exile_resolving_rider_if_you_do_is_only_if_marker(&stripped)
+    {
+        return;
+    }
     // CR 614.12: "[you may] put a creature card ... If that card is an
     // enchantment card, it enters tapped and attacking" (Summoner's Grimoire).
     // The leading moved-object type condition is represented by the typed
@@ -3239,11 +3379,10 @@ fn detect_condition_if(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionIf.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionIf.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// Remove sentences containing CR-implicit "if" phrases. These do not
@@ -3487,13 +3626,10 @@ fn detect_condition_unless(
     {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionUnless
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionUnless.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector I: Condition_AsLongAs ──────────────────────────────────────
@@ -3556,13 +3692,10 @@ fn detect_condition_as_long_as(
     if any_static_has_attached_subject_qualifier_grant(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::ConditionAsLongAs
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::ConditionAsLongAs.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 /// CR 611.3a + CR 613: an inverted attached-subject grant
@@ -3947,6 +4080,7 @@ fn detect_duration_this_turn(
         matches!(
             x,
             FilterProp::WasDealtDamageThisTurn
+                | FilterProp::DealtDamageThisTurn
                 | FilterProp::EnteredThisTurn
                 | FilterProp::ZoneChangedThisTurn { .. }
                 | FilterProp::AttackedThisTurn { .. }
@@ -4066,13 +4200,10 @@ fn detect_duration_this_turn(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationThisTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationThisTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector K: Duration_NextTurn ───────────────────────────────────────
@@ -4115,13 +4246,10 @@ fn detect_duration_next_turn(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::DurationNextTurn
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::DurationNextTurn.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector L: Optional_MayHave ────────────────────────────────────────
@@ -4164,13 +4292,10 @@ fn detect_optional_may_have(
     }) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::OptionalMayHave
-            .detector_label()
-            .into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::OptionalMayHave.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Detector M: APNAP ───────────────────────────────────────────────────
@@ -4195,11 +4320,10 @@ fn detect_apnap(
     if any_ability_has_apnap_ordering(parsed) {
         return;
     }
-    diagnostics.push(OracleDiagnostic::SwallowedClause {
-        detector: OracleSemanticFeature::Apnap.detector_label().into(),
-        description: truncate(original, 140).into(),
-        line_index: 0,
-    });
+    diagnostics.push(OracleDiagnostic::swallowed_clause(
+        OracleSemanticFeature::Apnap.detector_label(),
+        truncate(original, 140),
+    ));
 }
 
 // ── Cascade-vs-AST structural diff (option 3) ──────────────────────────
@@ -4362,7 +4486,9 @@ mod tests {
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-    use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool, TargetFilter};
+    use crate::types::ability::{
+        AbilityDefinition, DamageModification, Effect, OutsideGameSourcePool, TargetFilter,
+    };
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
@@ -4400,6 +4526,197 @@ mod tests {
                 } if warning_detector == detector
             )
         })
+    }
+
+    /// Every swallow finding on this face, with its stamped unit provenance.
+    fn swallows(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+    ) -> Vec<(
+        &str,
+        usize,
+        &crate::parser::oracle_ir::diagnostic::OracleSourceSpan,
+    )> {
+        parsed
+            .parse_warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause {
+                    detector,
+                    line_index,
+                    unit_span,
+                    ..
+                } => Some((
+                    detector.as_str(),
+                    *line_index,
+                    unit_span
+                        .as_ref()
+                        .expect("the audit stamps a unit span on every finding it emits"),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ── Unit provenance (Plan 02 gate 5, as amended by the t124 ruling) ──────────
+
+    /// THE COLLAPSE, PINNED BY NAME.
+    ///
+    /// Aether Revolt raises TWO swallowed semantics from ONE physical source line: an
+    /// `as long as` revolt condition and an `if … would … instead` replacement condition.
+    /// They are genuinely distinct clauses — and their diagnostics carry the SAME
+    /// `unit_span`, so a consumer cannot locate them separately.
+    ///
+    /// That is NOT a defect in this payload. It is the line-granularity ceiling of the
+    /// span SUBSTRATE: `DocEmitter::exact_span` hands every item on a line the whole
+    /// line's byte range, so `audit_units` groups both clauses into one unit, and one
+    /// unit has exactly one span. Sub-line item spans are the prerequisite that lifts it;
+    /// when they land, the units subdivide on their own and these two spans separate.
+    ///
+    /// Asserted BY NAME so that whoever lands sub-line spans must consciously flip this
+    /// test, rather than leave a silently stale collapse behind.
+    #[test]
+    fn same_line_clauses_share_the_unit_span_until_subline_item_spans_exist() {
+        let text = "Revolt — As long as a permanent left the battlefield under your control \
+                    this turn, if a source you control would deal noncombat damage to an \
+                    opponent or a permanent an opponent controls, it deals that much damage \
+                    plus 2 instead.\nWhenever you get one or more {E}, this enchantment deals \
+                    that much damage to any target.";
+        let parsed = parse_named(text, "Aether Revolt", &["Enchantment"]);
+
+        let found = swallows(&parsed);
+        assert_eq!(
+            found.len(),
+            2,
+            "two clauses on line 0 each swallow a semantic: {found:?}"
+        );
+        assert_ne!(
+            found[0].0, found[1].0,
+            "the two findings are DIFFERENT detectors — distinct clauses, not one clause twice",
+        );
+
+        // Both are attributed to line 0 …
+        assert_eq!((found[0].1, found[1].1), (0, 0));
+        // … and — the ceiling — they SHARE one span. Distinct byte spans for the two
+        // clauses are unreachable until items carry sub-line spans.
+        assert_eq!(
+            found[0].2, found[1].2,
+            "same-line clauses share the unit span; flip this only when items carry sub-line spans",
+        );
+        // The span is the unit's own line, exactly located and card-absolute.
+        let span = found[0].2;
+        assert_eq!((span.first_line, span.last_line), (0, 0));
+        assert_eq!(span.start_byte, 0);
+        assert_eq!(
+            span.end_byte,
+            text.lines().next().expect("line 0").len(),
+            "the unit span is the exact byte extent of the line it owns",
+        );
+    }
+
+    /// NON-VACUITY for the collapse above: the span is not a constant.
+    ///
+    /// Captain Eberhart swallows a `this turn` duration on line 1 AND another on line 2.
+    /// Those are two units, so they must carry DIFFERENT, non-overlapping spans. Without
+    /// this, `same_line_clauses_share_the_unit_span…` would pass just as happily against
+    /// a span that never varied at all.
+    #[test]
+    fn different_units_carry_different_spans() {
+        let text = "Double strike\nSpells cast from among cards you drew this turn cost {1} \
+                    less to cast.\nSpells cast from among cards your opponents drew this turn \
+                    cost {1} more to cast.";
+        let parsed = parse_named(text, "Captain Eberhart", &["Creature"]);
+
+        let found = swallows(&parsed);
+        assert_eq!(found.len(), 2, "one finding per line: {found:?}");
+        assert_eq!(
+            (found[0].1, found[1].1),
+            (1, 2),
+            "attributed to lines 1 and 2"
+        );
+        assert_ne!(
+            found[0].2, found[1].2,
+            "distinct units must carry distinct spans — otherwise the span is inert",
+        );
+        assert!(
+            found[0].2.end_byte <= found[1].2.start_byte,
+            "unit spans are disjoint and in source order: {:?} then {:?}",
+            found[0].2,
+            found[1].2,
+        );
+    }
+
+    /// The evidence set is the unit's POOLED items, and it is honestly `0..N`.
+    /// A finding names every item the audit consulted — never one hand-picked id.
+    #[test]
+    fn findings_carry_the_units_pooled_evidence_items() {
+        let text = "Revolt — As long as a permanent left the battlefield under your control \
+                    this turn, if a source you control would deal noncombat damage to an \
+                    opponent or a permanent an opponent controls, it deals that much damage \
+                    plus 2 instead.\nWhenever you get one or more {E}, this enchantment deals \
+                    that much damage to any target.";
+        let parsed = parse_named(text, "Aether Revolt", &["Enchantment"]);
+
+        let items: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter(|warning| matches!(warning, OracleDiagnostic::SwallowedClause { .. }))
+            .map(|warning| warning.evidence_items().to_vec())
+            .collect();
+
+        assert_eq!(items.len(), 2);
+        assert!(
+            !items[0].is_empty(),
+            "line 0 lowered an item; the finding must name the evidence it was judged against",
+        );
+        assert_eq!(
+            items[0], items[1],
+            "both findings came from ONE unit, so they carry ONE evidence set",
+        );
+    }
+
+    /// CR 603.7a + CR 608.2c: Feather, the Redeemed's "If you do, return it to
+    /// your hand at the beginning of the next end step" is represented by the
+    /// `on_exile` rider on `Effect::ExileResolvingSpellInsteadOfGraveyard`,
+    /// so Detector G must NOT flag it as a swallowed `Condition_If`. Reverting
+    /// the `any_ability_has_exile_resolving_rider` exemption re-fires the
+    /// swallow (the coverage-honesty regression this guards against).
+    #[test]
+    fn feather_return_rider_is_not_a_swallowed_condition_if() {
+        let parsed = parse_named(
+            "Flying\nWhenever you cast an instant or sorcery spell that targets a creature you \
+             control, exile that card instead of putting it into your graveyard as it resolves. \
+             If you do, return it to your hand at the beginning of the next end step.",
+            "Feather, the Redeemed",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Feather's folded return rider must not surface as a swallowed Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 702.170c + CR 608.2c: Lilah, Undefeated Slickshot's "If you do, it
+    /// becomes plotted" folds onto the same `on_exile` rider (as
+    /// `ExiledSpellRider::BecomePlotted`), so — like Feather — Detector G must
+    /// NOT flag its "if you do" as a swallowed `Condition_If`. This guards the
+    /// coverage-honesty regression that the plot-grant fold could otherwise
+    /// introduce (the folded grant leaves no `GrantCastingPermission { Plotted }`
+    /// node for the `any_ability_has_plotted_grant` suppression to see).
+    #[test]
+    fn lilah_plotted_rider_is_not_a_swallowed_condition_if() {
+        let parsed = parse_named(
+            "Prowess\nWhenever you cast a multicolored instant or sorcery spell from your hand, \
+             exile that spell instead of putting it into your graveyard as it resolves. If you \
+             do, it becomes plotted.",
+            "Lilah, Undefeated Slickshot",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Lilah's folded plotted rider must not surface as a swallowed Condition_If: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     fn find_search_outside_game(def: &AbilityDefinition) -> Option<&Effect> {
@@ -4483,22 +4800,36 @@ mod tests {
     }
 
     /// Registration + real-pipeline positive: a "choose up to X, where X is ..."
-    /// modal keeps the fixed-default cap (the existing "where" guard blocks the
-    /// cast-{X} arm), so the real parser yields a modal node WITHOUT
-    /// `dynamic_max_choices`. Driven end-to-end through `parse_oracle_text` →
-    /// `check_swallowed_clauses`, so it discriminates the detector registration.
-    /// This "where X is" shape is unaffected by Sub-plan B's "that many" arm,
-    /// keeping the test stable across both commits. Revert the registration line
-    /// in `check_swallowed_clauses` → no diagnostic → fails.
+    /// modal whose `<expr>` `parse_cda_quantity` does NOT recognize keeps the
+    /// fixed-default cap — the where-X arm's `map_opt` fails, the `CostXPaid`
+    /// arm's `not(where)` lookahead rejects it, and it falls through with NO
+    /// `dynamic_max_choices`, so the detector fires. The `is_none()` guard below
+    /// pins the fixture expr as genuinely-unsupported: if a future quantity arm
+    /// ever supports it, that guard fails LOUDLY (never a silent vacuous pass),
+    /// signalling the fixture needs a still-dropped expr. Driven end-to-end
+    /// through `parse_oracle_text` → `check_swallowed_clauses`, so it
+    /// discriminates the detector registration. The positive where-X capability
+    /// (supported exprs → dynamic cap) is pinned separately by
+    /// `parse_modal_choose_count_up_to_x_redefined_is_dynamic`. Revert the
+    /// registration line in `check_swallowed_clauses` → no diagnostic → fails.
     #[test]
     fn modal_dynamic_max_dropped_registered_via_real_parse() {
-        let parsed = parse_named(
-            "Choose up to X, where X is the number of cards in your hand \u{2014}\n\
-             \u{2022} You gain 2 life.\n\
-             \u{2022} Draw a card.",
-            "Synthetic Dropped Cap Modal",
-            &["Sorcery"],
+        // A cross-player "greatest number of creatures" count that no
+        // `parse_cda_quantity` arm recognizes ⇒ the dynamic cap is genuinely
+        // dropped. Shared const feeds both the guard and the fixture so they
+        // cannot drift.
+        const DROPPED_EXPR: &str = "the greatest number of creatures a player controls";
+        assert!(
+            crate::parser::oracle_quantity::parse_cda_quantity(DROPPED_EXPR).is_none(),
+            "fixture expr must stay unsupported so the modal cap is genuinely \
+             dropped; pick another still-unsupported expr if this fails",
         );
+        let oracle = format!(
+            "Choose up to X, where X is {DROPPED_EXPR} \u{2014}\n\
+             \u{2022} You gain 2 life.\n\
+             \u{2022} Draw a card."
+        );
+        let parsed = parse_named(&oracle, "Synthetic Dropped Cap Modal", &["Sorcery"]);
         assert!(
             has_swallowed_detector(&parsed, "Modal_DynamicMaxDropped"),
             "real parse of a dropped-cap modal must surface the detector: {:?}",
@@ -6764,6 +7095,37 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
     }
 
+    #[test]
+    fn dynamic_qty_accepts_jaws_of_defeat_pt_difference_carrier() {
+        let parsed = parse_named(
+            "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+            "Jaws of Defeat",
+            &["Enchantment"],
+        );
+
+        let trigger = parsed.triggers.first().expect("Jaws trigger must parse");
+        let execute = trigger.execute.as_ref().expect("Jaws execute must parse");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::LoseLife {
+                    amount: crate::types::ability::QuantityExpr::Difference { .. },
+                    ..
+                }
+            ),
+            "positive reach guard: Jaws must carry a typed P/T Difference, got {execute:?}"
+        );
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "positive reach guard: Jaws must contain no Unimplemented root effect"
+        );
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
     /// CR 702.170a: Fblthp's "The plot cost is equal to its mana cost" is the
     /// intrinsic plot cost of the `TopOfLibraryHasPlot` static (computed at
     /// synthesis, no stored `QuantityExpr`), so the " equal to " marker must NOT
@@ -6951,6 +7313,91 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         // No "twice" at all.
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
             "draw a card for each creature you control."
+        ));
+    }
+
+    /// CR 614.1a + CR 701.10g: Neriv, Heart of the Storm — "it deals twice that
+    /// much damage instead" is a `DamageModification::Double` replacement. The ×2
+    /// is carried by the modification (a unit variant with no `QuantityExpr`), so
+    /// the "twice" marker must not flag DynamicQty.
+    ///
+    /// Non-vacuous: the two reach-guards prove the parse reached the real Double
+    /// carrier and admitted zero `Effect::Unimplemented` (an Unimplemented would
+    /// early-return `check_swallowed_clauses` and make the negative pass for the
+    /// wrong reason — card-test foot-gun #6). Revert surface: remove the
+    /// `damage_modification` suppression clause in `detect_dynamic_qty` and this
+    /// flips to a live DynamicQty warning.
+    #[test]
+    fn dynamic_qty_accepts_damage_double_carrier_neriv() {
+        // Verbatim Oracle text. "Flying" is supplied as an MTGJSON keyword — as
+        // the real card-data pipeline does — so it is recognized rather than left
+        // as an Unimplemented line; the doubling clause is the unit under test.
+        let types: Vec<String> = ["Legendary", "Creature", "Dragon"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let parsed = parse_oracle_text(
+            "Flying\n\
+             If a creature you control that entered this turn would deal damage, it deals twice \
+             that much damage instead.",
+            "Neriv, Heart of the Storm",
+            &["Flying".to_string()],
+            &types,
+            &["Dragon".to_string()],
+        );
+
+        // Reach-guard A: zero Unimplemented ⇒ the doubling unit's detector runs to
+        // completion (an Unimplemented would early-return `check_swallowed_clauses`
+        // — card-test foot-gun #6). Isolation was measured: the doubling clause
+        // ALONE parses to zero abilities + one Double replacement, so this
+        // negative is exercised on the doubling unit, not masked by the "Flying"
+        // keyword line.
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach-guard: Neriv must parse with zero Unimplemented (else the negative is vacuous)"
+        );
+        // Reach-guard B: the Double carrier the suppression keys on is present.
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .any(|r| r.damage_modification == Some(DamageModification::Double)),
+            "reach-guard: Neriv must parse to a Double damage-modification replacement"
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// Helper-level narrowness gate for
+    /// `cleaned_twice_damage_double_is_only_dynamic_marker`: the damage-double
+    /// suppression fires ONLY when "twice that much damage" is the sole dynamic
+    /// marker, and — unlike `cleaned_twice_is_only_dynamic_marker` (repeat-count
+    /// "twice") — it accepts the "twice that" multiplier form because here the ×2
+    /// is carried by `DamageModification::Double`. Any second dynamic marker keeps
+    /// the warning, so a real second clause is never masked.
+    #[test]
+    fn dynamic_qty_damage_double_marker_gate() {
+        // Neriv's sole-marker case — suppression-eligible.
+        assert!(super::cleaned_twice_damage_double_is_only_dynamic_marker(
+            "if a creature you control that entered this turn would deal damage, it deals twice \
+             that much damage instead."
+        ));
+        // The OLD repeat-count helper REJECTS this exact phrase (it treats
+        // "twice that" as a multiplier needing a real QuantityExpr) — which is
+        // precisely why the damage-double helper is a separate sibling.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "it deals twice that much damage instead."
+        ));
+        // Non-masking: a genuine second dynamic marker keeps the warning live.
+        assert!(!super::cleaned_twice_damage_double_is_only_dynamic_marker(
+            "it deals twice that much damage. then draw cards equal to the number of counters on it."
+        ));
+        assert!(!super::cleaned_twice_damage_double_is_only_dynamic_marker(
+            "it deals twice that much damage, then create a token for each creature you control."
+        ));
+        // No damage-double phrase at all → not eligible.
+        assert!(!super::cleaned_twice_damage_double_is_only_dynamic_marker(
+            "investigate twice instead."
         ));
     }
 
@@ -7299,8 +7746,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     fn optional_you_may_accepts_mizzix_mastery_cast_copy() {
         let parsed = parse_named(
             "Exile target card that's an instant or sorcery from your graveyard. \
-             For each card exiled this way, copy it. You may cast the copy \
-             without paying its mana cost.",
+             For each card exiled this way, copy it, and you may cast the copy \
+             without paying its mana cost. Exile Mizzix's Mastery.",
             "Mizzix's Mastery",
             &["Sorcery"],
         );
@@ -8119,6 +8566,77 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             !has_swallowed_detector(&parsed, "ActivateOnlyDuring"),
             "a TYPED timing window must not be reported as swallowed"
         );
+    }
+
+    /// FIX1 recognizer (CR 701.10e): the counter-multiplier escape-hatch phrase
+    /// scan must ALSO accept the "each kind of counter" doubling form (which
+    /// emits `Effect::Double`, not `MultiplyCounter`), while staying
+    /// RED-conservative — a SECOND dynamic marker keeps the warning alive.
+    #[test]
+    fn counter_multiplier_recognizer_accepts_each_kind_form() {
+        // "each kind" doubling form — newly recognized.
+        assert!(super::cleaned_has_only_counter_multiplier_dynamic(
+            "double the number of each kind of counter on target creature"
+        ));
+        // Historical "+1/+1 counters" form — regression guard.
+        assert!(super::cleaned_has_only_counter_multiplier_dynamic(
+            "double the number of +1/+1 counters on target creature"
+        ));
+        // A SECOND dynamic marker ("for each") must keep the warning: a real
+        // uncaptured clause may hide behind it.
+        assert!(!super::cleaned_has_only_counter_multiplier_dynamic(
+            "double the number of each kind of counter on target creature for each card in your hand"
+        ));
+    }
+
+    /// FIX1 end-to-end (CR 701.10e): the "each kind of counter" doubling form no
+    /// longer produces a false-positive DynamicQty swallowed-clause warning — the
+    /// escape hatch now recognizes `Effect::Double { DoubleTarget::Counters }` as
+    /// the intrinsic carrier of the doubled count. Covers a synthetic targeted
+    /// instant AND Zimone, Paradox Sculptor's real activated line.
+    #[test]
+    fn double_each_kind_of_counter_is_not_a_dynamic_qty_swallow() {
+        use crate::parser::oracle_ir::feature::OracleSemanticFeature;
+
+        for (text, name, types) in [
+            (
+                "Double the number of each kind of counter on target creature.",
+                "Synthetic Counter Doubler",
+                &["Instant"][..],
+            ),
+            (
+                "{G}{U}, {T}: Double the number of each kind of counter on up to two target creatures and/or artifacts you control.",
+                "Zimone, Paradox Sculptor",
+                &["Legendary", "Creature"][..],
+            ),
+        ] {
+            let parsed = parse_named(text, name, types);
+
+            // REACH GUARDS (avoid vacuity): the line must actually parse and the
+            // detector's dynamic marker must be present, or the silence proves
+            // nothing about the escape-hatch arm.
+            assert!(
+                !parsed.abilities.is_empty(),
+                "{name}: the line must parse to at least one ability"
+            );
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: the targeted form must parse — a self-suppressing Unimplemented would make this vacuous"
+            );
+            assert!(
+                // allow-noncombinator: test reach-guard asserting the fixture text carries the marker
+                text.to_lowercase().contains("the number of"),
+                "{name}: the dynamic-qty marker must be present in the fixture"
+            );
+
+            assert!(
+                !has_swallowed_detector(
+                    &parsed,
+                    OracleSemanticFeature::DynamicQty.detector_label()
+                ),
+                "{name}: an intrinsic counter-doubler must not be flagged as a swallowed DynamicQty clause"
+            );
+        }
     }
 
     /// The OTHER half of the `ActivateOnlyDuring` input space, pinned to what the parser

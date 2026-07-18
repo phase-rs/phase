@@ -179,7 +179,7 @@ pub struct ShortcutProposal {
 /// shortcut proceed; `Shorten` names an earlier stopping point (Phase 3 realizes this
 /// conservatively as decline-to-manual — the opponent receives a real priority window
 /// instead of the loop being auto-taken; finite-K materialization is Phase 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ShortcutResponse {
     /// CR 732.2c: this player agrees to take the shortcut.
     Accept,

@@ -682,7 +682,7 @@ fn convert_rule(
         // CR 602.5 + CR 605.1a: "Activated abilities of [filter] can't be
         // activated" — Pithing Needle / Phyrexian Revoker / Sorcerous
         // Spyglass / Karn family. Maps onto engine
-        // `StaticMode::CantBeActivated { who, source_filter, exemption }`.
+        // `StaticMode::CantBeActivated { who, source_filter, exemption, kind }`.
         // The schema's `ActivatedAbilities` filter that scopes which
         // abilities are prohibited becomes the engine's `source_filter`
         // (filter on the source object whose abilities are blocked).
@@ -1968,6 +1968,8 @@ fn activated_ability_effect_to_static(
             who: ProhibitionScope::AllPlayers,
             source_filter,
             exemption,
+            // CR 606.2: not kind-narrowed — blocks any activated ability.
+            kind: None,
         },
         other => {
             return Err(ConversionGap::UnknownVariant {
@@ -2736,7 +2738,7 @@ fn convert_settable_color_to_mods(
     c: &crate::schema::types::SettableColor,
 ) -> ConvResult<Vec<engine::types::ability::ContinuousModification>> {
     use crate::schema::types::SettableColor as S;
-    use engine::types::ability::ContinuousModification as M;
+    use engine::types::ability::{ColorChangeMode, ContinuousModification as M};
     Ok(match c {
         // CR 105.2: "is all colors" — set the object's color to all five.
         S::AllColors => vec![M::SetColor {
@@ -2754,7 +2756,9 @@ fn convert_settable_color_to_mods(
             vec![M::SetColor { colors }]
         }
         // CR 105.3 + CR 700.7: Chosen-color CDAs read from `chosen_attributes`.
-        S::TheChosenColor | S::TheChosenColors => vec![M::AddChosenColor],
+        S::TheChosenColor | S::TheChosenColors => vec![M::AddChosenColor {
+            mode: ColorChangeMode::Set,
+        }],
         // CR 700.7: "the mana color chosen this way" — engine has no
         // distinct primitive yet; surface as engine prerequisite.
         S::TheManaColorChosenThisWay => {

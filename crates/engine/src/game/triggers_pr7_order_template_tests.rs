@@ -1,6 +1,5 @@
 //! PR-7 Part B2 — building-block tests for the trigger-ordering resolver's two
-//! tiers (`apply_trigger_order_template`) plus the `SetTriggerOrderTemplate{Save}`
-//! GameAction route through `apply()`.
+//! tiers (`apply_trigger_order_template`) plus live `OrderTriggers` persistence.
 //!
 //! CR 603.3b: a simultaneous batch is ordered ONCE; every subsequent parked-tail
 //! re-drain is coverage-only. These tests pin the two-tier split:
@@ -10,6 +9,7 @@ use super::*;
 use crate::analysis::decision_template::{
     DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
 };
+use crate::types::actions::GameAction;
 use crate::types::game_state::{GameState, TriggerOrderGroup, YieldTarget};
 use crate::types::identifiers::CardId;
 
@@ -55,6 +55,18 @@ fn mk_ctx(
     }
 }
 
+fn mk_named_ctx(
+    source_id: u64,
+    incarnation: Option<u64>,
+    card_id: u64,
+    description: &str,
+    count: i32,
+) -> DeferredTrigger {
+    let mut context = mk_ctx(source_id, incarnation, Some(card_id), count);
+    context.pending.description = Some(description.to_string());
+    context
+}
+
 fn group(triggers: Vec<DeferredTrigger>) -> TriggerOrderGroup {
     TriggerOrderGroup {
         controller: PlayerId(0),
@@ -63,18 +75,10 @@ fn group(triggers: Vec<DeferredTrigger>) -> TriggerOrderGroup {
     }
 }
 
-fn this_obj(source_id: u64, incarnation: Option<u64>) -> YieldTarget {
-    YieldTarget::ThisObject {
-        source_id: ObjectId(source_id),
-        incarnation,
-        trigger_description: None,
-    }
-}
-
-fn all_copies(card_id: u64) -> YieldTarget {
+fn all_copies(card_id: u64, description: &str) -> YieldTarget {
     YieldTarget::AllCopies {
         card_id: CardId(card_id),
-        trigger_description: None,
+        trigger_description: Some(description.to_string()),
     }
 }
 
@@ -159,129 +163,74 @@ fn apply_ephemeral_duplicate_source_tail_stays_in_order() {
     );
 }
 
-/// T7 (Gap-B regression, persistent distinct-card parked tail). Saved persistent order
-/// {X@0, Y@1, X@2} (X duplicate card, Y distinct). Fresh full batch [X1, X2, Y] permutes
-/// ONCE to [X1, Y, X2] and registers a `ThisObject` ephemeral marker; the parked tail
-/// [Y, X2] is then coverage-only (stays [Y, X2]). A direct-permute-on-tail impl would
-/// re-grab the pin vacated by X1 and invert the DISTINCT pair to [X2, Y].
+/// A duplicate persistent identity is ambiguous and must not auto-order a future batch.
 #[test]
-fn apply_persistent_permutes_once_then_tail_is_coverage_only() {
+fn duplicate_or_legacy_persistent_templates_never_auto_order() {
     const CARD_X: u64 = 100;
     const CARD_Y: u64 = 200;
     let mut state = GameState::new_two_player(7);
 
-    // Persistent AllCopies template: X@0, Y@1, X@2.
+    // Legacy wildcard + duplicate X identities are intentionally rejected.
     let persistent = DecisionTemplate {
         owner: PlayerId(0),
         decisions: vec![
             PinnedDecision::Order {
-                source: all_copies(CARD_X),
+                source: YieldTarget::AllCopies {
+                    card_id: CardId(CARD_X),
+                    trigger_description: None,
+                },
                 pos: 0,
             },
             PinnedDecision::Order {
-                source: all_copies(CARD_Y),
+                source: all_copies(CARD_Y, "Y trigger"),
                 pos: 1,
             },
             PinnedDecision::Order {
-                source: all_copies(CARD_X),
+                source: all_copies(CARD_X, "X trigger"),
                 pos: 2,
             },
         ],
         replay: ReplayMode::Static,
         key: DecisionGroupKey::from_sources(
-            &[all_copies(CARD_X), all_copies(CARD_Y), all_copies(CARD_X)],
+            &[
+                YieldTarget::AllCopies {
+                    card_id: CardId(CARD_X),
+                    trigger_description: None,
+                },
+                all_copies(CARD_Y, "Y trigger"),
+                all_copies(CARD_X, "X trigger"),
+            ],
             DecisionKind::TriggerOrdering,
         ),
     };
     state.set_trigger_order_template(persistent);
 
-    // Fresh full batch in placement order [X1(src1), X2(src2), Y(src3)].
+    // Fresh full batch is not eligible for a legacy wildcard preference.
     let mut fresh = group(vec![
-        mk_ctx(1, Some(0), Some(CARD_X), 1), // X1
-        mk_ctx(2, Some(0), Some(CARD_X), 2), // X2
-        mk_ctx(3, Some(0), Some(CARD_Y), 3), // Y
+        mk_named_ctx(1, Some(0), CARD_X, "X trigger", 1),
+        mk_named_ctx(2, Some(0), CARD_X, "X trigger", 2),
+        mk_named_ctx(3, Some(0), CARD_Y, "Y trigger", 3),
     ]);
-    assert!(
-        apply_trigger_order_template(&mut state, &mut fresh),
-        "persistent template covers the fresh batch"
-    );
+    assert!(!apply_trigger_order_template(&mut state, &mut fresh));
     assert_eq!(
         source_ids(&fresh),
-        vec![1, 3, 2],
-        "PERMUTE-ONCE to [X1, Y, X2] (X1→pos0, Y→pos1, X2→pos2)"
-    );
-    // A ThisObject ephemeral marker for {src1, src2, src3} now exists.
-    assert!(
-        state.decision_templates.iter().any(|t| t.key.is_ephemeral()
-            && t.key.covers(&[
-                this_obj(1, Some(0)),
-                this_obj(2, Some(0)),
-                this_obj(3, Some(0))
-            ])),
-        "the persistent permute registers a covering ThisObject ephemeral marker (Gap-B)"
-    );
-
-    // Parked tail after X1 dispatched: [Y(src3), X2(src2)].
-    let mut tail = group(vec![
-        mk_ctx(3, Some(0), Some(CARD_Y), 3), // Y
-        mk_ctx(2, Some(0), Some(CARD_X), 2), // X2
-    ]);
-    assert!(
-        apply_trigger_order_template(&mut state, &mut tail),
-        "the tail matches the ephemeral marker first (ephemeral-before-persistent consult)"
-    );
-    assert_eq!(
-        source_ids(&tail),
-        vec![3, 2],
-        "COVERAGE-ONLY keeps the saved distinct order [Y, X2]; a direct-permute-on-tail impl \
-         would invert to [X2, Y]"
+        vec![1, 2, 3],
+        "ambiguous or legacy templates leave the live group for the player to order"
     );
 }
 
-/// T4 (persistent Save route + finding #5 identity). Save through `apply()` builds a
-/// persistent `AllCopies` template from the submitted order; the pin card-ids equal the
-/// source objects' card-ids (the CANONICAL identity the matcher later reads as
-/// `source_card_id`). A fresh batch of those two card identities is then auto-ordered to
-/// the saved order by `apply_trigger_order_template` (the gate's 3rd arm).
+/// A nonidentity live order with distinct named identities is saved and replays.
 #[test]
-fn save_persistent_template_reapplies_in_saved_order() {
-    use crate::types::actions::{GameAction, TriggerOrderTemplateOp};
+fn submitted_persistent_template_reapplies_in_saved_order() {
     const CARD_A: u64 = 100;
     const CARD_B: u64 = 200;
 
     let mut state = GameState::new_two_player(7);
-    // Two battlefield objects: id1 = card A, id2 = card B.
-    let mut oa = crate::game::game_object::GameObject::new(
-        ObjectId(1),
-        CardId(CARD_A),
-        PlayerId(0),
-        "A".to_string(),
-        crate::types::zones::Zone::Battlefield,
-    );
-    oa.incarnation = 0;
-    let mut ob = crate::game::game_object::GameObject::new(
-        ObjectId(2),
-        CardId(CARD_B),
-        PlayerId(0),
-        "B".to_string(),
-        crate::types::zones::Zone::Battlefield,
-    );
-    ob.incarnation = 0;
-    state.objects.insert(ObjectId(1), oa);
-    state.objects.insert(ObjectId(2), ob);
-
-    // Save via apply(): sources = [id1, id2], order = [1, 0] ⇒ position0 = sources[1]
-    // (id2, card B), position1 = sources[0] (id1, card A).
-    super::super::engine::apply_as_current(
-        &mut state,
-        GameAction::SetTriggerOrderTemplate {
-            op: TriggerOrderTemplateOp::Save {
-                sources: vec![ObjectId(1), ObjectId(2)],
-                order: vec![1, 0],
-            },
-        },
-    )
-    .expect("Save is an any-state preference action");
+    let submitted = vec![
+        mk_named_ctx(2, Some(0), CARD_B, "B trigger", 2),
+        mk_named_ctx(1, Some(0), CARD_A, "A trigger", 1),
+    ];
+    record_submitted_trigger_order(&mut state, PlayerId(0), &submitted, false);
 
     // Exactly one persistent template registered for P0.
     let persistent: Vec<&DecisionTemplate> = state
@@ -293,34 +242,27 @@ fn save_persistent_template_reapplies_in_saved_order() {
     let tmpl = persistent[0];
     assert_eq!(tmpl.owner, PlayerId(0), "owner forced to actor");
 
-    // finding #5: the Save-derived pins read the objects' card_ids, at the submitted
-    // positions.
     assert_eq!(
         tmpl.decisions,
         vec![
             PinnedDecision::Order {
-                source: all_copies(CARD_B),
+                source: all_copies(CARD_B, "B trigger"),
                 pos: 0,
             },
             PinnedDecision::Order {
-                source: all_copies(CARD_A),
+                source: all_copies(CARD_A, "A trigger"),
                 pos: 1,
             },
         ],
-        "pins built from state.objects[source].card_id at the submitted order positions"
-    );
-    assert_eq!(
-        state.objects[&ObjectId(2)].card_id,
-        CardId(CARD_B),
-        "the Save-derived pin card_id equals the source object's card_id (identity)"
+        "pins retain card identity and the nonempty trigger discriminator"
     );
 
     // A fresh batch of those two card identities, in placement order [A, B], auto-orders
     // to the saved order [B, A] via the gate's 3rd arm — and the matcher reads
     // `source_card_id`, which equals the Save-derived card_id by construction.
     let mut fresh = group(vec![
-        mk_ctx(5, Some(0), Some(CARD_A), 1), // fresh object, card A
-        mk_ctx(6, Some(0), Some(CARD_B), 2), // fresh object, card B
+        mk_named_ctx(5, Some(0), CARD_A, "A trigger", 1),
+        mk_named_ctx(6, Some(0), CARD_B, "B trigger", 2),
     ]);
     assert!(
         apply_trigger_order_template(&mut state, &mut fresh),
@@ -335,11 +277,153 @@ fn save_persistent_template_reapplies_in_saved_order() {
     // Discriminator: without the persistent template a fresh batch is not covered.
     let mut state2 = GameState::new_two_player(7);
     let mut fresh2 = group(vec![
-        mk_ctx(5, Some(0), Some(CARD_A), 1),
-        mk_ctx(6, Some(0), Some(CARD_B), 2),
+        mk_named_ctx(5, Some(0), CARD_A, "A trigger", 1),
+        mk_named_ctx(6, Some(0), CARD_B, "B trigger", 2),
     ]);
     assert!(
         !apply_trigger_order_template(&mut state2, &mut fresh2),
         "no saved template ⇒ not covered ⇒ would prompt"
+    );
+}
+
+#[test]
+fn only_nonidentity_distinct_named_orders_persist() {
+    const CARD_A: u64 = 100;
+    const CARD_B: u64 = 200;
+    let mut state = GameState::new_two_player(7);
+
+    let distinct = vec![
+        mk_named_ctx(1, Some(0), CARD_A, "A trigger", 1),
+        mk_named_ctx(2, Some(0), CARD_B, "B trigger", 2),
+    ];
+    record_submitted_trigger_order(&mut state, PlayerId(0), &distinct, true);
+
+    let missing_description = vec![
+        mk_ctx(3, Some(0), Some(CARD_A), 1),
+        mk_named_ctx(4, Some(0), CARD_B, "B trigger", 2),
+    ];
+    record_submitted_trigger_order(&mut state, PlayerId(0), &missing_description, false);
+
+    let duplicate_identity = vec![
+        mk_named_ctx(5, Some(0), CARD_A, "A trigger", 1),
+        mk_named_ctx(6, Some(0), CARD_A, "A trigger", 2),
+    ];
+    record_submitted_trigger_order(&mut state, PlayerId(0), &duplicate_identity, false);
+
+    assert!(
+        state.decision_templates.is_empty(),
+        "identity, missing-description, and duplicate identities never become persistent preferences"
+    );
+}
+
+#[test]
+fn persistent_order_template_rejects_unrepresentable_positions() {
+    let max_representable: Vec<_> = (1..=u64::from(u8::MAX) + 1)
+        .map(|id| mk_named_ctx(id, Some(0), id, &format!("trigger {id}"), 1))
+        .collect();
+    let mut max_state = GameState::new_two_player(7);
+    record_submitted_trigger_order(&mut max_state, PlayerId(0), &max_representable, false);
+
+    let max_template = max_state
+        .decision_templates
+        .iter()
+        .find(|template| template.key.is_persistent())
+        .expect("256 distinct identities fit the u8 order-position range");
+    assert_eq!(max_template.decisions.len(), usize::from(u8::MAX) + 1);
+    assert!(matches!(
+        max_template.decisions.last(),
+        Some(PinnedDecision::Order { pos: u8::MAX, .. })
+    ));
+    assert!(
+        is_specific_persistent_order_template(max_template),
+        "the maximum representable template remains eligible for replay"
+    );
+
+    let unrepresentable: Vec<_> = (1..=u64::from(u8::MAX) + 2)
+        .map(|id| mk_named_ctx(id, Some(0), id, &format!("trigger {id}"), 1))
+        .collect();
+    let mut overflow_state = GameState::new_two_player(7);
+    record_submitted_trigger_order(&mut overflow_state, PlayerId(0), &unrepresentable, false);
+
+    assert!(
+        overflow_state.decision_templates.is_empty(),
+        "257 distinct identities cannot be saved without truncating a u8 position"
+    );
+}
+
+#[test]
+fn live_order_triggers_persists_only_nonidentity_named_order() {
+    const CARD_A: u64 = 100;
+    const CARD_B: u64 = 200;
+
+    let mut state = GameState::new_two_player(7);
+    let disposition = begin_trigger_ordering(
+        &mut state,
+        vec![
+            mk_named_ctx(1, Some(0), CARD_A, "A trigger", 1),
+            mk_named_ctx(2, Some(0), CARD_B, "B trigger", 2),
+        ],
+    );
+    let TriggerOrderingDisposition::PromptForChoice(prompt) = disposition else {
+        panic!("distinct named triggers must reach an OrderTriggers prompt");
+    };
+    state.waiting_for = *prompt;
+
+    super::super::engine::apply_as_current(
+        &mut state,
+        GameAction::OrderTriggers { order: vec![1, 0] },
+    )
+    .expect("a valid nonidentity OrderTriggers submission succeeds");
+
+    let persistent: Vec<_> = state
+        .decision_templates
+        .iter()
+        .filter(|template| template.key.is_persistent())
+        .collect();
+    assert_eq!(
+        persistent.len(),
+        1,
+        "nonidentity live order saves one preference"
+    );
+    assert_eq!(
+        persistent[0].decisions,
+        vec![
+            PinnedDecision::Order {
+                source: all_copies(CARD_B, "B trigger"),
+                pos: 0,
+            },
+            PinnedDecision::Order {
+                source: all_copies(CARD_A, "A trigger"),
+                pos: 1,
+            },
+        ],
+        "the saved preference preserves the submitted nonidentity order"
+    );
+
+    let mut identity_state = GameState::new_two_player(7);
+    let disposition = begin_trigger_ordering(
+        &mut identity_state,
+        vec![
+            mk_named_ctx(3, Some(0), CARD_A, "A trigger", 1),
+            mk_named_ctx(4, Some(0), CARD_B, "B trigger", 2),
+        ],
+    );
+    let TriggerOrderingDisposition::PromptForChoice(prompt) = disposition else {
+        panic!("distinct named triggers must reach an OrderTriggers prompt");
+    };
+    identity_state.waiting_for = *prompt;
+
+    super::super::engine::apply_as_current(
+        &mut identity_state,
+        GameAction::OrderTriggers { order: vec![0, 1] },
+    )
+    .expect("a valid identity OrderTriggers submission succeeds");
+
+    assert!(
+        identity_state
+            .decision_templates
+            .iter()
+            .all(|template| !template.key.is_persistent()),
+        "identity live order does not save a persistent preference"
     );
 }

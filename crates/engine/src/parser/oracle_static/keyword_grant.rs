@@ -522,23 +522,12 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     }
 
     // Pattern 2: "Creature cards you own that aren't on the battlefield have flash"
-    // This grants flash to cards in non-battlefield zones.
+    // This grants flash to cards in non-battlefield zones. The subject-to-filter
+    // grammar is shared with the land type-change compound handler (Dune
+    // Chanter) via `parse_owned_off_battlefield_subject_filter`.
     if nom_primitives::scan_contains(subject, "cards you own that aren't on the battlefield") {
-        let (prefix, _) = nom_primitives::scan_split_at_phrase(subject, |i| tag("cards").parse(i))?;
-        let type_end = prefix.len();
-        let type_part = &tp.original[..type_end];
-        let (base_filter, _) = parse_type_phrase(type_part);
-        let affected = match base_filter {
-            TargetFilter::Typed(mut typed) => {
-                typed = typed.controller(ControllerRef::You);
-                // "aren't on the battlefield" means any zone except battlefield
-                typed.properties.push(FilterProp::InAnyZone {
-                    zones: vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command],
-                });
-                TargetFilter::Typed(typed)
-            }
-            _ => base_filter,
-        };
+        let subject_original = &tp.original[..subject.len()];
+        let affected = parse_owned_off_battlefield_subject_filter(subject_original)?;
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
             .affected(affected)
             .description(text.to_string())
@@ -1837,7 +1826,23 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
 /// canonical inner classifier without exposing the private
 /// `parse_quoted_ability` / `parse_quoted_rule_static_modifications` helpers.
 pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> {
-    let ability_text = ability_text.trim();
+    // Oracle's punctuation convention carries the *enclosing* sentence's comma
+    // INSIDE the closing quote of a granted ability when a clause follows — e.g.
+    // Bronzehide Lion's `..."{G}{W}: Enchanted creature gains indestructible until
+    // end of turn," and it loses all other abilities.` That trailing `,` is
+    // sentence punctuation, not part of the ability; left attached it defeats the
+    // inner duration combinator ("until end of turn," ≠ "until end of turn") and
+    // the phrase falls through to prose, silently dropping the UntilEndOfTurn
+    // duration. Strip it here, at the single boundary every quoted-grant caller
+    // funnels through (aura grants, token grants, keyword-list grants), so a
+    // quoted ability parses identically to its unquoted form.
+    //
+    // Only the comma is stripped — a trailing PERIOD is the ability's own terminal
+    // punctuation ("{T}: Add {G}." / "...equal to the difference.") that must be
+    // preserved in the serialized `description` (#5599), and it does not defeat
+    // any inner combinator. `split_keyword_list` strips `['.', ',']` because there
+    // the text is consumed structurally, not surfaced as a description.
+    let ability_text = ability_text.trim().trim_end_matches(',').trim();
     if ability_text.is_empty() {
         return Vec::new();
     }

@@ -1,13 +1,30 @@
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     AbilityCost, CastingPermission, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
     SpellStackToGraveyardReplacement, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastingVariant, GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, CastingVariant, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
+
+/// CR 400.1/400.2: Recursively extract a filter's own `controller` axis,
+/// looking through the composed forms (`Not`/`And`/`Or`) a real card's target
+/// filter may be built from rather than only matching a bare `Typed`. `And`/
+/// `Or` return the first branch that carries a controller axis — composed
+/// filters in this codebase don't mix two different explicit player axes on
+/// the same object filter, so first-found is unambiguous.
+fn extract_controller_ref(filter: &TargetFilter) -> Option<&crate::types::ability::ControllerRef> {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.as_ref(),
+        TargetFilter::Not { filter } => extract_controller_ref(filter),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().find_map(extract_controller_ref)
+        }
+        _ => None,
+    }
+}
 
 /// CR 115.1 + CR 601.2c: "You may cast a spell ... from your hand without paying
 /// its mana cost" (Electrodominance, Baral's Expertise) has no "target" word —
@@ -21,7 +38,30 @@ fn open_private_zone_cast_selection(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let Some(player) = state.players.iter().find(|p| p.id == ability.controller) else {
+    // CR 400.1/400.2 + CR 109.4: A hand-scoped cast filter's own `controller`
+    // axis names WHOSE hand is the candidate pool. Buster-Sword-class filters
+    // ("cast a spell from your hand") carry no controller (or `You`) and keep
+    // scanning the caster's own hand. Silent-Blade Oni's "cast a spell from
+    // among those cards" (bound to the damaged player's hand via
+    // `ControllerRef::TriggeringPlayer`, issue #5240) needs a DIFFERENT
+    // player's hand as the pool — `ability.controller` alone can't express
+    // that, so resolve the filter's own controller axis through the single
+    // `ControllerRef` authority instead of hardcoding the caster. Recurses
+    // through `Not`/`And`/`Or` (extract_controller_ref) so a composed filter
+    // (e.g. a future card combining a type restriction with a player axis via
+    // `And`) isn't silently treated as caster-scoped.
+    let hand_owner = extract_controller_ref(target_filter)
+        .and_then(|cref| {
+            crate::game::filter::controller_ref_player(
+                state,
+                ability.source_id,
+                Some(ability.controller),
+                Some(ability),
+                cref,
+            )
+        })
+        .unwrap_or(ability.controller);
+    let Some(player) = state.players.iter().find(|p| p.id == hand_owner) else {
         return Err(EffectError::PlayerNotFound);
     };
     let cards_iter = match source_zone {
@@ -380,13 +420,23 @@ pub fn resolve(
         );
     }
 
-    grant_lingering_permissions(state, ability, &target_ids, events)?;
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::CastFromZone,
-        source_id: ability.source_id,
-        subject: None,
-    });
+    match grant_lingering_permissions(state, ability, &target_ids, events)? {
+        LingeringPermissionGrantResult::Immediate => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::CastFromZone,
+                source_id: ability.source_id,
+                subject: None,
+            });
+        }
+        LingeringPermissionGrantResult::ExileDeliveryComplete => {}
+        // CR 614.1 + CR 616.1: A current-zone-to-Exile delivery may park for
+        // replacement ordering. Its typed batch completion records the
+        // permission and emits `EffectResolved` only after the delivery settles,
+        // so this resolver must not run either tail early.
+        LingeringPermissionGrantResult::NeedsChoice => {
+            return Ok(());
+        }
+    }
 
     Ok(())
 }
@@ -469,8 +519,10 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
         return Ok(true);
     }
 
-    grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?;
-    Ok(false)
+    Ok(matches!(
+        grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?,
+        LingeringPermissionGrantResult::NeedsChoice
+    ))
 }
 
 fn effective_cast_from_zone_constraint(
@@ -591,6 +643,7 @@ fn cast_single_target_during_resolution(
     // (only reached if a future free-cast adds an MV gate; these carry none).
     // There are no dig misses for a targeted single-card free-cast.
     let cleanup = crate::types::ability::ResolutionCastCleanup {
+        source_id: ability.source_id,
         exiled_misses: Vec::new(),
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
@@ -720,6 +773,20 @@ fn cast_from_zone_enters_with_modifications(
     Vec::new()
 }
 
+/// Result of a lingering cast permission grant. An exile-delivery batch owns
+/// `EffectResolved` so its tail cannot run before a parked replacement choice.
+pub(crate) enum LingeringPermissionGrantResult {
+    /// Every resolved target already occupies an in-place supported zone.
+    Immediate,
+    /// One batch delivered every current-zone-to-Exile target through the
+    /// replacement pipeline synchronously; its completion recorded only
+    /// settled exile cards and emitted the resolution tail.
+    ExileDeliveryComplete,
+    /// The replacement pipeline parked at CR 616.1; its completion owns the
+    /// permission and resolution tail once the choice settles.
+    NeedsChoice,
+}
+
 /// CR 118.9: Stamp `ExileWithAltCost` / `ExileWithAltAbilityCost` on resolved
 /// targets. Shared by the direct resolve path and the `EffectZoneChoice` resume
 /// path (Electrodominance hand pick).
@@ -728,6 +795,55 @@ pub(crate) fn grant_lingering_permissions(
     ability: &ResolvedAbility,
     target_ids: &[ObjectId],
     events: &mut Vec<GameEvent>,
+) -> Result<LingeringPermissionGrantResult, EffectError> {
+    let mut in_place_ids = Vec::new();
+    let mut exile_delivery_ids = Vec::new();
+    for &obj_id in target_ids {
+        let Some(current_zone) = state.objects.get(&obj_id).map(|object| object.zone) else {
+            continue;
+        };
+        if matches!(current_zone, Zone::Exile | Zone::Graveyard | Zone::Hand) {
+            in_place_ids.push(obj_id);
+        } else {
+            exile_delivery_ids.push(obj_id);
+        }
+    }
+
+    if exile_delivery_ids.is_empty() {
+        record_lingering_permissions(state, ability, &in_place_ids)?;
+        return Ok(LingeringPermissionGrantResult::Immediate);
+    }
+
+    // CR 614.1 + CR 616.1: The impulse-draw-class current-zone-to-Exile
+    // instruction is a replaceable effect-owned event. Keep the permission
+    // recording and resolution event in the typed completion so a replacement
+    // choice cannot expose either tail before the whole batch settles.
+    let requests = exile_delivery_ids
+        .iter()
+        .map(|&obj_id| ZoneMoveRequest::effect(obj_id, Zone::Exile, ability.source_id))
+        .collect();
+    let result = zone_pipeline::move_objects_simultaneously_then(
+        state,
+        requests,
+        Some(BatchCompletion::CastFromZoneExileDeliveryComplete {
+            ability: Box::new(ability.clone()),
+            in_place_ids,
+            exile_delivery_ids,
+        }),
+        events,
+    );
+    Ok(match result {
+        BatchMoveResult::Done => LingeringPermissionGrantResult::ExileDeliveryComplete,
+        BatchMoveResult::NeedsChoice => LingeringPermissionGrantResult::NeedsChoice,
+    })
+}
+
+/// CR 118.9: Construct the object-local casting permissions after the caller
+/// established that each target is in a zone the permission can authorize.
+fn record_lingering_permissions(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target_ids: &[ObjectId],
 ) -> Result<(), EffectError> {
     let (
         without_paying,
@@ -768,17 +884,12 @@ pub(crate) fn grant_lingering_permissions(
     let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
 
     for &obj_id in target_ids {
-        // CR 601.2a: Impulse-draw and similar grants move non-exile cards to
-        // exile before attaching `ExileWithAltCost`. Targeted graveyard grants
-        // (Emry, Lurker in the Loch) and resolution-time hand picks
-        // (Electrodominance) keep the card in its source zone and grant a
-        // permission the casting pipeline consumes in place.
+        // CR 601.2a: Targeted graveyard grants (Emry, Lurker in the Loch) and
+        // resolution-time hand picks (Electrodominance) keep the card in its
+        // source zone and grant a permission the casting pipeline consumes in
+        // place. Current-zone-to-Exile targets arrive here only after their
+        // replacement-safe delivery settled in exile.
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
-        if current_zone.is_some_and(|z| z != Zone::Exile && z != Zone::Graveyard && z != Zone::Hand)
-        {
-            zones::move_to_zone(state, obj_id, Zone::Exile, events);
-        }
-
         // CR 118.9: Grant casting permission. Three cases:
         //   - `alt_ability_cost: Some(_)` → `ExileWithAltAbilityCost` (Nashi:
         //     "pay life equal to its mana value rather than paying its mana
@@ -857,10 +968,39 @@ pub(crate) fn grant_lingering_permissions(
     Ok(())
 }
 
+/// CR 614.1 + CR 616.1 + CR 611.2a: Complete an impulse-draw-class exile
+/// delivery only after every proposed move settles. A redirected card receives
+/// no exile permission; existing Hand/Graveyard/Exile targets retain their
+/// established in-place grant behavior.
+pub(crate) fn complete_lingering_permissions_after_exile_delivery(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    in_place_ids: &[ObjectId],
+    exile_delivery_ids: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let mut permission_ids = in_place_ids.to_vec();
+    permission_ids.extend(exile_delivery_ids.iter().copied().filter(|obj_id| {
+        state
+            .objects
+            .get(obj_id)
+            .is_some_and(|object| object.zone == Zone::Exile)
+    }));
+    record_lingering_permissions(state, ability, &permission_ids)
+        .expect("CastFromZone batch completion carries a CastFromZone ability");
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::CastFromZone,
+        source_id: ability.source_id,
+        subject: None,
+    });
+    BatchMoveResult::Done
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
+    use crate::game::zones;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, Comparator, ControllerRef,
@@ -1751,7 +1891,26 @@ mod tests {
         apply_as_current(&mut state, GameAction::SelectCards { cards: vec![cheap] }).unwrap();
 
         assert_eq!(state.objects[&cheap].zone, Zone::Stack);
-        assert!(state.objects[&cheap].casting_permissions.is_empty());
+        assert!(
+            matches!(
+                state.objects[&cheap].casting_permissions.as_slice(),
+                [CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: None,
+                    mana_spend_permission: None,
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications,
+                    ..
+                }] if enters_with_modifications.is_empty()
+            ),
+            "the consumed hand-cast permission must remain only as a neutral stable slot"
+        );
+
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(
+            state.objects[&cheap].casting_permissions.is_empty(),
+            "normal Stack exit cleanup must remove the neutral consumed slot"
+        );
     }
 
     /// CR 118.9 + CR 702.62a + CR 608.2g: The Face of Boe RUNTIME proof. Picking a

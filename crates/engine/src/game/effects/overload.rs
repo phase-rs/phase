@@ -62,6 +62,22 @@ fn transform_effect_in_place(effect: &mut Effect) {
         name: String::new(),
         description: None,
     };
+    // CR 702.96a + CR 702.96c: Overload's text change replaces only the word
+    // "target". A targetless, self-referential move — Mizzix's Mastery's trailing
+    // "Exile Mizzix's Mastery" (`ChangeZone { target: SelfRef }`) — carries no
+    // "target" to rewrite, so it must NOT be promoted to `ChangeZoneAll`. Doing so
+    // would break the self-exile: `ChangeZoneAll` scans origin zones (defaulting to
+    // the battlefield) for filter matches, but the resolving spell is on the stack,
+    // so a `ChangeZoneAll { SelfRef }` finds nothing and the card falls to the
+    // graveyard instead of exile. Leave the single-target self-move untouched.
+    if let Effect::ChangeZone {
+        target: crate::types::ability::TargetFilter::SelfRef,
+        ..
+    } = effect
+    {
+        return;
+    }
+
     let owned = std::mem::replace(effect, placeholder);
     *effect = match owned {
         Effect::Destroy {
@@ -328,6 +344,132 @@ mod tests {
             }
             ref other => panic!("expected ChangeZoneAll, got {other:?}"),
         }
+    }
+
+    /// CR 702.96a + CR 702.96c: Mizzix's Mastery's trailing "Exile Mizzix's
+    /// Mastery" is a targetless, self-referential move (`ChangeZone { target:
+    /// SelfRef }`). Overload's text change rewrites only the word "target", so
+    /// this clause must stay a single-target `ChangeZone`. Promoting it to
+    /// `ChangeZoneAll` would break the self-exile: that resolver scans the
+    /// battlefield for filter matches, but the resolving spell is on the stack,
+    /// so `ChangeZoneAll { SelfRef }` finds nothing and the card would fall to the
+    /// graveyard instead of exile.
+    #[test]
+    fn change_zone_self_ref_not_promoted() {
+        let mut def = leaf(Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        });
+        transform_ability_def(&mut def);
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::SelfRef,
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "targetless self-exile must stay ChangeZone, got {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 707.12 + CR 702.96a: Mizzix's Mastery overloaded — the top-level exile
+    /// ("Exile target card …") promotes to `ChangeZoneAll` (target → each), the
+    /// `CastCopyOfCard` copy/cast follows the exiled set unchanged, and the nested
+    /// self-exile (`ChangeZone { SelfRef }`) is preserved. This is the exact tree
+    /// the parser + fold produce for the overloaded card.
+    #[test]
+    fn mizzix_overload_tree_transforms_target_but_preserves_self_exile() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::mana::ManaCost;
+        let self_exile = leaf(Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        });
+        let cast_copy = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastCopyOfCard {
+                target: TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                cost: ManaCost::zero(),
+                count: None,
+            },
+        )
+        .sub_ability(self_exile);
+        let mut root = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Instant],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+        .sub_ability(cast_copy);
+        transform_ability_def(&mut root);
+
+        // Top-level "target card" exile → mass exile.
+        assert!(
+            matches!(*root.effect, Effect::ChangeZoneAll { .. }),
+            "top-level exile must promote, got {:?}",
+            root.effect
+        );
+        let cast = root.sub_ability.as_ref().expect("cast-copy sub");
+        assert!(
+            matches!(*cast.effect, Effect::CastCopyOfCard { .. }),
+            "CastCopyOfCard preserved, got {:?}",
+            cast.effect
+        );
+        let exile = cast.sub_ability.as_ref().expect("self-exile sub");
+        assert!(
+            matches!(
+                *exile.effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "self-exile preserved, got {:?}",
+            exile.effect
+        );
     }
 
     #[test]

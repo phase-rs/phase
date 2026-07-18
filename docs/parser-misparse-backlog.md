@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4760
-- **Total card appearances across root causes:** 4794 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4758
+- **Total card appearances across root causes:** 4792 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -12,7 +12,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 748 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 1 | Relative-clause / filter restriction on target dropped | 746 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 606 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
@@ -47,7 +47,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (748 cards)
+### 1. Relative-clause / filter restriction on target dropped  (746 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -383,7 +383,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Iridian Maelstrom
 - Isamaru and Yoshimaru
 - Isareth the Awakener
-- It That Heralds the End
 - Iterative Analysis
 - Ivorytusk Fortress
 - Jabari's Influence
@@ -733,7 +732,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Urborg Panther
 - Urborg Phantom
 - Ursine Fylgja
-- Urza's Filter
 - Urza's Hot Tub
 - Valley Questcaller
 - Vampire Socialite
@@ -2578,7 +2576,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (247 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (246 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2756,7 +2754,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Regent's Authority
 - Reign of Terror
 - Relic Amulet
-- Renowned Weaponsmith
 - Reptilian-...placeholder
 - Resilient Wanderer
 - Return the Favor
@@ -5102,7 +5099,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 30. Token/named-card name corrupted by normalization or overrun  (8 cards)
+### 30. Token/named-card name corrupted by normalization or overrun  (7 cards)
 
 **Signature.** A quoted/literal card name is rewritten by '~' self-reference normalization, an 'or'-list of names isn't split, a zone phrase is absorbed into the name, or trailing punctuation is left on a list option.
 
@@ -5110,7 +5107,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 <details><summary>Cards</summary>
 
-- Dragonstorm Forecaster
 - Hecatomb
 - Thran Golem
 - Thrasta, Tempest's Roar

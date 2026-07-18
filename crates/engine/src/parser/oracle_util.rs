@@ -1478,6 +1478,40 @@ fn precedes_type_addition_clause(haystack: &str, end: usize) -> bool {
     parse_in_addition_type_probe(&lower).is_ok()
 }
 
+/// CR 205.3j + CR 205.2: A subtype-word occurrence immediately followed by a
+/// core-type word is a TYPE reference ("a Gideon planeswalker", "Sliver
+/// creatures"), never a self-reference — the type-adjective position is
+/// grammatically incompatible with a name subject, which is always followed
+/// by a verb ("Gideon becomes …"). Keep such occurrences literal so
+/// type-phrase parsers (e.g. the "you control a Gideon planeswalker"
+/// condition on Gideon of the Trials' emblem) can read the subtype.
+/// Per-occurrence sibling of `precedes_type_addition_clause`.
+///
+/// Scoped to true CR 205.2a core-type words: the informational "card"/"spell"
+/// suffixes are deliberately excluded, because "a <Subtype> card" phrases
+/// (Curse of Misfortunes' "a Curse card that doesn't have the same name as
+/// …") ride search-filter suffix grammar that today parses only through the
+/// `~`-normalized short name; keeping them normalizing preserves that
+/// behavior. Extend to "card"/"spell" only together with search-filter
+/// support for literal subtype words.
+/// `end` is the byte index just past the matched word.
+fn precedes_core_type_word(haystack: &str, end: usize) -> bool {
+    let next_word = haystack[end..]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_ascii_lowercase();
+    // Accept the regular plural too ("Sliver creatures").
+    [
+        next_word.as_str(),
+        // allow-noncombinator: plural fold on a word already extracted by split_whitespace (structural, not parsing dispatch)
+        next_word.strip_suffix('s').unwrap_or(""),
+    ]
+    .iter()
+    .any(|word| is_core_type_name(word) && !matches!(*word, "card" | "spell"))
+}
+
 fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
     haystack: &str,
     needle: &str,
@@ -1497,6 +1531,7 @@ fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
             && pos >= last_end
             && !follows_subtype_status_qualifier(haystack, pos)
             && !precedes_type_addition_clause(haystack, end)
+            && !precedes_core_type_word(haystack, end)
         {
             result.push_str(&haystack[last_end..pos]);
             result.push_str(replacement);
@@ -2213,7 +2248,21 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                 && !subtype_in_type_change_context
                 && !of_short_name_collides_with_possessive_zone_phrase(&result, short_name)
             {
-                result = replace_all_words(&result, short_name, "~");
+                // CR 205.3j + CR 201.3a: when the short name is also a subtype
+                // word ("Gideon of the Trials" → "Gideon", a planeswalker
+                // type), an occurrence used as a type adjective ("a Gideon
+                // planeswalker") must stay literal while subject occurrences
+                // ("Gideon becomes …") still normalize to `~`. Route through
+                // the per-occurrence preserving replacer — the same replacer
+                // (and case-sensitivity precedent) the single-word subtype
+                // name branch above already uses.
+                result = if is_subtype_word(&lower_short) {
+                    replace_all_words_case_sensitive_preserving_subtype_status_refs(
+                        &result, short_name, "~",
+                    )
+                } else {
+                    replace_all_words(&result, short_name, "~")
+                };
             }
         }
     }
@@ -2523,6 +2572,46 @@ mod tests {
                 "Manifest Dread"
             ),
             "Manifest dread. A manifested permanent you control gets +1/+1."
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_keeps_subtype_type_reference_literal() {
+        // CR 205.3j + CR 201.3a: "Gideon of the Trials" — the of-derived short
+        // name "Gideon" is also a planeswalker type. A subject occurrence
+        // ("Gideon becomes …") normalizes to `~`, while a type-adjective
+        // occurrence ("a Gideon planeswalker") must stay literal so the
+        // emblem's "you control a Gideon planeswalker" condition can parse.
+        // Full three-line Oracle text, production-shaped (normalization runs
+        // once over the whole text).
+        let text = "[+1]: Until your next turn, prevent all damage target permanent would deal.\n[0]: Until end of turn, Gideon becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"";
+        let normalized = normalize_card_name_refs(text, "Gideon of the Trials");
+        // Subject occurrence ("Gideon becomes") folds to `~`; the type-adjective
+        // occurrence ("a Gideon planeswalker") stays literal — asserted against
+        // the full normalized text so no other span silently changes.
+        assert_eq!(
+            normalized,
+            "[+1]: Until your next turn, prevent all damage target permanent would deal.\n[0]: Until end of turn, ~ becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\""
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_curse_of_misfortunes_keeps_card_suffix_normalizing() {
+        // CR 205.3j + CR 201.3a: Curse of Misfortunes — the sensitive sibling
+        // the of-branch guard comment names. The `precedes_core_type_word`
+        // probe is scoped to true CR 205.2a core-type words, so the
+        // informational "card" suffix does NOT suppress replacement: both
+        // occurrences keep today's `~` normalization (the search-filter
+        // suffix grammar parses through the normalized short name; keeping
+        // this pinned prevents a coverage flip on this card).
+        let text = "At the beginning of your upkeep, you may search your library for a Curse card that doesn't have the same name as a Curse attached to enchanted player, put it onto the battlefield attached to that player, then shuffle.";
+        let normalized = normalize_card_name_refs(text, "Curse of Misfortunes");
+        // Both occurrences keep today's `~` normalization ("card" is an
+        // informational suffix, not a CR 205.2a core type) — asserted against the
+        // full normalized text so a coverage flip on this card cannot slip past.
+        assert_eq!(
+            normalized,
+            "At the beginning of your upkeep, you may search your library for a ~ card that doesn't have the same name as a ~ attached to enchanted player, put it onto the battlefield attached to that player, then shuffle."
         );
     }
 

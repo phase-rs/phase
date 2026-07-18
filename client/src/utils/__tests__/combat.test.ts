@@ -1,12 +1,22 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameObject, ObjectId } from "../../adapter/types";
+import type { AttackTarget, GameObject, ObjectId } from "../../adapter/types";
 import {
   buildGameObjectWithCoreTypes,
   buildObjectMap,
 } from "../../test/factories/gameObjectFactory";
 import { buildGameState } from "../../test/factories/gameStateFactory";
-import { evenSplit, groupAttackers } from "../combat";
+import {
+  attackTargetsForAttacker,
+  buildAttacks,
+  commonAttackTargets,
+  evenSplit,
+  groupAttackers,
+} from "../combat";
+
+const P1: AttackTarget = { type: "Player", data: 1 };
+const P2: AttackTarget = { type: "Player", data: 2 };
+const PW: AttackTarget = { type: "Planeswalker", data: 50 };
 
 function makeObject(overrides: Partial<GameObject> & { id: ObjectId }): GameObject {
   return buildGameObjectWithCoreTypes(["Creature"], {
@@ -105,5 +115,74 @@ describe("groupAttackers", () => {
     const stacks = groupAttackers([3, 1, 2], null);
     expect(stacks.map((s) => s.ids)).toEqual([[1], [2], [3]]);
     expect(stacks.every((s) => s.count === 1 && s.representative === null)).toBe(true);
+  });
+
+  it("splits identically-named attackers with different legal-target sets into separate stacks", () => {
+    const state = makeState([
+      makeObject({ id: 101 }),
+      makeObject({ id: 102 }),
+      makeObject({ id: 103 }),
+    ]);
+    // 101/102 share [P1, P2]; 103 can only attack P1 — it must not stack with them.
+    const targetsFor = (id: ObjectId): AttackTarget[] =>
+      id === 103 ? [P1] : [P1, P2];
+
+    const stacks = groupAttackers([101, 102, 103], state, targetsFor);
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks[0]).toMatchObject({ name: "Goblin", ids: [101, 102], targets: [P1, P2] });
+    expect(stacks[1]).toMatchObject({ name: "Goblin", ids: [103], targets: [P1] });
+  });
+});
+
+describe("attackTargetsForAttacker", () => {
+  it("returns the attacker's own bucket when the engine map is present", () => {
+    expect(attackTargetsForAttacker(101, { "101": [P1, PW], "102": [P2] }, [P1, P2, PW])).toEqual([P1, PW]);
+  });
+
+  it("treats a missing key in a present map as no legal targets (no fallback)", () => {
+    expect(attackTargetsForAttacker(999, { "101": [P1] }, [P1, P2])).toEqual([]);
+  });
+
+  it("falls back to the aggregate only for a legacy payload (undefined map)", () => {
+    expect(attackTargetsForAttacker(101, undefined, [P1, P2])).toEqual([P1, P2]);
+  });
+});
+
+describe("commonAttackTargets", () => {
+  it("returns the intersection of every selected attacker's legal set, in aggregate order", () => {
+    expect(
+      commonAttackTargets([101, 102], { "101": [P1, P2], "102": [P1] }, [P1, P2]),
+    ).toEqual([P1]);
+  });
+
+  it("is empty when the selected attackers share no legal target", () => {
+    expect(
+      commonAttackTargets([101, 102], { "101": [P1], "102": [P2] }, [P1, P2]),
+    ).toEqual([]);
+  });
+
+  it("is the whole aggregate for a legacy payload (every attacker shares it)", () => {
+    expect(commonAttackTargets([101, 102], undefined, [P1, P2])).toEqual([P1, P2]);
+  });
+});
+
+describe("buildAttacks", () => {
+  it("pairs each attacker with its sole engine-provided target (no default injection)", () => {
+    expect(buildAttacks([101, 102], { "101": [P1], "102": [P2] }, [P1, P2])).toEqual([
+      [101, P1],
+      [102, P2],
+    ]);
+  });
+
+  it("drops an attacker the engine gives no legal target (present map, missing key)", () => {
+    expect(buildAttacks([101, 102], { "101": [P1] }, [P1])).toEqual([[101, P1]]);
+  });
+
+  it("uses the aggregate for a legacy payload", () => {
+    expect(buildAttacks([101, 102], undefined, [P1])).toEqual([
+      [101, P1],
+      [102, P1],
+    ]);
   });
 });

@@ -7,7 +7,6 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::GiftKind;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// CR 702.174: Deliver a gift to the opponent of the ability's controller.
@@ -92,56 +91,18 @@ pub fn resolve(
 }
 
 /// Deliver "gift a card" — opponent draws one card.
-/// Routes through the replacement system so draw-replacement effects apply (CR 121.1).
+/// Routes through the single-authority `start_draw_sequence` path so
+/// draw-replacement effects apply and CR 121.1's `allowed_draw_count` gate
+/// honors `CantDraw` and `PerTurnDrawLimit` statics. The old direct
+/// `select_cards_to_draw` call bypassed that gate for Gift draws.
 fn deliver_card_draw(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     opponent: PlayerId,
 ) -> Result<(), EffectError> {
-    // CR 614.1a + CR 614.6 + CR 704.3: Route through the single-authority
-    // helper so post-replacement continuations drain in the same step.
-    let _ = super::draw::draw_through_replacement(
-        state,
-        opponent,
-        1,
-        events,
-        |state, event, events| {
-            let ProposedEvent::Draw {
-                player_id, count, ..
-            } = event
-            else {
-                return;
-            };
-            // CR 121.1 + CR 613.11: route card selection through the single
-            // `select_cards_to_draw` authority so a `DrawFromBottom` static is
-            // honored on the gift draw too.
-            let cards_to_draw = super::draw::select_cards_to_draw(state, player_id, count as usize);
-
-            for obj_id in cards_to_draw {
-                zones::move_to_zone(state, obj_id, Zone::Hand, events);
-                // CR 121.1 + CR 504.1: Increment counters first; embed the
-                // resulting per-step ordinal into the event so trigger
-                // conditions can identify the first draw of the draw step.
-                let (nth_in_turn, nth_in_step) =
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
-                        p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
-                        (p.cards_drawn_this_turn, p.cards_drawn_this_step)
-                    } else {
-                        (1, 1)
-                    };
-                events.push(GameEvent::CardDrawn {
-                    player_id,
-                    object_id: obj_id,
-                    nth_in_turn,
-                    nth_in_step,
-                });
-                super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
-                // CR 702.94a + CR 603.11: Shared first-draw / miracle-offer hook.
-                super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
-            }
-        },
-    );
+    // CR 614.1a + CR 614.6 + CR 704.3: The sequence driver retains replacement
+    // pauses and drains post-replacement continuations in this resolution step.
+    let _ = super::draw::start_draw_sequence(state, opponent, 1, events);
 
     Ok(())
 }

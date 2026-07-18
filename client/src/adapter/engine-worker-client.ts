@@ -214,6 +214,13 @@ export class EngineWorkerClient {
     );
   }
 
+  async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
+    return this.request<number[]>(
+      { type: "previewManaPayment", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   async getState(): Promise<GameState> {
     return this.request<GameState>({ type: "getState" }, ENGINE_REQUEST_TIMEOUT_MS);
   }

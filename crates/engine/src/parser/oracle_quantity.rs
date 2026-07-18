@@ -20,7 +20,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::{all_consuming, eof, opt, peek, value};
+use nom::combinator::{all_consuming, eof, map, opt, peek, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -877,63 +877,8 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    // CR 208.1: "the difference between its power and toughness" — the
-    // unsigned gap between an object's two current post-layer characteristics.
-    // ("The difference between A and B" being unsigned is an Oracle templating
-    // convention with no dedicated CR number; the resolver takes `.abs()`.)
-    // Composed from `tag`s by axis (subject form ×
-    // power/toughness ordering), emitting a general `QuantityExpr::Difference`
-    // over existing `QuantityRef::Power`/`Toughness` leaves. Placed before the
-    // generic `parse_quantity_ref` arm so the whole difference phrase is
-    // recognized as a unit. Operand order is irrelevant — `Difference`
-    // resolves to an absolute value — but both orderings are parsed so the
-    // remainder is fully consumed.
-    //
-    // CR 115.10: the P/T refs are scoped to `ObjectScope::Recipient`. On a
-    // trigger pump like Doran's ("Whenever a creature you control attacks or
-    // blocks, it gets +X/+X … where X is the difference between its power and
-    // toughness"), "its" anaphors back to the *affected* creature, not the
-    // ability's own source — `Recipient` resolves to the first object target
-    // (the pumped creature) and only falls back to the source when no target
-    // is present (the CDA case), so a single scope is correct for every
-    // parse path that lands a difference phrase.
-    if let Ok((rest, (left_ref, right_ref))) = (
-        tag::<_, _, OracleError<'_>>("the difference between "),
-        alt((tag("its "), tag("~'s "), tag("this creature's "))),
-        alt((
-            value(
-                (
-                    QuantityRef::Power {
-                        scope: ObjectScope::Recipient,
-                    },
-                    QuantityRef::Toughness {
-                        scope: ObjectScope::Recipient,
-                    },
-                ),
-                pair(tag("power and "), tag("toughness")),
-            ),
-            value(
-                (
-                    QuantityRef::Toughness {
-                        scope: ObjectScope::Recipient,
-                    },
-                    QuantityRef::Power {
-                        scope: ObjectScope::Recipient,
-                    },
-                ),
-                pair(tag("toughness and "), tag("power")),
-            ),
-        )),
-    )
-        .parse(text)
-        .map(|(rest, (_, _, refs))| (rest, refs))
-    {
-        if rest.is_empty() {
-            return Some(QuantityExpr::Difference {
-                left: Box::new(QuantityExpr::Ref { qty: left_ref }),
-                right: Box::new(QuantityExpr::Ref { qty: right_ref }),
-            });
-        }
+    if let Ok((_, expr)) = all_consuming(nom_quantity::parse_recipient_pt_difference).parse(text) {
+        return Some(expr);
     }
 
     // CR 208.1 / CR 107.1: General "the difference between A and B" over any
@@ -1457,16 +1402,27 @@ fn parse_opponents_attacked_clause(input: &str) -> nom::IResult<&str, (), Oracle
 }
 
 /// CR 109.5: "opponent who [scalar predicate]" → `PlayerCount` over opponents
-/// matching the per-candidate attribute threshold.
+/// matching the per-candidate attribute threshold. The comparator is carried per
+/// attribute clause: hand-size accepts both "N or fewer" (LE) and "N or more"
+/// (GE); the count-style predicates (cards drawn, battlefield entries) are always
+/// "N or more" (GE), so a `map` adapter tags them with `Comparator::GE`.
 fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<QuantityRef> {
-    let ((relation, attr, count), rest) = nom_on_lower(clause, clause, |input| {
+    let ((relation, attr, comparator, value_expr), rest) = nom_on_lower(clause, clause, |input| {
         let (input, relation) = parse_player_population(input)?;
-        let (input, (attr, count)) = alt((
-            parse_cards_drawn_attr_clause,
-            parse_battlefield_entries_attr_clause,
+        let (input, (attr, comparator, value_expr)) = alt((
+            map(parse_hand_size_who_attr_clause, |(a, c, n)| {
+                (a, c, QuantityExpr::Fixed { value: n })
+            }),
+            parse_comparative_hand_size_who_clause,
+            map(parse_cards_drawn_attr_clause, |(a, n)| {
+                (a, Comparator::GE, QuantityExpr::Fixed { value: n })
+            }),
+            map(parse_battlefield_entries_attr_clause, |(a, n)| {
+                (a, Comparator::GE, QuantityExpr::Fixed { value: n })
+            }),
         ))
         .parse(input)?;
-        Ok((input, (relation, attr, count)))
+        Ok((input, (relation, attr, comparator, value_expr)))
     })?;
     if !rest.is_empty() || relation != PlayerRelation::Opponent {
         return None;
@@ -1475,10 +1431,75 @@ fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<Quant
         filter: PlayerFilter::PlayerAttribute {
             relation,
             attr: Box::new(attr),
-            comparator: Comparator::GE,
-            value: Box::new(QuantityExpr::Fixed { value: count }),
+            comparator,
+            value: Box::new(value_expr),
         },
     })
+}
+
+/// CR 402.1: "who has/have N or fewer|more cards in hand" → the candidate's hand
+/// size (CR 402.1, the hand zone), carrying the threshold comparator. "or fewer"
+/// lowers to `LE` (Bandit's Talent: "draw an additional card for each opponent who
+/// has one or fewer cards in hand"); "or more" lowers to `GE`. Both directions are
+/// admitted so the whole "opponent who has N or fewer/more cards in hand" class is
+/// covered, not a single card. This is the "who has/have"-anchored companion of
+/// `parse_hand_size_attr_clause` (which anchors the "with N or more" GE-only
+/// phrasing used by the "the number of …" population path).
+fn parse_hand_size_who_attr_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, Comparator, i32)> {
+    let (input, _) = alt((tag("who has "), tag("who have "))).parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, comparator) = alt((
+        value(Comparator::LE, tag(" or fewer cards in hand")),
+        value(Comparator::GE, tag(" or more cards in hand")),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
+            comparator,
+            n as i32,
+        ),
+    ))
+}
+
+/// CR 402.1 + CR 109.5: "who has/have {more|fewer} cards in hand than you" /
+/// "who has/have as many cards in hand as you" — the comparative-operand form of
+/// the hand-size population predicate (CR 402.1, the hand zone). The reference
+/// operand "you" (CR 109.5; for a triggered ability, the controller when it
+/// triggered) reuses the SAME `HandSize` noun as the per-candidate attr, so both
+/// sides read hand size (Wojek Investigator). Composed by axis (comparator × noun ×
+/// operand), not enumerated full-string tags.
+fn parse_comparative_hand_size_who_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, Comparator, QuantityExpr)> {
+    let (input, _) = alt((tag("who has "), tag("who have "))).parse(input)?;
+    let (input, (comparator, connector)) = alt((
+        value((Comparator::GT, "than "), tag("more ")),
+        value((Comparator::LT, "than "), tag("fewer ")),
+        value((Comparator::EQ, "as "), tag("as many ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("cards in hand ").parse(input)?;
+    let (input, _) = tag(connector).parse(input)?;
+    // Reference-operand axis; today only "you" → controller. `value`-ready for future refs.
+    let (input, ref_scope) = value(PlayerScope::Controller, tag("you")).parse(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            }, // per-candidate (inert scope)
+            comparator,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { player: ref_scope },
+            }, // CR 109.5 operand
+        ),
+    ))
 }
 
 /// CR 402.1 / 119.1 / 122.1f / 404.1: Parse a player population whose scalar
@@ -1683,6 +1704,11 @@ fn parse_anaphoric_power_toughness_sum(
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
+    if let Ok((_, expr)) =
+        all_consuming(nom_quantity::parse_demonstrative_pt_difference).parse(lower)
+    {
+        return Some(expr);
+    }
     // CR 608.2c + CR 608.2h: "the X <verb>ed/<verb> this way" — numeric result from the
     // preceding effect (or trigger event) in the same resolution. Must check
     // before "that much" to avoid false match on "this way" vs. "this turn".
@@ -3346,6 +3372,89 @@ mod tests {
     };
     use crate::types::mana::ManaColor;
 
+    /// DynQty subgroup D / Matrix #1 — the comparative hand-size producer builds the
+    /// exact `PlayerAttribute` AST (Wojek Investigator). Fails iff EDIT 2 is reverted;
+    /// independent of EDIT 1. The full `assert_eq` pins operand scope (Controller,
+    /// CR 109.5) ≠ per-candidate attr scope (ScopedPlayer) — swapping them flips it.
+    /// Sibling cells (fewer→LT, as many→EQ) and the fixed-arm reach-guard prove the
+    /// alt is axis-composed and the numeric backtrack is intact.
+    #[test]
+    fn comparative_hand_size_producer_builds_player_attribute() {
+        let gt = parse_for_each_clause("opponent who has more cards in hand than you");
+        assert_eq!(
+            gt,
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer
+                    }),
+                    comparator: Comparator::GT,
+                    value: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller
+                        }
+                    }),
+                }
+            }),
+            "Wojek exact AST"
+        );
+
+        let lt = parse_for_each_clause("opponent who has fewer cards in hand than you");
+        assert!(
+            matches!(
+                lt,
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        comparator: Comparator::LT,
+                        ..
+                    }
+                })
+            ),
+            "fewer → LT: {lt:?}"
+        );
+
+        let eq = parse_for_each_clause("opponent who has as many cards in hand as you");
+        assert!(
+            matches!(
+                eq,
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        comparator: Comparator::EQ,
+                        ..
+                    }
+                })
+            ),
+            "as many → EQ: {eq:?}"
+        );
+
+        // Reach-guard: the fixed-threshold arm is untouched — a numeric "N or more"
+        // still lowers to a `Fixed` operand with `GE` (backtrack intact).
+        let fixed = parse_for_each_clause("opponent who has 3 or more cards in hand");
+        assert!(
+            matches!(
+                fixed,
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        comparator: Comparator::GE,
+                        ..
+                    }
+                })
+            ),
+            "fixed 'N or more' must still parse to GE: {fixed:?}"
+        );
+        if let Some(QuantityRef::PlayerCount {
+            filter: PlayerFilter::PlayerAttribute { value, .. },
+        }) = fixed
+        {
+            assert_eq!(
+                *value,
+                QuantityExpr::Fixed { value: 3 },
+                "fixed operand = 3"
+            );
+        }
+    }
+
     /// The expected `QuantityExpr::Difference` for "power and toughness" order:
     /// `Difference { Ref(Power{Recipient}), Ref(Toughness{Recipient}) }`.
     /// Operand order is irrelevant at resolution (`Difference` resolves to an
@@ -3470,6 +3579,42 @@ mod tests {
             ),
             "reversed ordering should still parse to a Difference, got {expr:?}"
         );
+    }
+
+    #[test]
+    fn event_context_difference_between_trigger_creatures_power_and_toughness() {
+        let expr = parse_event_context_quantity(
+            "the difference between that creature's power and its toughness",
+        );
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::Difference { ref left, ref right })
+                    if matches!(**left, QuantityExpr::Ref { qty: QuantityRef::Power { scope: ObjectScope::Demonstrative } })
+                    && matches!(**right, QuantityExpr::Ref { qty: QuantityRef::Toughness { scope: ObjectScope::Demonstrative } })
+            ),
+            "bare demonstrative referent must use Demonstrative, got {expr:?}"
+        );
+    }
+
+    #[test]
+    fn event_context_pt_difference_does_not_claim_recipient_surfaces() {
+        for phrase in [
+            "the difference between its power and toughness",
+            "the difference between ~'s power and its toughness",
+            "the difference between this creature's power and toughness",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                None,
+                "recipient phrase must not bind to Demonstrative: {phrase:?}"
+            );
+            assert_eq!(
+                parse_cda_quantity(phrase),
+                Some(pt_difference()),
+                "recipient grammar must remain reachable for {phrase:?}"
+            );
+        }
     }
 
     /// CR 107.1a: a "where X is half …, rounded …" binding routes through
@@ -3650,6 +3795,26 @@ mod tests {
                     counter_type,
                 } => assert_eq!(counter_type, expected, "phrase: {phrase}"),
                 other => panic!("Expected CountersOn{{Source, _}} for {phrase}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn quantity_ref_self_loyalty_is_loyalty_counters_on_source() {
+        // CR 306.5c: a planeswalker's loyalty on the battlefield is its
+        // loyalty-counter count, so every self-possessive "loyalty" phrasing
+        // (Nissa, Ascended Animist's "where X is ~'s loyalty") resolves to
+        // `CountersOn { Source, Loyalty }`.
+        for phrase in ["~'s loyalty", "its loyalty", "this card's loyalty"] {
+            let qty = parse_quantity_ref(phrase).unwrap_or_else(|| panic!("failed: {phrase}"));
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Loyalty),
+                } => {}
+                other => {
+                    panic!("Expected CountersOn{{Source, Loyalty}} for {phrase}, got {other:?}")
+                }
             }
         }
     }
@@ -7832,5 +7997,67 @@ mod tests {
         );
         // Minion of the Wastes — "the life paid as it entered" (ETB snapshot)
         assert_eq!(parse_cda_quantity("the life paid as it entered"), None);
+    }
+
+    /// CR 402.1 + CR 109.5 (issue #5637): "for each opponent who has one or fewer
+    /// cards in hand" (Bandit's Talent's level-3 draw) must lower to a `PlayerCount`
+    /// over opponents whose hand size is `LE 1` — not drop the dynamic quantity and
+    /// draw a flat 1. The strict "or fewer" direction lowers to `Comparator::LE`.
+    #[test]
+    fn for_each_opponent_hand_size_or_fewer_lowers_to_le_player_count() {
+        assert_eq!(
+            parse_for_each_clause("opponent who has one or fewer cards in hand"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::LE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            })
+        );
+    }
+
+    /// CR 402.1: the symmetric "or more" direction on the same "who has/have …
+    /// cards in hand" clause lowers to `Comparator::GE`, proving the comparator is
+    /// carried per direction (class coverage, not a single-card LE special case).
+    #[test]
+    fn for_each_opponent_hand_size_or_more_lowers_to_ge_player_count() {
+        assert_eq!(
+            parse_for_each_clause("opponent who has three or more cards in hand"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 3 }),
+                },
+            })
+        );
+    }
+
+    /// Regression: the pre-existing "who drew N or more cards this turn" count
+    /// clause (Smuggler's Share class) still lowers to `GE` after the `map` adapter
+    /// threading — the comparator generalization must not disturb the GE-only
+    /// count-style predicates.
+    #[test]
+    fn for_each_opponent_cards_drawn_still_lowers_to_ge() {
+        assert_eq!(
+            parse_for_each_clause("opponent who drew two or more cards this turn"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::CardsDrawnThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 2 }),
+                },
+            })
+        );
     }
 }

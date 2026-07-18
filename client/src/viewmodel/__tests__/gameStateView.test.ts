@@ -391,6 +391,25 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10], objects)).toBe(false);
   });
 
+  it("renders the engine-provided exact keeper requirement without client-side capping", () => {
+    const choice = getBoardChoiceView({
+      type: "KeepExactPermanentsChoice",
+      data: {
+        player: 0,
+        target_player: 0,
+        eligible: [10, 11],
+        required_count: 5,
+        source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    expect(choice?.selection).toEqual({ type: "exactCount", count: 5 });
+  });
+
   it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {
     const station = getBoardChoiceView({
       type: "StationTarget",

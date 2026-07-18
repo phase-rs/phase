@@ -57,6 +57,11 @@ export function clear_replay_playback(): void;
 export function commanderPartnerCandidates(first_commander: string, candidates: any): any;
 
 /**
+ * Returns legal Commander-family companion candidates from the main deck.
+ */
+export function companionCandidates(request: any): any;
+
+/**
  * Create a default 2-player game state.
  */
 export function create_initial_state(): any;
@@ -238,6 +243,18 @@ export function is_card_commander_eligible(name: string): boolean;
 export function is_multiplayer_mode(): boolean;
 
 /**
+ * Read-only preview of cast-time target slots for a currently castable spell.
+ * Returns `[]` for uncastable, untargeted, or target-ambiguous casts.
+ */
+export function legal_targets_for_castable_js(object_id: number): any;
+
+/**
+ * Batch variant for hover/drag clients that need previews for many castable
+ * cards. The engine flushes layers once and reuses that snapshot for every id.
+ */
+export function legal_targets_for_castables_js(object_ids: any): any;
+
+/**
  * Returns the engine-typed catalog of debug-spawnable token presets,
  * loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
  * to populate the Create Token dropdown — frontend never derives this list.
@@ -282,6 +299,14 @@ export function ping(): string;
  * an error string when `action` is malformed or illegal in the current state.
  */
 export function preview_action_js(actor: number, action: any): any;
+
+/**
+ * Non-mutating automatic spell-payment preview. The engine simulates the
+ * exact, currently legal `CastSpell` action and returns the permanent ids that
+ * produced mana before that spell was committed to the stack. It returns an
+ * empty array when the cast needs another choice before payment can be final.
+ */
+export function preview_mana_payment_js(actor: number, action: any): any;
 
 /**
  * Project an authoritative seat view from Rust so frontend transports do not
@@ -393,6 +418,11 @@ export function set_multiplayer_mode(enabled: boolean): void;
 export function sideboardPolicyForFormat(format: any): any;
 
 /**
+ * Returns the engine-authored Oathbreaker signature-spell selection policy.
+ */
+export function signatureSpellSelectionPolicy(request: any): any;
+
+/**
  * Submit a game action on behalf of `actor` and return the ActionResult
  * (events + waiting_for).
  *
@@ -424,6 +454,7 @@ export interface InitOutput {
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
+    readonly companionCandidates: (a: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
@@ -443,10 +474,13 @@ export interface InitOutput {
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;
+    readonly legal_targets_for_castable_js: (a: number) => any;
+    readonly legal_targets_for_castables_js: (a: any) => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
     readonly preview_action_js: (a: number, b: any) => any;
+    readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -456,6 +490,7 @@ export interface InitOutput {
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
+    readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;

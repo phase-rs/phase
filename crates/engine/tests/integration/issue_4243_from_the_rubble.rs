@@ -37,7 +37,11 @@ fn from_the_rubble_end_step_trigger_targets_graveyard_creature_cards() {
         .chosen_attributes = vec![ChosenAttribute::CreatureType("Dinosaur".to_string())];
 
     let trigger = &runner.state().objects[&rubble].trigger_definitions[0];
-    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let execute = trigger
+        .definition
+        .execute
+        .as_ref()
+        .expect("trigger execute");
     let Effect::ChangeZone { target, origin, .. } = &*execute.effect else {
         panic!("expected ChangeZone trigger, got {:?}", execute.effect);
     };

@@ -11,6 +11,7 @@ import type {
   LegalActionsResult,
   ManaCost,
   MatchConfig,
+  ObjectId,
   PlayerId,
   PersistedGameState,
   StuckDecisionDiagnostic,
@@ -145,6 +146,17 @@ interface GameStoreState {
    * with the rest of `initialState` on `reset`.
    */
   lastCommittedSeq: number;
+  /**
+   * Monotonic local commit counter. Unlike `lastCommittedSeq`, this advances
+   * for an accepted equal-sequence snapshot too, so asynchronous display
+   * previews can prove they still describe the current engine snapshot.
+   */
+  engineCommitEpoch: number;
+  /**
+   * Engine-returned mana sources for the spell currently being dragged. This
+   * display state is cleared with every accepted engine snapshot.
+   */
+  manaPaymentPreviewSourceIds: ObjectId[];
 }
 
 /**
@@ -162,7 +174,9 @@ type CommitExtraState = Partial<Omit<GameStoreState,
   | "spellCosts"
   | "legalActionsByObject"
   | "stuckDiagnostic"
-  | "lastCommittedSeq">>;
+  | "lastCommittedSeq"
+  | "engineCommitEpoch"
+  | "manaPaymentPreviewSourceIds">>;
 
 interface GameStoreActions {
   initGame: (
@@ -237,6 +251,8 @@ interface GameStoreActions {
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
   setIsResolvingAll: (isResolvingAll: boolean) => void;
+  setManaPaymentPreviewSourceIds: (sourceIds: ObjectId[]) => void;
+  clearManaPaymentPreview: () => void;
   /** Clear the starting-player contest after the overlay has consumed it. */
   clearStartingContest: () => void;
 }
@@ -266,6 +282,8 @@ const initialState: GameStoreState = {
   startingContest: null,
   aiSeatIds: [],
   lastCommittedSeq: 0,
+  engineCommitEpoch: 0,
+  manaPaymentPreviewSourceIds: [],
 };
 
 export const useGameStore = create<GameStore>()(
@@ -294,6 +312,8 @@ export const useGameStore = create<GameStore>()(
                 waitingFor: snapshot.state.waiting_for,
                 ...legalResultState(snapshot.legalResult),
                 lastCommittedSeq: snapshot.seq,
+                engineCommitEpoch: prev.engineCommitEpoch + 1,
+                manaPaymentPreviewSourceIds: [],
               }
             : {}),
           // 2. History — ordered by arrival, so applied unconditionally.
@@ -506,6 +526,14 @@ export const useGameStore = create<GameStore>()(
 
     setIsResolvingAll: (isResolvingAll) => {
       set({ isResolvingAll });
+    },
+
+    setManaPaymentPreviewSourceIds: (sourceIds) => {
+      set({ manaPaymentPreviewSourceIds: sourceIds });
+    },
+
+    clearManaPaymentPreview: () => {
+      set({ manaPaymentPreviewSourceIds: [] });
     },
 
     clearStartingContest: () => {
