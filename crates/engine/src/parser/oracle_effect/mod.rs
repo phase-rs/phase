@@ -24687,10 +24687,11 @@ fn try_parse_conditional_protection_grant_ability(
 /// [`CopyChooseScope`]: "<type> they control" → `Chooser` (Human—Time Lord
 /// Meta-Crisis), "<type> controlled by the player to their {left|right}" →
 /// `Neighbor { direction }` (Caught in a Parallel Universe).
-pub(crate) fn try_parse_each_player_copy_chosen(
+pub(crate) fn parse_each_player_copy_chosen_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     let i = lower.as_str();
 
@@ -24778,25 +24779,27 @@ pub(crate) fn try_parse_each_player_copy_chosen(
         return None;
     }
 
-    let mut def = AbilityDefinition::new(
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        Effect::EachPlayerCopyChosen {
+        parsed_clause(Effect::EachPlayerCopyChosen {
             choose_filter,
             min,
             max,
             copy_modifications,
             scale,
             choose_scope,
-        },
-    );
-    // CR 101.4: "each player" → scope over all players; the self-iterating
-    // resolver reads this and walks the scoped set itself.
-    def.player_scope = Some(PlayerFilter::All);
-    Some(def)
+        }),
+        // CR 101.4: "each player" → scope over all players; the self-iterating
+        // resolver reads this and walks the scoped set itself.
+        Some(PlayerFilter::All),
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// CR 122.1 + CR 208.1: Parse the optional scaling sentence of
-/// [`try_parse_each_player_copy_chosen`] — "then each player who chose a second
+/// [`parse_each_player_copy_chosen_ir`] — "then each player who chose a second
 /// <noun> puts a number of <counter> counters on the token they created equal to
 /// the <property> of the second <noun> they chose." Returns the `CopyScale` and
 /// the remaining text.
@@ -25076,9 +25079,6 @@ fn try_parse_chain_bypass(
         return Some(def);
     }
     if let Some(def) = try_parse_threshold_land_balance(text, kind) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_each_player_copy_chosen(text, kind) {
         return Some(def);
     }
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
@@ -25695,6 +25695,9 @@ pub(crate) fn parse_effect_chain_ir(
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
     if let Some(ir) = parse_catch_up_draw_ir(text, kind, ctx) {
+        return ir;
+    }
+    if let Some(ir) = parse_each_player_copy_chosen_ir(text, kind, ctx) {
         return ir;
     }
     let text = strip_trailing_activation_restriction_sentence(text);
