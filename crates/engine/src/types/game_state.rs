@@ -4571,6 +4571,11 @@ pub struct CastingVariantChoiceOption {
 #[serde(tag = "type")]
 pub enum PayCostKind {
     Discard,
+    /// CR 701.20a + CR 601.2b: Reveal a card from hand matching the cost's
+    /// filter as an additional/alternative cast cost. The chosen card stays
+    /// in hand (revealing doesn't move it) and becomes the resolving
+    /// ability's cost-paid-object referent (CR 608.2k).
+    Reveal,
     Sacrifice,
     ReturnToHand,
     /// Exile objects from the specified zone.

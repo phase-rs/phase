@@ -49,6 +49,7 @@ mod braids_arisen_nightmare_decline;
 mod breeches_blastmaker_coin_flip_copy;
 mod brigid_mana_ability;
 mod bring_to_light_free_cast_2880;
+mod calamity_of_the_titans_reveal_cost;
 mod call_damage_control_modal_return;
 mod captain_america_throw;
 mod cascade_intervening_if_pipeline;

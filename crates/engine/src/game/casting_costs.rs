@@ -6540,10 +6540,109 @@ fn pay_additional_cost_with_source(
                 },
             });
         }
+        AbilityCost::Reveal { count, filter } => {
+            let mut pending = pending;
+            // CR 701.20a: A filter-less reveal is the spell revealing itself —
+            // there is no choice to make, the object is already known.
+            let Some(filter) = filter else {
+                if let Some(obj) = state.objects.get(&pending.object_id) {
+                    pending
+                        .ability
+                        .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                            object_id: pending.object_id,
+                            lki: obj.snapshot_for_mana_spent(),
+                        });
+                    events.push(GameEvent::CardsRevealed {
+                        player,
+                        card_ids: vec![pending.object_id],
+                        card_names: vec![obj.name.clone()],
+                    });
+                }
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            };
+            // CR 701.20a + CR 601.2b: A filtered reveal requires interactive
+            // card selection — return a WaitingFor, mirroring Discard.
+            let eligible = super::casting::find_eligible_reveal_targets(
+                state,
+                player,
+                pending.object_id,
+                &filter,
+            );
+            // CR 601.2b: Defense-in-depth — payability already gated this.
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible cards in hand to reveal".to_string(),
+                ));
+            }
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Reveal,
+                choices: eligible,
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
+            });
+        }
         _ => {
             // Other cost types (Exile, etc.) — not yet interactive
         }
     }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 701.20a + CR 601.2b: Complete a filtered `AbilityCost::Reveal` payment
+/// after the player selects a matching card from hand. The card stays in
+/// hand — revealing doesn't move it (CR 701.20b) — and becomes the
+/// resolving ability's cost-paid-object referent (CR 608.2k), backing
+/// references like "the revealed card's mana value".
+pub(crate) fn handle_reveal_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    expected: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != expected {
+        return Err(EngineError::InvalidAction(format!(
+            "Must reveal exactly {} card(s), got {}",
+            expected,
+            chosen.len()
+        )));
+    }
+    for card_id in chosen {
+        if !legal_cards.contains(card_id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card not in hand".to_string(),
+            ));
+        }
+    }
+
+    let mut revealed_names = Vec::with_capacity(chosen.len());
+    for (index, &card_id) in chosen.iter().enumerate() {
+        let obj = state.objects.get(&card_id).ok_or_else(|| {
+            EngineError::InvalidAction("Selected card no longer exists".to_string())
+        })?;
+        revealed_names.push(obj.name.clone());
+        if index == 0 {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: card_id,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
+        }
+    }
+
+    events.push(GameEvent::CardsRevealed {
+        player,
+        card_ids: chosen.to_vec(),
+        card_names: revealed_names,
+    });
 
     finish_pending_cost_or_cast(state, player, pending, events)
 }
