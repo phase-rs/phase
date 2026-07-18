@@ -19,6 +19,9 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
 
     let mut cards: HashMap<String, CardRules> = HashMap::new();
     let mut face_index: HashMap<String, CardFace> = HashMap::new();
+    let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
+    let mut face_order_index: HashMap<String, usize> = HashMap::new();
+    let mut layout_index: HashMap<String, crate::types::card::LayoutKind> = HashMap::new();
     let mut bracket_signals_by_name: HashMap<String, BracketSignals> = HashMap::new();
     let mut legalities = HashMap::new();
     let errors: Vec<(PathBuf, String)> = Vec::new();
@@ -62,8 +65,22 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
                 }
                 LayoutKind::Single => CardLayout::Single(face_a),
             };
-            for (face, source) in layout_faces(&layout).into_iter().zip(faces.iter()) {
+            for (face_idx, (face, source)) in layout_faces(&layout)
+                .into_iter()
+                .zip(faces.iter())
+                .enumerate()
+            {
                 let key = face.name.to_lowercase();
+                if let Some(oracle_id) = face.scryfall_oracle_id.clone() {
+                    oracle_id_index
+                        .entry(oracle_id.clone())
+                        .or_default()
+                        .push(key.clone());
+                    face_order_index.insert(key.clone(), face_idx);
+                    if let Some(runtime_kind) = runtime_layout_kind(layout_kind) {
+                        layout_index.entry(oracle_id).or_insert(runtime_kind);
+                    }
+                }
                 face_index.insert(key.clone(), face.clone());
                 if source.is_game_changer {
                     bracket_signals_by_name.insert(
@@ -87,6 +104,13 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         } else {
             let face = build_oracle_face(&faces[0], oracle_id);
             let key = face.name.to_lowercase();
+            if let Some(oracle_id) = face.scryfall_oracle_id.clone() {
+                oracle_id_index
+                    .entry(oracle_id)
+                    .or_default()
+                    .push(key.clone());
+                face_order_index.insert(key.clone(), 0);
+            }
             let card_legalities = normalize_legalities(&faces[0].legalities);
             let rules = CardRules {
                 layout: CardLayout::Single(face.clone()),
@@ -114,8 +138,9 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         cards,
         name_alias_index: build_name_alias_index(face_index.keys()),
         face_index,
-        oracle_id_index: HashMap::new(),
-        layout_index: HashMap::new(),
+        oracle_id_index,
+        face_order_index,
+        layout_index,
         legalities,
         printings_index: HashMap::new(),
         rulings_index: HashMap::new(),
@@ -124,6 +149,19 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         bracket_signals_by_name,
         creature_type_vocabulary,
     })
+}
+
+fn runtime_layout_kind(layout_kind: LayoutKind) -> Option<crate::types::card::LayoutKind> {
+    match layout_kind {
+        LayoutKind::Split => Some(crate::types::card::LayoutKind::Split),
+        LayoutKind::Flip => Some(crate::types::card::LayoutKind::Flip),
+        LayoutKind::Transform => Some(crate::types::card::LayoutKind::Transform),
+        LayoutKind::Meld => Some(crate::types::card::LayoutKind::Meld),
+        LayoutKind::Adventure => Some(crate::types::card::LayoutKind::Adventure),
+        LayoutKind::Modal => Some(crate::types::card::LayoutKind::Modal),
+        LayoutKind::Prepare => Some(crate::types::card::LayoutKind::Prepare),
+        LayoutKind::Single | LayoutKind::Specialize => None,
+    }
 }
 
 #[cfg(test)]
