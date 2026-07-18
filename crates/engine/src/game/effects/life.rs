@@ -81,7 +81,11 @@ pub fn resolve_gain(
                 player.life += gain_amount as i32;
                 // CR 119.9: Track life gained this turn for triggered ability matching.
                 player.life_gained_this_turn += gain_amount;
-                crate::game::layers::mark_layers_full(state);
+                // CR 611.3a + CR 119: escalate layers only if a live continuous
+                // static reads the life family (life total / life-above-starting
+                // / per-turn life counters); otherwise this life change cannot
+                // flip any derived board.
+                crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
 
                 events.push(GameEvent::LifeChanged {
                     player_id,
@@ -211,7 +215,8 @@ pub fn apply_life_gain_after_replacement(
         player.life += gain_amount as i32;
         player.life_gained_this_turn += gain_amount;
     }
-    crate::game::layers::mark_layers_full(state);
+    // CR 611.3a + CR 119: gate escalation on a live life-reading static.
+    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
@@ -287,7 +292,9 @@ pub fn apply_life_loss_after_replacement(
         player.life -= loss_amount as i32;
         player.life_lost_this_turn += loss_amount;
     }
-    crate::game::layers::mark_layers_full(state);
+    // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
+    // static. Also the sink for non-infect player damage (deal_damage.rs).
+    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),
@@ -487,7 +494,8 @@ pub fn resolve_lose(
                     .ok_or(EffectError::PlayerNotFound)?;
                 player.life -= loss_amount as i32;
                 player.life_lost_this_turn += loss_amount;
-                crate::game::layers::mark_layers_full(state);
+                // CR 611.3a + CR 119: gate escalation on a live life-reading static.
+                crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
 
                 events.push(GameEvent::LifeChanged {
                     player_id,
