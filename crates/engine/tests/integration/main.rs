@@ -529,6 +529,7 @@ mod issue_583_vivi_ornitier_mana_source;
 mod issue_5999_aura_exile_host;
 mod issue_6002_neera_wild_mage_bottom_of_library;
 mod issue_6006_aminatou_veil_piercer_own_turn_miracle;
+mod issue_6010_ragavan_exile_cast_controller;
 mod issue_629_fractured_sanity_cycling;
 mod issue_654_stridehangar_automaton;
 mod issue_680_shalai_and_hallar_forgotten_ancient;
