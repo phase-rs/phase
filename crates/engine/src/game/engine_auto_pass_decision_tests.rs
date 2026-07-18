@@ -575,6 +575,7 @@ fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
         player: PlayerId(0),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     let mut state = GameState {
@@ -628,6 +629,7 @@ fn declare_attackers_opponents_turns_stop_does_not_pause_on_own_turn() {
         player: PlayerId(0),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     let mut state = GameState {

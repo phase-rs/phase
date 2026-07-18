@@ -2412,18 +2412,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::DeclareAttackers => {
                 // CR 508.1: Active player declares attackers as a turn-based action.
-                let valid_attacker_ids = super::combat::get_valid_attacker_ids(state);
-                let valid_attack_targets = super::combat::get_valid_attack_targets(state);
-                let attacker_constraints = super::combat::attacker_constraints_for_active_player(
-                    state,
-                    &valid_attacker_ids,
-                );
-                return WaitingFor::DeclareAttackers {
-                    player: state.active_player,
-                    valid_attacker_ids,
-                    valid_attack_targets,
-                    attacker_constraints,
-                };
+                // Built from the single engine constraints authority (per-attacker
+                // legal map + aggregate compat + display badges).
+                return super::combat::build_declare_attackers_waiting_for(state);
             }
             Phase::DeclareBlockers => {
                 // CR 509.1: Defending player declares blockers as a turn-based action.
