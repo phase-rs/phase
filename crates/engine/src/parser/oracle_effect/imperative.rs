@@ -4642,6 +4642,38 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
         });
     }
 
+    // Pattern 5 (Winnowing): "a <type> [they/you/that player] control[s]" — a
+    // single bare category with a controller phrase, no "from among" and no
+    // enumerated list. CR 608.2d + CR 701.21a: the caller strips "for each
+    // player, you choose " and the pub wrapper sets `ControllerForAll`, so the
+    // spell's controller chooses one <type> each player controls and the rest
+    // (narrowed by a trailing sweep continuation) are sacrificed. Covers the
+    // class "for each player, you choose a <type> that player controls".
+    // Placed before pattern 2 because pattern 2's `parse_category_list_prefix`
+    // also matches the single leading category, then bails with `.ok()?` (no
+    // "from among") — which would abort the whole function before this arm.
+    if let Ok((rest, core_type)) = parse_category_item(rest_lower) {
+        if alt((
+            tag::<_, _, E>(" they control"),
+            tag(" you control"),
+            tag(" that player controls"),
+        ))
+        .parse(rest)
+        .is_ok()
+        {
+            let filter = TargetFilter::Typed(TypedFilter::new(
+                super::conditions::core_type_to_type_filter(core_type),
+            ));
+            return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories: vec![core_type],
+                chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                choose_filter: filter.clone(),
+                sacrifice_filter: filter,
+                total_power_cap: None,
+            });
+        }
+    }
+
     // Pattern 2: "an artifact, a creature, ... from among [the nonland] permanents they control"
     if let Ok((after_categories, categories)) = parse_category_list_prefix(rest_lower) {
         let (_, choose_filter) = preceded(
