@@ -5498,7 +5498,7 @@ mod tests {
         assert!(
             copy.trigger_definitions
                 .iter_all()
-                .any(|t| t == &granted_trigger),
+                .any(|t| t.definition == granted_trigger),
             "GrantTrigger must place the destroy-trigger on the copy"
         );
         assert!(

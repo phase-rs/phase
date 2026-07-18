@@ -15,6 +15,7 @@ pub fn has_damage_reflection_to_player(object: &GameObject) -> bool {
     object
         .trigger_definitions
         .iter_unchecked()
+        .map(|entry| &entry.definition)
         .any(damage_reflection_to_player_trigger)
 }
 
@@ -24,6 +25,7 @@ pub fn has_damage_reflection_to_controller(object: &GameObject) -> bool {
     object
         .trigger_definitions
         .iter_unchecked()
+        .map(|entry| &entry.definition)
         .any(damage_reflection_to_controller_trigger)
 }
 

@@ -1715,7 +1715,7 @@ mod tests {
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.trigger_definitions.len(), 1);
         assert_eq!(
-            obj.trigger_definitions[0].mode,
+            obj.trigger_definitions[0].definition.mode,
             crate::types::triggers::TriggerMode::ChangesZone
         );
     }

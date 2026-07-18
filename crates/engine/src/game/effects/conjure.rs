@@ -1,5 +1,5 @@
 use crate::game::layers::compute_current_copiable_values;
-use crate::game::printed_cards::{apply_card_face_to_object, apply_copiable_values};
+use crate::game::printed_cards::{apply_card_face_to_object, install_copiable_values_as_base};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{
@@ -161,7 +161,9 @@ pub fn resolve(
                             face: Some(face), ..
                         } => apply_card_face_to_object(obj, face),
                         ConjuredIdentity::Named { face: None, .. } => {}
-                        ConjuredIdentity::Duplicate(values) => apply_copiable_values(obj, values),
+                        ConjuredIdentity::Duplicate(values) => {
+                            install_copiable_values_as_base(obj, values)
+                        }
                     }
 
                     if destination == Zone::Battlefield {
@@ -374,9 +376,17 @@ fn place_conjured_in_library(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ConjureCard, QuantityExpr, TargetRef};
+    use crate::database::synthesis::KeywordTriggerInstaller;
+    use crate::game::triggers::process_triggers;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ConjureCard, Effect, QuantityExpr, TargetFilter, TargetRef,
+        TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
 
     /// Issue #5614: "conjure a duplicate … into the top five cards of your library
     /// at random" must land the conjured card in a random slot AMONG the top five —
@@ -584,6 +594,7 @@ mod tests {
     #[test]
     fn duplicate_conjure_copies_referenced_card_characteristics() {
         use crate::types::card_type::CoreType;
+        use crate::types::triggers::TriggerMode;
 
         let mut state = GameState::new_two_player(7);
         // A referenced creature card (in exile) with real characteristics — these
@@ -603,6 +614,10 @@ mod tests {
             obj.base_toughness = Some(2);
             obj.power = Some(2);
             obj.toughness = Some(2);
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::Attacks),
+            );
+            obj.materialize_base_trigger_definitions();
         }
         // The conjure ability inherits the referenced card as its target, so the
         // anaphoric `ParentTarget` reference resolves to it.
@@ -651,6 +666,185 @@ mod tests {
         assert!(
             !conjured.is_token,
             "conjured cards are real cards, not tokens"
+        );
+        assert!(matches!(
+            conjured
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .map(|entry| &entry.occurrence),
+            Some(crate::types::ability::TriggerDefinitionOccurrenceRef::Printed { .. })
+        ));
+        assert!(
+            !matches!(
+                conjured
+                    .trigger_definitions
+                    .iter_all()
+                    .next()
+                    .map(|entry| &entry.occurrence),
+                Some(crate::types::ability::TriggerDefinitionOccurrenceRef::CopiedValue { .. })
+            ),
+            "duplicate conjure installs a new base set, never a copy-effect occurrence"
+        );
+    }
+
+    #[test]
+    fn duplicate_conjure_two_objects_keep_distinct_base_sets_and_fire_independently() {
+        let mut state = GameState::new_two_player(7);
+        let explicit = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        let referenced = crate::game::zones::create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(0),
+            "Fabricating Duplicate".to_string(),
+            Zone::Exile,
+        );
+        {
+            let object = state.objects.get_mut(&referenced).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.keywords = vec![Keyword::Fabricate(1)];
+            object.base_keywords = object.keywords.clone();
+            object.base_trigger_definitions = std::sync::Arc::new(vec![explicit.clone()]);
+            object.materialize_base_trigger_definitions();
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Duplicate {
+                        duplicate_of: TargetFilter::ParentTarget,
+                    },
+                    count: QuantityExpr::Fixed { value: 2 },
+                }],
+                destination: Zone::Battlefield,
+                tapped: false,
+                library_position: None,
+                library_players: None,
+            },
+            vec![TargetRef::Object(referenced)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("duplicate conjure resolves");
+
+        let duplicated = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ObjectConjured { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            duplicated.len(),
+            2,
+            "the production resolver creates two objects"
+        );
+
+        let trigger_surface = |state: &GameState, object_id: ObjectId| {
+            let object = &state.objects[&object_id];
+            object
+                .trigger_definitions
+                .iter_all()
+                .map(|entry| {
+                    (
+                        object.trigger_definition_ref(entry),
+                        entry.definition.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let first_surface = trigger_surface(&state, duplicated[0]);
+        let second_surface = trigger_surface(&state, duplicated[1]);
+        assert_eq!(
+            first_surface.len(),
+            2,
+            "explicit plus Fabricate companion slots"
+        );
+        assert_eq!(
+            second_surface.len(),
+            2,
+            "explicit plus Fabricate companion slots"
+        );
+        assert_eq!(first_surface[0].1, explicit);
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &first_surface[1].1,
+            &Keyword::Fabricate(1),
+        ));
+        for surface in [&first_surface, &second_surface] {
+            assert!(surface.iter().all(|(reference, _)| matches!(
+                reference.occurrence,
+                TriggerDefinitionOccurrenceRef::Printed { .. }
+            )));
+            assert!(surface.iter().all(|(reference, _)| !matches!(
+                reference.occurrence,
+                TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+            )));
+        }
+        assert_ne!(
+            first_surface[0].0, second_surface[0].0,
+            "each duplicate owns a distinct explicit-trigger base-set generation"
+        );
+        assert_ne!(
+            first_surface[1].0, second_surface[1].0,
+            "each duplicate owns a distinct keyword-companion base-set generation"
+        );
+
+        state.capture_rng_word_pos();
+        let uninterrupted = state.clone();
+        let serialized = serde_json::to_string(&state).expect("serialize duplicate state");
+        let mut restored: GameState = serde_json::from_str(&serialized).expect("round-trip state");
+        restored.rehydrate_rng();
+        assert_eq!(
+            uninterrupted.loop_fingerprint(),
+            restored.loop_fingerprint(),
+            "round-trip duplicate state has the uninterrupted control fingerprint"
+        );
+        assert_eq!(
+            trigger_surface(&uninterrupted, duplicated[0]),
+            trigger_surface(&restored, duplicated[0]),
+            "round-trip preserves the first duplicate's trigger refs and payloads"
+        );
+        assert_eq!(
+            trigger_surface(&uninterrupted, duplicated[1]),
+            trigger_surface(&restored, duplicated[1]),
+            "round-trip preserves the second duplicate's trigger refs and payloads"
+        );
+
+        {
+            let first_duplicate = state.objects.get_mut(&duplicated[0]).unwrap();
+            first_duplicate.base_controller = Some(PlayerId(1));
+            first_duplicate.controller = PlayerId(1);
+        }
+        assert_eq!(
+            state.objects[&duplicated[1]].controller,
+            PlayerId(0),
+            "changing one duplicate's controller cannot affect its sibling"
+        );
+        process_triggers(&mut state, &events);
+        let pending = state
+            .pending_trigger_order
+            .as_ref()
+            .expect("two independently controlled duplicate trigger pairs require ordering");
+        assert_eq!(pending.groups.len(), 2);
+        assert!(pending.groups.iter().all(|group| group.triggers.len() == 2));
+        assert_eq!(
+            pending
+                .groups
+                .iter()
+                .map(|group| group.triggers.len())
+                .sum::<usize>(),
+            4,
+            "both explicit and Fabricate triggers fire for both duplicates"
         );
     }
 

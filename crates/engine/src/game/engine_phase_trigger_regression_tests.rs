@@ -1009,8 +1009,12 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
         for trigger in face.triggers.clone() {
             obj.trigger_definitions.push(trigger);
         }
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
         // CR 702.30a: the next controller-upkeep echo payment is due.
         obj.echo_due = true;
     }
@@ -1138,8 +1142,12 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
         for trigger in face.triggers.clone() {
             obj.trigger_definitions.push(trigger);
         }
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
         // CR 702.30a: the next controller-upkeep echo payment is due.
         obj.echo_due = true;
     }
@@ -1422,8 +1430,12 @@ fn lifelink_replacement_does_not_double_fire_life_gain_triggers() {
                     },
                 )),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
 
     // Leyline of Hope analog: "If you would gain life, gain that much + 1 instead"
@@ -1914,8 +1926,12 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
                     },
                 )),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
 
     let mut primary = ResolvedAbility::new(
@@ -2016,8 +2032,12 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
             TriggerDefinition::new(TriggerMode::Scry)
                 .execute(AbilityDefinition::new(AbilityKind::Database, effect)),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
     for (card_id, name) in [
         (CardId(919), "Library One"),
@@ -3441,7 +3461,10 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
     // must be on the copy's trigger_definitions...
     let copied = state.objects.get(&assassin).unwrap();
     assert!(
-        copied.trigger_definitions.iter_all().any(|t| t == &granted),
+        copied
+            .trigger_definitions
+            .iter_all()
+            .any(|t| t.definition == granted),
         "BecomeCopy's GrantTrigger modification must be present on the copy"
     );
 

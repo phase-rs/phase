@@ -230,6 +230,7 @@ pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
     let immediate_etb_triggers: Vec<_> = object
         .trigger_definitions
         .iter_unchecked()
+        .map(|entry| &entry.definition)
         .filter(|trigger| qualifies_immediate_etb(object, trigger))
         .collect();
     let immediate_replacements: Vec<_> = object

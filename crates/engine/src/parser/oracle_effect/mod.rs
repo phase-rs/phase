@@ -12110,16 +12110,18 @@ pub(crate) fn parse_grant_graveyard_keyword_to_target_ir(
 /// checked ("both present, both open with `enchant`") — never semantically parsed —
 /// and a fixed `RemoveKeyword`/`AddKeyword` pair is always emitted.
 ///
-/// Returns the fully-constructed 4-node effect chain directly, bypassing the
-/// per-clause chunker. Declines (returns `None`) unless the ENTIRE body matches,
-/// so any card whose text deviates stays an honest `Effect::Unimplemented`.
+/// Returns one typed root clause whose nested continuation chain preserves the
+/// class's source-rebind structure. Declines (returns `None`) unless the ENTIRE
+/// body matches, so any card whose text deviates stays an honest
+/// `Effect::Unimplemented`.
 ///
-/// See `build_aura_attach_chain` for why each node uses the anaphor it
+/// See `build_aura_attach_clause` for why each node uses the anaphor it
 /// does (source-rebind interplay with `ChangeZone { forward_result: true }`).
-pub(crate) fn try_parse_reanimator_aura_etb_effect(
+pub(crate) fn try_parse_reanimator_aura_etb_effect_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let stripped = super::oracle_util::strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tap_state =
@@ -12127,11 +12129,18 @@ pub(crate) fn try_parse_reanimator_aura_etb_effect(
     // CR 613.1f: Animate Dead / Dance of the Dead are printed as Auras, so the
     // ETB swaps the printed Enchant restriction (Swap) and refers back to the
     // already-established attachment via `TargetFilter::AttachedTo`.
-    Some(build_aura_attach_chain(
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        tap_state,
-        EnchantGrantShape::Swap,
-        TargetFilter::AttachedTo,
+        build_aura_attach_clause(
+            tap_state,
+            EnchantGrantShape::Swap,
+            TargetFilter::AttachedTo,
+            kind,
+        ),
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
     ))
 }
 
@@ -12204,23 +12213,26 @@ fn parse_reanimator_aura_etb_body(i: &str) -> OracleResult<'_, crate::types::zon
 /// only via the shared `parse_quoted_enchant_clause` (never semantically
 /// parsed), matching the swap shape.
 ///
-/// Returns the fully-constructed 4-node chain via `build_aura_attach_chain`
-/// with `EnchantGrantShape::GrantOnly` and the genuinely-parsed target.
+/// Returns one typed root clause with `EnchantGrantShape::GrantOnly` and the
+/// genuinely-parsed target.
 /// Declines (returns `None`) unless the ENTIRE body matches, so any card whose
 /// text deviates stays an honest `Effect::Unimplemented`.
-pub(crate) fn try_parse_reanimator_aura_grant_etb_effect(
+pub(crate) fn try_parse_reanimator_aura_grant_etb_effect_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let stripped = super::oracle_util::strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let (target, tap_state) =
         super::oracle_nom::bridge::nom_parse_lower(&lower, parse_reanimator_aura_grant_etb_shape)?;
-    Some(build_aura_attach_chain(
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        tap_state,
-        EnchantGrantShape::GrantOnly,
-        target,
+        build_aura_attach_clause(tap_state, EnchantGrantShape::GrantOnly, target, kind),
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
     ))
 }
 
@@ -12285,9 +12297,10 @@ enum EnchantGrantShape {
     GrantOnly,
 }
 
-/// Build the reanimator-Aura attach chain shared by the two ETB shapes:
-/// `try_parse_reanimator_aura_etb_effect` (swap; Animate Dead / Dance of the
-/// Dead) and `try_parse_reanimator_aura_grant_etb_effect` (grant; Necromancy).
+/// Build the reanimator-Aura root clause shared by the two ETB shapes:
+/// `try_parse_reanimator_aura_etb_effect_ir` (swap; Animate Dead / Dance of
+/// the Dead) and `try_parse_reanimator_aura_grant_etb_effect_ir` (grant;
+/// Necromancy).
 /// Two documented parameters vary across call sites: the producer target of the
 /// root `ChangeZone` (`root_target` — `AttachedTo` for the swap shape, whose
 /// creature was chosen at cast time via the printed Enchant restriction; a
@@ -12316,12 +12329,12 @@ enum EnchantGrantShape {
 ///   leaves-battlefield condition watches the Aura, and its `Sacrifice { ParentTarget }`
 ///   snapshots the creature at delayed-trigger creation time (CR 701.21a /
 ///   CR 603.7c: "that creature's controller sacrifices it").
-fn build_aura_attach_chain(
-    kind: AbilityKind,
+fn build_aura_attach_clause(
     tap_state: crate::types::zones::EtbTapState,
     shape: EnchantGrantShape,
     root_target: TargetFilter,
-) -> AbilityDefinition {
+    kind: AbilityKind,
+) -> ParsedEffectClause {
     // CR 701.21a + CR 603.7c: "When ~ leaves the battlefield, that creature's
     // controller sacrifices it." — delayed leaves-battlefield sacrifice of the
     // reanimated creature (ParentTarget, snapshotted at creation).
@@ -12390,28 +12403,25 @@ fn build_aura_attach_chain(
     // CR 608.2c + CR 400.7: ROOT — return/put the enchanted creature card to the
     // battlefield under the caster's control (follow the instruction, CR 608.2c).
     // The card becomes a NEW object on arrival (CR 400.7), which is why
-    // `forward_result` rebinds the sub-chain source to the reanimated creature;
-    // set explicitly (not by auto-detection).
-    let mut root = AbilityDefinition::new(
-        kind,
-        Effect::ChangeZone {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
-            target: root_target,
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: Some(ControllerRef::You),
-            enter_tapped: tap_state,
-            enters_attacking: false,
-            up_to: false,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
-            face_down_profile: None,
-            enters_modified_if: None,
-        },
-    )
-    .sub_ability(generic);
-    root.forward_result = true;
+    // `forward_result` rebinds the sub-chain source to the reanimated creature.
+    // The effect-chain assembler recognizes the typed nested anaphora and sets
+    // that flag during ordinary lowering.
+    let mut root = parsed_clause(Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: root_target,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: Some(ControllerRef::You),
+        enter_tapped: tap_state,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+    });
+    root.sub_ability = Some(Box::new(generic));
     root
 }
 

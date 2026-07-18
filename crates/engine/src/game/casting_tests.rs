@@ -14879,7 +14879,7 @@ fn ashling_granted_evoke_offered_and_installs_etb_sac() {
         let trig = obj.trigger_definitions.get(0).unwrap();
         assert!(
             matches!(
-                trig.condition,
+                trig.definition.condition,
                 Some(crate::types::ability::TriggerCondition::CastVariantPaid {
                     variant: crate::types::ability::CastVariantPaid::Evoke,
                 })

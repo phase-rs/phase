@@ -15,7 +15,7 @@ use super::ability::{
     KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
     ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
     TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerCondition,
-    TriggerDefinition,
+    TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, TokenImageRef};
@@ -121,6 +121,53 @@ mod tuple_key_map {
 
         deserializer.deserialize_map(TupleKeyVisitor)
     }
+}
+
+/// Serde adapter for trigger occurrence ledgers. JSON object keys must be
+/// strings, while a `TriggerDefinitionRef` is structured identity; encode the
+/// map as an explicit entry list rather than flattening or guessing a key.
+mod trigger_definition_ref_map {
+    use super::*;
+
+    pub fn serialize<S>(
+        map: &HashMap<TriggerDefinitionRef, u32>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        map.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<TriggerDefinitionRef, u32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Vec::<(TriggerDefinitionRef, u32)>::deserialize(deserializer)
+            .map(|entries| entries.into_iter().collect())
+    }
+}
+
+/// Deserializes the object store and validates the one legacy trigger shape
+/// that can be materialized without guessing: a complete ordered payload list
+/// proven by the persisted printed base slots. Runtime copied/granted payloads
+/// have no such proof and are rejected at the state restore boundary.
+fn deserialize_objects_with_trigger_provenance<'de, D>(
+    deserializer: D,
+) -> Result<im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut objects =
+        im::HashMap::<ObjectId, GameObject, rustc_hash::FxBuildHasher>::deserialize(deserializer)?;
+    for (_, object) in objects.iter_mut() {
+        object
+            .migrate_legacy_trigger_definitions()
+            .map_err(serde::de::Error::custom)?;
+    }
+    Ok(objects)
 }
 
 /// Tracks whether the game is in day or night state (CR 730).
@@ -501,7 +548,7 @@ pub struct ZoneChangeRecord {
     /// from the live object before the look-back trigger scan, so the zone-change
     /// record carries the exact LKI trigger multiset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trigger_definitions: Vec<TriggerDefinition>,
+    pub trigger_definitions: Vec<TriggerEntry>,
     /// CR 208.1: Power as of the zone change.
     pub power: Option<i32>,
     /// CR 208.1: Toughness as of the zone change.
@@ -744,21 +791,32 @@ pub enum AutoMayChoice {
     Decline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MayTriggerOrigin {
-    Printed { trigger_index: usize },
-    Keyword { keyword: KeywordKind },
+    Definition {
+        definition_ref: TriggerDefinitionRef,
+    },
+    /// Compatibility-only wire shape for saves created before trigger
+    /// occurrences were serialized. Live collection always emits
+    /// [`Self::Definition`]; consumers must not derive new authority from this
+    /// display index.
+    Printed {
+        trigger_index: usize,
+    },
+    Keyword {
+        keyword: KeywordKind,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MayTriggerAutoChoiceKey {
     pub player: PlayerId,
     pub source_id: ObjectId,
     pub origin: MayTriggerOrigin,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MayTriggerAutoChoiceRecord {
     pub key: MayTriggerAutoChoiceKey,
     pub choice: AutoMayChoice,
@@ -8546,6 +8604,7 @@ pub struct GameState {
     // the default SipHash RandomState: ObjectId is a thin integer key and this
     // map is looked up millions of times per large-board resolution — profiling
     // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
+    #[serde(deserialize_with = "deserialize_objects_with_trigger_provenance")]
     pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
     pub next_object_id: u64,
     /// CR 118.3a: monotonic counter minting `ManaPipId`s for pool units so they
@@ -9291,23 +9350,23 @@ pub struct GameState {
     #[serde(default)]
     pub sideboard_submitted: Vec<PlayerId>,
 
-    // Trigger constraint tracking: (object_id, trigger_index) pairs that have fired
+    // Trigger constraint tracking keyed by exact source incarnation + occurrence.
     #[serde(default)]
-    pub triggers_fired_this_turn: HashSet<(ObjectId, usize)>,
+    pub triggers_fired_this_turn: HashSet<TriggerDefinitionRef>,
     /// CR 603.4: Per-trigger fire counts for MaxTimesPerTurn constraint.
-    /// Tracks how many times each (object_id, trigger_index) has fired this turn.
+    /// Tracks how many times each exact occurrence has fired this turn.
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
-        with = "tuple_key_map"
+        with = "trigger_definition_ref_map"
     )]
-    pub trigger_fire_counts_this_turn: HashMap<(ObjectId, usize), u32>,
+    pub trigger_fire_counts_this_turn: HashMap<TriggerDefinitionRef, u32>,
     /// CR 603.2: Tracks per-opponent-per-turn firing for
-    /// OncePerOpponentPerTurn. Keyed by (object_id, trigger_index, opponent_id).
+    /// OncePerOpponentPerTurn. Keyed by exact occurrence and opponent.
     #[serde(default)]
-    pub triggers_fired_this_turn_per_opponent: HashSet<(ObjectId, usize, PlayerId)>,
+    pub triggers_fired_this_turn_per_opponent: HashSet<(TriggerDefinitionRef, PlayerId)>,
     #[serde(default)]
-    pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
+    pub triggers_fired_this_game: HashSet<TriggerDefinitionRef>,
     #[serde(
         default,
         skip_serializing_if = "HashMap::is_empty",
@@ -9612,12 +9671,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub zone_changes_this_turn: Vec<ZoneChangeRecord>,
     /// CR 603.2c: Batched zone-change triggers already collected for
-    /// `(source_id, trig_idx, turn_zone_change_index)`. Prevents a second
+    /// `(definition_ref, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
     /// stacking duplicate batched triggers (issue #3866) without suppressing a
     /// later distinct leave by the same object in the same turn.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub batched_zone_change_trigger_fired: HashSet<(ObjectId, usize, usize)>,
+    pub batched_zone_change_trigger_fired: HashSet<(TriggerDefinitionRef, usize)>,
     /// CR 403.3: Battlefield entry snapshots this turn, enabling data-driven ETB queries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub battlefield_entries_this_turn: Vec<BattlefieldEntryRecord>,
@@ -15896,7 +15955,7 @@ mod tests {
             source_id: ObjectId(5),
             origin: MayTriggerOrigin::Printed { trigger_index: 1 },
         };
-        state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+        state.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
 
         let serialized = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
@@ -16033,6 +16092,70 @@ mod tests {
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn game_state_deserialize_materializes_proven_legacy_printed_trigger_payload() {
+        let object_id = ObjectId(991);
+        let trigger = crate::types::ability::TriggerDefinition::new(
+            crate::types::triggers::TriggerMode::Phase,
+        );
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(991),
+            PlayerId(0),
+            "Legacy printed trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions = Arc::new(vec![trigger.clone()]);
+        state.objects.insert(object_id, object);
+
+        let mut snapshot = serde_json::to_value(state).expect("serialize fixture state");
+        snapshot["objects"][object_id.0.to_string()]["trigger_definitions"] =
+            serde_json::to_value(vec![trigger]).expect("serialize legacy trigger payload");
+
+        let restored: GameState = serde_json::from_value(snapshot)
+            .expect("persisted base slots prove this legacy printed payload");
+        assert!(matches!(
+            restored.objects[&object_id].trigger_definitions[0].occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                printed_index: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn game_state_deserialize_rejects_unproven_legacy_trigger_payload() {
+        let object_id = ObjectId(992);
+        let mut state = GameState::new_two_player(42);
+        state.objects.insert(
+            object_id,
+            GameObject::new(
+                object_id,
+                CardId(992),
+                PlayerId(0),
+                "Hostile payload".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+
+        let mut snapshot = serde_json::to_value(state).expect("serialize fixture state");
+        snapshot["objects"][object_id.0.to_string()]["trigger_definitions"] =
+            serde_json::to_value(vec![crate::types::ability::TriggerDefinition::new(
+                crate::types::triggers::TriggerMode::Attacks,
+            )])
+            .expect("serialize hostile legacy payload");
+
+        let error = serde_json::from_value::<GameState>(snapshot)
+            .expect_err("payload-only runtime triggers must not be guessed as printed");
+        assert!(
+            error
+                .to_string()
+                .contains("legacy runtime trigger payload has no provable producer or base slot"),
+            "restore must reject unproven trigger provenance, got {error}"
+        );
     }
 
     /// 2026-05-09 audit M4 backward-compat: a JSON snapshot saved before the

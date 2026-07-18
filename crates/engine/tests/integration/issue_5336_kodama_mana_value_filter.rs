@@ -297,6 +297,7 @@ fn kodama_natures_lore_forest_limits_hand_to_zero_mana_value() {
         "Kodama must have exactly one parsed ETB trigger"
     );
     let cond = runner.state().objects[&kodama_id].trigger_definitions[0]
+        .definition
         .condition
         .as_ref()
         .expect("Kodama trigger must carry intervening-if");

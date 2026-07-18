@@ -1458,7 +1458,8 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
     use crate::game::ability_scan as scan;
     // (1) Trigger fire-time conditions (CR 603.4) AND effect bodies.
     for obj in state.objects.values() {
-        for (_, def) in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
+        for active in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
+            let def = active.definition;
             if def
                 .condition
                 .as_ref()
@@ -2155,7 +2156,8 @@ fn fire_time_conditions_read_projected_resource(state: &GameState) -> bool {
     // definitions` is the liveness authority (CR 702.26b phased-out + CR 114.4
     // command-zone gate) that deliberately does NOT filter by `condition`.
     for obj in state.objects.values() {
-        for (_, def) in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
+        for active in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
+            let def = active.definition;
             if def
                 .condition
                 .as_ref()
@@ -2880,6 +2882,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
+    use crate::types::ability::TriggerDefinitionRef;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
 
@@ -2900,6 +2903,17 @@ mod tests {
         state.objects.insert(oid, object);
         state.battlefield.push_back(oid);
         oid
+    }
+
+    fn test_trigger_ref(state: &GameState, object_id: ObjectId) -> TriggerDefinitionRef {
+        let object = &state.objects[&object_id];
+        TriggerDefinitionRef {
+            source: crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+            occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                base_set: object.trigger_base_set_instance,
+                printed_index: 0,
+            },
+        }
     }
 
     /// Insert a battlefield permanent with a chosen `tapped` state (B4 `board_delta`
@@ -3527,7 +3541,7 @@ mod tests {
         let mut a = GameState::new_two_player(7);
         let oid = battlefield_creature(&mut a, 720, 0);
         let mut b = a.clone();
-        b.triggers_fired_this_turn.insert((oid, 0)); // OncePerTurn gate fired
+        b.triggers_fired_this_turn.insert(test_trigger_ref(&b, oid)); // OncePerTurn gate fired
         b.players[1].life -= 1;
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),
@@ -3552,9 +3566,11 @@ mod tests {
     fn trigger_max_times_per_turn_gate_breaks_modulo_equality() {
         let mut a = GameState::new_two_player(7);
         let oid = battlefield_creature(&mut a, 730, 0);
-        a.trigger_fire_counts_this_turn.insert((oid, 0), 1);
+        a.trigger_fire_counts_this_turn
+            .insert(test_trigger_ref(&a, oid), 1);
         let mut b = a.clone();
-        b.trigger_fire_counts_this_turn.insert((oid, 0), 2); // limit progressed
+        b.trigger_fire_counts_this_turn
+            .insert(test_trigger_ref(&b, oid), 2); // limit progressed
         b.players[1].life -= 1;
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),

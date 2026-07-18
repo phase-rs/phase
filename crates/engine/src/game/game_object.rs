@@ -9,7 +9,8 @@ use crate::types::ability::{
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
     ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
     ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
-    TriggerDefinition,
+    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
+    TriggerOccurrenceState,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -127,11 +128,13 @@ pub struct SignatureSpellState {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleaveFormState {
     pub abilities: Arc<Vec<AbilityDefinition>>,
-    pub triggers: Definitions<TriggerDefinition>,
+    pub triggers: Definitions<TriggerEntry>,
     pub statics: Definitions<StaticDefinition>,
     pub replacements: Definitions<ReplacementDefinition>,
     pub base_abilities: Arc<Vec<AbilityDefinition>>,
     pub base_triggers: Arc<Vec<TriggerDefinition>>,
+    pub trigger_base_set_instance: TriggerBaseSetInstanceRef,
+    pub next_trigger_base_set_instance: u64,
     pub base_statics: Arc<Vec<StaticDefinition>>,
     pub base_replacements: Arc<Vec<ReplacementDefinition>>,
 }
@@ -187,6 +190,8 @@ pub struct BackFaceData {
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
+    /// Stored card-face payload. Live object definitions are materialized with
+    /// recipient-local occurrence provenance when this face is installed.
     pub trigger_definitions: Definitions<TriggerDefinition>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
@@ -444,7 +449,9 @@ pub struct GameObject {
     /// `GameState::clone()` shares the ability list across cloned states
     /// (AI search); mutations go through `Arc::make_mut` for copy-on-write.
     pub abilities: Arc<Vec<AbilityDefinition>>,
-    pub trigger_definitions: Definitions<TriggerDefinition>,
+    /// Live trigger definitions are identity-bearing entries. Parser and card-face
+    /// data remain payload-only in `base_trigger_definitions` / `BackFaceData`.
+    pub trigger_definitions: Definitions<TriggerEntry>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
     /// CR 702.148a-b + CR 612: When this object is a cleave spell, the alternate
@@ -509,6 +516,17 @@ pub struct GameObject {
     /// than the `Definitions<T>` wrapper that gates live reads.
     /// Wrapped in `Arc` for structural sharing across cloned `GameState`s.
     pub base_trigger_definitions: Arc<Vec<TriggerDefinition>>,
+    /// Current ordered printed/base trigger-set generation. This stays stable
+    /// across ordinary layer resets and only changes when a caller intentionally
+    /// installs a new base/face/cleave trigger set.
+    #[serde(default = "GameObject::initial_trigger_base_set_instance")]
+    pub trigger_base_set_instance: TriggerBaseSetInstanceRef,
+    /// Next object-local base-set generation. Never rewound or reused.
+    #[serde(default = "GameObject::initial_next_trigger_base_set_instance")]
+    pub next_trigger_base_set_instance: u64,
+    /// Recipient-local Layer-6 grant allocator and active producer table.
+    #[serde(default)]
+    pub trigger_occurrence_state: TriggerOccurrenceState,
     /// CR 613.1: printed-card baseline for replacement definitions. See
     /// `base_trigger_definitions`.
     pub base_replacement_definitions: Arc<Vec<ReplacementDefinition>>,
@@ -1115,6 +1133,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_keywords: _,
         base_abilities: _,
         base_trigger_definitions: _,
+        trigger_base_set_instance: _,
+        next_trigger_base_set_instance: _,
+        trigger_occurrence_state: _,
         base_replacement_definitions: _,
         base_static_definitions: _,
         base_color: _,
@@ -1214,6 +1235,134 @@ pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType>
 }
 
 impl GameObject {
+    const fn initial_trigger_base_set_instance() -> TriggerBaseSetInstanceRef {
+        TriggerBaseSetInstanceRef::INITIAL
+    }
+
+    const fn initial_next_trigger_base_set_instance() -> u64 {
+        2
+    }
+
+    /// Allocates an intentionally-new printed/base trigger-set generation.
+    /// This is the sole mutation site for the serialized base-set counter.
+    pub fn allocate_trigger_base_set_instance(&mut self) -> Result<(), &'static str> {
+        let next = self.next_trigger_base_set_instance;
+        self.next_trigger_base_set_instance = next
+            .checked_add(1)
+            .ok_or("trigger base-set allocator exhausted")?;
+        self.trigger_base_set_instance = TriggerBaseSetInstanceRef(next);
+        Ok(())
+    }
+
+    /// Re-materializes the live base slots without changing their generation.
+    /// Ordinary full/incremental layer resets and same-face rehydration use this
+    /// path, preserving each printed slot's occurrence identity.
+    pub fn materialize_base_trigger_definitions(&mut self) {
+        self.trigger_definitions = self
+            .base_trigger_definitions
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(printed_index, definition)| {
+                TriggerEntry::new(
+                    TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: self.trigger_base_set_instance,
+                        printed_index,
+                    },
+                    definition,
+                )
+            })
+            .collect();
+    }
+
+    /// Installs a new intentional base/face/cleave trigger set and then
+    /// materializes its ordered printed slots. Allocation occurs before the
+    /// live entries become observable.
+    pub fn install_trigger_base_definitions(
+        &mut self,
+        definitions: Arc<Vec<TriggerDefinition>>,
+    ) -> Result<(), &'static str> {
+        self.allocate_trigger_base_set_instance()?;
+        self.base_trigger_definitions = definitions;
+        self.materialize_base_trigger_definitions();
+        Ok(())
+    }
+
+    /// Returns the exact source-side identity for a currently materialized
+    /// trigger entry.
+    pub fn trigger_definition_ref(
+        &self,
+        entry: &TriggerEntry,
+    ) -> crate::types::ability::TriggerDefinitionRef {
+        crate::types::ability::TriggerDefinitionRef {
+            source: crate::types::identifiers::ObjectIncarnationRef::from_object(self),
+            occurrence: entry.occurrence.clone(),
+        }
+    }
+
+    /// Validates the object-local portion of trigger occurrence provenance.
+    pub fn validate_trigger_definitions(&self) -> Result<(), &'static str> {
+        for entry in self.trigger_definitions.iter_all() {
+            match &entry.occurrence {
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set,
+                    printed_index,
+                } => {
+                    if *base_set != self.trigger_base_set_instance {
+                        return Err("printed trigger refers to a noncurrent base set");
+                    }
+                    if self.base_trigger_definitions.get(*printed_index) != Some(&entry.definition)
+                    {
+                        return Err("printed trigger slot does not match the active base set");
+                    }
+                }
+                TriggerDefinitionOccurrenceRef::Unmaterialized => {
+                    return Err("observable trigger entry lacks occurrence provenance");
+                }
+                TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+                | TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+                | TriggerDefinitionOccurrenceRef::CopyRetained { .. }
+                | TriggerDefinitionOccurrenceRef::Granted { .. }
+                | TriggerDefinitionOccurrenceRef::ExpandedGrant { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Promotes a legacy payload-only live list only when its persisted base
+    /// slots prove the exact ordered printed mapping. Copied and granted
+    /// runtime payloads are rejected rather than guessed from equal definition
+    /// bytes.
+    pub fn migrate_legacy_trigger_definitions(&mut self) -> Result<(), &'static str> {
+        let has_legacy_entries = self.trigger_definitions.iter_all().any(|entry| {
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Unmaterialized
+            )
+        });
+        if !has_legacy_entries {
+            return self.validate_trigger_definitions();
+        }
+        if self.base_trigger_definitions.is_empty()
+            || self.trigger_definitions.len() != self.base_trigger_definitions.len()
+            || !self.trigger_definitions.iter_all().all(|entry| {
+                matches!(
+                    entry.occurrence,
+                    TriggerDefinitionOccurrenceRef::Unmaterialized
+                )
+            })
+            || !self
+                .trigger_definitions
+                .iter_all()
+                .zip(self.base_trigger_definitions.iter())
+                .all(|(entry, base)| entry.definition == *base)
+        {
+            return Err("legacy runtime trigger payload has no provable producer or base slot");
+        }
+        self.materialize_base_trigger_definitions();
+        self.validate_trigger_definitions()
+    }
+
     /// Apply an Alchemy "perpetually" modification to this card: record it on the
     /// object (so it persists across zones/serialization and can be re-applied
     /// after a copy rebuilds base characteristics) and edit the corresponding
@@ -1626,10 +1775,8 @@ impl GameObject {
             // Both sides are `Arc<Vec<_>>` — refcount-only clone.
             self.base_abilities = Arc::clone(&self.abilities);
         }
-        if self.base_trigger_definitions.is_empty() && !self.trigger_definitions.is_empty() {
-            self.base_trigger_definitions =
-                Arc::new(self.trigger_definitions.iter_all().cloned().collect());
-        }
+        #[cfg(any(test, feature = "test-support"))]
+        self.materialize_test_fixture_trigger_base();
         if self.base_replacement_definitions.is_empty() && !self.replacement_definitions.is_empty()
         {
             self.base_replacement_definitions =
@@ -1647,6 +1794,26 @@ impl GameObject {
         }
 
         self.base_characteristics_initialized = true;
+    }
+
+    /// Test-fixture-only construction seam for pre-identity unit fixtures.
+    ///
+    /// Production restore never calls this: deserialization instead requires
+    /// `migrate_legacy_trigger_definitions` to prove every legacy payload from
+    /// persisted printed slots. Keeping the compatibility path behind the same
+    /// `test-support` boundary as scenario construction makes that distinction
+    /// explicit rather than dependent on layer-flush call order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn materialize_test_fixture_trigger_base(&mut self) {
+        if self.base_trigger_definitions.is_empty() && !self.trigger_definitions.is_empty() {
+            self.base_trigger_definitions = Arc::new(
+                self.trigger_definitions
+                    .iter_all()
+                    .map(|entry| entry.definition.clone())
+                    .collect(),
+            );
+            self.materialize_base_trigger_definitions();
+        }
     }
 
     pub fn new(id: ObjectId, card_id: CardId, owner: PlayerId, name: String, zone: Zone) -> Self {
@@ -1708,6 +1875,9 @@ impl GameObject {
             base_keywords: Vec::new(),
             base_abilities: Arc::new(Vec::new()),
             base_trigger_definitions: Default::default(),
+            trigger_base_set_instance: TriggerBaseSetInstanceRef::INITIAL,
+            next_trigger_base_set_instance: 2,
+            trigger_occurrence_state: TriggerOccurrenceState::default(),
             base_replacement_definitions: Default::default(),
             base_static_definitions: Default::default(),
             base_color: Vec::new(),
@@ -1973,7 +2143,7 @@ impl GameObject {
         self.mana_cost = self.base_mana_cost.clone();
         self.keywords = self.base_keywords.clone();
         self.abilities = Arc::clone(&self.base_abilities);
-        self.trigger_definitions = Arc::clone(&self.base_trigger_definitions).into();
+        self.materialize_base_trigger_definitions();
         self.replacement_definitions = Arc::clone(&self.base_replacement_definitions).into();
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
         self.color = self.base_color.clone();
@@ -2258,7 +2428,13 @@ impl GameObject {
         // card, not subject to functioning gates. `iter_all` is pub(crate).
         self.trigger_definitions
             .iter_all()
-            .filter_map(|t| t.counter_filter.as_ref().and_then(|f| f.threshold))
+            .filter_map(|entry| {
+                entry
+                    .definition
+                    .counter_filter
+                    .as_ref()
+                    .and_then(|f| f.threshold)
+            })
             .max()
     }
 
@@ -2330,6 +2506,7 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 mod tests {
     use super::*;
     use crate::types::counter::parse_counter_type;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn game_object_has_all_rules_relevant_fields() {
@@ -2389,6 +2566,218 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn legacy_printed_trigger_payload_with_matching_base_slots_is_materialized() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        let definitions = vec![
+            TriggerDefinition::new(TriggerMode::Phase),
+            TriggerDefinition::new(TriggerMode::Attacks),
+        ];
+        object.base_trigger_definitions = Arc::new(definitions.clone());
+        object.trigger_definitions = definitions.into();
+
+        object
+            .migrate_legacy_trigger_definitions()
+            .expect("matching persisted base slots prove the legacy printed mapping");
+
+        assert!(object
+            .trigger_definitions
+            .iter_all()
+            .enumerate()
+            .all(|(printed_index, entry)| {
+                entry.occurrence
+                    == TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index,
+                    }
+            }));
+    }
+
+    #[test]
+    fn legacy_runtime_trigger_payload_without_a_printed_slot_is_rejected() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object
+            .trigger_definitions
+            .push(TriggerDefinition::new(TriggerMode::Attacks));
+
+        assert_eq!(
+            object.migrate_legacy_trigger_definitions(),
+            Err("legacy runtime trigger payload has no provable producer or base slot"),
+            "a payload-only runtime copied/granted trigger must not be guessed as printed"
+        );
+    }
+
+    fn trigger_test_object() -> GameObject {
+        GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Trigger Test".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    #[test]
+    fn printed_explicit_and_keyword_companion_map_to_stable_distinct_base_slots() {
+        let mut object = trigger_test_object();
+        let explicit = TriggerDefinition::new(TriggerMode::Phase);
+        let keyword_companion = TriggerDefinition::new(TriggerMode::Attacks);
+        object.base_trigger_definitions = Arc::new(vec![explicit.clone(), keyword_companion]);
+
+        object.materialize_base_trigger_definitions();
+
+        let occurrences = object
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.occurrence.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences,
+            vec![
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            object.trigger_definitions[0].definition, explicit,
+            "the first final slot preserves the explicit printed trigger payload"
+        );
+    }
+
+    #[test]
+    fn repeated_printed_companion_slots_stay_distinct() {
+        let mut object = trigger_test_object();
+        let companion = TriggerDefinition::new(TriggerMode::Attacks);
+        object.base_trigger_definitions = Arc::new(vec![companion.clone(), companion]);
+
+        object.materialize_base_trigger_definitions();
+
+        assert_ne!(
+            object.trigger_definitions[0].occurrence, object.trigger_definitions[1].occurrence,
+            "repeated final slots must not collapse because their payloads match"
+        );
+    }
+
+    #[test]
+    fn unchanged_base_reset_and_rehydrate_keep_trigger_refs() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object.materialize_base_trigger_definitions();
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_eq!(before, after);
+        assert_eq!(
+            object.next_trigger_base_set_instance, 2,
+            "rehydrating unchanged base slots must not allocate a new generation"
+        );
+    }
+
+    #[test]
+    fn reincarnation_changes_the_full_trigger_ref_without_reusing_a_base_slot() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object.bump_incarnation();
+        object.materialize_base_trigger_definitions();
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_ne!(
+            before, after,
+            "a new object incarnation is a new trigger source"
+        );
+        assert_eq!(
+            before.occurrence, after.occurrence,
+            "ordinary base rehydration does not fabricate a new base set"
+        );
+    }
+
+    #[test]
+    fn intentional_base_replacement_gets_fresh_base_set_ref() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object
+            .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+                TriggerMode::Attacks,
+            )]))
+            .expect("base-set allocator has capacity");
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_ne!(before, after);
+        assert_eq!(
+            object.trigger_base_set_instance,
+            TriggerBaseSetInstanceRef(2)
+        );
+        assert_eq!(object.next_trigger_base_set_instance, 3);
+    }
+
+    #[test]
+    fn serialized_base_slots_preserve_exact_refs() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions = Arc::new(vec![
+            TriggerDefinition::new(TriggerMode::Phase),
+            TriggerDefinition::new(TriggerMode::Attacks),
+        ]);
+        object.materialize_base_trigger_definitions();
+        let refs = object
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| object.trigger_definition_ref(entry))
+            .collect::<Vec<_>>();
+
+        let roundtrip: GameObject = serde_json::from_str(&serde_json::to_string(&object).unwrap())
+            .expect("identity-bearing trigger entries roundtrip");
+        let roundtrip_refs = roundtrip
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| roundtrip.trigger_definition_ref(entry))
+            .collect::<Vec<_>>();
+
+        assert_eq!(refs, roundtrip_refs);
+        assert_eq!(
+            object.trigger_base_set_instance,
+            roundtrip.trigger_base_set_instance
+        );
+        assert_eq!(
+            object.next_trigger_base_set_instance,
+            roundtrip.next_trigger_base_set_instance
+        );
+        assert_eq!(
+            object.trigger_occurrence_state,
+            roundtrip.trigger_occurrence_state
+        );
     }
 
     /// CR 702.26: `phase_status` must be exposed on the wire so the FE can

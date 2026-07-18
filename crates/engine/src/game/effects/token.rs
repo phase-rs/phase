@@ -4344,11 +4344,14 @@ mod tests {
             1,
             "catalog rules_text must install the attacks life trigger intrinsically"
         );
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::Attacks);
+        assert_eq!(
+            obj.trigger_definitions[0].definition.mode,
+            TriggerMode::Attacks
+        );
         assert!(
             !obj.trigger_definitions
                 .iter_all()
-                .any(|trigger| trigger.mode == TriggerMode::ChangesZone),
+                .any(|trigger| trigger.definition.mode == TriggerMode::ChangesZone),
             "SOS Pest must keep its printed attack trigger, not the older Pest dies trigger"
         );
         assert_eq!(
@@ -4382,11 +4385,11 @@ mod tests {
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = &obj.trigger_definitions[0];
-        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(trigger.definition.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
         assert_eq!(
-            trigger.trigger_zones,
+            trigger.definition.trigger_zones,
             vec![Zone::Battlefield],
             "CR 603.10a LKI scans a dying token as a Battlefield source"
         );
@@ -4622,10 +4625,14 @@ mod tests {
         );
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = &obj.trigger_definitions[0];
-        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
-        let execute = trigger.execute.as_ref().expect("Pest dies trigger effect");
+        assert_eq!(trigger.definition.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
+        let execute = trigger
+            .definition
+            .execute
+            .as_ref()
+            .expect("Pest dies trigger effect");
         assert!(matches!(
             *execute.effect,
             Effect::GainLife {

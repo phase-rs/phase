@@ -133,12 +133,12 @@ fn run_case(oracle: &str, filler: Option<(PlayerId, CoreType)>) -> (GameRunner, 
         runner.state().objects[&ench]
             .trigger_definitions
             .iter_unchecked()
-            .any(|t| t.mode == TriggerMode::StateCondition),
+            .any(|entry| entry.definition.mode == TriggerMode::StateCondition),
         "the \"{oracle}\" line must parse to a StateCondition trigger; got modes {:?}",
         runner.state().objects[&ench]
             .trigger_definitions
             .iter_unchecked()
-            .map(|t| t.mode.clone())
+            .map(|entry| entry.definition.mode.clone())
             .collect::<Vec<_>>()
     );
 

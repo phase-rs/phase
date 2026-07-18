@@ -15,7 +15,7 @@ use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
     TargetSelectionConstraint,
 };
-use super::identifiers::{CardId, ObjectId, TrackedSetId};
+use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
@@ -46,6 +46,139 @@ pub enum Chooser {
     /// An opponent of the controller makes the choice (CR 608.2e).
     /// In 2-player, the single opponent. In multiplayer, controller chooses which opponent.
     Opponent,
+}
+
+#[cfg(test)]
+mod trigger_occurrence_tests {
+    use super::*;
+
+    fn static_origin() -> TriggerProducerOrigin {
+        TriggerProducerOrigin::Static {
+            source: ObjectIncarnationRef::of(ObjectId(7), 3),
+            definition_index: 0,
+            modification_index: 0,
+        }
+    }
+
+    #[test]
+    fn grant_reconciler_reuses_active_generation_and_never_reuses_retired_generation() {
+        let producer = TriggerGrantProducerKey::Granted {
+            origin: static_origin(),
+            output_index: 0,
+        };
+        let mut state = TriggerOccurrenceState::default();
+        let first = state
+            .reconcile_grant_instances(vec![(producer.clone(), "first")])
+            .unwrap()[0]
+            .0;
+        let second = state
+            .reconcile_grant_instances(vec![(producer.clone(), "second")])
+            .unwrap()[0]
+            .0;
+        assert_eq!(first, second, "a full-pass reset retains active identity");
+
+        state
+            .reconcile_grant_instances::<()>(Vec::new())
+            .expect("retiring an active producer is atomic");
+        let third = state
+            .reconcile_grant_instances(vec![(producer, "third")])
+            .unwrap()[0]
+            .0;
+        assert_ne!(first, third, "a re-grant receives a fresh generation");
+        assert!(third.0 > first.0, "serialized generations are monotonic");
+    }
+
+    #[test]
+    fn identical_grants_from_distinct_producers_remain_distinct_entries() {
+        let definition = TriggerDefinition::new(TriggerMode::Attacks);
+        let mut state = TriggerOccurrenceState::default();
+        let entries = state
+            .reconcile_trigger_entries(vec![
+                (
+                    TriggerGrantProducerKey::Granted {
+                        origin: static_origin(),
+                        output_index: 0,
+                    },
+                    definition.clone(),
+                ),
+                (
+                    TriggerGrantProducerKey::Granted {
+                        origin: TriggerProducerOrigin::Transient {
+                            continuous_effect_id: 19,
+                            modification_index: 0,
+                        },
+                        output_index: 0,
+                    },
+                    definition,
+                ),
+            ])
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0].occurrence, entries[1].occurrence);
+    }
+
+    #[test]
+    fn byte_identical_singular_outputs_from_one_grantor_remain_distinct() {
+        let definition = TriggerDefinition::new(TriggerMode::Attacks);
+        let mut state = TriggerOccurrenceState::default();
+        let entries = state
+            .reconcile_trigger_entries(vec![
+                (
+                    TriggerGrantProducerKey::Granted {
+                        origin: static_origin(),
+                        output_index: 0,
+                    },
+                    definition.clone(),
+                ),
+                (
+                    TriggerGrantProducerKey::Granted {
+                        origin: static_origin(),
+                        output_index: 1,
+                    },
+                    definition,
+                ),
+            ])
+            .expect("distinct output slots from one grantor are distinct producers");
+
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0].occurrence, entries[1].occurrence);
+    }
+
+    #[test]
+    fn duplicate_candidate_reconciliation_does_not_commit_partial_generation() {
+        let producer = TriggerGrantProducerKey::Granted {
+            origin: static_origin(),
+            output_index: 0,
+        };
+        let mut state = TriggerOccurrenceState::default();
+
+        assert_eq!(
+            state.reconcile_grant_instances(vec![(producer.clone(), ()), (producer, ())]),
+            Err(TriggerOccurrenceError::DuplicateProducer(
+                TriggerGrantProducerKey::Granted {
+                    origin: static_origin(),
+                    output_index: 0,
+                },
+            )),
+        );
+        assert_eq!(
+            state.active_grants().count(),
+            0,
+            "failed reconciliation must not retain a partially allocated producer"
+        );
+
+        let instance = state
+            .reconcile_grant_instances(vec![(
+                TriggerGrantProducerKey::Granted {
+                    origin: static_origin(),
+                    output_index: 0,
+                },
+                (),
+            )])
+            .unwrap()[0]
+            .0;
+        assert_eq!(instance, TriggerGrantInstanceRef(1));
+    }
 }
 
 /// CR 400.1 + CR 608.2c: Which player's zone supplies cards for a direct
@@ -18521,6 +18654,419 @@ pub struct TriggerDefinition {
     pub clash_result: Option<ClashResult>,
 }
 
+/// Monotonic identity for one intentionally-installed ordered base trigger set.
+///
+/// The number is local to its recipient object. [`TriggerDefinitionRef`] also
+/// contains that object's all-zone incarnation, so a reused object storage id
+/// cannot reuse a definition identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TriggerBaseSetInstanceRef(pub u64);
+
+impl TriggerBaseSetInstanceRef {
+    pub const INITIAL: Self = Self(1);
+}
+
+/// Monotonic identity assigned by the Layer-6 grant reconciler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TriggerGrantInstanceRef(pub u64);
+
+/// Exact Layer-1 origin of a winning `CopyValues` continuous effect.
+///
+/// The transient continuous-effect id is already serialized and monotonic; the
+/// modification index distinguishes two `CopyValues` modifications installed by
+/// the same effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CopyEffectInstanceRef {
+    pub continuous_effect_id: u64,
+    pub modification_index: usize,
+}
+
+/// Payload-free identity of the continuous-effect occurrence which produced a
+/// Layer-6 trigger candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TriggerProducerOrigin {
+    Static {
+        source: ObjectIncarnationRef,
+        definition_index: usize,
+        modification_index: usize,
+    },
+    Transient {
+        continuous_effect_id: u64,
+        modification_index: usize,
+    },
+}
+
+/// Payload-free key reconciled to a stable Layer-6 grant instance.
+///
+/// This is deliberately independent of `TriggerDefinition`: byte-identical
+/// grants from distinct producers remain independently functioning abilities
+/// (CR 113.2c).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TriggerGrantProducerKey {
+    KeywordCompanion {
+        origin: TriggerProducerOrigin,
+        /// Which keyword output of a multi-keyword modification produced this
+        /// companion. `AddChosenKeyword` may emit more than one independently
+        /// functioning keyword from one exact continuous-effect occurrence.
+        #[serde(default)]
+        keyword_output_index: usize,
+        companion_index: usize,
+    },
+    CopyRetained {
+        origin: TriggerProducerOrigin,
+        source_base_set: TriggerBaseSetInstanceRef,
+        source_printed_index: usize,
+    },
+    Granted {
+        origin: TriggerProducerOrigin,
+        output_index: usize,
+    },
+    ExpandedGrant {
+        origin: TriggerProducerOrigin,
+        provider: Box<TriggerDefinitionRef>,
+        provider_output_index: usize,
+    },
+}
+
+/// The immutable occurrence component of a live trigger definition identity.
+///
+/// It is intentionally a closed typed representation rather than a definition
+/// hash or a live-vector index. The latter are presentation details and cannot
+/// distinguish independently functioning identical ability instances.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TriggerDefinitionOccurrenceRef {
+    Printed {
+        base_set: TriggerBaseSetInstanceRef,
+        printed_index: usize,
+    },
+    CopiedValue {
+        copy_effect: CopyEffectInstanceRef,
+        copied_slot: usize,
+    },
+    KeywordCompanion {
+        grant_instance: TriggerGrantInstanceRef,
+        companion_index: usize,
+    },
+    CopyRetained {
+        grant_instance: TriggerGrantInstanceRef,
+        source_base_set: TriggerBaseSetInstanceRef,
+        source_printed_index: usize,
+    },
+    Granted {
+        grant_instance: TriggerGrantInstanceRef,
+    },
+    ExpandedGrant {
+        grant_instance: TriggerGrantInstanceRef,
+        provider: Box<TriggerDefinitionRef>,
+        provider_output_index: usize,
+    },
+    /// Compatibility-only marker for manually assembled test objects and old
+    /// payload-only wire values. Runtime layer materialization replaces this
+    /// before `active_trigger_definitions` can expose the entry; structural
+    /// validation rejects it from an observable game state.
+    #[serde(skip_serializing, skip_deserializing)]
+    Unmaterialized,
+}
+
+/// Exact identity of a trigger definition that functions on one object
+/// incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TriggerDefinitionRef {
+    pub source: ObjectIncarnationRef,
+    pub occurrence: TriggerDefinitionOccurrenceRef,
+}
+
+/// Identity-bearing runtime trigger entry.
+///
+/// `definition` stays explicit: code that needs only a payload must project it
+/// intentionally rather than silently dropping occurrence provenance through a
+/// `Deref` implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TriggerEntry {
+    pub occurrence: TriggerDefinitionOccurrenceRef,
+    pub definition: TriggerDefinition,
+}
+
+impl TriggerEntry {
+    pub fn new(occurrence: TriggerDefinitionOccurrenceRef, definition: TriggerDefinition) -> Self {
+        Self {
+            occurrence,
+            definition,
+        }
+    }
+
+    pub fn definition(&self) -> &TriggerDefinition {
+        &self.definition
+    }
+}
+
+impl From<TriggerDefinition> for TriggerEntry {
+    fn from(definition: TriggerDefinition) -> Self {
+        Self::new(TriggerDefinitionOccurrenceRef::Unmaterialized, definition)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TriggerEntryWire {
+    IdentityBearing {
+        occurrence: TriggerDefinitionOccurrenceRef,
+        definition: TriggerDefinition,
+    },
+    LegacyPayload(TriggerDefinition),
+}
+
+impl<'de> Deserialize<'de> for TriggerEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match TriggerEntryWire::deserialize(deserializer)? {
+            TriggerEntryWire::IdentityBearing {
+                occurrence,
+                definition,
+            } => Ok(Self::new(occurrence, definition)),
+            // A later GameState normalization validates this only for a
+            // provable printed/base slot. Keeping the marker here preserves the
+            // distinction instead of guessing copied/granted provenance from
+            // definition bytes at the serde boundary.
+            TriggerEntryWire::LegacyPayload(definition) => Ok(definition.into()),
+        }
+    }
+}
+
+/// Serialized allocation/reconciliation state for one recipient incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerOccurrenceState {
+    #[serde(default = "TriggerOccurrenceState::initial_next_grant_instance")]
+    next_grant_instance: u64,
+    #[serde(default)]
+    active_grants: Vec<ActiveTriggerGrantInstance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ActiveTriggerGrantInstance {
+    producer: TriggerGrantProducerKey,
+    instance: TriggerGrantInstanceRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerOccurrenceError {
+    DuplicateProducer(TriggerGrantProducerKey),
+    GrantAllocatorExhausted,
+}
+
+impl TriggerOccurrenceState {
+    const fn initial_next_grant_instance() -> u64 {
+        1
+    }
+
+    /// Allocates one fresh grant generation. This is the only mutation site
+    /// for the serialized grant counter; generations are never reused.
+    pub fn allocate_trigger_grant_instance(
+        &mut self,
+    ) -> Result<TriggerGrantInstanceRef, TriggerOccurrenceError> {
+        let next = self.next_grant_instance;
+        let following = next
+            .checked_add(1)
+            .ok_or(TriggerOccurrenceError::GrantAllocatorExhausted)?;
+        self.next_grant_instance = following;
+        Ok(TriggerGrantInstanceRef(next))
+    }
+
+    /// Reconciles an ordered recipient-local producer set atomically.
+    ///
+    /// The identity/retirement/generation core is payload-generic so the same
+    /// allocator contract can serve activated-ability occurrences. The thin
+    /// trigger adapter below maps the returned instances to trigger entries.
+    fn reconcile_grant_instances_scoped<T, F>(
+        &mut self,
+        candidates: Vec<(TriggerGrantProducerKey, T)>,
+        replaces: F,
+    ) -> Result<Vec<(TriggerGrantInstanceRef, T)>, TriggerOccurrenceError>
+    where
+        F: Fn(&TriggerGrantProducerKey) -> bool,
+    {
+        let mut staged = self.clone();
+        let mut next_active = staged
+            .active_grants
+            .iter()
+            .filter(|active| !replaces(&active.producer))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut output = Vec::with_capacity(candidates.len());
+
+        for (producer, payload) in candidates {
+            if next_active
+                .iter()
+                .any(|active: &ActiveTriggerGrantInstance| active.producer == producer)
+            {
+                return Err(TriggerOccurrenceError::DuplicateProducer(producer));
+            }
+
+            let instance = staged
+                .active_grants
+                .iter()
+                .find(|active| active.producer == producer)
+                .map(|active| active.instance)
+                .unwrap_or(staged.allocate_trigger_grant_instance()?);
+            next_active.push(ActiveTriggerGrantInstance { producer, instance });
+            output.push((instance, payload));
+        }
+
+        staged.active_grants = next_active;
+        *self = staged;
+        Ok(output)
+    }
+
+    pub fn reconcile_grant_instances<T>(
+        &mut self,
+        candidates: Vec<(TriggerGrantProducerKey, T)>,
+    ) -> Result<Vec<(TriggerGrantInstanceRef, T)>, TriggerOccurrenceError> {
+        self.reconcile_grant_instances_scoped(candidates, |_| true)
+    }
+
+    pub fn reconcile_trigger_entries(
+        &mut self,
+        candidates: Vec<(TriggerGrantProducerKey, TriggerDefinition)>,
+    ) -> Result<Vec<TriggerEntry>, TriggerOccurrenceError> {
+        self.reconcile_grant_instances(candidates).map(|entries| {
+            entries
+                .into_iter()
+                .map(|(grant_instance, definition)| {
+                    let producer = self
+                        .active_grants
+                        .iter()
+                        .find(|active| active.instance == grant_instance)
+                        .expect("reconciled grant instance must remain active");
+                    TriggerEntry::new(
+                        occurrence_for_grant(&producer.producer, grant_instance),
+                        definition,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// Atomically replaces one producer class while retaining every active
+    /// producer outside that class. Off-zone keyword evaluation uses this so
+    /// re-evaluating a card in exile cannot retire an unrelated live grant.
+    pub fn reconcile_trigger_entries_matching<F>(
+        &mut self,
+        candidates: Vec<(TriggerGrantProducerKey, TriggerDefinition)>,
+        replaces: F,
+    ) -> Result<Vec<TriggerEntry>, TriggerOccurrenceError>
+    where
+        F: Fn(&TriggerGrantProducerKey) -> bool,
+    {
+        self.reconcile_grant_instances_scoped(candidates, replaces)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|(grant_instance, definition)| {
+                        let producer = self
+                            .active_grants
+                            .iter()
+                            .find(|active| active.instance == grant_instance)
+                            .expect("reconciled grant instance must remain active");
+                        TriggerEntry::new(
+                            occurrence_for_grant(&producer.producer, grant_instance),
+                            definition,
+                        )
+                    })
+                    .collect()
+            })
+    }
+
+    /// Reuses the active generation for `producer` or allocates one fresh
+    /// generation through [`Self::allocate_trigger_grant_instance`]. This is
+    /// the incremental Layer-6 path; full-pass retirement is completed by
+    /// [`Self::retire_absent_grants`] after all candidates are materialized.
+    pub fn grant_instance_for(
+        &mut self,
+        producer: TriggerGrantProducerKey,
+    ) -> Result<TriggerGrantInstanceRef, TriggerOccurrenceError> {
+        if let Some(active) = self
+            .active_grants
+            .iter()
+            .find(|active| active.producer == producer)
+        {
+            return Ok(active.instance);
+        }
+        let instance = self.allocate_trigger_grant_instance()?;
+        self.active_grants
+            .push(ActiveTriggerGrantInstance { producer, instance });
+        Ok(instance)
+    }
+
+    /// Retires every producer that did not materialize during the completed
+    /// layer pass. Retired instances are never reused because allocation is
+    /// monotonic.
+    pub fn retire_absent_grants(&mut self, live_instances: &[TriggerGrantInstanceRef]) {
+        self.active_grants
+            .retain(|active| live_instances.contains(&active.instance));
+    }
+
+    pub fn active_grants(
+        &self,
+    ) -> impl Iterator<Item = (&TriggerGrantProducerKey, TriggerGrantInstanceRef)> {
+        self.active_grants
+            .iter()
+            .map(|active| (&active.producer, active.instance))
+    }
+}
+
+/// Converts a payload-free producer key plus its recipient-local generation
+/// into the corresponding immutable trigger occurrence.
+pub fn occurrence_for_grant(
+    producer: &TriggerGrantProducerKey,
+    grant_instance: TriggerGrantInstanceRef,
+) -> TriggerDefinitionOccurrenceRef {
+    match producer {
+        TriggerGrantProducerKey::KeywordCompanion {
+            companion_index, ..
+        } => TriggerDefinitionOccurrenceRef::KeywordCompanion {
+            grant_instance,
+            companion_index: *companion_index,
+        },
+        TriggerGrantProducerKey::CopyRetained {
+            source_base_set,
+            source_printed_index,
+            ..
+        } => TriggerDefinitionOccurrenceRef::CopyRetained {
+            grant_instance,
+            source_base_set: *source_base_set,
+            source_printed_index: *source_printed_index,
+        },
+        TriggerGrantProducerKey::Granted { .. } => {
+            TriggerDefinitionOccurrenceRef::Granted { grant_instance }
+        }
+        TriggerGrantProducerKey::ExpandedGrant {
+            provider,
+            provider_output_index,
+            ..
+        } => TriggerDefinitionOccurrenceRef::ExpandedGrant {
+            grant_instance,
+            provider: provider.clone(),
+            provider_output_index: *provider_output_index,
+        },
+    }
+}
+
+impl Default for TriggerOccurrenceState {
+    fn default() -> Self {
+        Self {
+            next_grant_instance: Self::initial_next_grant_instance(),
+            active_grants: Vec::new(),
+        }
+    }
+}
+
 impl TriggerDefinition {
     pub fn new(mode: TriggerMode) -> Self {
         Self {
@@ -20430,9 +20976,9 @@ impl ResolvedAbility {
     }
 
     pub fn set_may_trigger_origin_recursive(&mut self, origin: MayTriggerOrigin) {
-        self.may_trigger_origin = Some(origin);
+        self.may_trigger_origin = Some(origin.clone());
         if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_may_trigger_origin_recursive(origin);
+            sub.set_may_trigger_origin_recursive(origin.clone());
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_may_trigger_origin_recursive(origin);
