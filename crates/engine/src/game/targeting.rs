@@ -1176,6 +1176,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
+        // CR 615.5 + CR 120.1: "Comeuppance deals that much damage to that
+        // creature" — the reflection target is the prevented event's damage
+        // source object itself (the creature that would have dealt the damage).
+        // Returns the source as an object ref; `None` outside the
+        // post-replacement window. Sibling of `PostReplacementSourceController`
+        // (which projects the same source to its controller player).
+        TargetFilter::PostReplacementDamageSource => {
+            state.post_replacement_event_source().map(TargetRef::Object)
+        }
         TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target().cloned(),
         // CR 108.3 + CR 400.3 + CR 615.5: Owner of the prevented event's damage
         // recipient ("that creature's owner shuffles it into their library").

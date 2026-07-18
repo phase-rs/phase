@@ -537,6 +537,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::HasObjectTarget
         | AbilityCondition::TriggeringSpellTargetsFilter { .. }
         | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
         | AbilityCondition::ControllerControlsMatching { .. }
         | AbilityCondition::ControllerControlledMatchingAsCast { .. }

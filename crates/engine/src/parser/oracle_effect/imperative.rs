@@ -5658,6 +5658,15 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         } else {
             TargetFilter::Any
         }
+    } else if let Some(permanent_type) = parse_compound_you_and_permanents(text, &lower) {
+        // CR 615 + CR 614.1a: "to you and [<type>] permanents you control" — a
+        // compound player+permanent recipient (Comeuppance's "you and
+        // planeswalkers you control"; Channel Harm's "you and permanents you
+        // control"). Checked BEFORE the bare "to you" scan (which this phrase
+        // also contains) so the permanent leg is not dropped. Lowered to the
+        // dedicated `DamageTargetFilter::PlayerOrPermanentsControlledBy` at
+        // shield creation — never to a bare `Or` that would leak to `valid_card`.
+        TargetFilter::ControllerAndControlledPermanents { permanent_type }
     } else if nom_primitives::scan_contains(rest, "to you")
         || nom_primitives::scan_contains(rest, "to its controller")
     {
@@ -5717,23 +5726,48 @@ fn parse_prevent_that_would_deal_source_filter(text: &str, lower: &str) -> Optio
     }
 }
 
-/// CR 615.1: Optional trailing "by [source-filter]" on prevent clauses
-/// (Arachnogenesis: "by non-Spider creatures").
-fn parse_prevent_damage_source_filter(text: &str, lower: &str) -> Option<TargetFilter> {
-    let (_, filter_text) = nom_on_lower(text, lower, |input| {
-        value(
-            (),
-            (take_until::<_, _, OracleError<'_>>(" by "), tag(" by ")),
-        )
-        .parse(input)
-    })?;
-    let filter_text = filter_text.trim().trim_end_matches('.');
-    let (filter, rem) = parse_type_phrase(filter_text);
-    if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-        Some(filter)
-    } else {
-        None
-    }
+/// CR 615 + CR 614.1a: Recognize the compound damage recipient "you and
+/// [`<type>`] permanents you control". Returns the permanent-leg type
+/// restriction — `Some(Some(Planeswalker))` for Comeuppance's "you and
+/// planeswalkers you control", `Some(None)` for Channel Harm's bare "you and
+/// permanents you control", and `None` when the phrase is absent. Nom
+/// combinators only — the plural type word is a single `alt()` axis.
+fn parse_compound_you_and_permanents(text: &str, lower: &str) -> Option<Option<CoreType>> {
+    let region = TextPair::new(text, lower).strip_after("to you and ")?;
+    let (_, permanent_type) = you_and_controlled_permanent_type(region.lower).ok()?;
+    Some(permanent_type)
+}
+
+/// CR 614.1a: "`<plural-type>` you control" tail of the compound recipient. Maps
+/// the plural permanent-type word to its `CoreType` restriction; bare
+/// "permanents" carries no restriction (`None`).
+fn you_and_controlled_permanent_type(input: &str) -> OracleResult<'_, Option<CoreType>> {
+    let (input, permanent_type) = alt((
+        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+        value(Some(CoreType::Creature), tag("creatures")),
+        value(Some(CoreType::Artifact), tag("artifacts")),
+        value(Some(CoreType::Enchantment), tag("enchantments")),
+        value(Some(CoreType::Land), tag("lands")),
+        value(None, tag("permanents")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" you control").parse(input)?;
+    Ok((input, permanent_type))
+}
+
+/// CR 615.1 + CR 609.7b: Optional trailing "by [source-filter]" on
+/// prevent clauses. Routes the "by " remainder through the shared replacement-
+/// side source-noun grammar (`parse_damage_source_subject_filter`) so the
+/// prevent path and the "instead"/no-"instead" replacement paths share ONE
+/// source grammar. Covers typed sources (Arachnogenesis: "by non-Spider
+/// creatures") and controller-axis sources (Comeuppance: "by sources you don't
+/// control"; Channel Harm: "by sources you don't control"). The `_text` slice is
+/// unused here — the shared grammar consumes lowercase, matching the replacement
+/// side — but is retained for signature parity with the sibling extractors.
+fn parse_prevent_damage_source_filter(_text: &str, lower: &str) -> Option<TargetFilter> {
+    let (_, (_, after_by)) = nom_primitives::split_once_on(lower, " by ").ok()?;
+    let subject = after_by.trim().trim_end_matches('.').trim();
+    crate::parser::oracle_replacement::parse_damage_source_subject_filter(subject)
 }
 
 /// CR 609.7 + CR 615.2: Detect the source-scoped prevent form — "prevent
@@ -19306,6 +19340,80 @@ mod tests {
                 "wrong prevention_duration for {text:?}"
             );
         }
+    }
+
+    /// CR 615 + CR 614.1a: "to you and planeswalkers you control" lowers to the
+    /// compound `ControllerAndControlledPermanents { Planeswalker }` recipient,
+    /// NOT a bare `Controller` that would silently drop the planeswalker leg
+    /// (Comeuppance). "you and permanents you control" carries no type
+    /// restriction (Channel Harm).
+    #[test]
+    fn prevent_compound_recipient_you_and_controlled_permanents() {
+        use crate::types::card_type::CoreType;
+
+        let planeswalker_text =
+            "Prevent all damage that would be dealt to you and planeswalkers you control this turn.";
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(planeswalker_text, false)
+        else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: Some(CoreType::Planeswalker)
+            }
+        );
+
+        let permanents_text =
+            "Prevent all damage that would be dealt to you and permanents you control this turn.";
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(permanents_text, false)
+        else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: None
+            }
+        );
+    }
+
+    /// CR 615: the plain "to you" recipient must remain `Controller` — the
+    /// compound-recipient recognizer must not over-trigger on the bare form.
+    #[test]
+    fn prevent_plain_to_you_recipient_stays_controller() {
+        let text = "Prevent all damage that would be dealt to you this turn.";
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(text, false) else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(target, TargetFilter::Controller);
+    }
+
+    /// CR 609.7b: "by sources you don't control" lowers to a
+    /// controller-axis source filter (`ControllerRef::Opponent`) via the shared
+    /// replacement-side source grammar — a self source (you control) is NOT
+    /// matched (Comeuppance / Channel Harm).
+    #[test]
+    fn prevent_by_sources_you_dont_control_source_filter() {
+        use crate::types::ability::ControllerRef;
+
+        let text = "Prevent all damage that would be dealt to you and planeswalkers you control \
+                    this turn by sources you don't control.";
+        let Effect::PreventDamage {
+            damage_source_filter,
+            ..
+        } = parse_prevent_effect(text, false)
+        else {
+            panic!("expected PreventDamage");
+        };
+        let Some(TargetFilter::Typed(tf)) = damage_source_filter else {
+            panic!("expected Typed source filter, got {damage_source_filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(
+            tf.type_filters.is_empty(),
+            "\"sources\" carries no type restriction"
+        );
     }
 
     /// CR 119.3 + CR 608.2c: Kaya's Wrath lifegain (issue #2943) must parse

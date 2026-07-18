@@ -2514,6 +2514,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::HasObjectTarget
             | AbilityCondition::TriggeringSpellTargetsFilter { .. }
             | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
             | AbilityCondition::ControllerControlsMatching { .. }
             | AbilityCondition::ControllerControlledMatchingAsCast { .. }
@@ -7290,10 +7291,22 @@ fn resolve_chain_body(
                 // when that rider's condition is false. Mirrors the gated-sub
                 // sibling escape hatch (the `next.sub_link == SequentialSibling`
                 // branch below).
+                // CR 615.5 + CR 120.1: A sub whose gate is an INDEPENDENT per-event
+                // predicate — `PostReplacementDamageSourceMatchesFilter`
+                // (Comeuppance's two mutually-exclusive creature/noncreature
+                // reflection riders) — does not reference this node's effect, so it
+                // must be evaluated on its own regardless of whether this node's
+                // gate held. Without this, the noncreature rider never fires when
+                // the creature rider's gate is false (and vice-versa).
+                let sub_has_independent_event_gate = matches!(
+                    sub.condition.as_ref(),
+                    Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })
+                );
                 if sub
                     .condition
                     .as_ref()
                     .is_some_and(condition_depends_on_effect_performed)
+                    || sub_has_independent_event_gate
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
                         && sub.condition.is_none())
                 {
@@ -9611,6 +9624,21 @@ pub(crate) fn evaluate_condition(
                 &crate::game::filter::FilterContext::from_ability(ability),
             )
         }
+        // CR 615.5 + CR 120.1: "If damage from a [type] source is prevented this
+        // way, …" — gate a prevention rider on the type of the PREVENTED event's
+        // damage source (Comeuppance). Reads `post_replacement_event_source`,
+        // populated while the prevention continuation drains; absent outside that
+        // window → the gate is false and the rider does not fire.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => state
+            .post_replacement_event_source()
+            .is_some_and(|source_id| {
+                crate::game::filter::matches_target_filter(
+                    state,
+                    source_id,
+                    filter,
+                    &crate::game::filter::FilterContext::from_ability(ability),
+                )
+            }),
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             origin,
             destination,

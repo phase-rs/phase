@@ -4782,6 +4782,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::SourceIsTapped
         | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::ControllerControlsMatching { .. }
         | AbilityCondition::And { .. }

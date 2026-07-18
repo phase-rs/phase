@@ -509,6 +509,10 @@ impl EventObjectSnapshot {
             | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::OriginalSource
             | TargetFilter::PostReplacementDamageTarget
+            // CR 615.5 + CR 615: object/compound referents never reachable from
+            // the Connive subject grammar; resolving them needs live state.
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::ControllerAndControlledPermanents { .. }
             | TargetFilter::ChosenDamageSource { .. } => Unsupported,
         }
     }

@@ -65,6 +65,7 @@ mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
 mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;
+mod comeuppance;
 mod companion_special_action;
 mod consuming_vapors_rebound;
 mod copy_retarget_past_rider;

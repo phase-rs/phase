@@ -128,6 +128,16 @@ fn resolve_effect_recipients(
     if matches!(target_filter, TargetFilter::SelfRef) {
         return vec![TargetRef::Object(ability.source_id)];
     }
+    // CR 615.5 + CR 120.1: the prevented event's damage source object (Comeuppance
+    // reflecting to "that creature"). An OBJECT context ref — resolved here (not
+    // via `player_context_target`, which only projects players) before the
+    // `ability.targets` fallback, since the reflection rider carries no targets.
+    if matches!(target_filter, TargetFilter::PostReplacementDamageSource) {
+        return state
+            .post_replacement_event_source()
+            .map(|id| vec![TargetRef::Object(id)])
+            .unwrap_or_default();
+    }
     if let Some(target) = player_context_target(state, ability, target_filter) {
         return vec![target];
     }

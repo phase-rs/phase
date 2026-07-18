@@ -616,8 +616,15 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
         }
+        TargetFilter::PostReplacementDamageSource => "prevented event's damage source".into(),
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
         TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
+        TargetFilter::ControllerAndControlledPermanents { permanent_type } => {
+            match permanent_type {
+                Some(ct) => format!("you and {ct:?}s you control"),
+                None => "you and permanents you control".into(),
+            }
+        }
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::PlayerWhoChoseLabel { label } => format!("player who last chose {label}"),
@@ -3768,6 +3775,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::SourceMatchesFilter { filter } => {
             format!("source is {}", fmt_target(filter))
+        }
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
+            format!("prevented event's damage source is {}", fmt_target(filter))
         }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             destination,
@@ -7271,6 +7281,11 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 608.2c: Source filter conditions — resolved by `evaluate_condition`
         // against the ability source object.
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 615.5: Prevented-event damage-source filter — resolved by
+        // `evaluate_condition` against `post_replacement_event_source`.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. } => {
+            ("PostReplacementDamageSourceMatchesFilter", Handled)
+        }
         // CR 608.2c: Zone-change-this-way — resolved by `evaluate_condition`
         // against `state.last_zone_changed_ids`.
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
