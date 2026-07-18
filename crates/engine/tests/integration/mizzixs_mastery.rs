@@ -34,11 +34,16 @@ use engine::types::zones::Zone;
 const MIZZIX: &str = "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it, and you may cast the copy without paying its mana cost. Exile Mizzix's Mastery.\nOverload {5}{R}{R}{R} (You may cast this spell for its overload cost. If you do, change \"target\" in its text to \"each.\")";
 
 /// A graveyard instant/sorcery whose copy has a target-free, observable effect
-/// (gain 3 life for the copy's controller). Gain-life avoids copy-target
+/// (gain a chosen life amount for the copy's controller). Gain-life avoids copy-target
 /// selection so the `CastCopyOfCard` choice is the only interactive prompt.
-fn add_gain_life_spell(scenario: &mut GameScenario, name: &str, is_instant: bool) -> ObjectId {
+fn add_gain_life_spell(
+    scenario: &mut GameScenario,
+    name: &str,
+    is_instant: bool,
+    amount: i32,
+) -> ObjectId {
     let mut b = scenario.add_spell_to_graveyard(P0, name, is_instant);
-    b.from_oracle_text("You gain 3 life.");
+    b.from_oracle_text(&format!("You gain {amount} life."));
     b.id()
 }
 
@@ -137,7 +142,7 @@ fn normal_cast_accepts_and_casts_the_copy_then_self_exiles() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let mizzix = add_mizzix(&mut scenario);
-    let gy = add_gain_life_spell(&mut scenario, "Test Bolt", /* instant */ true);
+    let gy = add_gain_life_spell(&mut scenario, "Test Bolt", /* instant */ true, 3);
     let mut runner = scenario.build();
     with_p0_priority(&mut runner);
     let life0 = p0_life(&runner);
@@ -186,7 +191,7 @@ fn normal_cast_can_decline_its_only_copy() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let mizzix = add_mizzix(&mut scenario);
-    let gy = add_gain_life_spell(&mut scenario, "Test Bolt", /* instant */ true);
+    let gy = add_gain_life_spell(&mut scenario, "Test Bolt", /* instant */ true, 3);
     let mut runner = scenario.build();
     with_p0_priority(&mut runner);
     let life0 = p0_life(&runner);
@@ -289,8 +294,8 @@ fn overload_exiles_and_copies_each_spell_and_mizzix_ends_in_exile() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let mizzix = add_mizzix(&mut scenario);
-    let inst = add_gain_life_spell(&mut scenario, "Test Bolt", true);
-    let sorc = add_gain_life_spell(&mut scenario, "Test Divination", false);
+    let inst = add_gain_life_spell(&mut scenario, "Test Bolt", true, 3);
+    let sorc = add_gain_life_spell(&mut scenario, "Test Divination", false, 5);
     // A creature card in the graveyard that overload's "each instant or sorcery"
     // must NOT touch.
     let creature = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
@@ -351,7 +356,7 @@ fn overload_exiles_and_copies_each_spell_and_mizzix_ends_in_exile() {
     assert_eq!(
         p0_life(&runner),
         life0 + 3,
-        "exactly one copy was cast (accept one, decline one) → +3 life only"
+        "the selected +3 copy, rather than the declined +5 copy, was cast"
     );
     // Step 3b: the self-exile survives the overload transform.
     assert_eq!(
