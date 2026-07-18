@@ -528,12 +528,15 @@ def train_selfplay_model(
         X = X[finite_mask]
         y = y[finite_mask]
 
-    # train_test_split(stratify=y) requires at least two classes; a single-class
-    # phase (all wins or all losses) is unlabelable — skip it rather than crash.
-    if len(np.unique(y)) < 2:
+    # train_test_split(stratify=y) requires at least two classes AND at least
+    # two members per class; a single-class phase (all wins or all losses) or a
+    # class with one member (reachable under --allow-tiny-corpus, whose
+    # per-phase floor is 2) is unsplittable — skip it rather than crash.
+    classes, class_counts = np.unique(y, return_counts=True)
+    if len(classes) < 2 or class_counts.min() < 2:
         print(
-            f"  WARNING: {phase_name} has a single outcome class — skipping "
-            "(cannot stratify).",
+            f"  WARNING: {phase_name} lacks two outcome classes with >=2 "
+            "members each — skipping (cannot stratify).",
             file=sys.stderr,
         )
         return None
