@@ -24101,6 +24101,37 @@ fn immortal_sun_line1_covers_the_subject_and_type_class_generically() {
 }
 
 #[test]
+fn loyalty_activation_prohibition_accepts_singular_possessive_type() {
+    // The shared type parser accepts a singular type noun. The possessive suffix
+    // must therefore accept both singular spellings as well, otherwise an
+    // otherwise-valid class member silently falls through to Unimplemented.
+    for possessive in ["planeswalker's", "planeswalker\u{2019}s"] {
+        let text = format!("Players can't activate {possessive} loyalty abilities.");
+        let def = parse_static_line(&text)
+            .unwrap_or_else(|| panic!("singular possessive must parse: {text}"));
+        match def.mode {
+            StaticMode::CantBeActivated {
+                source_filter,
+                kind,
+                ..
+            } => {
+                assert_eq!(
+                    source_filter,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                    "singular possessive must retain the planeswalker filter: {text}"
+                );
+                assert_eq!(
+                    kind,
+                    Some(ActivatedAbilityKind::Loyalty),
+                    "singular possessive must retain the loyalty kind: {text}"
+                );
+            }
+            other => panic!("expected CantBeActivated for {text:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn regression_cant_be_activated_family_keeps_kind_none() {
     // CR 606.2: The kind axis is opt-in — pre-existing activation prohibitions
     // (Karn/Clarion source-scoped, Pithing Needle chosen-name, Damping Matrix

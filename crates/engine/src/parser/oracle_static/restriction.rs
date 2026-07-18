@@ -471,6 +471,8 @@ pub(crate) fn parse_subject_cant_activate_loyalty(
     let (tail, _) = alt((
         tag::<_, _, OracleError<'_>>("' loyalty abilities"),
         tag("\u{2019} loyalty abilities"),
+        tag("'s loyalty abilities"),
+        tag("\u{2019}s loyalty abilities"),
     ))
     .parse(after_type)
     .ok()?;
