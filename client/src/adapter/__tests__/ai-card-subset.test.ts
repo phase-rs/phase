@@ -142,6 +142,42 @@ describe("WasmAdapter AI-pool subset lifecycle", () => {
     expect(loadedB).not.toContain("Game A Card");
   });
 
+  it("degrades to the single-worker path when the rebuild subset fails, then retries next decision", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    mockWorkerClient.buildAiCardSubset
+      .mockResolvedValueOnce(
+        JSON.stringify({ kind: "subset", json: '{"Game A Card":{}}', count: 1 }),
+      )
+      .mockRejectedValueOnce(new Error("subset build failed"))
+      .mockResolvedValueOnce(
+        JSON.stringify({ kind: "subset", json: '{"Retry Card":{}}', count: 1 }),
+      );
+    mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    await adapter.warmCardDatabase();
+
+    // Game A: pool created and loaded normally.
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+
+    // Game B: the rebuild's subset resolution rejects. The decision must NOT
+    // reject (ensureAiPool is called outside getAiAction's try block) — it
+    // degrades to the single-worker path for this decision.
+    await adapter.resetGameState();
+    const degraded = await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(degraded).toEqual({ type: "PassPriority" });
+    expect(mockWorkerClient.getAiAction).toHaveBeenCalled();
+
+    // The failure is transient, not latched: the next decision retries the
+    // subset build and restores the pool with the fresh subset.
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(3);
+    const calls = mockWorkerClient.loadCardDb.mock.calls;
+    expect(calls[calls.length - 1][0] as string).toContain("Retry Card");
+  });
+
   it("drops the pool for an unbounded game (Momir) and restores it next game", async () => {
     const { WasmAdapter } = await import("../wasm-adapter");
 

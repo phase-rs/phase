@@ -455,7 +455,17 @@ export class WasmAdapter implements EngineAdapter {
       // The pool's subset is game-scoped: after `resetGameState` invalidated it,
       // rebuild this game's subset (the pool instance is preserved across games).
       if (this.cardDbLoaded && this.engine && !this.aiPool.isCardDbLoaded) {
-        return await this.loadAiPoolGameDb(this.engine, this.aiPool);
+        try {
+          return await this.loadAiPoolGameDb(this.engine, this.aiPool);
+        } catch (err) {
+          // Degrade to the single-worker path for this decision instead of
+          // crashing the AI flow (`getAiAction` calls ensureAiPool outside its
+          // try block). `isCardDbLoaded` stays false, so a transient failure
+          // retries on the next decision. A dead engine worker surfaces
+          // properly downstream via the single-worker path's classifier.
+          console.warn("Failed to load game DB into AI pool:", err);
+          return null;
+        }
       }
       return this.aiPool;
     }
