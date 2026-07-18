@@ -1009,6 +1009,7 @@ mod teamwork_keyword;
 mod teferis_puzzle_box_4241;
 mod tergrid_mirrormade_copy_on_effect_entry;
 mod the_mind_stone_harness_infinity;
+mod there_are_no_permanents_state_trigger;
 mod they_gain_keyword_anaphor;
 mod three_blind_mice;
 mod token_storm_scaling_gate;
