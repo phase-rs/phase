@@ -782,6 +782,7 @@ mod twice_instead_repeat_for;
 mod twilight_prophet_upkeep_drain_1375;
 mod typhoon_per_opponent_island_count;
 mod tyvar_activate_as_though_haste;
+mod unmaterialized_lki_serialization;
 mod unravel_counter_mana_value;
 mod unstoppable_slasher_half_life;
 mod urborg_scavengers_source_exiled_keyword_grant;

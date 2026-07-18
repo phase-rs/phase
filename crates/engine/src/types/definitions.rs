@@ -160,10 +160,10 @@ impl<T> From<Arc<Vec<T>>> for Definitions<T> {
     }
 }
 
-// Card-face data deliberately remains payload-only, while the live trigger
-// collection owns `TriggerEntry` provenance. These conversions are only a
-// construction bridge: the live layer/base-install authorities materialize a
-// concrete occurrence before runtime enumeration.
+// Production construction must materialize payload trigger definitions through
+// a base-install or grant authority. Test fixtures retain this bridge for
+// focused tests that deliberately exercise unmaterialized entries.
+#[cfg(any(test, feature = "test-support"))]
 impl From<Vec<crate::types::ability::TriggerDefinition>>
     for Definitions<crate::types::ability::TriggerEntry>
 {
@@ -172,6 +172,7 @@ impl From<Vec<crate::types::ability::TriggerDefinition>>
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl From<Arc<Vec<crate::types::ability::TriggerDefinition>>>
     for Definitions<crate::types::ability::TriggerEntry>
 {
