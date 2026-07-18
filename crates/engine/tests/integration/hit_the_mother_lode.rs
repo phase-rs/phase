@@ -153,11 +153,13 @@ fn discover_hit_cast_still_creates_seven_treasures() {
         })
         .expect("cast the discovered card for free");
 
-    // Observable effect of the free cast: the hit is no longer in the library.
-    assert_ne!(
+    // CR 608.2g: the accepted discovered card becomes the topmost stack object
+    // during the spell's resolution; accepting the offer must not leave it in
+    // exile or put it into hand.
+    assert_eq!(
         runner.state().objects[&hit].zone,
-        Zone::Library,
-        "the cast discovered card left the library"
+        Zone::Stack,
+        "the accepted discovered card is cast onto the stack"
     );
     assert_eq!(
         treasures(runner.state(), P0).len(),
