@@ -1,4 +1,4 @@
-//! CR 608.2c + CR 701.20a — Neera, Wild Mage's cast trigger must move the
+//! CR 608.2c — Neera, Wild Mage's cast trigger must move the
 //! TRIGGERING SPELL to the bottom of its owner's library, never Neera herself.
 //!
 //! Oracle (read from the pool export): "Whenever you cast a spell, you may put
