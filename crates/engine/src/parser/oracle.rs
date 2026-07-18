@@ -57,7 +57,7 @@ use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     lower_effect_chain_ir, parse_additional_cost_instead_condition_fragment, parse_effect_chain,
-    parse_effect_chain_with_context, rewrite_condition_keyword,
+    parse_effect_chain_ir, parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
@@ -68,6 +68,7 @@ use super::oracle_ir::doc::{
 };
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
+use super::oracle_ir::replacement::ReplacementIr;
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -82,6 +83,7 @@ use super::oracle_modal::{
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir, parse_replacement_line,
+    parse_replacement_line_ir,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -207,10 +209,10 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     parsed
 }
 
-fn parse_replacement_sentence_sequence(
+fn parse_replacement_sentence_sequence_ir(
     line: &str,
     card_name: &str,
-) -> Option<Vec<ReplacementDefinition>> {
+) -> Option<Vec<ReplacementIr>> {
     // CR 614.1c: Effects that read "[This permanent] enters with ...",
     // "As [this permanent] enters ...", or "[This permanent] enters as ..."
     // are replacement effects.
@@ -225,7 +227,7 @@ fn parse_replacement_sentence_sequence(
         if !is_replacement_pattern(&sentence.to_lowercase()) {
             return None;
         }
-        replacements.push(parse_replacement_line(sentence, card_name)?);
+        replacements.push(parse_replacement_line_ir(sentence, card_name)?);
     }
     Some(replacements)
 }
@@ -624,13 +626,21 @@ fn parse_begin_game_counter_clause(
     ))
 }
 
+fn lower_spell_node(node: &OracleNodeIr) -> Option<AbilityDefinition> {
+    match node {
+        OracleNodeIr::Spell(effect_ir) => Some(lower_effect_chain_ir(effect_ir)),
+        OracleNodeIr::PreLoweredSpell(definition) => Some(definition.clone()),
+        _ => None,
+    }
+}
+
 fn parsed_result_recently_granted_flashback(emitter: &DocEmitter<'_>) -> bool {
     // u4-c2: reads the emitter's last-emitted-per-category peeks instead of
     // `result.{abilities,triggers,statics}.last()` (the vectors moved into the
     // source-ordered builder). Same semantics: was flashback just granted?
     emitter
-        .last_ability()
-        .is_some_and(definition_grants_flashback)
+        .last_ability_definition()
+        .is_some_and(|definition| definition_grants_flashback(&definition))
         || emitter.last_trigger().is_some_and(|trigger| {
             trigger
                 .execute
@@ -950,7 +960,7 @@ fn parse_static_replacement_compound(
     line: &str,
     lower: &str,
     card_name: &str,
-) -> Option<(Vec<StaticDefinition>, Vec<ReplacementDefinition>)> {
+) -> Option<(Vec<StaticDefinition>, Vec<ReplacementIr>)> {
     // Re-attach the shared subject to each conjunct so each clause parses
     // independently (Oracle text drops the subject on the second conjunct).
     let (subject, p1, p2) = split_dual_cant_clause(line, lower)?;
@@ -959,8 +969,8 @@ fn parse_static_replacement_compound(
 
     let left_statics = parse_static_line_with_graveyard_keyword_continuation(&left, None, None);
     let right_statics = parse_static_line_with_graveyard_keyword_continuation(&right, None, None);
-    let left_repl = parse_replacement_line(&left, card_name);
-    let right_repl = parse_replacement_line(&right, card_name);
+    let left_repl = parse_replacement_line_ir(&left, card_name);
+    let right_repl = parse_replacement_line_ir(&right, card_name);
 
     // Each conjunct must be claimed by at least one layer; otherwise this is not
     // a clean cross-layer compound and the line belongs to the single-layer
@@ -1116,12 +1126,15 @@ fn try_split_and_cant_become_untapped(
 // vectors for a matching shape (a dual authority the parse/lower split removes).
 // ===========================================================================
 
-/// The lowered replacement definition an item carries, if it is a replacement.
-/// Only `PreLowered*` nodes are inspected: the dedicated IR variants
-/// (`Spell`/`Trigger`/`Static`/`Replacement`) are never constructed today, and
-/// gain relation participation when the dispatch-cutover unit builds them.
+/// The replacement definition an item carries, if it is a replacement.
+///
+/// `ReplacementIr` already owns the parsed definition relation discovery needs;
+/// lowering it is currently an identity conversion. Treat both representations
+/// uniformly so document relations are recovered before the lower seam folds
+/// the items into category vectors.
 fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
     match &item.node {
+        OracleNodeIr::Replacement(replacement_ir) => Some(&replacement_ir.definition),
         OracleNodeIr::PreLoweredReplacement(def) => Some(def),
         _ => None,
     }
@@ -3328,9 +3341,9 @@ struct DocEmitter<'a> {
     /// `result.{triggers,statics}.last()` (`parsed_result_recently_granted_flashback`).
     /// INSERTION recency: overwritten on each emit of that category. Safe as a
     /// clone-on-emit slot because NO `triggers.pop()`/`statics.pop()` exists in the
-    /// parser (doc.rs verifies this) — nothing can revert them. The ABILITY peek is
-    /// deliberately NOT here: it must be pop-aware, so `last_ability()` reads the
-    /// builder's `spells_emitted` stack via `peek_last_spell` instead.
+    /// parser (doc.rs verifies this) — nothing can revert them. The ability peek is
+    /// deliberately NOT here: it must be pop-aware, so `last_ability_node()` reads
+    /// the builder's `spells_emitted` stack via `peek_last_spell_node` instead.
     ///
     /// If a trigger/static pop is ever introduced, make these
     /// `*_emitted: Vec<OracleItemId>` stacks (like `spells_emitted`) first.
@@ -3399,8 +3412,8 @@ impl<'a> DocEmitter<'a> {
     }
 
     fn ability_at(&mut self, line: usize, def: AbilityDefinition) {
-        // No `last_ability` clone: the ability peek is pop-aware, read from the
-        // builder's `spells_emitted` stack (see `last_ability`).
+        // No ability clone: the ability peek is pop-aware, read from the builder's
+        // `spells_emitted` stack (see `last_ability_node`).
         self.emit_at(line, OracleNodeIr::PreLoweredSpell(def));
     }
     fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
@@ -3412,13 +3425,16 @@ impl<'a> DocEmitter<'a> {
         self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
     }
 
-    /// Last-emitted definition per category — the read-only peeks for
+    /// Last-emitted node per category — the read-only peeks for
     /// `parsed_result_recently_granted_flashback` (the one mid-loop reader of
-    /// `result.{abilities,triggers,statics}.last()`). All three are INSERTION
-    /// recency; `last_ability` is pop-aware (via `spells_emitted`), the other two
-    /// are clone-on-emit slots (no pop exists to revert them).
-    fn last_ability(&self) -> Option<&AbilityDefinition> {
-        self.builder.peek_last_spell()
+    /// `result.{abilities,triggers,statics}.last()`). All three are insertion
+    /// recency; `last_ability_node` is pop-aware (via `spells_emitted`), the other
+    /// two are clone-on-emit slots (no pop exists to revert them).
+    fn last_ability_node(&self) -> Option<&OracleNodeIr> {
+        self.builder.peek_last_spell_node()
+    }
+    fn last_ability_definition(&self) -> Option<AbilityDefinition> {
+        self.last_ability_node().and_then(lower_spell_node)
     }
     fn last_trigger(&self) -> Option<&TriggerDefinition> {
         self.last_trigger.as_ref()
@@ -4444,8 +4460,8 @@ pub(crate) fn parse_oracle_ir(
             && scan_contains(&lower, "enters with")
             && !scan_contains(&lower, "enters this way,")
         {
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 i += 1;
                 continue;
             }
@@ -4733,8 +4749,8 @@ pub(crate) fn parse_oracle_ir(
         // Corpus: Traxos, Scourge of Kroog; Grimgrin, Corpse-Born; Leviathan.
         if is_enters_tapped_cant_untap_compound(&lower) {
             let mut consumed = false;
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 consumed = true;
             }
             let defs = parse_static_line_with_graveyard_keyword_continuation(
@@ -4776,8 +4792,8 @@ pub(crate) fn parse_oracle_ir(
             for __item in statics {
                 emitter.static_at(item_line, __item);
             }
-            for __item in replacements {
-                emitter.replacement_at(item_line, __item);
+            for replacement_ir in replacements {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
             }
             i += 1;
             continue;
@@ -4913,21 +4929,23 @@ pub(crate) fn parse_oracle_ir(
             // replacement parsers; the legacy `as long as` precondition still
             // routes the duration-gated replacement fallback.
             if find_copy_verb_present(&lower) {
-                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
-                    for __item in rep_defs {
-                        emitter.replacement_at(item_line, __item);
+                if let Some(replacement_irs) =
+                    parse_replacement_sentence_sequence_ir(&line, card_name)
+                {
+                    for replacement_ir in replacement_irs {
+                        emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     }
                     i += 1;
                     continue;
                 }
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
             } else if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -4940,8 +4958,8 @@ pub(crate) fn parse_oracle_ir(
                 // replacement parser first; a line that is not actually an
                 // enters-with-counter replacement returns `None` and falls
                 // through to the static parser below.
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -5108,9 +5126,9 @@ pub(crate) fn parse_oracle_ir(
         {
             ctx.subject = None;
             ctx.actor = None;
-            let def = parse_effect_chain_with_context(&line, AbilityKind::Spell, &mut ctx);
-            if !has_unimplemented(&def) {
-                emitter.ability_at(item_line, def);
+            let effect_ir = parse_effect_chain_ir(&line, AbilityKind::Spell, &mut ctx);
+            if !has_unimplemented(&lower_effect_chain_ir(&effect_ir)) {
+                emitter.emit_at(item_line, OracleNodeIr::Spell(effect_ir));
                 i += 1;
                 continue;
             }
@@ -5158,15 +5176,16 @@ pub(crate) fn parse_oracle_ir(
             // A single Oracle paragraph can contain multiple independent ETB
             // replacement sentences. Parse each replacement sentence instead of
             // letting the first successful parser drop sibling modifiers.
-            if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
-                for __item in rep_defs {
-                    emitter.replacement_at(item_line, __item);
+            if let Some(replacement_irs) = parse_replacement_sentence_sequence_ir(&line, card_name)
+            {
+                for replacement_ir in replacement_irs {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 }
                 i += 1;
                 continue;
             }
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 i += 1;
                 continue;
             }
@@ -5179,16 +5198,17 @@ pub(crate) fn parse_oracle_ir(
             // exactly as the unprefixed Blind Obedience / Authority of the
             // Consuls lines do.
             if let Some(effect_text) = strip_ability_word(&line) {
-                if let Some(rep_defs) = parse_replacement_sentence_sequence(&effect_text, card_name)
+                if let Some(replacement_irs) =
+                    parse_replacement_sentence_sequence_ir(&effect_text, card_name)
                 {
-                    for __item in rep_defs {
-                        emitter.replacement_at(item_line, __item);
+                    for replacement_ir in replacement_irs {
+                        emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     }
                     i += 1;
                     continue;
                 }
-                if let Some(rep_def) = parse_replacement_line(&effect_text, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&effect_text, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -5532,7 +5552,8 @@ pub(crate) fn parse_oracle_ir(
             // the ability-word merge and the cross-line binder below exactly like any
             // other override — the binder wraps it in `ConditionInstead` and parks the
             // printed Dig as the `else_ability` fallback.
-            let dig_alt = emitter.builder.peek_last_spell().and_then(|previous| {
+            let previous_spell = emitter.last_ability_definition();
+            let dig_alt = previous_spell.as_ref().and_then(|previous| {
                 crate::parser::oracle_effect::conditions::try_parse_dig_instead_alternative(
                     &effect_line,
                     Some(previous),
@@ -5633,7 +5654,7 @@ pub(crate) fn parse_oracle_ir(
                     }
                     // No previous ability to compose with — restore condition and push standalone.
                     def.condition = Some(condition);
-                } else if emitter.builder.peek_last_spell().is_some() {
+                } else if emitter.last_ability_node().is_some() {
                     // CR 614.6: "If an event is replaced, it never happens."
                     //
                     // The line IS a self-replacement override of the preceding
@@ -5657,8 +5678,7 @@ pub(crate) fn parse_oracle_ir(
                     def.sub_ability = None;
                     def.else_ability = None;
                 }
-            } else if is_unbindable_self_replacement && emitter.builder.peek_last_spell().is_some()
-            {
+            } else if is_unbindable_self_replacement && emitter.last_ability_node().is_some() {
                 // CR 614.6 + CR 614.15: the residual self-replacement printings — a
                 // PARTIAL override whose antecedent is not a Dig ("search your library
                 // for up to three basic Forest cards instead of two"), or one that

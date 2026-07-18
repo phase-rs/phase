@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 453
 expression: "&ir"
 ---
 {
@@ -22,30 +23,34 @@ expression: "&ir"
         "fragment": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on that creature instead."
       },
       "node": {
-        "PreLoweredReplacement": {
-          "event": "AddCounter",
-          "execute": null,
-          "mode": {
-            "type": "Mandatory"
+        "Replacement": {
+          "definition": {
+            "event": "AddCounter",
+            "execute": null,
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on that creature instead.",
+            "condition": null,
+            "quantity_modification": {
+              "type": "Plus",
+              "value": 1
+            },
+            "counter_match": {
+              "type": "OfType",
+              "data": "P1P1"
+            }
           },
-          "valid_card": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": "You",
-            "properties": []
-          },
-          "description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on that creature instead.",
-          "condition": null,
-          "quantity_modification": {
-            "type": "Plus",
-            "value": 1
-          },
-          "counter_match": {
-            "type": "OfType",
-            "data": "P1P1"
-          }
+          "source_text": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on that creature instead.",
+          "execute_ir": null
         }
       }
     },
