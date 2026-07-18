@@ -15,9 +15,9 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    AutoMayChoice, DelayedTrigger, DistributionUnit, GameState, MayTriggerAutoChoiceKey,
-    MayTriggerOrigin, StackEntry, StackEntryKind, TargetSelectionConstraint, TriggerSourceContext,
-    WaitingFor,
+    AutoMayChoice, DelayedTrigger, DistributionUnit, GameState, LatchedBatchedTrigger,
+    LatchedSuppressTrigger, LogicalZoneChangeGroup, MayTriggerAutoChoiceKey, MayTriggerOrigin,
+    StackEntry, StackEntryKind, TargetSelectionConstraint, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::WardCost;
@@ -541,6 +541,105 @@ fn reconcile_off_zone_keyword_triggers(state: &mut GameState) {
         obj.trigger_occurrence_state = occurrence_state;
         obj.trigger_definitions = trigger_definitions.into();
     }
+}
+
+/// Project a currently functioning source through the same owned source
+/// snapshot authority used for a zone-change record. The synthetic `to` is
+/// never emitted as an event; it only lets the existing snapshot constructor
+/// preserve the source's exact current zone without rebuilding trigger-entry
+/// provenance at a collection site.
+fn trigger_source_context_for_latch(
+    state: &GameState,
+    source: &GameObject,
+) -> TriggerSourceContext {
+    let mut record = source.snapshot_for_zone_change(source.id, Some(source.zone), source.zone);
+    record.attachments = super::zones::capture_attachment_snapshot(state, source);
+    record.linked_exile_snapshot =
+        super::zones::capture_linked_exile_snapshot(state, source.id, source.zone);
+    record.combat_status = super::zones::capture_combat_status(state, source.id);
+    record.sync_trigger_source_context();
+    record
+        .trigger_source_context()
+        .cloned()
+        .expect("zone-change source snapshot always owns its trigger source context")
+}
+
+/// CR 603.10: Capture the full immediately-before authority for a logical
+/// zone-change owner after its initial layer flush and before its first
+/// delivery, preserving the look-back exception's pre-event trigger state.
+///
+/// Trigger source zones deliberately mirror the existing collector's scope.
+/// Suppressors mirror its existing active battlefield-static gather, so this
+/// latching step preserves behavior while moving ownership from a later live
+/// scan into the serialized carrier.
+fn latch_logical_zone_change_group_immediately_before(
+    state: &GameState,
+    group: &mut LogicalZoneChangeGroup,
+) {
+    let mut batched_triggers = Vec::new();
+    for zone in [
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Zone::Exile,
+        Zone::Stack,
+        Zone::Command,
+    ] {
+        for source_id in trigger_source_ids_for_zone(state, zone) {
+            let Some(source) = state.objects.get(&source_id) else {
+                continue;
+            };
+            let source_context = trigger_source_context_for_latch(state, source);
+            for active in super::functioning_abilities::active_trigger_definitions(state, source) {
+                if active.definition.batched
+                    && trigger_definition_functions_in_zone(active.definition, zone)
+                {
+                    batched_triggers.push(LatchedBatchedTrigger {
+                        definition_ref: active.definition_ref,
+                        definition: active.definition.clone(),
+                        source_context: source_context.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    let suppress_triggers = super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(source, definition)| {
+            let StaticMode::SuppressTriggers {
+                source_filter,
+                events,
+            } = &definition.mode
+            else {
+                return None;
+            };
+            Some(LatchedSuppressTrigger {
+                source_context: trigger_source_context_for_latch(state, source),
+                source_filter: source_filter.clone(),
+                events: events.clone(),
+            })
+        })
+        .collect();
+
+    group
+        .latch_immediately_before(batched_triggers, suppress_triggers)
+        .expect("a new logical zone-change group is latched exactly once");
+}
+
+/// Allocate one fully latched logical zone-change owner for either final pause
+/// carrier. The authority projection receives the required initial layer flush
+/// and off-zone reconciliation before it is latched, while the live move state
+/// retains its existing flush boundary at trigger collection. This avoids
+/// changing move-time state merely to construct a serialized observation owner.
+pub(crate) fn allocate_logical_zone_change_group(
+    state: &mut GameState,
+    announced_members: &[ObjectId],
+) -> LogicalZoneChangeGroup {
+    let mut immediately_before_state = state.clone();
+    super::layers::flush_layers(&mut immediately_before_state);
+    reconcile_off_zone_keyword_triggers(&mut immediately_before_state);
+    let mut group = state.allocate_logical_zone_change_group(announced_members);
+    latch_logical_zone_change_group_immediately_before(&immediately_before_state, &mut group);
+    group
 }
 
 #[derive(Clone, Copy)]
@@ -8693,6 +8792,85 @@ pub mod tests {
         let missing_context =
             ZoneChangeRecord::test_minimal(object.id, Some(Zone::Battlefield), Zone::Graveyard);
         assert!(ltb_trigger_source_context(&missing_context, object.id).is_none());
+    }
+
+    #[test]
+    fn logical_zone_change_owner_latches_pre_delivery_batched_sources_and_suppressors() {
+        let mut state = setup();
+        let battlefield_source = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Battlefield batch source".to_string(),
+            Zone::Battlefield,
+        );
+        let graveyard_source = create_object(
+            &mut state,
+            CardId(82),
+            PlayerId(0),
+            "Graveyard batch source".to_string(),
+            Zone::Graveyard,
+        );
+        let suppressor = create_object(
+            &mut state,
+            CardId(83),
+            PlayerId(0),
+            "Suppressor".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut battlefield_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        battlefield_trigger.batched = true;
+        let mut graveyard_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        graveyard_trigger.batched = true;
+        graveyard_trigger.trigger_zones = vec![Zone::Graveyard];
+        for (source_id, trigger) in [
+            (battlefield_source, battlefield_trigger),
+            (graveyard_source, graveyard_trigger),
+        ] {
+            let source = state.objects.get_mut(&source_id).expect("source exists");
+            std::sync::Arc::make_mut(&mut source.base_trigger_definitions).push(trigger);
+            source.materialize_base_trigger_definitions();
+        }
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&suppressor)
+                .expect("suppressor exists")
+                .base_static_definitions,
+        )
+        .push(StaticDefinition::new(StaticMode::SuppressTriggers {
+            source_filter: TargetFilter::Typed(TypedFilter::creature()),
+            events: vec![SuppressedTriggerEvent::EntersBattlefield],
+        }));
+        state.layers_dirty.mark_full();
+
+        let group = allocate_logical_zone_change_group(&mut state, &[]);
+        let (batched, suppressors) = group
+            .immediately_before_latches()
+            .expect("empty-member owner still has pre-delivery authority");
+
+        assert_eq!(batched.len(), 2);
+        assert_eq!(
+            batched
+                .iter()
+                .map(|latched| latched.definition_ref.source.object_id)
+                .collect::<HashSet<_>>(),
+            HashSet::from([battlefield_source, graveyard_source])
+        );
+        assert!(batched.iter().all(|latched| {
+            latched.definition_ref.source == latched.source_context.identity.reference
+                && latched.definition.batched
+        }));
+        assert_eq!(suppressors.len(), 1);
+        assert_eq!(
+            suppressors[0].source_context.identity.reference.object_id,
+            suppressor
+        );
+        assert_eq!(
+            suppressors[0].events,
+            vec![SuppressedTriggerEvent::EntersBattlefield]
+        );
     }
 
     /// Helper to create a minimal TriggerDefinition with typed fields.

@@ -15,7 +15,7 @@ use super::ability::{
     KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
     ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
     TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerCondition,
-    TriggerDefinitionRef, TriggerEntry,
+    TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -1498,6 +1498,28 @@ pub struct LogicalZoneChangeBattlefieldDeparture {
     pub source_context: TriggerSourceContext,
 }
 
+/// A batched trigger definition captured before the first delivery of one
+/// logical zone-change action.
+///
+/// The definition reference and source context are both event-time authority:
+/// neither may be rebuilt from a later live object whose grant generation or
+/// incarnation could have changed while the action was paused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatchedBatchedTrigger {
+    pub definition_ref: TriggerDefinitionRef,
+    pub definition: TriggerDefinition,
+    pub source_context: TriggerSourceContext,
+}
+
+/// A functioning trigger-suppression static captured with the pre-delivery
+/// authority of one logical zone-change action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatchedSuppressTrigger {
+    pub source_context: TriggerSourceContext,
+    pub source_filter: TargetFilter,
+    pub events: Vec<crate::types::statics::SuppressedTriggerEvent>,
+}
+
 /// Complete ownership for one logical zone-change action.
 ///
 /// Both pause carriers persist this same shape. It deliberately has no serde
@@ -1509,6 +1531,13 @@ pub struct LogicalZoneChangeGroup {
     pub prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
     pub terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
     pub all_origin_occurrences: Vec<LogicalZoneChangeOccurrence>,
+    /// `true` only after the initial pre-delivery layer flush has captured the
+    /// full batched-trigger and trigger-suppression authority. This marker is
+    /// required even for an empty member set or an empty latch, so a legacy
+    /// active owner can never masquerade as a proven empty snapshot.
+    pub immediately_before_latched: bool,
+    pub immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
+    pub immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
 }
 
 impl LogicalZoneChangeGroup {
@@ -1525,7 +1554,40 @@ impl LogicalZoneChangeGroup {
             prospective_battlefield_members,
             terminal_outcomes,
             all_origin_occurrences: Vec::new(),
+            immediately_before_latched: false,
+            immediately_before_batched_triggers: Vec::new(),
+            immediately_before_suppress_triggers: Vec::new(),
         }
+    }
+
+    /// Install the one authoritative pre-delivery trigger latch. Re-latching a
+    /// paused action would silently replace event-time authority, so it is
+    /// rejected even when the first snapshot happened to be empty.
+    pub fn latch_immediately_before(
+        &mut self,
+        batched_triggers: Vec<LatchedBatchedTrigger>,
+        suppress_triggers: Vec<LatchedSuppressTrigger>,
+    ) -> Result<(), String> {
+        if self.immediately_before_latched {
+            return Err("logical zone-change group already has an immediately-before latch".into());
+        }
+        self.immediately_before_latched = true;
+        self.immediately_before_batched_triggers = batched_triggers;
+        self.immediately_before_suppress_triggers = suppress_triggers;
+        Ok(())
+    }
+
+    /// Returns the carrier-owned pre-delivery authority only once its explicit
+    /// latch marker proves it was captured.
+    pub fn immediately_before_latches(
+        &self,
+    ) -> Result<(&[LatchedBatchedTrigger], &[LatchedSuppressTrigger]), String> {
+        self.immediately_before_latched
+            .then_some((
+                self.immediately_before_batched_triggers.as_slice(),
+                self.immediately_before_suppress_triggers.as_slice(),
+            ))
+            .ok_or_else(|| "logical zone-change group lacks an immediately-before latch".into())
     }
 
     /// Retain the actual `ZoneChanged` records emitted by one explicitly-bounded
@@ -1635,6 +1697,7 @@ impl LogicalZoneChangeGroup {
     /// Call only after every announced prospective member has reached a terminal
     /// result; a paused owner is intentionally allowed to retain `Pending` slots.
     pub fn validate_complete(&self) -> Result<(), String> {
+        self.immediately_before_latches()?;
         if self.prospective_battlefield_members.len() != self.terminal_outcomes.len() {
             return Err("logical zone-change member/outcome lengths differ".to_string());
         }
@@ -16484,11 +16547,13 @@ mod tests {
 
     #[test]
     fn pending_change_zone_iteration_modern_shape_roundtrips() {
+        let mut logical_zone_change_group =
+            LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(1), Vec::new());
+        logical_zone_change_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("empty immediately-before authority is still explicitly latched");
         let original = PendingChangeZoneIteration {
-            logical_zone_change_group: LogicalZoneChangeGroup::new(
-                LogicalZoneChangeGroupId(1),
-                Vec::new(),
-            ),
+            logical_zone_change_group,
             paused_current: None,
             remaining: vec![],
             source_id: ObjectId(7),
@@ -16544,6 +16609,19 @@ mod tests {
         assert!(
             error.to_string().contains("logical_zone_change_group"),
             "missing group rejection must name the missing authority: {error}"
+        );
+
+        let mut missing_latch = serde_json::to_value(&original).expect("serialize modern carrier");
+        let group = missing_latch
+            .get_mut("logical_zone_change_group")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("modern carrier includes its logical owner");
+        group.remove("immediately_before_latched");
+        let error = serde_json::from_value::<PendingChangeZoneIteration>(missing_latch)
+            .expect_err("legacy active carrier without pre-event authority must reject");
+        assert!(
+            error.to_string().contains("immediately_before_latched"),
+            "missing latch rejection must name the missing authority: {error}"
         );
     }
 
@@ -16634,6 +16712,9 @@ mod tests {
                 },
             ],
         );
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("test group owns an explicit pre-delivery latch");
         let events = vec![
             GameEvent::ZoneChanged {
                 object_id: first.id,
@@ -16721,6 +16802,9 @@ mod tests {
                 },
             ],
         );
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("test group owns an explicit pre-delivery latch");
         let events = vec![
             GameEvent::ZoneChanged {
                 object_id: first.id,

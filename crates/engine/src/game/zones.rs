@@ -1130,7 +1130,7 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
     mark_simultaneous_departures(slice, &departed);
 }
 
-fn capture_linked_exile_snapshot(
+pub(crate) fn capture_linked_exile_snapshot(
     state: &GameState,
     source_id: ObjectId,
     from: Zone,
@@ -1200,7 +1200,10 @@ fn sever_battlefield_attachment_graph_on_exit(
     }
 }
 
-fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCombatStatus {
+pub(crate) fn capture_combat_status(
+    state: &GameState,
+    object_id: ObjectId,
+) -> ZoneChangeCombatStatus {
     let Some(combat) = &state.combat else {
         return ZoneChangeCombatStatus::default();
     };

@@ -997,7 +997,8 @@ pub(crate) fn move_objects_simultaneously_then(
     let event_start = events.len();
     let zone_change_record_start = state.zone_changes_this_turn.len();
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
-    let logical_zone_change_group = state.allocate_logical_zone_change_group(&ids);
+    let logical_zone_change_group =
+        crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let destination = reqs.first().map(|r| r.to);
     match deliver_batch(state, reqs, events) {
         BatchMoveResult::Done => {
@@ -1062,7 +1063,8 @@ pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: Batch
 fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut PendingBatchDeliveries {
     if state.pending_batch_deliveries.is_none() {
         let zone_change_record_start = state.zone_changes_this_turn.len();
-        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(state, &[]);
         state.pending_batch_deliveries = Some(PendingBatchDeliveries {
             logical_zone_change_group,
             paused_current: None,
@@ -1195,7 +1197,10 @@ fn stash_batch_tail(
         .map(ZoneMoveRequest::into_pending)
         .collect();
     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
-        logical_zone_change_group: state.allocate_logical_zone_change_group(&announced_members),
+        logical_zone_change_group: crate::game::triggers::allocate_logical_zone_change_group(
+            state,
+            &announced_members,
+        ),
         paused_current,
         remaining,
         destination,

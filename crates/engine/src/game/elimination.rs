@@ -973,11 +973,15 @@ mod tests {
     fn pending_search_found_zone_delivery(
         object_id: ObjectId,
     ) -> crate::types::game_state::PendingBatchDeliveries {
+        let mut logical_zone_change_group = crate::types::game_state::LogicalZoneChangeGroup::new(
+            crate::types::identifiers::LogicalZoneChangeGroupId(1),
+            Vec::new(),
+        );
+        logical_zone_change_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("test batch owner has explicit pre-delivery authority");
         crate::types::game_state::PendingBatchDeliveries {
-            logical_zone_change_group: crate::types::game_state::LogicalZoneChangeGroup::new(
-                crate::types::identifiers::LogicalZoneChangeGroupId(1),
-                Vec::new(),
-            ),
+            logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
             destination: Zone::Exile,

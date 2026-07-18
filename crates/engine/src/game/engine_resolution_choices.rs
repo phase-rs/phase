@@ -4165,7 +4165,10 @@ pub(super) fn handle_resolution_choice(
                     })?;
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     let logical_zone_change_group =
-                        state.allocate_logical_zone_change_group(&chosen_ids);
+                        crate::game::triggers::allocate_logical_zone_change_group(
+                            state,
+                            &chosen_ids,
+                        );
                     for (i, card_id) in chosen_ids.iter().enumerate() {
                         let origin = state
                             .objects
@@ -4587,7 +4590,10 @@ pub(super) fn handle_resolution_choice(
                     let events_before_effect = events.len();
                     let chosen_ids: Vec<_> = chosen.to_vec();
                     let logical_zone_change_group =
-                        state.allocate_logical_zone_change_group(&chosen_ids);
+                        crate::game::triggers::allocate_logical_zone_change_group(
+                            state,
+                            &chosen_ids,
+                        );
                     for (i, card_id) in chosen_ids.iter().enumerate() {
                         let anticipated_pause =
                             effects::change_zone::anticipated_zone_change_delivery(
