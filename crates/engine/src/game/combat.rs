@@ -118,13 +118,33 @@ pub enum CombatRequirement {
     /// (`StaticMode::MustAttackPlayer`) intersected with the currently
     /// attackable players; empty for a generic "attacks each combat if able"
     /// requirement or for goad with no surviving specific-player constraint.
-    MustAttack { players: Vec<PlayerId> },
-    /// CR 509.1c: this creature blocks this combat if able.
-    MustBlock,
+    /// `sources` names the objects imposing the requirement (intrinsic → the
+    /// creature itself; remote → the anthem/`Goaded`-static carrier). EMPTY
+    /// when the only cause is player-level goad (`goaded_by`), which carries no
+    /// object (CR 701.15b).
+    MustAttack {
+        players: Vec<PlayerId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<ObjectId>,
+    },
+    /// CR 509.1c: this creature blocks this combat if able. `sources` = the
+    /// `MustBlock` static carriers.
+    MustBlock {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<ObjectId>,
+    },
     /// CR 508.1c: this creature can't attack (informational — the UI greys it).
-    CantAttack,
+    /// `sources` = the restriction carriers (Pacifism, Angelic Arbiter).
+    CantAttack {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<ObjectId>,
+    },
     /// CR 509.1b: this creature can't block (informational — the UI greys it).
-    CantBlock,
+    /// `sources` = the "can't block" restriction carriers.
+    CantBlock {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<ObjectId>,
+    },
 }
 
 /// Tracks the state of the current combat phase.
@@ -995,6 +1015,23 @@ fn blocker_has_cant_block_static_from_precomputed(
         .is_some()
 }
 
+/// CR 509.1b: sorted, deduped carriers of every "can't block" restriction on
+/// `obj_id`, drawn from the SAME iterator `blocker_has_cant_block_static_from_precomputed`
+/// reduces to a bool. Payload path only.
+fn cant_block_sources(
+    state: &GameState,
+    obj_id: ObjectId,
+    blocker_restriction: &[(ObjectId, StaticDefinition)],
+) -> Vec<ObjectId> {
+    let mut sources: Vec<ObjectId> =
+        blocker_restriction_statics_for_from_precomputed(state, obj_id, blocker_restriction)
+            .map(|(_, src)| src)
+            .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
 /// CR 509.1c: each `MustBeBlocked` requirement functioning on `attacker_id`,
 /// paired with its optional blocker filter (`None` = any blocker satisfies the
 /// requirement; `Some(filter)` = only a blocker matching `filter` does) and the
@@ -1107,6 +1144,40 @@ pub fn validate_blockers(
     validate_blockers_for_player(state, defending_player, assignments)
 }
 
+/// CR 509.1c: does `obj` carry an intrinsic generic `MustBlock` static? The
+/// single authority both `creature_has_must_block_requirement` and
+/// `must_block_sources_gated` consume for the local must-block arm.
+fn has_local_must_block(state: &GameState, obj: &GameObject) -> bool {
+    super::functioning_abilities::active_static_definitions(state, obj)
+        .any(|sd| sd.mode == StaticMode::MustBlock)
+}
+
+/// CR 509.1c: sorted, deduped carriers of every must-block cause on `obj`.
+/// Called by the producer ONLY when `creature_has_must_block_requirement`
+/// already returned true (all exemptions cleared).
+fn must_block_sources_gated(
+    state: &GameState,
+    obj: &GameObject,
+    obj_id: ObjectId,
+    has_must_block_static: bool,
+) -> Vec<ObjectId> {
+    let mut sources = Vec::new();
+    // CR 509.1c: intrinsic generic MustBlock → carrier = the creature itself.
+    if has_local_must_block(state, obj) {
+        sources.push(obj_id);
+    }
+    if has_must_block_static {
+        sources.extend(crate::game::static_abilities::check_static_ability_sources(
+            state,
+            StaticMode::MustBlock,
+            &static_target_ctx(obj_id),
+        ));
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
 /// CR 509.1c: Whether `obj_id` carries an *obey-able* generic MustBlock
 /// requirement for `player` — the enforcement predicate from the generic-MustBlock
 /// loop in `validate_blockers_for_player` MINUS the "already assigned" check. It
@@ -1137,16 +1208,12 @@ fn creature_has_must_block_requirement(
     // CR 509.1c: MustBlock — directly on this creature or from a cross-permanent
     // static ("All creatures block each combat if able").
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
-    let has_must_block = super::functioning_abilities::active_static_definitions(state, obj)
-        .any(|sd| sd.mode == StaticMode::MustBlock)
+    let has_must_block = has_local_must_block(state, obj)
         || (has_must_block_static
             && crate::game::static_abilities::check_static_ability(
                 state,
                 StaticMode::MustBlock,
-                &crate::game::static_abilities::StaticCheckContext {
-                    target_id: Some(obj_id),
-                    ..Default::default()
-                },
+                &static_target_ctx(obj_id),
             ));
     if !has_must_block {
         return false;
@@ -2347,6 +2414,45 @@ pub fn creature_cant_attack(state: &GameState, obj_id: ObjectId) -> bool {
 /// `attack_defended.is_none()` (a defender-scoped "can't attack player X" must
 /// NOT count — the creature can still attack someone else); (2) remote gated
 /// `CantAttack`; (3) remote gated `CantAttackOrBlock`.
+/// `StaticCheckContext` targeting `obj_id` — the shared context both the
+/// enforcement bools (`check_static_ability`) and the source collectors
+/// (`check_static_ability_sources`) pass to the static layer.
+fn static_target_ctx(obj_id: ObjectId) -> crate::game::static_abilities::StaticCheckContext {
+    crate::game::static_abilities::StaticCheckContext {
+        target_id: Some(obj_id),
+        ..Default::default()
+    }
+}
+
+/// CR 508.1c + CR 604.1 + CR 109.5: local intrinsic "can't attack" match for one
+/// definition — a non-defender-scoped `CantAttack`/`CantAttackOrBlock` whose
+/// affected filter (if any) matches `obj_id`. The single authority both the
+/// enforcement bool `creature_cant_attack_gated` and the source collector
+/// `cant_attack_sources_gated` consume — no parallel re-implementation.
+fn local_cant_attack_def_applies(
+    state: &GameState,
+    obj_id: ObjectId,
+    sd: &StaticDefinition,
+) -> bool {
+    matches!(
+        sd.mode,
+        StaticMode::CantAttack | StaticMode::CantAttackOrBlock
+    ) && sd.attack_defended.is_none()
+        && match sd.affected.as_ref() {
+            // CR 604.1 + CR 109.5: an unscoped source-local attack
+            // restriction is intrinsic to its own source.
+            None => true,
+            // CR 508.1c: scoped attack restrictions affect this source only
+            // when their affected filter actually matches it.
+            Some(filter) => matches_target_filter(
+                state,
+                obj_id,
+                filter,
+                &FilterContext::from_source(state, obj_id),
+            ),
+        }
+}
+
 fn creature_cant_attack_gated(
     state: &GameState,
     obj_id: ObjectId,
@@ -2358,25 +2464,8 @@ fn creature_cant_attack_gated(
     // CR 508.1c: local CantAttack / CantAttackOrBlock, but only the
     // non-defender-scoped forms — a defender-scoped restriction ("can't attack
     // player X") leaves the creature able to attack another target.
-    super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
-        matches!(
-            sd.mode,
-            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-        ) && sd.attack_defended.is_none()
-            && match sd.affected.as_ref() {
-                // CR 604.1 + CR 109.5: an unscoped source-local attack
-                // restriction is intrinsic to its own source.
-                None => true,
-                // CR 508.1c: scoped attack restrictions affect this source only
-                // when their affected filter actually matches it.
-                Some(filter) => matches_target_filter(
-                    state,
-                    obj_id,
-                    filter,
-                    &FilterContext::from_source(state, obj_id),
-                ),
-            }
-    })
+    super::functioning_abilities::active_static_definitions(state, obj)
+        .any(|sd| local_cant_attack_def_applies(state, obj_id, sd))
     // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics (Angelic
     // Arbiter restricting opponents' creatures) resolved via the shared
     // `check_static_ability` building block.
@@ -2384,20 +2473,52 @@ fn creature_cant_attack_gated(
         && crate::game::static_abilities::check_static_ability(
             state,
             StaticMode::CantAttack,
-            &crate::game::static_abilities::StaticCheckContext {
-                target_id: Some(obj_id),
-                ..Default::default()
-            },
+            &static_target_ctx(obj_id),
         ))
     || (gates.has_cant_attack_or_block
         && crate::game::static_abilities::check_static_ability(
             state,
             StaticMode::CantAttackOrBlock,
-            &crate::game::static_abilities::StaticCheckContext {
-                target_id: Some(obj_id),
-                ..Default::default()
-            },
+            &static_target_ctx(obj_id),
         ))
+}
+
+/// CR 508.1c: sorted, deduped carriers of every functioning "can't attack"
+/// restriction on `obj_id`. Mirrors `creature_cant_attack_gated` arm-for-arm —
+/// the enforcement bool early-returns over the same predicates; this payload-path
+/// collector accumulates the carrier ids instead.
+fn cant_attack_sources_gated(
+    state: &GameState,
+    obj_id: ObjectId,
+    gates: &CombatStaticGates,
+) -> Vec<ObjectId> {
+    let Some(obj) = state.objects.get(&obj_id) else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    // CR 604.1 + CR 109.5: an intrinsic restriction's carrier is the creature itself.
+    if super::functioning_abilities::active_static_definitions(state, obj)
+        .any(|sd| local_cant_attack_def_applies(state, obj_id, sd))
+    {
+        sources.push(obj_id);
+    }
+    if gates.has_cant_attack {
+        sources.extend(crate::game::static_abilities::check_static_ability_sources(
+            state,
+            StaticMode::CantAttack,
+            &static_target_ctx(obj_id),
+        ));
+    }
+    if gates.has_cant_attack_or_block {
+        sources.extend(crate::game::static_abilities::check_static_ability_sources(
+            state,
+            StaticMode::CantAttackOrBlock,
+            &static_target_ctx(obj_id),
+        ));
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    sources
 }
 
 /// CR 508.1d / CR 701.15b: True if `obj_id` is a creature controlled by the
@@ -2449,6 +2570,54 @@ pub(crate) fn must_attack_players_for_creature(
         .collect()
 }
 
+/// CR 508.1d: does `obj` carry an intrinsic generic `MustAttack` static? The
+/// single authority both `creature_must_attack_with_attackable_players_gated`
+/// and `must_attack_sources_gated` consume for the local must-attack arm.
+fn has_local_must_attack(state: &GameState, obj: &GameObject) -> bool {
+    super::functioning_abilities::active_static_definitions(state, obj)
+        .any(|sd| sd.mode == StaticMode::MustAttack)
+}
+
+/// CR 508.1d + CR 701.15b/c: sorted, deduped carriers of every must-attack cause
+/// on `obj`. Called by the producer ONLY when the enforcement bool already
+/// returned true (all exemptions cleared), so no exemption re-check is needed.
+/// `has_attackable_must_player` is precomputed by the producer (n6: the single
+/// `must_attack_players_for_creature` scan feeds both `players` and this).
+/// Direct `goaded_by` designations contribute NO source (CR 701.15b, player-level).
+fn must_attack_sources_gated(
+    state: &GameState,
+    obj: &GameObject,
+    obj_id: ObjectId,
+    gates: &CombatStaticGates,
+    has_attackable_must_player: bool,
+) -> Vec<ObjectId> {
+    let mut sources = Vec::new();
+    // CR 508.1d: intrinsic generic MustAttack (Juggernaut) → carrier = the creature.
+    if has_local_must_attack(state, obj) {
+        sources.push(obj_id);
+    }
+    if gates.has_must_attack {
+        sources.extend(crate::game::static_abilities::check_static_ability_sources(
+            state,
+            StaticMode::MustAttack,
+            &static_target_ctx(obj_id),
+        ));
+    }
+    // CR 701.15c: Goaded-static carriers. Direct player-goad contributes none.
+    if gates.has_goad {
+        crate::game::perf_counters::record_static_full_scan();
+        sources.extend(goad_static_hits_for_creature(state, obj_id).map(|(_, src)| src));
+    }
+    // CR 508.1d: MustAttackPlayer statics are local (`must_attack_players_for_creature`
+    // scans `active_static_definitions`) → carrier = the creature itself.
+    if has_attackable_must_player {
+        sources.push(obj_id);
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
 pub fn creature_must_attack_with_attackable_players(
     state: &GameState,
     obj_id: ObjectId,
@@ -2481,16 +2650,12 @@ fn creature_must_attack_with_attackable_players_gated(
     }
     // CR 508.1d: MustAttack — either directly on this creature or from a
     // cross-permanent static (e.g., "All creatures attack each combat if able").
-    let has_must_attack = super::functioning_abilities::active_static_definitions(state, obj)
-        .any(|sd| sd.mode == StaticMode::MustAttack)
+    let has_must_attack = has_local_must_attack(state, obj)
         || (gates.has_must_attack
             && crate::game::static_abilities::check_static_ability(
                 state,
                 StaticMode::MustAttack,
-                &crate::game::static_abilities::StaticCheckContext {
-                    target_id: Some(obj_id),
-                    ..Default::default()
-                },
+                &static_target_ctx(obj_id),
             ));
     // CR 701.15b: Goaded creatures must attack each combat if able.
     let is_goaded = !goading_players_for_creature_gated(state, obj_id, gates.has_goad).is_empty();
@@ -3938,21 +4103,33 @@ pub(crate) fn goading_players_for_creature_gated(
 
     if has_goad_static {
         crate::game::perf_counters::record_static_full_scan();
-        for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-            if def.mode != StaticMode::Goaded {
-                continue;
-            }
-            let Some(affected) = &def.affected else {
-                continue;
-            };
-            let ctx = FilterContext::from_source(state, source.id);
-            if matches_target_filter(state, creature_id, affected, &ctx) {
-                players.insert(source.controller);
-            }
-        }
+        players.extend(goad_static_hits_for_creature(state, creature_id).map(|(p, _)| p));
     }
 
     players
+}
+
+/// CR 701.15c: `(goading player, goad-static carrier id)` for each functioning
+/// `StaticMode::Goaded` static affecting `creature_id`. The single authority
+/// both the player-set query (`goading_players_for_creature_gated`) and the
+/// source-attribution collector (`must_attack_sources_gated`) consume — no
+/// parallel `battlefield_active_statics` re-scan. Direct `goaded_by`
+/// designations are NOT included: they carry no object source (CR 701.15b).
+fn goad_static_hits_for_creature<'a>(
+    state: &'a GameState,
+    creature_id: ObjectId,
+) -> impl Iterator<Item = (PlayerId, ObjectId)> + 'a {
+    super::functioning_abilities::battlefield_active_statics(state).filter_map(
+        move |(source, def)| {
+            if def.mode != StaticMode::Goaded {
+                return None;
+            }
+            let affected = def.affected.as_ref()?;
+            let ctx = FilterContext::from_source(state, source.id);
+            matches_target_filter(state, creature_id, affected, &ctx)
+                .then_some((source.controller, source.id))
+        },
+    )
 }
 
 /// Declare blockers: validate, populate CombatState, emit event, auto-order by ObjectId.
@@ -4150,15 +4327,24 @@ pub fn attacker_constraints_for_active_player(
                 &gates,
             ) {
                 // CR 508.1d: specific-player requirements intersected with the
-                // currently attackable players; empty for generic / goad.
+                // currently attackable players; empty for generic / goad. n6: this
+                // single `must_attack_players_for_creature` scan feeds both the
+                // players list and the source collector's MustAttackPlayer arm.
                 let players: Vec<PlayerId> = must_attack_players_for_creature(state, obj)
                     .into_iter()
                     .filter(|p| attackable.contains(p))
                     .collect();
-                constraints.insert(obj_id, CombatRequirement::MustAttack { players });
+                let sources =
+                    must_attack_sources_gated(state, obj, obj_id, &gates, !players.is_empty());
+                constraints.insert(obj_id, CombatRequirement::MustAttack { players, sources });
             }
         } else if creature_cant_attack_gated(state, obj_id, &gates) {
-            constraints.insert(obj_id, CombatRequirement::CantAttack);
+            constraints.insert(
+                obj_id,
+                CombatRequirement::CantAttack {
+                    sources: cant_attack_sources_gated(state, obj_id, &gates),
+                },
+            );
         }
     }
     constraints
@@ -4205,14 +4391,29 @@ pub fn blocker_constraints_for_player(
                 &blocker_allowed,
                 can_block_shadow_exists,
             ) {
-                constraints.insert(obj_id, CombatRequirement::MustBlock);
+                constraints.insert(
+                    obj_id,
+                    CombatRequirement::MustBlock {
+                        sources: must_block_sources_gated(
+                            state,
+                            obj,
+                            obj_id,
+                            has_must_block_static,
+                        ),
+                    },
+                );
             }
         } else if blocker_has_cant_block_static_from_precomputed(
             state,
             obj_id,
             &blocker_restriction,
         ) {
-            constraints.insert(obj_id, CombatRequirement::CantBlock);
+            constraints.insert(
+                obj_id,
+                CombatRequirement::CantBlock {
+                    sources: cant_block_sources(state, obj_id, &blocker_restriction),
+                },
+            );
         }
     }
     constraints
@@ -10838,7 +11039,10 @@ mod tests {
         let constraints = blocker_constraints_for_player(&state, PlayerId(1), &valid);
         assert_eq!(
             constraints.get(&blocker),
-            Some(&CombatRequirement::MustBlock),
+            // CR 509.1c: intrinsic MustBlock → carrier is the creature itself.
+            Some(&CombatRequirement::MustBlock {
+                sources: vec![blocker]
+            }),
             "a must-block creature able to block the attacker is MustBlock"
         );
     }
@@ -10875,7 +11079,10 @@ mod tests {
         let valid = get_valid_block_targets_for_player(&state, PlayerId(1));
         assert_eq!(
             blocker_constraints_for_player(&state, PlayerId(1), &valid).get(&blocker),
-            Some(&CombatRequirement::MustBlock),
+            // CR 509.1c: intrinsic MustBlock → carrier is the creature itself.
+            Some(&CombatRequirement::MustBlock {
+                sources: vec![blocker]
+            }),
             "reach-guard: ground blocker CAN block the ground attacker"
         );
 
@@ -10980,7 +11187,10 @@ mod tests {
         let constraints = blocker_constraints_for_player(&state, PlayerId(1), &valid);
         assert_eq!(
             constraints.get(&restricted),
-            Some(&CombatRequirement::CantBlock),
+            // CR 509.1b: local CantBlock (affected None → self only) → carrier = restricted.
+            Some(&CombatRequirement::CantBlock {
+                sources: vec![restricted]
+            }),
             "a creature with a CantBlock static surfaces as CantBlock"
         );
         assert!(
@@ -11011,9 +11221,15 @@ mod tests {
             .get_mut(&lured)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(2),
-            }));
+            // MAJOR-1: production-faithful — no static ships `affected: None`. SelfRef
+            // is inert to `must_attack_players_for_creature` (matches on `sd.mode`),
+            // so it changes no assertion; it upholds the no-`affected:None` invariant.
+            .push(
+                StaticDefinition::new(StaticMode::MustAttackPlayer {
+                    player: PlayerId(2),
+                })
+                .affected(TargetFilter::SelfRef),
+            );
 
         let generic = create_creature(&mut state, PlayerId(0), "Frenzied Bear", 2, 2);
         state
@@ -11021,7 +11237,10 @@ mod tests {
             .get_mut(&generic)
             .unwrap()
             .static_definitions
-            .push(StaticDefinition::new(StaticMode::MustAttack));
+            // MAJOR-1: SelfRef (source == generic) matches ONLY `generic` in
+            // `check_static_ability_sources`, so the generic MustAttack no longer
+            // cross-attributes onto `lured` via the affected=None-matches-all path.
+            .push(StaticDefinition::new(StaticMode::MustAttack).affected(TargetFilter::SelfRef));
 
         let valid_attacker_ids = get_valid_attacker_ids(&state);
         // Reach-guard: both creatures are eligible attackers, so the MustAttack
@@ -11034,15 +11253,158 @@ mod tests {
         let constraints = attacker_constraints_for_active_player(&state, &valid_attacker_ids);
         assert_eq!(
             constraints.get(&lured),
+            // CR 508.1d: MustAttackPlayer is a local static → carrier = lured. The
+            // generic sibling's SelfRef MustAttack no longer cross-attributes here.
             Some(&CombatRequirement::MustAttack {
-                players: vec![PlayerId(2)]
+                players: vec![PlayerId(2)],
+                sources: vec![lured],
             }),
             "MustAttackPlayer{{P2}} surfaces the specific attackable player"
         );
         assert_eq!(
             constraints.get(&generic),
-            Some(&CombatRequirement::MustAttack { players: vec![] }),
+            // CR 508.1d: generic's own SelfRef MustAttack matches itself in both the
+            // local push and the remote collect → dedup → carrier = generic.
+            Some(&CombatRequirement::MustAttack {
+                players: vec![],
+                sources: vec![generic],
+            }),
             "a generic must-attack creature surfaces an empty specific-player list"
+        );
+    }
+
+    /// CR 508.1c: the real "(from Pacifism)" case the frontend renders — a creature
+    /// restricted by a static on a DISTINCT object surfaces that object as the
+    /// source. REVERT-FAIL: deleting the `check_static_ability_sources` extend in
+    /// `cant_attack_sources_gated` empties `sources`, failing `vec![restrictor]`.
+    #[test]
+    fn attacker_constraints_surface_cant_attack_remote_source() {
+        let mut state = setup();
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        let creature = create_creature(&mut state, PlayerId(0), "Restricted Bear", 2, 2);
+        // A distinct object (e.g., a Pacifism Aura / Angelic Arbiter) carrying a
+        // functioning CantAttack static whose affected filter matches `creature`.
+        let restrictor = create_creature(&mut state, PlayerId(0), "Pacifism Source", 0, 1);
+        state
+            .objects
+            .get_mut(&restrictor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SpecificObject { id: creature }),
+            );
+
+        let valid = get_valid_attacker_ids(&state);
+        // Reach-guard: the restricted creature is NOT an eligible attacker, so the
+        // producer reaches the CantAttack else-branch for it (non-vacuous).
+        assert!(
+            !valid.contains(&creature),
+            "reach-guard: the remotely-restricted creature is excluded from valid attackers"
+        );
+
+        let constraints = attacker_constraints_for_active_player(&state, &valid);
+        assert_eq!(
+            constraints.get(&creature),
+            // CR 508.1c: the carrier is the DISTINCT restricting object, not the creature.
+            Some(&CombatRequirement::CantAttack {
+                sources: vec![restrictor]
+            }),
+            "a remotely-restricted creature names the distinct restriction carrier"
+        );
+        assert_ne!(
+            restrictor, creature,
+            "the source is a distinct object — this is the remote-attribution case"
+        );
+    }
+
+    /// CR 701.15c parity for the collector: two distinct carriers of the same
+    /// restriction surface as two sorted, deduped sources. REVERT-FAIL: a
+    /// single-push collector yields len != 2.
+    #[test]
+    fn cant_attack_sources_collects_two_sorted_remote_carriers() {
+        let mut state = setup();
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        let creature = create_creature(&mut state, PlayerId(0), "Doubly Restricted", 2, 2);
+        let source_a = create_creature(&mut state, PlayerId(0), "Restrictor A", 0, 1);
+        let source_b = create_creature(&mut state, PlayerId(0), "Restrictor B", 0, 1);
+        for &src in &[source_a, source_b] {
+            state
+                .objects
+                .get_mut(&src)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::CantAttack)
+                        .affected(TargetFilter::SpecificObject { id: creature }),
+                );
+        }
+
+        let mut expected = vec![source_a, source_b];
+        expected.sort_unstable();
+        assert_eq!(
+            cant_attack_sources_gated(&state, creature, &CombatStaticGates::compute(&state)),
+            expected,
+            "two remote CantAttack carriers surface as two sorted sources"
+        );
+    }
+
+    /// MINOR-2 drift guard (REMOTE pair only): the enforcement bool
+    /// `check_static_ability` and the source collector `check_static_ability_sources`
+    /// are two separately-written reductions over the shared
+    /// `static_ability_match_applies` predicate, so they CAN drift. Pin their
+    /// agreement for the three affected=None-matches-all kinds. REVERT-FAIL: any
+    /// divergence in either driver's predicate flips one side.
+    #[test]
+    fn remote_static_bool_and_sources_drivers_agree() {
+        use crate::game::static_abilities::{
+            check_static_ability, check_static_ability_sources, StaticCheckContext,
+        };
+        let mut state = setup();
+        let target = create_creature(&mut state, PlayerId(0), "Target", 2, 2);
+        for mode in [
+            StaticMode::CantAttack,
+            StaticMode::MustAttack,
+            StaticMode::MustBlock,
+        ] {
+            let src = create_creature(&mut state, PlayerId(0), "Src", 0, 1);
+            state
+                .objects
+                .get_mut(&src)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(mode.clone())
+                        .affected(TargetFilter::SpecificObject { id: target }),
+                );
+            let ctx = StaticCheckContext {
+                target_id: Some(target),
+                ..Default::default()
+            };
+            assert_eq!(
+                check_static_ability(&state, mode.clone(), &ctx),
+                !check_static_ability_sources(&state, mode.clone(), &ctx).is_empty(),
+                "bool and sources drivers must agree for {mode:?}"
+            );
+        }
+    }
+
+    /// m4: legacy serde blobs serialized before `sources` existed decode with an
+    /// empty `sources` (serde default). REVERT-FAIL: removing `#[serde(default)]`
+    /// on `sources` turns these into decode errors.
+    #[test]
+    fn combat_requirement_decodes_legacy_blobs_with_default_sources() {
+        assert_eq!(
+            serde_json::from_str::<CombatRequirement>(r#"{"kind":"CantAttack"}"#).unwrap(),
+            CombatRequirement::CantAttack { sources: vec![] },
+        );
+        assert_eq!(
+            serde_json::from_str::<CombatRequirement>(r#"{"kind":"MustAttack","players":[1]}"#)
+                .unwrap(),
+            CombatRequirement::MustAttack {
+                players: vec![PlayerId(1)],
+                sources: vec![],
+            },
         );
     }
 

@@ -321,10 +321,10 @@ export interface MeldSelection {
 // engine surfaces on the declare-attackers/blockers waiting payloads for
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
 export type CombatRequirement =
-  | { kind: "MustAttack"; players: PlayerId[] }
-  | { kind: "MustBlock" }
-  | { kind: "CantAttack" }
-  | { kind: "CantBlock" };
+  | { kind: "MustAttack"; players: PlayerId[]; sources?: ObjectId[] }
+  | { kind: "MustBlock"; sources?: ObjectId[] }
+  | { kind: "CantAttack"; sources?: ObjectId[] }
+  | { kind: "CantBlock"; sources?: ObjectId[] };
 
 // CR 702.19: Which trample variant applies to combat damage assignment.
 export type TrampleKind = "Standard" | "OverPlaneswalkers";
