@@ -682,7 +682,7 @@ fn convert_rule(
         // CR 602.5 + CR 605.1a: "Activated abilities of [filter] can't be
         // activated" — Pithing Needle / Phyrexian Revoker / Sorcerous
         // Spyglass / Karn family. Maps onto engine
-        // `StaticMode::CantBeActivated { who, source_filter, exemption }`.
+        // `StaticMode::CantBeActivated { who, source_filter, exemption, kind }`.
         // The schema's `ActivatedAbilities` filter that scopes which
         // abilities are prohibited becomes the engine's `source_filter`
         // (filter on the source object whose abilities are blocked).
@@ -1968,6 +1968,8 @@ fn activated_ability_effect_to_static(
             who: ProhibitionScope::AllPlayers,
             source_filter,
             exemption,
+            // CR 606.2: not kind-narrowed — blocks any activated ability.
+            kind: None,
         },
         other => {
             return Err(ConversionGap::UnknownVariant {

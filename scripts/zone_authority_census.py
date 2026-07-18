@@ -7,15 +7,11 @@ calls the raw movers in `game/zones.rs`, pokes the `im::Vector` zone containers
 directly, or assigns `GameObject::zone` bypasses replacement consultation,
 `ZoneChanged` events, triggers, and draw bookkeeping.
 
-This census is the ratchet for that migration (Plan 03). It classifies every
-production hit by (file, enclosing fn, pattern family) and compares the result
-against `scripts/zone-authority-baseline.txt`:
-
-  * a hit that is NOT in the baseline fails    -> new bypass, route it properly
-  * a baseline row whose count DROPPED fails   -> stale baseline, tighten it
-
-so the allowlist can only shrink. When the baseline reaches zero rows the
-migration is complete and the gate is zero-tolerance by construction.
+This census is the hard authority gate for that migration (Plan 03). It
+classifies every production hit by (file, enclosing fn, pattern family), and
+fails every hit that lacks a nonempty `allow-raw-zone:` annotation. An
+annotation records a reviewed operation that is not a replaceable zone event;
+it remains visible in `--list` rather than disappearing from the census.
 
 Pattern families (a hit is classified into exactly one):
 
@@ -26,15 +22,12 @@ Pattern families (a hit is classified into exactly one):
                  preserve membership (a shuffle is; anything else must prove it)
     exempt       any of the above, annotated `// allow-raw-zone: <reason>`
 
-`exempt` is ratcheted like the rest, deliberately. The annotation is the
-cheapest possible way to add a raw zone mutation, so it must cost a review
-rather than a keystroke -- an exemption no instrument counts is an exemption
-nobody revisits. The reason string is mandatory.
+The annotation reason is mandatory. A raw zone operation cannot be introduced
+without naming why it is outside the replacement-consulting pipeline.
 
 Usage:
     scripts/zone_authority_census.py --check      # gate (used by CI)
     scripts/zone_authority_census.py --list       # report every classified hit
-    scripts/zone_authority_census.py --write      # regenerate the baseline
 """
 
 from __future__ import annotations
@@ -46,20 +39,39 @@ from pathlib import Path
 from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BASELINE = REPO_ROOT / "scripts" / "zone-authority-baseline.txt"
 
 SCOPES = ("crates/engine/src", "crates/engine-wasm/src")
+ENGINE_GAME_DIR = REPO_ROOT / "crates" / "engine" / "src" / "game"
 
 # The authority modules themselves: raw delivery is their implementation.
 AUTHORITY_FILES = {"zones.rs", "zone_pipeline.rs"}
 
-# Test-support placement helpers. These construct pre-game state and are
-# expected to bypass the pipeline loudly; Plan 03 step 5 gives them a named
-# `test-support` API. Outlined test modules (`*_tests.rs`, `tests.rs`) carry no
-# production dispatch and lose the inline `#[cfg(test)]` marker a line scan
-# keys on, so they are excluded by name (same convention as
-# check-parser-combinators.sh).
-TEST_SUPPORT_FILES = {"scenario.rs", "scenario_db.rs", "testing.rs"}
+# Test-support placement helpers are excluded only when game/mod.rs explicitly
+# exposes them through the named test-support boundary. This guards against a
+# future scenario.rs becoming a production module while retaining its basename.
+TEST_SUPPORT_EXPORT = re.compile(
+    r'^\s*#\[cfg\(any\(test,\s*feature\s*=\s*"test-support"\)\)\]\s*$'
+    r"\n^\s*pub\s+mod\s+(?P<module>\w+)\s*;\s*$",
+    re.MULTILINE,
+)
+
+
+def test_support_modules(game_mod_source: str) -> frozenset[str]:
+    """Return game modules explicitly compiled only for tests/test-support."""
+    return frozenset(match.group("module") for match in TEST_SUPPORT_EXPORT.finditer(game_mod_source))
+
+
+TEST_SUPPORT_MODULES = test_support_modules((ENGINE_GAME_DIR / "mod.rs").read_text(encoding="utf-8"))
+
+# Compatibility surface for sibling censuses that share this scanner. Scenario
+# infrastructure deliberately does NOT appear here: its exclusion is derived
+# from the feature gate above, not its basename.
+TEST_SUPPORT_FILES = frozenset({"testing.rs"})
+
+
+def is_feature_gated_test_support_module(path: Path) -> bool:
+    """Whether `path` is a game module behind the explicit test-support gate."""
+    return path.parent == ENGINE_GAME_DIR and path.stem in TEST_SUPPORT_MODULES
 
 ALLOW_ANNOTATION = re.compile(r"allow-raw-zone\s*:\s*(?P<reason>\S.*?)\s*$")
 ALLOW_ANNOTATION_BARE = "allow-raw-zone"
@@ -89,7 +101,7 @@ ZONE_ASSIGN = re.compile(r"\.zone\s*=\s*[^=]")
 
 # (D) A `&mut` borrow of a zone container handed to a callee, which can mutate
 # membership out of sight of (B). Only callees that provably preserve membership
-# are allowed: a shuffle reorders the library (CR 701.19) and is not a zone
+# are allowed: a shuffle reorders the library (CR 701.24) and is not a zone
 # change. Anything else is a bypass until proven otherwise.
 BORROW = re.compile(rf"&mut\s+[\w.\[\]()]+\.\s*({ZONES})\b")
 BORROW_CALLEE = re.compile(r"(\w+)\s*\(\s*$")
@@ -513,8 +525,7 @@ def census_file(path: Path) -> list[tuple[str, str, str]]:
             continue
 
         # An explicitly classified non-event operation is still counted -- as an
-        # exemption. It is capped by the same ratchet, so the annotation cannot
-        # become the cheap way to add a raw zone mutation.
+        # exemption -- so `--list` remains a complete review surface.
         reason = annotation_reason(raw) or (annotation_reason(lines[i - 1]) if i > 0 else None)
         if reason:
             hits.extend([(rel, current_fn, "exempt")] * n)
@@ -538,7 +549,7 @@ def collect() -> dict[tuple[str, str, str], int]:
     for scope in SCOPES:
         for path in sorted((REPO_ROOT / scope).rglob("*.rs")):
             name = path.name
-            if name in AUTHORITY_FILES or name in TEST_SUPPORT_FILES:
+            if name in AUTHORITY_FILES or is_feature_gated_test_support_module(path):
                 continue
             if name == "tests.rs" or name.endswith("_tests.rs"):
                 continue
@@ -547,54 +558,21 @@ def collect() -> dict[tuple[str, str, str], int]:
     return counts
 
 
-HEADER = """\
-# Frozen census of pre-existing raw zone mutation (Plan 03 / CR 400.7).
-#
-# Generated by scripts/zone_authority_census.py --write. Do not hand-edit.
-# Columns: file <TAB> enclosing fn <TAB> pattern family <TAB> count.
-# Keyed on the enclosing function, not the line, so it survives line drift.
-#
-# This is MIGRATION DEBT, and it is a ratchet: rows may only shrink. Each row
-# is a site that still mutates a zone without going through zone_pipeline. As
-# the Plan 03 tranches migrate them onto ZoneMoveRequest, delete the rows
-# (scripts/zone_authority_census.py --write). When this file is empty the gate
-# is zero-tolerance by construction.
-#
-# A site that is genuinely NOT a replaceable zone event (CR 733 rollback,
-# component absorption, in-library reorder, cease-to-exist, test setup) does
-# not belong here -- it is a permanent, named exemption and is annotated at the
-# call site instead:
-#
-#     // allow-raw-zone: <one-line reason>
-#
-"""
-
-
-def render(counts: dict[tuple[str, str, str], int], header: bool = True) -> str:
+def render(counts: dict[tuple[str, str, str], int]) -> str:
     rows = [f"{f}\t{fn}\t{fam}\t{n}" for (f, fn, fam), n in sorted(counts.items())]
-    body = "\n".join(rows) + ("\n" if rows else "")
-    return HEADER + body if header else body
+    return "\n".join(rows) + ("\n" if rows else "")
 
 
-def load_baseline() -> dict[tuple[str, str, str], int]:
-    if not BASELINE.exists():
-        return {}
-    out: dict[tuple[str, str, str], int] = {}
-    for line in BASELINE.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        f, fn, fam, n = line.split("\t")
-        out[(f, fn, fam)] = int(n)
-    return out
+def unannotated_hits(counts: dict[tuple[str, str, str], int]) -> dict[tuple[str, str, str], int]:
+    """Return raw zone operations not authorized by `allow-raw-zone:`."""
+    return {key: count for key, count in counts.items() if key[2] != "exempt"}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--check", action="store_true", help="gate against the baseline")
+    g.add_argument("--check", action="store_true", help="require an annotation on every classified hit")
     g.add_argument("--list", action="store_true", help="print every classified hit")
-    g.add_argument("--write", action="store_true", help="regenerate the baseline")
     args = ap.parse_args()
 
     try:
@@ -605,61 +583,25 @@ def main() -> int:
     total = sum(counts.values())
 
     if args.list:
-        sys.stdout.write(render(counts, header=False))
+        sys.stdout.write(render(counts))
         print(f"\n{total} classified production hits in {len(counts)} (file, fn, family) rows", file=sys.stderr)
         return 0
 
-    if args.write:
-        BASELINE.write_text(render(counts), encoding="utf-8")
-        print(f"wrote {BASELINE.relative_to(REPO_ROOT)}: {total} hits / {len(counts)} rows")
-        return 0
-
-    baseline = load_baseline()
-    added = {k: n for k, n in counts.items() if k not in baseline}
-    grown = {k: (baseline[k], n) for k, n in counts.items() if k in baseline and n > baseline[k]}
-    shrunk = {k: (baseline[k], counts.get(k, 0)) for k in baseline if counts.get(k, 0) < baseline[k]}
-
-    if added or grown:
-        bypass = {k: v for k, v in added.items() if k[2] != "exempt"} or {
-            k: v for k, v in grown.items() if k[2] != "exempt"
-        }
-        print("ERROR: raw zone mutation grew.\n", file=sys.stderr)
-        for (f, fn, fam), n in sorted(added.items()):
-            print(f"  NEW      {f}::{fn} ({fam} x{n})", file=sys.stderr)
-        for (f, fn, fam), (was, now) in sorted(grown.items()):
-            print(f"  GREW     {f}::{fn} ({fam}) {was} -> {now}", file=sys.stderr)
-        if bypass:
-            print(
-                "\nA gameplay zone change must be proposed through zone_pipeline so that\n"
-                "replacement effects, ZoneChanged events, triggers, and draw bookkeeping\n"
-                "all get their opportunity. Build a ZoneMoveRequest instead.\n\n"
-                "If the operation is genuinely not a replaceable zone event (rollback,\n"
-                "component absorption, in-library reorder, cease-to-exist, test setup),\n"
-                "annotate it with:\n\n"
-                "    // allow-raw-zone: <one-line reason>\n",
-                file=sys.stderr,
-            )
+    bypasses = unannotated_hits(counts)
+    if bypasses:
+        print("ERROR: raw zone mutation lacks allow-raw-zone annotation.\n", file=sys.stderr)
+        for (f, fn, fam), count in sorted(bypasses.items()):
+            print(f"  UNANNOTATED {f}::{fn} ({fam} x{count})", file=sys.stderr)
         print(
-            "An `exempt` row means an ANNOTATED site. Exemptions are ratcheted too:\n"
-            "the annotation is the cheapest way to add a raw zone mutation, so a new\n"
-            "one is a reviewed decision, not a local one. If it is genuinely not a\n"
-            "zone event, get the exemption reviewed and run --write.\n",
+            "\nA gameplay zone change must go through zone_pipeline so replacement effects,\n"
+            "ZoneChanged events, triggers, and draw bookkeeping all run. If an operation is\n"
+            "genuinely not a replaceable zone event, annotate it with:\n\n"
+            "    // allow-raw-zone: <one-line reason>\n",
             file=sys.stderr,
         )
         return 1
 
-    if shrunk:
-        print("ERROR: the zone-authority baseline is stale -- migration progressed.\n", file=sys.stderr)
-        for (f, fn, fam), (was, now) in sorted(shrunk.items()):
-            print(f"  MIGRATED {f}::{fn} ({fam}) {was} -> {now}", file=sys.stderr)
-        print(
-            "\nThe baseline is a ratchet: it may only shrink. Tighten it with\n"
-            "    scripts/zone_authority_census.py --write\n",
-            file=sys.stderr,
-        )
-        return 1
-
-    print(f"Gate B PASS: {total} raw zone hits, all classified ({len(counts)} rows, baseline frozen)")
+    print(f"Gate B PASS: {total} classified production hits carry allow-raw-zone annotations ({len(counts)} rows)")
     return 0
 
 

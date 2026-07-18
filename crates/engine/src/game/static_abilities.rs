@@ -402,7 +402,16 @@ pub(crate) fn prohibition_scope_matches_player(
         return false;
     };
     match scope {
-        ProhibitionScope::Opponents => player != source_obj.controller,
+        // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a multiplayer team
+        // game (e.g. Two-Headed Giant) a player's opponents are only players NOT on
+        // their team, so a naive `player != source_obj.controller` inequality wrongly
+        // treats a teammate as an opponent (barring them from casting). Route through
+        // the team-aware authority; in a two-player / FFA `IndividualSeats` topology
+        // `is_opponent` reduces to `!=`, so 2-player and free-for-all behavior is
+        // byte-identical. Mirrors the affected-filter fix in `static_filter_matches`.
+        ProhibitionScope::Opponents => {
+            crate::game::players::is_opponent(state, source_obj.controller, player)
+        }
         ProhibitionScope::AllPlayers => true,
         ProhibitionScope::Controller => player == source_obj.controller,
         // CR 303.4e: For an Aura attached to an object ("enchanted creature's
@@ -1112,7 +1121,29 @@ pub fn build_cost_permission_context(
 ///
 /// Checks both battlefield permanents and spell-applied transient effects
 /// (e.g., a sorcery that grants all players CantWinTheGame this turn).
+///
+/// CR 810.8a: "If an effect says that a player can't win the game, that
+/// player's team can't win the game" (the Platinum Angel / Angel's Grace
+/// example: neither player on the opposing team can win while the clause
+/// affects one of them). So in 2HG this is true for `player_id` if EITHER
+/// `player_id` itself or their teammate has the grant — mirrors the
+/// `player_has_cant_gain_life` / `player_has_cant_lose_life` teammate fold
+/// below (CR 810.9g/810.9h siblings) and `sba::player_has_cant_lose`'s
+/// identical CR 810.8a fold on the can't-lose side.
 pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
+    cant_win_active_for(state, player_id)
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| cant_win_active_for(state, teammate)))
+}
+
+/// Single-player check underlying `player_has_cant_win`: does `player_id`
+/// itself (battlefield permanent, command-zone emblem, or spell-applied
+/// transient effect) have an active `CantWinTheGame` grant? Does NOT fold in
+/// teammates — callers needing the CR 810.8a team-wide answer must go through
+/// `player_has_cant_win`.
+fn cant_win_active_for(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
         StaticMode::CantWinTheGame,
@@ -1647,6 +1678,37 @@ fn check_static_other_by_name(state: &GameState, name: &str, context: &StaticChe
             ) {
                 continue;
             }
+            // CR 101.2 + CR 109.5 + CR 115.10: per-affected-player applicability
+            // gate — the same read `check_static_ability` performs for typed
+            // prohibition modes. An `Other` static carrying a per-player
+            // relative-count predicate (Ward of Bones: "each opponent who controls
+            // more lands than you can't play lands" → `CantPlayLand` +
+            // `per_player_condition`) applies to the queried player ONLY when that
+            // predicate holds for them. Evaluated against the affected player
+            // (target-owner, else the queried `player_id`) with `ScopedPlayer`
+            // bound to them and "you" to the source's controller. Fail closed when
+            // no affected player is in context so an under-specified query never
+            // over-applies the prohibition.
+            if let Some(ref cond) = def.per_player_condition {
+                let affected_player = context
+                    .target_id
+                    .and_then(|id| state.objects.get(&id))
+                    .map(|o| o.controller)
+                    .or(context.player_id);
+                match affected_player {
+                    Some(p) => {
+                        if !crate::game::restrictions::evaluate_condition(
+                            state,
+                            p,
+                            source_obj.id,
+                            cond,
+                        ) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
             return true;
         }
     }
@@ -1851,9 +1913,16 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::You => {
                             source_controller == Some(player_id)
                         }
-                        crate::types::ability::ControllerRef::Opponent => {
-                            source_controller.is_some() && source_controller != Some(player_id)
-                        }
+                        // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a
+                        // multiplayer team game (e.g. Two-Headed Giant) a player's
+                        // opponents are only players NOT on their team, so a naive
+                        // `source_controller != player_id` inequality wrongly treats a
+                        // teammate as an opponent. Route through the team-aware
+                        // authority; in a two-player game `is_opponent` reduces to `!=`.
+                        crate::types::ability::ControllerRef::Opponent => source_controller
+                            .is_some_and(|sc| {
+                                crate::game::players::is_opponent(state, sc, player_id)
+                            }),
                         // CR 109.4: Static abilities have no ability-target context
                         // in which to resolve a target player. Fail closed — the
                         // parser never emits this variant for static filters.

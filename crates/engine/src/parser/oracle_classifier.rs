@@ -189,6 +189,17 @@ pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {
 }
 
 pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
+    // CR 114.1: An emblem-granting instant/sorcery ("You get an emblem with
+    // \"…\"") whose quoted body contains static text (Gideon of the Trials'
+    // can't-lose/win locks) matches `is_static_pattern` on the unmasked view, so
+    // the spell IR loop would otherwise consume the whole line through the static
+    // classifier — splitting the quoted body mid-sentence. Defer it to the
+    // effect-chain parser, whose `try_parse_emblem_creation` seam produces a
+    // single `Effect::CreateEmblem`. Reuses the emblem-head prefix combinator.
+    if super::oracle_effect::sequence::is_emblem_creation_head(lower) {
+        return true;
+    }
+
     if is_self_spell_cost_modification(lower) {
         return false;
     }
@@ -487,6 +498,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return false;
     }
 
+    if super::oracle_static::is_control_players_during_own_library_search(lower) {
+        return true;
+    }
+
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
         return true;
     }
@@ -733,6 +748,10 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    if super::oracle_replacement::is_search_found_replacement_pattern(lower) {
+        return true;
+    }
+
     // CR 608.2c: reflexive "enters this way" riders on triggered abilities
     // (Winter Soldier, Reborn Avenger) contain "enters" + "counter" but are
     // not CR 614.1c ETB replacements.

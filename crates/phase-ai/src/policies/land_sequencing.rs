@@ -99,14 +99,17 @@ impl TacticalPolicy for LandSequencingPolicy {
 /// True when `obj` has an ETB trigger that returns a land YOU control to hand
 /// (the Ravnica/MOM bounce-land / "Karoo" cycle). Structural, not name-matched.
 fn is_self_bounce_land(obj: &GameObject) -> bool {
-    obj.trigger_definitions.iter_unchecked().any(|t| {
-        t.mode == TriggerMode::ChangesZone
-            && t.destination == Some(Zone::Battlefield)
-            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-            && t.execute
-                .as_deref()
-                .is_some_and(|exec| collect_chain_effects(exec).iter().any(bounces_own_land))
-    })
+    obj.trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+        .any(|t| {
+            t.mode == TriggerMode::ChangesZone
+                && t.destination == Some(Zone::Battlefield)
+                && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+                && t.execute
+                    .as_deref()
+                    .is_some_and(|exec| collect_chain_effects(exec).iter().any(bounces_own_land))
+        })
 }
 
 fn bounces_own_land(effect: &&Effect) -> bool {

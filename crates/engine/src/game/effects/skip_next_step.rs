@@ -129,6 +129,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,

@@ -155,18 +155,9 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         }
 
         if has_battlefield_sbas {
-            // CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
-            check_zero_toughness(state, events, &mut any_performed, &battlefield_snapshot);
-
-            // A zero-toughness move can park on a CR 616.1 choice. Do not let
-            // the later lethal-damage SBA mutate an unrelated creature until the
-            // affected player has chosen and the first move settles.
-            if pending_replacement_pauses_sba(state) {
-                return;
-            }
-
-            // CR 704.5g: A creature with lethal damage marked on it is destroyed.
-            check_lethal_damage(state, events, &mut any_performed, &battlefield_snapshot);
+            // CR 704.5f-h: Zero-toughness and lethal/deathtouch creature deaths
+            // are simultaneous and share one replacement-aware batch.
+            check_creature_deaths(state, events, &mut any_performed, &battlefield_snapshot);
         }
 
         // CR 614.3 / CR 701.19b: If a regeneration replacement choice is pending, pause SBA evaluation.
@@ -427,20 +418,46 @@ fn ascend_status_in(
 /// Mirrors `player_has_protection_from_everything` in `static_abilities.rs`:
 /// for transient effects scoped to players, we scan `transient_continuous_effects`
 /// for entries pinned to this player via `SpecificPlayer { id }` whose
-/// modifications grant `StaticMode::CantLoseTheGame`. The battlefield scan
-/// handles the permanent-source path (Platinum Angel and friends).
+/// modifications grant `StaticMode::CantLoseTheGame`. The game-scope static
+/// scan handles the printed-source path: battlefield permanents (Platinum
+/// Angel and friends) plus command-zone emblems (CR 114.4: abilities of
+/// emblems function in the command zone — Gideon of the Trials' emblem),
+/// mirroring `player_has_cant_win` → `check_static_ability`'s CR 114.4 scope.
+///
+/// CR 810.8a: "If an effect says that a player can't lose the game, that
+/// player's team can't lose the game" (Platinum Angel example: "Neither that
+/// player nor their teammate can lose the game"). So in 2HG, this is true for
+/// `player_id` if EITHER `player_id` itself or their teammate has the grant —
+/// mirrors the `player_has_cant_gain_life` / `player_has_cant_lose_life`
+/// teammate fold in `static_abilities.rs` (CR 810.9g/810.9h siblings).
 ///
 /// `pub(crate)` so the live loop-shortcut firewall
 /// (`analysis::loop_check::live_mandatory_loop_winner`, CR 101.2) can reuse the same
 /// SBA-layer predicate rather than re-deriving the can't-lose check.
 pub(crate) fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
-    // CR 604.1: O(1) presence gate on the battlefield-static authority only. The
-    // transient-continuous-effect path below is a separate authority the index does
-    // NOT fold, so gate the `.any()` with a short-circuit conjunction rather than an
-    // early return.
+    cant_lose_active_for(state, player_id)
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| cant_lose_active_for(state, teammate)))
+}
+
+/// Single-player check underlying `player_has_cant_lose`: does `player_id`
+/// itself (battlefield permanent, command-zone emblem, or spell-applied
+/// transient effect) have an active `CantLoseTheGame` grant? Does NOT fold in
+/// teammates — callers needing the CR 810.8a team-wide answer must go through
+/// `player_has_cant_lose`.
+fn cant_lose_active_for(state: &GameState, player_id: PlayerId) -> bool {
+    // CR 604.1: O(1) presence gate on the printed-static authority only (the
+    // index is built over `game_functioning_statics`, so it has identical
+    // battlefield + command-zone scoping). The transient-continuous-effect path
+    // below is a separate authority the index does NOT fold, so gate the
+    // `.any()` with a short-circuit conjunction rather than an early return.
+    // CR 114.4: `game_active_statics` includes command-zone emblems, so an
+    // emblem's "you can't lose the game" (Gideon of the Trials) is honored.
     let from_permanent = static_kind_present(state, StaticModeKind::CantLoseTheGame) && {
         crate::game::perf_counters::record_static_full_scan();
-        super::functioning_abilities::battlefield_active_statics(state).any(|(obj, def)| {
+        super::functioning_abilities::game_active_statics(state).any(|(obj, def)| {
             def.mode == StaticMode::CantLoseTheGame
                 && static_affects_player(obj.controller, &def.affected, player_id)
         })
@@ -614,12 +631,13 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
 
 /// CR 903.9a: If a commander is in a graveyard or exile (and was put there
 /// since the last SBA check), its owner may put it into the command zone.
-/// CR 903.9b: Hand and library are also covered (see `commander_eligible_for_zone_return`).
+/// CR 903.9b: Hand and library returns are handled before delivery by the
+/// replacement pipeline, not by this SBA check.
 /// CR 903.9c: Also handles merged/melded permanents — after
 /// `merge::split_merged_permanent_on_leave` places each absorbed component
-/// in its destination zone with `is_commander` intact, the next SBA pass
-/// finds the commander component here and presents the choice identically to
-/// the standalone case.
+/// in a graveyard or exile with `is_commander` intact, the next SBA pass finds
+/// the commander component here and presents the same choice as for a
+/// standalone commander.
 ///
 /// Pauses the SBA loop by setting `WaitingFor::CommanderZoneChoice` so the
 /// player can accept (move to command zone) or decline (leave in place).
@@ -690,16 +708,33 @@ pub(crate) fn move_to_graveyard_via_pipeline(
     )
 }
 
-/// CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
-/// CR 702.26b: Phased-out permanents are treated as though they don't exist —
-/// state-based actions scan only phased-in permanents.
-fn check_zero_toughness(
+/// CR 704.5f-h: Creature-death SBAs share a batch, while preserving whether
+/// each creature is put into a graveyard or destroyed.
+#[derive(Clone, Copy)]
+enum CreatureDeathSba {
+    ZeroToughness(ObjectId),
+    Destroy(ObjectId),
+}
+
+impl CreatureDeathSba {
+    fn object_id(self) -> ObjectId {
+        match self {
+            Self::ZeroToughness(id) | Self::Destroy(id) => id,
+        }
+    }
+
+    fn is_destroy(self) -> bool {
+        matches!(self, Self::Destroy(_))
+    }
+}
+
+fn check_creature_deaths(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
 ) {
-    let to_destroy: Vec<_> = battlefield_snapshot
+    let mut to_die: Vec<_> = battlefield_snapshot
         .iter()
         .copied()
         .filter(|id| {
@@ -708,36 +743,21 @@ fn check_zero_toughness(
                     && obj.toughness.is_some_and(|t| t <= 0)
             })
         })
+        .map(CreatureDeathSba::ZeroToughness)
         .collect();
+    to_die.extend(
+        lethal_damage_candidates(state, battlefield_snapshot)
+            .into_iter()
+            .map(CreatureDeathSba::Destroy),
+    );
 
-    let mut performed_ids = Vec::new();
-    for &id in &to_destroy {
-        if live_battlefield_object(state, &id).is_none() {
-            continue;
-        }
-        // CR 614.6: zero-toughness death is a "leaves the battlefield" event —
-        // consult Moved redirects via the pipeline; bail on a CR 616.1 pause.
-        if move_to_graveyard_via_pipeline(state, id, events) {
-            return;
-        }
-        performed_ids.push(id);
-        *any_performed = true;
-    }
-    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
-    // these permanents left the battlefield together — record the group so
-    // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    perform_creature_deaths(state, events, any_performed, &to_die);
 }
 
 /// CR 704.5g / CR 704.5h: A creature with lethal damage (or deathtouch damage) is destroyed.
 /// CR 702.26b: Phased-out permanents are treated as though they don't exist.
-fn check_lethal_damage(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-    battlefield_snapshot: &[ObjectId],
-) {
-    let to_destroy: Vec<_> = battlefield_snapshot
+fn lethal_damage_candidates(state: &GameState, battlefield_snapshot: &[ObjectId]) -> Vec<ObjectId> {
+    battlefield_snapshot
         .iter()
         .copied()
         .filter(|id| {
@@ -756,13 +776,173 @@ fn check_lethal_damage(
                     && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
             })
         })
-        .collect();
+        .collect()
+}
 
-    // CR 701.19b: Route each destruction through the replacement pipeline
-    // so regeneration shields can intercept.
+#[cfg(test)]
+fn check_lethal_damage(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
+) {
+    let to_die: Vec<_> = lethal_damage_candidates(state, battlefield_snapshot)
+        .into_iter()
+        .map(CreatureDeathSba::Destroy)
+        .collect();
+    perform_creature_deaths(state, events, any_performed, &to_die);
+}
+
+fn perform_creature_deaths(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    to_die: &[CreatureDeathSba],
+) {
+    // CR 704.3 + CR 614.6: zero-toughness and lethal-damage SBAs are
+    // simultaneous. Consult every graveyard move (and, for lethal damage, its
+    // destruction) while the complete co-dying set is still present, then
+    // deliver the approved moves. A static die-exile replacement on a creature
+    // that is itself dying (Etching of Kumano) must still be able to replace
+    // the other creature's death.
+    //
+    // A replacement consult is not pure: applying an earlier one-shot can mark
+    // it consumed before a later object surfaces a CR 616.1 ordering choice.
+    // Keep a transaction snapshot for this multi-object path and, on a pause,
+    // restore both state and emitted events before falling back to the safe
+    // sequential path below. There, every consumed replacement is delivered
+    // before the later prompt is parked; no approved move can be dropped.
+    let co_dying_replacement_source = to_die.iter().any(|death| {
+        state
+            .objects
+            .get(&death.object_id())
+            .is_some_and(|obj| !obj.replacement_definitions.is_empty())
+    });
+    if to_die.len() > 1 && co_dying_replacement_source {
+        let snapshot = state.clone();
+        let events_start = events.len();
+        let mut deliveries: Vec<(ObjectId, Option<ObjectId>, Option<ApprovedZoneChange>, bool)> =
+            Vec::with_capacity(to_die.len());
+        let mut paused = false;
+
+        for &death in to_die {
+            let id = death.object_id();
+            if !death.is_destroy() {
+                let proposed =
+                    ProposedEvent::zone_change(id, Zone::Battlefield, Zone::Graveyard, None);
+                match replacement::replace_event(state, proposed, events) {
+                    ReplacementResult::Execute(zone_event) => {
+                        let approved =
+                            ApprovedZoneChange::approve_post_replacement(zone_event).ok();
+                        deliveries.push((id, None, approved, false));
+                    }
+                    ReplacementResult::Prevented => deliveries.push((id, None, None, false)),
+                    ReplacementResult::NeedsChoice(_) => {
+                        paused = true;
+                        break;
+                    }
+                }
+                *any_performed = true;
+                continue;
+            }
+
+            let proposed = ProposedEvent::Destroy {
+                object_id: id,
+                source: None,
+                cant_regenerate: false,
+                applied: HashSet::new(),
+            };
+
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(ProposedEvent::Destroy {
+                    object_id, source, ..
+                }) => {
+                    let zone_proposed = ProposedEvent::zone_change(
+                        object_id,
+                        Zone::Battlefield,
+                        Zone::Graveyard,
+                        source,
+                    );
+                    match replacement::replace_event(state, zone_proposed, events) {
+                        ReplacementResult::Execute(zone_event) => {
+                            let approved =
+                                ApprovedZoneChange::approve_post_replacement(zone_event).ok();
+                            deliveries.push((object_id, source, approved, true));
+                        }
+                        ReplacementResult::Prevented => {
+                            deliveries.push((object_id, source, None, true));
+                        }
+                        ReplacementResult::NeedsChoice(_) => {
+                            paused = true;
+                            break;
+                        }
+                    }
+                    *any_performed = true;
+                }
+                ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+                    *any_performed = true;
+                }
+                ReplacementResult::NeedsChoice(_) => {
+                    paused = true;
+                    break;
+                }
+            }
+        }
+
+        if !paused {
+            let mut performed_ids = Vec::with_capacity(deliveries.len());
+            for (object_id, source, approved, destroyed) in deliveries {
+                if let Some(approved) = approved {
+                    let ctx = DeliveryCtx {
+                        source_id: source,
+                        exile_links: ExileLinkSpec::default(),
+                        drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                        library_placement: None,
+                    };
+                    if let ZoneDeliveryResult::NeedsChoice(_) =
+                        zone_pipeline::deliver(state, approved, ctx, events)
+                    {
+                        return;
+                    }
+                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                        if obj.zone == Zone::Battlefield {
+                            obj.damage_marked = 0;
+                            obj.dealt_deathtouch_damage = false;
+                        }
+                    }
+                }
+                if destroyed {
+                    events.push(GameEvent::CreatureDestroyed { object_id });
+                }
+                performed_ids.push(object_id);
+            }
+            zones::mark_simultaneous_departures(
+                events,
+                &zones::departed_subset(state, &performed_ids),
+            );
+            return;
+        }
+
+        *state = snapshot;
+        events.truncate(events_start);
+    }
+
+    // CR 701.19b: Route a single death (or a rolled-back, choice-bearing batch)
+    // through the replacement pipeline so regeneration shields can intercept
+    // destruction. The synchronous multi-object path above keeps co-dying
+    // replacement sources alive through all consultations.
     let mut performed_ids = Vec::new();
-    for &id in &to_destroy {
+    for &death in to_die {
+        let id = death.object_id();
         if live_battlefield_object(state, &id).is_none() {
+            continue;
+        }
+        if !death.is_destroy() {
+            if move_to_graveyard_via_pipeline(state, id, events) {
+                return;
+            }
+            performed_ids.push(id);
+            *any_performed = true;
             continue;
         }
         let proposed = ProposedEvent::Destroy {
@@ -877,8 +1057,8 @@ fn check_lethal_damage(
             }
         }
     }
-    // CR 603.10a + CR 704.3: creatures destroyed by lethal damage in this SBA
-    // check died simultaneously as a single event — record the group so
+    // CR 603.10a + CR 704.3: creatures that leave in this SBA check die
+    // simultaneously as a single event — record the group so
     // co-departing dies/LTB observers (Blood Artist) observe each other.
     // CR 701.19a/b: a creature whose destruction was Prevented (regeneration)
     // stays on the battlefield, so `departed_subset` excludes it from the group.
@@ -4747,6 +4927,46 @@ mod tests {
             "Player with CantLoseTheGame at 0 life should not be eliminated"
         );
         assert!(!state.eliminated_players.contains(&PlayerId(0)));
+    }
+
+    /// CR 104.3b + CR 114.4: `CantLoseTheGame` printed on a command-zone
+    /// emblem (Gideon of the Trials' emblem: "… you can't lose the game …")
+    /// functions from the command zone, so the loss-SBA skip honors it. RED
+    /// when `player_has_cant_lose` scans only the battlefield. The unprotected
+    /// opponent at 0 life IS eliminated — the live sibling proves the loss SBA
+    /// executed (reach guard), and that the emblem's `You`-scoped `affected`
+    /// filter protects only its controller.
+    #[test]
+    fn sba_cant_lose_from_command_zone_emblem() {
+        use crate::types::ability::StaticDefinition;
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Gideon of the Trials Emblem".to_string(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_emblem = true;
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::CantLoseTheGame).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ));
+        state.players[0].life = 0;
+        state.players[1].life = 0;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.players[0].is_eliminated,
+            "emblem-granted CantLoseTheGame must function from the command zone (CR 114.4)"
+        );
+        assert!(
+            state.players[1].is_eliminated,
+            "opponent of the emblem's controller is not protected (reach guard)"
+        );
     }
 
     #[test]

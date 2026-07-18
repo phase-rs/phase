@@ -1032,7 +1032,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DebugPermissionRevoked { .. }
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::Foretold { .. }
-        | GameEvent::BecameForetold { .. } => 0,
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::HiddenSearchViewed { .. } => 0,
     }
 }
 

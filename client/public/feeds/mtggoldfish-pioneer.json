@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-07-17T00:00:00Z",
+  "updated": "2026-07-18T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -895,125 +895,6 @@
       ]
     },
     {
-      "name": "Izzet Phoenix",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Arclight Phoenix"
-        },
-        {
-          "count": 4,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Impulse"
-        },
-        {
-          "count": 2,
-          "name": "Flashback"
-        },
-        {
-          "count": 3,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 3,
-          "name": "Lightning Axe"
-        },
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Picklock Prankster"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Command"
-        },
-        {
-          "count": 1,
-          "name": "Proft's Eidetic Memory"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 4,
-          "name": "Treasure Cruise"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Brazen Borrower"
-        },
-        {
-          "count": 2,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 4,
-          "name": "Ledger Shredder"
-        },
-        {
-          "count": 3,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 1,
-          "name": "Rending Volley"
-        }
-      ]
-    },
-    {
       "name": "Dimir Midrange",
       "author": "MTGGoldfish",
       "colors": [
@@ -1145,6 +1026,125 @@
         {
           "count": 2,
           "name": "Graveyard Trespasser"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Phoenix",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Arclight Phoenix"
+        },
+        {
+          "count": 4,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Consider"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 2,
+          "name": "Flashback"
+        },
+        {
+          "count": 3,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 3,
+          "name": "Lightning Axe"
+        },
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 4,
+          "name": "Picklock Prankster"
+        },
+        {
+          "count": 1,
+          "name": "Prismari Command"
+        },
+        {
+          "count": 1,
+          "name": "Proft's Eidetic Memory"
+        },
+        {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 4,
+          "name": "Treasure Cruise"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Brazen Borrower"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 4,
+          "name": "Ledger Shredder"
+        },
+        {
+          "count": 3,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 3,
+          "name": "Redcap Melee"
+        },
+        {
+          "count": 1,
+          "name": "Rending Volley"
         }
       ]
     },
@@ -1288,11 +1288,23 @@
       "main": [
         {
           "count": 1,
-          "name": "Spell Pierce"
+          "name": "Island"
         },
         {
-          "count": 2,
-          "name": "Vivi Ornitier"
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
         },
         {
           "count": 4,
@@ -1303,16 +1315,8 @@
           "name": "Igneous Inspiration"
         },
         {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
           "count": 1,
           "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 1,
-          "name": "Torch the Tower"
         },
         {
           "count": 4,
@@ -1323,7 +1327,15 @@
           "name": "Stormchaser's Talent"
         },
         {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
+        {
           "count": 2,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 3,
           "name": "Accumulate Wisdom"
         },
         {
@@ -1335,58 +1347,54 @@
           "name": "Gran-Gran"
         },
         {
-          "count": 1,
-          "name": "Abandon Attachments"
+          "count": 2,
+          "name": "It'll Quench Ya!"
         },
         {
-          "count": 3,
+          "count": 4,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 4,
           "name": "Firebending Lesson"
         },
         {
           "count": 2,
-          "name": "Riverpyre Verge"
+          "name": "Abandon Attachments"
         },
         {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
+          "count": 4,
+          "name": "Tablet of Discovery"
+        },
+        {
+          "count": 1,
+          "name": "Great Hall of the Biblioplex"
+        },
+        {
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 2,
           "name": "Shivan Reef"
         },
         {
-          "count": 3,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 2,
-          "name": "It'll Quench Ya!"
-        },
-        {
           "count": 1,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 4,
-          "name": "Island"
+          "name": "Spell Pierce"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Firebending Lesson"
+          "count": 3,
+          "name": "Abrade"
         },
         {
           "count": 1,
-          "name": "Combustion Technique"
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 2,
+          "name": "Test of Talents"
         },
         {
           "count": 1,
@@ -1401,7 +1409,7 @@
           "name": "Ral, Crackling Wit"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Accumulate Wisdom"
         },
         {
@@ -1417,12 +1425,8 @@
           "name": "Improvisation Capstone"
         },
         {
-          "count": 2,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 2,
-          "name": "Abrade"
+          "count": 1,
+          "name": "Price of Freedom"
         }
       ]
     }

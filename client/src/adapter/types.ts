@@ -707,6 +707,7 @@ export type CastChoice = { type: "Cast" } | { type: "Decline" };
 export type AutoMayChoice = { type: "Accept" } | { type: "Decline" };
 
 export type MayTriggerOrigin =
+  | { type: "Definition"; definition_ref: TriggerDefinitionRef }
   | { type: "Printed"; trigger_index: number }
   | { type: "Keyword"; keyword: string };
 
@@ -985,6 +986,98 @@ export interface GameObject {
 export interface PrintedRef {
   oracle_id: string;
   face_name: string;
+}
+
+export interface ObjectIncarnationRef {
+  object_id: ObjectId;
+  incarnation: number;
+}
+
+export interface CopyEffectInstanceRef {
+  continuous_effect_id: number;
+  modification_index: number;
+}
+
+export type TriggerDefinitionOccurrenceRef =
+  | { Printed: { base_set: number; printed_index: number } }
+  | {
+      CopiedValue: {
+        copy_effect: CopyEffectInstanceRef;
+        copied_slot: number;
+      };
+    }
+  | {
+      KeywordCompanion: {
+        grant_instance: number;
+        companion_index: number;
+      };
+    }
+  | {
+      CopyRetained: {
+        grant_instance: number;
+        source_base_set: number;
+        source_printed_index: number;
+      };
+    }
+  | { Granted: { grant_instance: number } }
+  | {
+      ExpandedGrant: {
+        grant_instance: number;
+        provider: TriggerDefinitionRef;
+        provider_output_index: number;
+      };
+    };
+
+export interface TriggerDefinitionRef {
+  source: ObjectIncarnationRef;
+  occurrence: TriggerDefinitionOccurrenceRef;
+}
+
+export interface ActiveLibrarySearch {
+  searcher: PlayerId;
+  searched_zone_owner: PlayerId;
+  effective_library_owner?: PlayerId;
+  learned_audience: PlayerId[];
+  looked_at: [PlayerId, Zone, ObjectIncarnationRef][];
+}
+
+export type ActiveSearchDecisionAuthority =
+  | { type: "latched_controller"; controller: PlayerId }
+  | { type: "searcher_fallback" };
+
+export interface ActiveSearchDecisionControl {
+  searcher: PlayerId;
+  searched_zone_owner: PlayerId;
+  authority: ActiveSearchDecisionAuthority;
+}
+
+export type SerializedPlayerIdKey = `${number}`;
+export type ActiveLibrarySearches = Partial<Record<SerializedPlayerIdKey, ActiveLibrarySearch>>;
+export type ActiveSearchDecisionControls = Partial<
+  Record<SerializedPlayerIdKey, ActiveSearchDecisionControl>
+>;
+
+export interface LibrarySearchCardFaceView {
+  name: string;
+  mana_cost: ManaCost;
+  mana_value: number;
+  colors: ManaColor[];
+  card_type: CardType;
+  keywords: Keyword[];
+  power: number | null;
+  toughness: number | null;
+  loyalty: number | null;
+  printed_ref?: PrintedRef | null;
+}
+
+export interface LibrarySearchCardView {
+  owner: PlayerId;
+  zone: Zone;
+  identity: ObjectIncarnationRef;
+  card_id: CardId;
+  current_face: LibrarySearchCardFaceView;
+  front_face: LibrarySearchCardFaceView;
+  back_face?: LibrarySearchCardFaceView | null;
 }
 
 // ── Companion ────────────────────────────────────────────────────────────
@@ -2071,6 +2164,10 @@ export type PlanarDieFace = "Planeswalk" | "Chaos" | "Blank";
 
 export type GameEvent =
   | { type: "GameStarted" }
+  | {
+      type: "HiddenSearchViewed";
+      data: { searcher: PlayerId; cards: LibrarySearchCardView[]; audience: PlayerId[] };
+    }
   | { type: "TurnStarted"; data: { player_id: PlayerId; turn_number: number } }
   | { type: "PhaseChanged"; data: { phase: Phase } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
@@ -2412,6 +2509,7 @@ export interface TurnOrderSlotView {
  * `engine::game::derived_views::DerivedViews`.
  */
 export interface DerivedViews {
+  unique_authorized_submitter?: PlayerId;
   /**
    * Engine-classified live keyword badges for battlefield permanents. The
    * strip renders this map directly rather than deciding which keyword timing
@@ -2541,6 +2639,8 @@ export interface GameState {
   players: Player[];
   priority_player: PlayerId;
   turn_decision_controller?: PlayerId | null;
+  active_library_searches?: ActiveLibrarySearches;
+  active_search_decision_controls?: ActiveSearchDecisionControls;
   objects: Record<string, GameObject>;
   next_object_id: number;
   battlefield: ObjectId[];

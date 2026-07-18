@@ -4401,7 +4401,9 @@ fn priest_of_titania_mana_ability_supported() {
 
 #[test]
 fn distinct_card_type_choose_wires_remainder_on_bottom() {
-    use crate::types::ability::{ChooseFromZoneConstraint, LibraryPosition};
+    use crate::types::ability::{
+        ChooseFromZoneConstraint, LibraryPosition, QuantityExpr, TargetFilter,
+    };
     let r = parse(
             "Flying, vigilance, deathtouch, lifelink\nWhen Atraxa enters, reveal the top ten cards of your library. For each card type, you may put a card of that type from among the revealed cards into your hand. Put the rest on the bottom of your library in a random order.",
             "Atraxa, Grand Unifier",
@@ -4468,6 +4470,8 @@ fn distinct_card_type_choose_wires_remainder_on_bottom() {
         matches!(
             &*bottom_def.effect,
             Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
                 ..
             }
@@ -16549,6 +16553,245 @@ fn everybody_lives_emits_cant_lose_life_lose_game_win_game_statics() {
     );
 }
 
+// CR 104.2b + CR 104.3e + CR 614.1a + CR 514.2: Angel's Grace prints a
+// two-subject restriction conjunction ("You can't lose the game this turn and
+// your opponents can't win the game this turn.") followed by the one-shot form
+// of the life-floor damage replacement ("Until end of turn, damage that would
+// reduce your life total to less than 1 reduces it to 1 instead."). SHAPE
+// test: the chain must emit a Controller-scoped `CantLoseTheGame`, an
+// Opponent-scoped `CantWinTheGame`, and an `AddTargetReplacement` carrying
+// `DamageDone` + `LifeFloor{1}` + `Player{Controller}` with duration
+// `UntilEndOfTurn` and `expiry: None` (derived from the ability duration at
+// install). Zero `Effect::Unimplemented` is the reach guard: before the fix,
+// the whole first sentence and the floor clause each routed to
+// `Effect::Unimplemented`. Runtime semantics are covered by
+// `tests/integration/angels_grace.rs`.
+#[test]
+fn angels_grace_emits_cant_lose_cant_win_and_life_floor() {
+    use crate::types::ability::{
+        DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Duration,
+    };
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+
+    let r = parse(
+        "Split second (As long as this spell is on the stack, players can't cast spells \
+         or activate abilities that aren't mana abilities.)\n\
+         You can't lose the game this turn and your opponents can't win the game this \
+         turn. Until end of turn, damage that would reduce your life total to less than \
+         1 reduces it to 1 instead.",
+        "Angel's Grace",
+        &[Keyword::SplitSecond],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1, "single chained spell ability");
+
+    let mut cant_lose_affected = None;
+    let mut cant_win_affected = None;
+    let mut life_floor = None;
+    let mut node = Some(&r.abilities[0]);
+    while let Some(def) = node {
+        assert!(
+            !matches!(*def.effect, Effect::Unimplemented { .. }),
+            "no Unimplemented chunk should remain, got {:?}",
+            def.effect
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                for s in static_abilities {
+                    match s.mode {
+                        StaticMode::CantLoseTheGame => {
+                            cant_lose_affected = s.affected.clone();
+                        }
+                        StaticMode::CantWinTheGame => {
+                            cant_win_affected = s.affected.clone();
+                        }
+                        _ => continue,
+                    }
+                    // CR 514.2: "this turn" — both restriction statics must be
+                    // duration-scoped so the transient effects end at cleanup;
+                    // a dropped duration would make the locks permanent.
+                    assert_eq!(
+                        def.duration,
+                        Some(Duration::UntilEndOfTurn),
+                        "restriction statics must carry the this-turn duration"
+                    );
+                }
+            }
+            Effect::AddTargetReplacement {
+                replacement,
+                target,
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::None,
+                    "self-contained floating replacement takes no per-target binding"
+                );
+                assert_eq!(
+                    def.duration,
+                    Some(Duration::UntilEndOfTurn),
+                    "the install resolver derives the EndOfTurn expiry from this duration"
+                );
+                life_floor = Some((**replacement).clone());
+            }
+            _ => {}
+        }
+        node = def.sub_ability.as_deref();
+    }
+
+    // CR 104.3b + CR 104.3e: "You can't lose the game" binds to the caster.
+    assert_eq!(
+        cant_lose_affected,
+        Some(TargetFilter::Controller),
+        "CantLoseTheGame must be Controller-scoped"
+    );
+    // CR 104.2b: "your opponents can't win the game" binds to the opponents.
+    assert!(
+        matches!(
+            cant_win_affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ),
+        "CantWinTheGame must be Opponent-scoped, got {cant_win_affected:?}"
+    );
+    // CR 614.1a: the life floor is a DamageDone replacement on the caster.
+    let repl = life_floor.expect("chain must emit the AddTargetReplacement life floor");
+    assert!(matches!(repl.event, ReplacementEvent::DamageDone));
+    assert_eq!(
+        repl.damage_modification,
+        Some(DamageModification::LifeFloor { minimum: 1 })
+    );
+    assert_eq!(
+        repl.damage_target_filter,
+        Some(DamageTargetFilter::Player {
+            player: DamageTargetPlayerScope::Controller
+        })
+    );
+    assert!(
+        repl.expiry.is_none(),
+        "expiry is derived from the ability duration at install, not parse time"
+    );
+}
+
+// CR 614.1a + CR 514.2: Angel of Grace carries the same life-floor sentence in
+// TRIGGER context ("When this creature enters, until end of turn, damage that
+// would reduce your life total to less than 1 reduces it to 1 instead.") —
+// the divergent production entry for the lift. The trigger's execute body must
+// lower to `AddTargetReplacement` with `Duration::UntilEndOfTurn` threaded
+// onto the executing ability (the install resolver derives the EndOfTurn
+// expiry from it via `expiry_from_duration`); a dropped duration would make
+// the floor permanent.
+#[test]
+fn angel_of_grace_trigger_lifts_life_floor_with_duration() {
+    use crate::types::ability::{DamageModification, Duration};
+
+    let r = parse(
+        "Flash\nFlying\nWhen this creature enters, until end of turn, damage that would \
+         reduce your life total to less than 1 reduces it to 1 instead.\n{4}{W}{W}, Exile \
+         this card from your graveyard: Your life total becomes 10.",
+        "Angel of Grace",
+        &[Keyword::Flash, Keyword::Flying],
+        &["Creature"],
+        &["Angel"],
+    );
+    let execute = r
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_ref())
+        .expect("ETB trigger should have an execute body");
+    assert!(
+        !has_unimplemented(execute),
+        "ETB trigger body must not contain Unimplemented effects: {execute:#?}"
+    );
+    let Effect::AddTargetReplacement {
+        replacement,
+        target,
+    } = &*execute.effect
+    else {
+        panic!("trigger body must lift to AddTargetReplacement, got {execute:#?}");
+    };
+    assert_eq!(*target, TargetFilter::None);
+    assert_eq!(
+        replacement.damage_modification,
+        Some(DamageModification::LifeFloor { minimum: 1 })
+    );
+    assert_eq!(
+        execute.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the trigger-context duration must ride on the executing ability"
+    );
+    assert!(replacement.expiry.is_none());
+}
+
+// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: Courageous Resolve's
+// fateful-hour tail is an Oxford-comma list of THREE restriction clauses
+// under one "you can't"-family subject axis, the last of which switches
+// subject to "your opponents" — the same tail Angel's Grace and Celestine
+// Reef print, but reached through a comma-list rather than a plain
+// bare-"and" pair. Regression for the class boundary this PR adds to
+// `starts_bare_and_clause_lower`: splitting "your opponents can't win the
+// game this turn" off the tail left the PRECEDING comma-list item ("you
+// can't lose the game this turn,") with its dangling list comma still
+// attached, which broke `parse_restriction_modes`'s `all_consuming` match
+// and silently regressed it to `Effect::Unimplemented`. Fixed at the shared
+// `push_clause_chunk` (trims a trailing list comma, not just the sentence-
+// final period) rather than in this one bare-and arm, since every chunk
+// boundary in the module routes through it. RED against the unfixed chunk
+// trim: the middle clause reverts to `Unimplemented { name: "can't", .. }`.
+#[test]
+fn courageous_resolve_fateful_hour_list_zero_unimplemented() {
+    let r = parse(
+        "Up to one target creature you control gains protection from each of your \
+         opponents until end of turn. Draw a card.\n\
+         Fateful hour — If you have 5 or less life, you can't lose life this turn, you \
+         can't lose the game this turn, and your opponents can't win the game this turn.",
+        "Courageous Resolve",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    let fateful = r
+        .abilities
+        .iter()
+        .find(|a| {
+            a.description
+                .as_deref()
+                .is_some_and(|d| d.starts_with("Fateful hour"))
+        })
+        .expect("Fateful hour ability present");
+
+    let mut modes = Vec::new();
+    let mut node = Some(fateful);
+    while let Some(def) = node {
+        assert!(
+            !matches!(*def.effect, Effect::Unimplemented { .. }),
+            "no Unimplemented chunk should remain in the fateful-hour chain, got {:?}",
+            def.effect
+        );
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        {
+            modes.extend(static_abilities.iter().map(|s| s.mode.clone()));
+        }
+        node = def.sub_ability.as_deref();
+    }
+    assert_eq!(
+        modes,
+        vec![
+            StaticMode::CantLoseLife,
+            StaticMode::CantLoseTheGame,
+            StaticMode::CantWinTheGame,
+        ],
+        "all three fateful-hour restrictions must resolve in order, got {modes:?}"
+    );
+}
+
 #[test]
 fn avatars_wrath_parses_airbend_chain_cast_restriction_and_self_exile() {
     let r = parse(
@@ -20377,6 +20620,149 @@ fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
     );
 }
 
+/// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: the mass-exile arm of the
+/// two-trigger exile-return class. Worldgorger Dragon ("exile all other
+/// permanents you control") parses its ETB to `Effect::ChangeZoneAll`→Exile,
+/// not the single-target `ChangeZone`. The widened
+/// `trigger_is_etb_exile_pending_duration` predicate must stamp
+/// `Duration::UntilHostLeavesPlay` on the mass-exile ETB exactly as it does for
+/// the single-target Journey to Nowhere / Oblivion Ring class, so the engine's
+/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled cards when the
+/// source leaves. Oracle text verbatim from `data/card-data.json` (2026-07).
+#[test]
+fn mass_exile_ltb_return_etb_gets_until_host_leaves_duration() {
+    let oracle = "Flying, trample\n\
+             When this creature enters, exile all other permanents you control.\n\
+             When this creature leaves the battlefield, return the exiled cards to the \
+             battlefield under their owners' control.";
+    let name = "Worldgorger Dragon";
+    let result = parse(oracle, name, &[], &["Creature"], &[]);
+
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
+
+    let execute = etb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{name} ETB must have execute"));
+    assert_eq!(
+        execute.duration,
+        Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+        "{name}: mass-exile ETB must carry UntilHostLeavesPlay so the engine returns the cards"
+    );
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "{name}: ETB execute must be ChangeZoneAll→Exile"
+    );
+}
+
+/// CR 610.3: Realm Razer's LTB return carries an entry modifier ("return the
+/// exiled cards to the battlefield TAPPED") that the automatic
+/// `ExileLink::UntilSourceLeaves` return path can't apply — it performs a
+/// plain, unmodified zone move. `trigger_is_ltb_return` must reject a return
+/// trigger with any entry modifier, so `detect_etb_exile_ltb_return` never
+/// stamps `Duration::UntilHostLeavesPlay` on the ETB — correctly excluded
+/// rather than silently dropping the tapped rider. Because that leaves Realm
+/// Razer with no working return path, the unsupported return must be VISIBLE to
+/// the coverage tooling (an `Effect::unimplemented("modifier_bearing_linked_return")`
+/// marker on the LTB trigger) rather than the card showing as falsely
+/// supported. Oracle text verbatim from Scryfall (2026-07). Caught in review of
+/// #6055.
+#[test]
+fn mass_exile_ltb_return_with_entry_modifier_is_not_paired() {
+    use crate::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};
+    use crate::types::card::CardFace;
+
+    let oracle = "When this creature enters, exile all lands.\n\
+             When this creature leaves the battlefield, return the exiled cards to the \
+             battlefield tapped under their owners' control.";
+    let name = "Realm Razer";
+    let result = parse(oracle, name, &[], &["Creature"], &[]);
+
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
+
+    let execute = etb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{name} ETB must have execute"));
+    assert_eq!(
+        execute.duration, None,
+        "{name}: mass-exile ETB must NOT be stamped UntilHostLeavesPlay — its LTB return has a \
+         tapped modifier the automatic return path can't carry"
+    );
+
+    // Coverage-honesty gate (the maintainer's explicit ask, #6055): the
+    // unsupported modifier-bearing return must be visible to the coverage
+    // tooling, not silently green. Build a CardFace with BOTH triggers (the gap
+    // marker lives on the LTB return trigger) and assert the gap surfaces.
+    let face = CardFace {
+        name: name.to_string(),
+        triggers: result.triggers.clone(),
+        ..CardFace::default()
+    };
+    assert!(
+        card_face_has_unimplemented_parts(&face),
+        "{name}: the modifier-bearing linked return must report an Unimplemented part so the \
+         card is not falsely marked supported"
+    );
+    let gaps = card_face_gaps(&face);
+    assert!(
+        !gaps.is_empty(),
+        "{name}: coverage must report a non-empty gap set for the unsupported return"
+    );
+    assert!(
+        gaps.iter()
+            .any(|g| g == "Effect:modifier_bearing_linked_return"),
+        "{name}: coverage gaps must contain the modifier_bearing_linked_return marker, got: {gaps:?}"
+    );
+}
+
+/// Positive-safety companion to `mass_exile_ltb_return_with_entry_modifier_is_not_paired`:
+/// the already-merged unmodified class (Worldgorger Dragon) must still report
+/// ZERO coverage gaps after the modifier-unsupported path was added — proving
+/// the coverage-honesty fix did not regress the supported class. Oracle text
+/// verbatim from `crates/engine/tests/fixtures/integration_cards.json` (2026-07).
+#[test]
+fn mass_exile_ltb_return_unmodified_class_reports_no_gaps() {
+    use crate::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};
+    use crate::types::card::CardFace;
+
+    let oracle = "Flying, trample\n\
+             When this creature enters, exile all other permanents you control.\n\
+             When this creature leaves the battlefield, return the exiled cards to the \
+             battlefield under their owners' control.";
+    let name = "Worldgorger Dragon";
+    let result = parse(oracle, name, &[], &["Creature"], &[]);
+
+    let face = CardFace {
+        name: name.to_string(),
+        triggers: result.triggers.clone(),
+        ..CardFace::default()
+    };
+    assert!(
+        !card_face_has_unimplemented_parts(&face),
+        "{name}: the unmodified linked-return class must report no Unimplemented parts"
+    );
+    assert!(
+        card_face_gaps(&face).is_empty(),
+        "{name}: the unmodified linked-return class must report zero coverage gaps, got: {:?}",
+        card_face_gaps(&face)
+    );
+}
+
 #[test]
 fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
     let oracle = "As this artifact enters, choose a creature type. This artifact enters with a \
@@ -21853,4 +22239,201 @@ fn t123_advance_on_partial_intercepts_no_longer_eat_their_tails() {
             clean.extracted_keywords
         );
     }
+}
+
+/// Issue #6004: Azor's Gateway's transform condition — "If cards with five or
+/// more different mana values are exiled with Azor's Gateway, you gain 5
+/// life, untap Azor's Gateway, and transform it" — was entirely swallowed
+/// (the "cards with N or more different <quality>" noun phrase had no
+/// `ExiledBySource` variant of the "you control N or more with different
+/// <quality>" family, CR 202.3 + CR 607.2a). The whole `If`
+/// clause dropped, leaving an unconditional `GainLife` and losing the untap /
+/// transform effects outright. Now parses with zero swallowed clauses, and
+/// the condition (an `ObjectCountDistinct[ManaValue]` threshold over the
+/// `ExiledBySource` pool) gates each of the three effects.
+#[test]
+fn azors_gateway_transform_condition_parses_with_zero_swallowed_clauses() {
+    let text = "{1}, {T}: Draw a card, then exile a card from your hand. If cards with five \
+                or more different mana values are exiled with Azor's Gateway, you gain 5 life, \
+                untap Azor's Gateway, and transform it.";
+    let parsed = parse(text, "Azor's Gateway", &[], &["Artifact"], &[]);
+
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "expected zero swallowed clauses, got {:#?}",
+        parsed.parse_warnings
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+
+    let expected_ability_condition = Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountDistinct {
+                filter: TargetFilter::ExiledBySource,
+                qualities: vec![SharedQuality::ManaValue],
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 5 },
+    });
+
+    let draw = &parsed.abilities[0];
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    assert!(draw.condition.is_none());
+
+    let exile = draw.sub_ability.as_deref().expect("exile sub-ability");
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    assert!(exile.condition.is_none());
+
+    let gain_life = exile.sub_ability.as_deref().expect("gain life sub-ability");
+    assert!(matches!(gain_life.effect.as_ref(), Effect::GainLife { .. }));
+    assert_eq!(gain_life.condition, expected_ability_condition);
+
+    let untap = gain_life.sub_ability.as_deref().expect("untap sub-ability");
+    assert!(matches!(
+        untap.effect.as_ref(),
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    assert_eq!(untap.condition, expected_ability_condition);
+
+    let transform = untap.sub_ability.as_deref().expect("transform sub-ability");
+    assert!(matches!(
+        transform.effect.as_ref(),
+        Effect::Transform {
+            target: TargetFilter::ParentTarget
+        }
+    ));
+    assert_eq!(transform.condition, expected_ability_condition);
+    assert!(transform.sub_ability.is_none());
+}
+
+/// CR 104.2b + CR 104.3e + CR 114.1 + CR 611.3a + CR 205.3j: Gideon of the
+/// Trials (verbatim MTGJSON Oracle text) — the third loyalty ability creates
+/// an emblem carrying BOTH game-outcome locks, each gated on an `IsPresent`
+/// check for a Gideon planeswalker you control. Exercises all three seams of
+/// the fix in one production-shaped parse: the name normalizer keeps the
+/// type-adjective "Gideon" literal, the compound cant-win/lose multi arm
+/// splits the conjunction, and the emblem parser carries multiple statics.
+/// Reverting any of the three fails this test.
+#[test]
+fn gideon_of_the_trials_emblem_full_parse() {
+    let r = parse(
+        "[+1]: Until your next turn, prevent all damage target permanent would deal.\n[0]: Until end of turn, Gideon becomes a 4/4 Human Soldier creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+        "Gideon of the Trials",
+        &[],
+        &["Planeswalker"],
+        &["Gideon"],
+    );
+    assert_eq!(
+        r.abilities.len(),
+        3,
+        "three loyalty abilities, got {:#?}",
+        r.abilities
+    );
+    // Positive reach guard for the swallow assertion below: every ability
+    // parses with zero residual `Effect::Unimplemented`.
+    for def in &r.abilities {
+        assert!(
+            !has_unimplemented(def),
+            "no residual Unimplemented node, got {:#?}",
+            def
+        );
+    }
+
+    let Effect::CreateEmblem { statics, triggers } = &*r.abilities[2].effect else {
+        panic!(
+            "third loyalty ability must create an emblem, got {:?}",
+            r.abilities[2].effect
+        );
+    };
+    assert!(triggers.is_empty(), "emblem grants statics, not triggers");
+    assert_eq!(
+        statics.len(),
+        2,
+        "one static per conjunct of the emblem body, got {statics:#?}"
+    );
+    assert_eq!(statics[0].mode, StaticMode::CantLoseTheGame);
+    assert_eq!(
+        statics[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(statics[1].mode, StaticMode::CantWinTheGame);
+    assert_eq!(
+        statics[1].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    // CR 611.3a + CR 205.3j: each lock is gated on controlling a Gideon
+    // planeswalker — live, typed, never `Unrecognized`.
+    for static_def in statics {
+        let Some(StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(typed)),
+        }) = &static_def.condition
+        else {
+            panic!("each emblem static carries the IsPresent gate: {static_def:#?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(
+            typed.type_filters.contains(&TypeFilter::Planeswalker),
+            "gate requires a planeswalker: {typed:?}"
+        );
+        assert!(
+            typed
+                .type_filters
+                .contains(&TypeFilter::Subtype("Gideon".to_string())),
+            "gate requires the Gideon planeswalker type: {typed:?}"
+        );
+    }
+
+    // The `Condition_AsLongAs` swallow flag must clear — non-vacuously: the
+    // fully-typed positive shape asserted above IS the reach guard.
+    assert!(
+        r.parse_warnings.iter().all(|warning| {
+            let s = warning.to_string();
+            s.split_whitespace().next() != Some("Swallow:Condition_AsLongAs")
+        }),
+        "as-long-as gate is typed, so the swallow flag must clear: {:?}",
+        r.parse_warnings
+    );
+}
+
+/// CR 114.1: a standalone emblem-granting instant/sorcery ("You get an emblem
+/// with ...") must parse its spell effect to a `CreateEmblem` carrying the full
+/// static payload — the same emblem body outside any loyalty-ability context.
+/// Pins the spell-path class so any emblem-granting instant/sorcery is covered,
+/// not just Gideon.
+#[test]
+fn standalone_spell_emblem_grant_parses_to_create_emblem() {
+    let r = parse(
+        "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+        "Test Emblem Grant",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let create = r
+        .abilities
+        .iter()
+        .find_map(|def| match &*def.effect {
+            Effect::CreateEmblem { statics, .. } => Some(statics),
+            _ => None,
+        })
+        .expect("standalone spell emblem grant must parse to a CreateEmblem effect");
+    assert_eq!(
+        create.len(),
+        2,
+        "emblem carries both outcome-lock statics, got {create:#?}"
+    );
 }

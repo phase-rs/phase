@@ -1154,10 +1154,13 @@ pub fn get_game_state() -> JsValue {
 pub fn get_filtered_game_state(viewer: u8) -> JsValue {
     match with_state(|state| {
         let filtered = filter_state_for_viewer(state, PlayerId(viewer));
-        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
-            &filtered,
-            Some(PlayerId(viewer)),
-        ))
+        to_js(
+            &engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                state,
+                &filtered,
+                Some(PlayerId(viewer)),
+            ),
+        )
     }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,

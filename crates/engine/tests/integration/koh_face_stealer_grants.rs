@@ -170,7 +170,10 @@ fn koh_has_upkeep_trigger(state: &GameState, koh: ObjectId) -> bool {
     state.objects[&koh]
         .trigger_definitions
         .iter_unchecked()
-        .any(|t| matches!(t.mode, TriggerMode::Phase) && t.phase == Some(Phase::Upkeep))
+        .any(|entry| {
+            matches!(entry.definition.mode, TriggerMode::Phase)
+                && entry.definition.phase == Some(Phase::Upkeep)
+        })
 }
 
 // ─── Condition #4: a granted TRIGGERED ability actually FIRES for Koh ─────────

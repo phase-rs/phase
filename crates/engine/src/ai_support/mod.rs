@@ -1136,7 +1136,7 @@ fn sacrifice_for_mana_enables_followup(state: &GameState, player: PlayerId) -> b
         let case3 = obj
             .trigger_definitions
             .iter_all()
-            .any(trigger_fires_on_leaving_battlefield);
+            .any(|entry| trigger_fires_on_leaving_battlefield(entry.definition()));
         case2 || case3
     })
 }
@@ -1221,6 +1221,7 @@ fn beneficial_mana_tap_trigger_hold(
                 return false;
             };
             obj.trigger_definitions.iter_all().any(|trigger| {
+                let trigger = trigger.definition();
                 if !mana_sources::is_non_mana_tap_trigger(trigger)
                     || !mana_sources::trigger_chain_benefits_controller(trigger)
                 {
