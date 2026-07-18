@@ -97,7 +97,11 @@ cleanup_tmp() {
   # possibly-empty array under `set -u` (macOS default is bash 3.2).
   local f
   for f in ${PENDING_TMP[@]+"${PENDING_TMP[@]}"}; do
-    [ -e "$f" ] && rm -f "$f"
+    # Bare `rm -f`, never `[ -e "$f" ] && rm -f "$f"`: a false `[ -e ]` on the
+    # final iteration makes the AND-list — and therefore this trap, and
+    # therefore the whole script — exit non-zero after a fully successful run.
+    # `rm -f` already ignores a missing path, so the guard was only a landmine.
+    rm -f "$f"
   done
 }
 trap cleanup_tmp EXIT
@@ -107,18 +111,26 @@ track_tmp() {
   PENDING_TMP+=("$1")
 }
 
-# Atomically rename tmp → final and remove the path from the pending list
-# so the EXIT trap won't touch the now-promoted file.
-promote_tmp() {
+# Drop a path from the pending list. Every caller that disposes of a tracked
+# .tmp itself (promote, or an early `rm` once the file is known redundant) must
+# call this, or the EXIT trap is left holding a path it no longer owns.
+untrack_tmp() {
   local tmp="$1"
-  local final="$2"
-  mv -f "$tmp" "$final"
   local i
   local new=()
   for i in ${PENDING_TMP[@]+"${PENDING_TMP[@]}"}; do
     [ "$i" = "$tmp" ] || new+=("$i")
   done
   PENDING_TMP=(${new[@]+"${new[@]}"})
+}
+
+# Atomically rename tmp → final and remove the path from the pending list
+# so the EXIT trap won't touch the now-promoted file.
+promote_tmp() {
+  local tmp="$1"
+  local final="$2"
+  mv -f "$tmp" "$final"
+  untrack_tmp "$tmp"
 }
 
 run_tool_with_recovery() {
@@ -145,7 +157,8 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 
 # --- Group 1: card-data + card-names (expensive, independent of coverage) ---
 # Build every generator bin in ONE cargo invocation, then run the binaries
-# directly from target/tool/. Two reasons this matters for build time:
+# directly from the tool-profile output dir. Two reasons this matters for
+# build time:
 #   1. Unified feature set: mixing `--features cli` and no-feature invocations
 #      re-fingerprints the engine crate and recompiles it on each switch.
 #   2. Single invocation "shape": cargo's tool-profile artifacts stabilize per
@@ -153,25 +166,41 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 #      alone vs the others) recompiles the engine on each switch. One shape for
 #      every build keeps the warm case a true no-op.
 TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate --bin coverage-parse-diff)
-TOOL_BIN="target/tool"
+# Execute from the SAME target dir cargo built into: `cargo build` honors
+# CARGO_TARGET_DIR, so a hardcoded `target/tool` here would silently run stale
+# binaries from a different build whenever the variable is set.
+TOOL_BIN="${CARGO_TARGET_DIR:-target}/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
-# The token catalog is baked into the engine lib at compile time via
-# `include_str!("../../data/known-tokens.toml")` (token_presets.rs). Regenerate
-# it, then re-embed it only if it actually changed.
+# The token catalog is baked into the engine lib at compile time (build.rs
+# converts data/known-tokens.toml to JSON in OUT_DIR; token_presets.rs embeds
+# it via include_bytes!). Regenerate it, then re-embed it only if it actually
+# changed.
 echo "Generating token preset catalog from MTGJSON set files..."
 TOKENS_FILE="crates/engine/data/known-tokens.toml"
 # Temp beside the target so the replace below is an atomic same-filesystem
-# rename (Tilt's card-data resource may run this script concurrently).
-TOKENS_TMP="$(mktemp "${TOKENS_FILE}.XXXXXX")"
+# rename (Tilt's card-data resource may run this script concurrently). The
+# `.tmp.` infix is load-bearing: crates/engine/data/ is watched as part of the
+# Tiltfile's ENGINE_SRC, and only names matching its TMP_IGNORE (`**/*.tmp.*`)
+# are exempt from retriggering. Without it, creating this file re-triggers the
+# very resource that created it — an unbreakable card-data rebuild loop that
+# also drags every other ENGINE_SRC watcher (clippy, test-engine, wasm) with it.
+TOKENS_TMP="$(mktemp "${TOKENS_FILE}.tmp.XXXXXX")"
+# Register before tokens-gen runs: a failure or interrupt between here and the
+# promote below would otherwise strand the staging file in the watched data dir,
+# where nothing else would ever collect it.
+track_tmp "$TOKENS_TMP"
 "$TOOL_BIN/tokens-gen" --input "$DATA_DIR/mtgjson/sets" --output "$TOKENS_TMP"
 # tokens-gen output is deterministic, so only overwrite when content actually
 # changed — an unconditional copy bumps the file's mtime and forces a full
-# (40-65s) engine recompile via the include_str! dependency for nothing.
+# (40-65s) engine recompile via build.rs's rerun-if-changed for nothing.
 if cmp -s "$TOKENS_TMP" "$TOKENS_FILE"; then
   rm -f "$TOKENS_TMP"
+  untrack_tmp "$TOKENS_TMP"
 else
-  mv -f "$TOKENS_TMP" "$TOKENS_FILE"
+  # promote_tmp, not a bare `mv`: it deregisters the path so the EXIT trap
+  # cannot delete the file it was just promoted onto.
+  promote_tmp "$TOKENS_TMP" "$TOKENS_FILE"
   # The catalog changed, so the generator bins built above embed the stale
   # copy. Rebuild them (same shape) to re-bake the new catalog — this is the
   # one case where an engine recompile is genuinely required.
@@ -181,9 +210,17 @@ fi
 
 track_tmp "$OUTPUT_TMP"
 track_tmp "$NAMES_OUTPUT_TMP"
+# `--write-subtypes` refreshes the committed creature-subtype vocabulary
+# (crates/engine/data/oracle-subtypes.json, `include_str!`d by the parser).
+# This script is the only caller that may pass it: it is the only one that
+# downloads CardTypes.json above, and CardTypes.json is the sole source of the
+# token-only subtypes (Army, Servo, Pentavite, …). oracle-gen hard-fails under
+# this flag if that sidecar is missing, rather than regenerating a vocabulary
+# with all 26 of them silently deleted. Every other caller (CI, ai-gate, a bare
+# `cargo export-cards`) omits the flag and leaves the tracked file untouched.
 run_tool_with_recovery \
   "$OUTPUT_TMP" \
-  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP" --sidecar-dir "$OUTPUT_DIR"
+  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP" --sidecar-dir "$OUTPUT_DIR" --write-subtypes
 # Cheap presence guard only. The full JSON/object/non-empty/integrity
 # validation is done by card-data-validate below (CardDatabase::from_export),
 # which is strictly stronger than a jq shape check — so an extra jq parse of
@@ -264,7 +301,7 @@ elif [ ! -s "$WARNING_PATTERNS_OUTPUT_TMP" ] || ! jq -e '.' "$WARNING_PATTERNS_O
   coverage_ok=0
 fi
 if [ "$coverage_ok" = 1 ]; then
-  if ! jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, coverage_by_set}' \
+  if ! jq '{total_cards, supported_cards, coverage_pct, coverage_by_format, coverage_by_set, token_coverage}' \
         "$COVERAGE_OUTPUT_TMP" > "$COVERAGE_SUMMARY_TMP"; then
     echo "WARNING: coverage-summary derivation failed; leaving existing $COVERAGE_SUMMARY in place." >&2
   else
@@ -286,8 +323,10 @@ GEN_COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 MTGJSON_VERSION="unknown"
 MTGJSON_DATE="unknown"
 if [ -s "$MTGJSON_META_FILE" ]; then
-  MTGJSON_VERSION=$(jq -r '.meta.version // "unknown"' "$MTGJSON_META_FILE")
-  MTGJSON_DATE=$(jq -r '.meta.date // "unknown"' "$MTGJSON_META_FILE")
+  # tr strips Windows jq's trailing \r, which would otherwise embed a raw
+  # control character inside the JSON string values written to META_OUTPUT.
+  MTGJSON_VERSION=$(jq -r '.meta.version // "unknown"' "$MTGJSON_META_FILE" | tr -d '\r')
+  MTGJSON_DATE=$(jq -r '.meta.date // "unknown"' "$MTGJSON_META_FILE" | tr -d '\r')
 fi
 track_tmp "$META_OUTPUT_TMP"
 cat > "$META_OUTPUT_TMP" <<METAEOF
@@ -332,6 +371,7 @@ FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
 NAMES_SIZE=$(du -h "$NAMES_OUTPUT" | cut -f1)
 # Count entries in the small names array (648K) rather than grepping the 90MB
 # card-data for `"name"` — the latter is slower and overcounts nested keys.
-CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT")
+# tr strips Windows jq's trailing \r, which would otherwise corrupt this summary line.
+CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT" | tr -d '\r')
 echo "Generated $OUTPUT ($FILE_SIZE, ~$CARD_COUNT cards)"
 echo "Generated $NAMES_OUTPUT ($NAMES_SIZE)"

@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, ActivationRestriction, Comparator, CostObjectCount, FilterProp, QuantityExpr,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, Comparator, CostObjectCount, CostReduction, FilterProp,
+    QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -136,7 +136,7 @@ pub enum EscapeCost {
 
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum KeywordKind {
     Flying,
     FirstStrike,
@@ -235,7 +235,7 @@ pub enum KeywordKind {
     Madness,
     /// CR 702.168: Disguise — see `Keyword::Disguise`. A discriminant-level kind
     /// (like Morph/Mutate) so `FilterProp::HasKeywordKind { Disguise }` can name
-    /// the class regardless of the `Disguise(ManaCost)` parameter payload.
+    /// the class regardless of the `Disguise(DisguiseCost)` parameter payload.
     Disguise,
     /// CR 702.187: Mayhem — see `Keyword::Mayhem`.
     Mayhem,
@@ -312,6 +312,10 @@ pub enum KeywordKind {
 pub enum DynamicKeywordKind {
     Annihilator,
     Modular,
+    // CR 702.181a: Mobilize N — a granted mobilize whose count is a "where X is
+    // [quantity]" value (Infantry Shield: "Equipped creature has … mobilize X,
+    // where X is its power"). Resolves to `Keyword::Mobilize(Fixed { value })`.
+    Mobilize,
 }
 
 impl DynamicKeywordKind {
@@ -320,6 +324,12 @@ impl DynamicKeywordKind {
         match self {
             Self::Annihilator => Keyword::Annihilator(value),
             Self::Modular => Keyword::Modular(value),
+            // CR 702.181a: the resolved count is applied as a fixed value; the
+            // continuous layer pass re-resolves it whenever the source's power
+            // changes, so the mobilize count tracks "its power".
+            Self::Mobilize => Keyword::Mobilize(QuantityExpr::Fixed {
+                value: value as i32,
+            }),
         }
     }
 
@@ -328,6 +338,74 @@ impl DynamicKeywordKind {
         match name {
             "annihilator" => Some(Self::Annihilator),
             "modular" => Some(Self::Modular),
+            "mobilize" => Some(Self::Mobilize),
+            _ => None,
+        }
+    }
+}
+
+/// CR 702 cast-from-off-zone-for-alternative-cost keyword family whose cost is a
+/// plain `ManaCost`. Used by `ContinuousModification::AddKeywordWithDerivedCost`
+/// to construct the runtime keyword from a per-recipient DERIVED cost — the
+/// derived-cost mirror of `DynamicKeywordKind` (numeric-parameter grants).
+///
+/// The compound-cost members Flashback/Escape/Evoke/Bestow carry their own cost
+/// types (`FlashbackCost`/`EscapeCost`/`EvokeCost`/`BestowCost`), so they are out
+/// of this constructor's domain; they would belong to a future richer-cost kind
+/// if a card ever grants them a derived cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CostBearingKeywordKind {
+    Foretell,
+    Madness,
+    Disturb,
+    Mayhem,
+    Dash,
+    Unearth,
+}
+
+impl CostBearingKeywordKind {
+    /// Parallel to `DynamicKeywordKind::with_value(u32)`: construct the concrete
+    /// `Keyword` from a per-recipient DERIVED `ManaCost`. Infallible — every
+    /// variant maps to a `Keyword::X(ManaCost)`.
+    pub fn with_cost(&self, cost: ManaCost) -> Keyword {
+        match self {
+            Self::Foretell => Keyword::Foretell(cost),
+            Self::Madness => Keyword::Madness(cost),
+            Self::Disturb => Keyword::Disturb(cost),
+            Self::Mayhem => Keyword::Mayhem(cost),
+            Self::Dash => Keyword::Dash(cost),
+            Self::Unearth => Keyword::Unearth(cost),
+        }
+    }
+
+    /// True when `kw` is a keyword of this family (regardless of its cost). Used
+    /// by the off-zone applier's per-recipient "without <kw>" dedup check.
+    /// Compares by concrete `Keyword` shape rather than `KeywordKind` because
+    /// several of these families (e.g. Madness) share `KeywordKind::Unknown`,
+    /// which would over-match under a `kind()` comparison.
+    pub fn matches_keyword(&self, kw: &Keyword) -> bool {
+        matches!(
+            (self, kw),
+            (Self::Foretell, Keyword::Foretell(_))
+                | (Self::Madness, Keyword::Madness(_))
+                | (Self::Disturb, Keyword::Disturb(_))
+                | (Self::Mayhem, Keyword::Mayhem(_))
+                | (Self::Dash, Keyword::Dash(_))
+                | (Self::Unearth, Keyword::Unearth(_))
+        )
+    }
+
+    /// Parse a keyword name into a `CostBearingKeywordKind`, if it is one of the
+    /// plain-`ManaCost` cast-from-off-zone family. Lets a single parser branch
+    /// select the family from the granted keyword's name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "foretell" => Some(Self::Foretell),
+            "madness" => Some(Self::Madness),
+            "disturb" => Some(Self::Disturb),
+            "mayhem" => Some(Self::Mayhem),
+            "dash" => Some(Self::Dash),
+            "unearth" => Some(Self::Unearth),
             _ => None,
         }
     }
@@ -471,6 +549,25 @@ pub enum WardCost {
 pub enum BloodthirstValue {
     Fixed(u32),
     X,
+}
+
+/// CR 702.168d + CR 118.7a: A disguise cost can be fixed or carry its own
+/// dynamic generic reduction (Fugitive Codebreaker). The untagged mana form
+/// preserves the existing card-data representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DisguiseCost {
+    Mana(ManaCost),
+    Reduced {
+        cost: ManaCost,
+        reduction: Box<CostReduction>,
+    },
+}
+
+impl From<ManaCost> for DisguiseCost {
+    fn from(cost: ManaCost) -> Self {
+        Self::Mana(cost)
+    }
 }
 
 /// All MTG keywords as typed enum variants.
@@ -656,7 +753,7 @@ pub enum Keyword {
     Foretell(ManaCost),
     Mutate(ManaCost),
     Disturb(ManaCost),
-    Disguise(ManaCost),
+    Disguise(DisguiseCost),
     Blitz(ManaCost),
     Overload(ManaCost),
     Spectacle(ManaCost),
@@ -1041,6 +1138,228 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    /// Whether this keyword should appear in the battlefield card's compact
+    /// badge strip. The strip communicates abilities that remain relevant to
+    /// the object as a permanent: combat, protection, live characteristics,
+    /// activated abilities, and triggers sourced from the battlefield.
+    ///
+    /// This is an engine-owned presentation classification. It intentionally
+    /// omits cast-, hand-, graveyard-, and enters-only keywords (for example,
+    /// Evoke and Ravenous) while preserving the complete `keywords` list for
+    /// card previews and all rules processing.
+    pub fn is_battlefield_display_relevant(&self) -> bool {
+        match self {
+            // Combat, damage, and evasion
+            Keyword::Flying
+            | Keyword::FirstStrike
+            | Keyword::DoubleStrike
+            | Keyword::Trample
+            | Keyword::TrampleOverPlaneswalkers
+            | Keyword::Deathtouch
+            | Keyword::Lifelink
+            | Keyword::Vigilance
+            | Keyword::Haste
+            | Keyword::Reach
+            | Keyword::Defender
+            | Keyword::Menace
+            | Keyword::Fear
+            | Keyword::Intimidate
+            | Keyword::Skulk
+            | Keyword::Shadow
+            | Keyword::Horsemanship
+            | Keyword::Wither
+            | Keyword::Infect
+            | Keyword::Afflict(_)
+            | Keyword::Landwalk(_)
+            | Keyword::Rampage(_)
+            | Keyword::Absorb(_)
+            | Keyword::Banding
+            | Keyword::BandsWithOther(_)
+            | Keyword::Decayed
+            | Keyword::Unleash
+            | Keyword::Poisonous(_)
+            | Keyword::Toxic(_) => true,
+
+            // Live characteristics, protection, and attachment constraints
+            Keyword::Indestructible
+            | Keyword::Hexproof
+            | Keyword::HexproofFrom(_)
+            | Keyword::Shroud
+            | Keyword::Devoid
+            | Keyword::Changeling
+            | Keyword::Phasing
+            | Keyword::Protection(_)
+            | Keyword::Ward(_)
+            | Keyword::Enchant(_)
+            | Keyword::TotemArmor
+            | Keyword::LivingMetal
+            | Keyword::Daybound
+            | Keyword::Nightbound => true,
+
+            // Activated abilities available from the battlefield
+            Keyword::Reconfigure(_)
+            | Keyword::Equip(_)
+            | Keyword::Crew { .. }
+            | Keyword::Outlast(_)
+            | Keyword::Fortify(_)
+            | Keyword::Craft { .. }
+            | Keyword::LevelUp(_)
+            | Keyword::Saddle(_)
+            | Keyword::Transfigure(_)
+            | Keyword::Station
+            | Keyword::Specialize(_) => true,
+
+            // Triggered and ongoing abilities sourced from the battlefield
+            Keyword::Prowess
+            | Keyword::Undying
+            | Keyword::Persist
+            | Keyword::Exalted
+            | Keyword::Flanking
+            | Keyword::Evolve
+            | Keyword::Extort
+            | Keyword::Ascend
+            | Keyword::StartYourEngines
+            | Keyword::Modular(_)
+            | Keyword::Renown(_)
+            | Keyword::Annihilator(_)
+            | Keyword::Bushido(_)
+            | Keyword::Frenzy(_)
+            | Keyword::Soulbond
+            | Keyword::Battlecry
+            | Keyword::Afterlife(_)
+            | Keyword::Fading(_)
+            | Keyword::Vanishing(_)
+            | Keyword::Echo(_)
+            | Keyword::Impending { .. }
+            | Keyword::CumulativeUpkeep(_)
+            | Keyword::Haunt
+            | Keyword::Ingest
+            | Keyword::Melee
+            | Keyword::Mentor
+            | Keyword::Myriad
+            | Keyword::Provoke
+            | Keyword::Mobilize(_)
+            | Keyword::Dethrone
+            | Keyword::DoubleTeam
+            | Keyword::Graft(_)
+            | Keyword::Soulshift(_)
+            | Keyword::Firebending(_)
+            | Keyword::Champion(_)
+            | Keyword::Training => true,
+
+            // Cast-, zone-, deckbuilding-, or enters-only keywords; they are
+            // deliberately hidden from the battlefield badge strip.
+            Keyword::Flash
+            | Keyword::StartingIntensity(_)
+            | Keyword::Cascade
+            | Keyword::Exploit
+            | Keyword::Explore
+            | Keyword::Dredge(_)
+            | Keyword::Fabricate(_)
+            | Keyword::Tribute(_)
+            | Keyword::Unearth(_)
+            | Keyword::Convoke
+            | Keyword::Waterbend
+            | Keyword::Delve
+            | Keyword::Riot
+            | Keyword::EtbCounter { .. }
+            | Keyword::LivingWeapon
+            | Keyword::JobSelect
+            | Keyword::Bestow(_)
+            | Keyword::Embalm(_)
+            | Keyword::Eternalize(_)
+            | Keyword::Kicker(_)
+            | Keyword::Cycling(_)
+            | Keyword::Flashback(_)
+            | Keyword::Partner(_)
+            | Keyword::Companion(_)
+            | Keyword::Ninjutsu(_)
+            | Keyword::CommanderNinjutsu(_)
+            | Keyword::Prowl(_)
+            | Keyword::Morph(_)
+            | Keyword::Megamorph(_)
+            | Keyword::Mayhem(_)
+            | Keyword::Madness(_)
+            | Keyword::Miracle(_)
+            | Keyword::Dash(_)
+            | Keyword::Emerge(_)
+            | Keyword::Escape(_)
+            | Keyword::Harmonize(_)
+            | Keyword::Evoke(_)
+            | Keyword::Foretell(_)
+            | Keyword::Mutate(_)
+            | Keyword::Disturb(_)
+            | Keyword::Disguise(_)
+            | Keyword::Blitz(_)
+            | Keyword::Overload(_)
+            | Keyword::Spectacle(_)
+            | Keyword::Surge(_)
+            | Keyword::Encore(_)
+            | Keyword::Buyback(_)
+            | Keyword::Casualty(_)
+            | Keyword::Entwine(_)
+            | Keyword::Scavenge(_)
+            | Keyword::Reinforce { .. }
+            | Keyword::Prototype { .. }
+            | Keyword::Plot(_)
+            | Keyword::Offspring(_)
+            | Keyword::Affinity(_)
+            | Keyword::Epic
+            | Keyword::Fuse
+            | Keyword::Gravestorm
+            | Keyword::Hideaway(_)
+            | Keyword::Improvise
+            | Keyword::Rebound
+            | Keyword::Retrace
+            | Keyword::Ripple(_)
+            | Keyword::SplitSecond
+            | Keyword::Storm
+            | Keyword::Suspend { .. }
+            | Keyword::Totem
+            | Keyword::Warp(_)
+            | Keyword::Sneak(_)
+            | Keyword::WebSlinging(_)
+            | Keyword::Gift(_)
+            | Keyword::Discover(_)
+            | Keyword::Spree
+            | Keyword::Ravenous
+            | Keyword::Enlist
+            | Keyword::ReadAhead
+            | Keyword::Compleated
+            | Keyword::Conspire
+            | Keyword::Demonstrate
+            | Keyword::Bloodthirst(_)
+            | Keyword::Amplify(_)
+            | Keyword::Devour(_)
+            | Keyword::Teamwork(_)
+            | Keyword::Backup(_)
+            | Keyword::Squad(_)
+            | Keyword::Typecycling { .. }
+            | Keyword::Splice { .. }
+            | Keyword::Bargain
+            | Keyword::Sunburst
+            | Keyword::Assist
+            | Keyword::Augment
+            | Keyword::Aftermath
+            | Keyword::JumpStart
+            | Keyword::Cipher
+            | Keyword::Transmute(_)
+            | Keyword::Escalate(_)
+            | Keyword::Recover(_)
+            | Keyword::Cleave(_)
+            | Keyword::Undaunted
+            | Keyword::Paradigm
+            | Keyword::Replicate(_)
+            | Keyword::Awaken { .. }
+            | Keyword::ForMirrodin
+            | Keyword::MoreThanMeetsTheEye(_)
+            | Keyword::Freerunning(_)
+            | Keyword::Increment
+            | Keyword::Offering(_)
+            | Keyword::Unknown(_) => false,
+        }
+    }
+
     /// CR 122.1b: Promote a bare `KeywordKind` (as stored on `CounterType::Keyword`)
     /// to the full `Keyword` enum for insertion into an object's keyword list.
     /// Every enumerated keyword-counter kind maps to a parameterless Keyword
@@ -1425,6 +1744,37 @@ impl Keyword {
             Keyword::Crew { .. } | Keyword::Enchant(_) | Keyword::Saddle(_)
         )
     }
+
+    /// CR 113.2c: The runtime-REALIZED subset of [`Self::instances_function_separately`]
+    /// for cast-time spell-keyword grants — keywords whose multiple instances the
+    /// cast-time merge (`casting.rs::merge_spell_keyword`) must PRESERVE rather than
+    /// coalesce by kind, because a downstream path actually consumes the surviving
+    /// count. This is the single authority shared by that merge gate
+    /// (`casting.rs::requires_per_instance_keyword`) and the quoted keyword-list
+    /// parser (`parse_spells_have_quoted_keyword_list`), so the two cannot diverge:
+    /// the parser must not emit a duplicate `CastWithKeyword` grant the merge would
+    /// silently drop.
+    ///
+    /// - Cascade (CR 702.85c): each granted instance triggers separately, counted
+    ///   via `effective_spell_keyword_instances` in `game/triggers.rs`.
+    /// - Casualty (CR 702.153b) / Squad (CR 702.157b): each instance is paid and
+    ///   triggers separately.
+    ///
+    /// Deliberately NARROWER than [`Self::instances_function_separately`]: Storm
+    /// (CR 702.40b), Myriad, Increment, Provoke, Exalted, and DoubleTeam function
+    /// separately by their own rules, but their cast-GRANT consumption still reads
+    /// the kind-deduped keyword list, so preserving duplicate grants would be inert.
+    /// When such a keyword IS admitted by the quoted-list grammar (of these, only
+    /// Exalted is in `parse_keyword_name`'s KEYWORDS today), the parser declines a
+    /// duplicate of it rather than lower it to a single silently-deduped grant.
+    /// Promote a keyword here only once its granted instance count is genuinely
+    /// consumed end-to-end (with a discriminating runtime regression).
+    pub fn cast_merge_preserves_instances(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Cascade | Keyword::Casualty(_) | Keyword::Squad(_)
+        )
+    }
 }
 
 /// Capitalize the first character of a string (for type name normalization).
@@ -1640,7 +1990,7 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     use crate::parser::oracle_nom::enchant::{
         parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
-        parse_enchant_player_base, parse_enchant_type_leg,
+        parse_enchant_player_base, parse_enchant_qualified_type_leg,
     };
     use crate::parser::oracle_nom::error::OracleResult;
     use crate::parser::oracle_nom::filter::parse_zone_filter;
@@ -1709,7 +2059,7 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     //   "creature card in a graveyard"  (Animate Dead, Dance of the Dead)
     //   "instant card in a graveyard"   (Spellweaver Volute)
     //   "card in your hand"             (Don't Worry About It — no type leg)
-    let (rest, type_filter) = opt(parse_enchant_type_leg).parse(input).ok()?;
+    let (rest, type_leg) = opt(parse_enchant_qualified_type_leg).parse(input).ok()?;
     let (rest, _card_word) = opt(parse_card_word).parse(rest).ok()?;
     let (rest, zone) = opt(parse_leading_zone).parse(rest).ok()?;
     let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
@@ -1729,13 +2079,19 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // word AND a zone word AND a controller, so it cannot be a meaningful
     // enchant clause. (An attachment qualifier cannot stand alone: its leading
     // space requires a preceding type leg, so it never reaches this guard.)
-    if type_filter.is_none() && zone.is_none() && controller.is_none() {
+    if type_leg.is_none() && zone.is_none() && controller.is_none() {
         return None;
     }
 
     // CR 303.4a: When the type leg is absent (Don't Worry About It), the
     // class is "any card", encoded as `TypeFilter::Card`.
     let mut props = Vec::new();
+    let type_filter = if let Some(leg) = type_leg {
+        props.extend(leg.properties);
+        leg.type_filter
+    } else {
+        TypeFilter::Card
+    };
     if let Some(z) = zone {
         props.push(FilterProp::InZone { zone: z });
     }
@@ -1743,7 +2099,7 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
         props.push(prop);
     }
     props.extend(without_keyword);
-    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    let mut filter = TypedFilter::new(type_filter);
     if !props.is_empty() {
         filter = filter.properties(props);
     }
@@ -1961,7 +2317,7 @@ impl FromStr for Keyword {
                 "foretell" => return Ok(Keyword::Foretell(parse_keyword_mana_cost(p))),
                 "mutate" => return Ok(Keyword::Mutate(parse_keyword_mana_cost(p))),
                 "disturb" => return Ok(Keyword::Disturb(parse_keyword_mana_cost(p))),
-                "disguise" => return Ok(Keyword::Disguise(parse_keyword_mana_cost(p))),
+                "disguise" => return Ok(Keyword::Disguise(parse_keyword_mana_cost(p).into())),
                 "blitz" => return Ok(Keyword::Blitz(parse_keyword_mana_cost(p))),
                 "overload" => return Ok(Keyword::Overload(parse_keyword_mana_cost(p))),
                 // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
@@ -2803,7 +3159,10 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Foretell" => Ok(Keyword::Foretell(mana(data)?)),
         "Mutate" => Ok(Keyword::Mutate(mana(data)?)),
         "Disturb" => Ok(Keyword::Disturb(mana(data)?)),
-        "Disguise" => Ok(Keyword::Disguise(mana(data)?)),
+        "Disguise" => Ok(Keyword::Disguise(
+            serde_json::from_value::<DisguiseCost>(data.clone())
+                .or_else(|_| mana(data).map(DisguiseCost::Mana))?,
+        )),
         "Blitz" => Ok(Keyword::Blitz(mana(data)?)),
         "Overload" => Ok(Keyword::Overload(mana(data)?)),
         // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
@@ -3143,6 +3502,34 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 702.143d + CR 702 (alt-cost family): `with_cost` maps each variant to
+    /// its `Keyword::X(ManaCost)`, and `matches_keyword`/`from_name` round-trip.
+    #[test]
+    fn cost_bearing_keyword_kind_maps_family() {
+        use crate::types::mana::ManaCost;
+        let cost = ManaCost::generic(2);
+        let cases = [
+            (CostBearingKeywordKind::Foretell, "foretell"),
+            (CostBearingKeywordKind::Madness, "madness"),
+            (CostBearingKeywordKind::Disturb, "disturb"),
+            (CostBearingKeywordKind::Mayhem, "mayhem"),
+            (CostBearingKeywordKind::Dash, "dash"),
+            (CostBearingKeywordKind::Unearth, "unearth"),
+        ];
+        for (kind, name) in cases {
+            assert_eq!(CostBearingKeywordKind::from_name(name), Some(kind));
+            let kw = kind.with_cost(cost.clone());
+            // The constructed keyword is recognized by matches_keyword...
+            assert!(kind.matches_keyword(&kw));
+            // ...and NOT confused with a different family member.
+            assert!(!CostBearingKeywordKind::Dash.matches_keyword(&Keyword::Foretell(cost.clone())));
+        }
+        assert_eq!(
+            CostBearingKeywordKind::Foretell.with_cost(cost.clone()),
+            Keyword::Foretell(cost)
+        );
+    }
 
     #[test]
     fn parse_simple_keywords() {
@@ -3775,6 +4162,50 @@ mod tests {
                 TypedFilter::creature().controller(ControllerRef::You)
             ))
         );
+    }
+
+    /// CR 205.4a + CR 702.5a: Supertype-qualified Aura targets ("snow land",
+    /// "basic land", "legendary creature") must lower to the same typed filter
+    /// shape as ordinary target phrases: head type plus `HasSupertype`.
+    #[test]
+    fn parse_enchant_supertype_qualified_targets() {
+        use crate::types::card_type::Supertype;
+
+        let cases = [
+            (
+                "Enchant:snow land you control",
+                TypeFilter::Land,
+                Supertype::Snow,
+                Some(ControllerRef::You),
+            ),
+            (
+                "Enchant:basic land you control",
+                TypeFilter::Land,
+                Supertype::Basic,
+                Some(ControllerRef::You),
+            ),
+            (
+                "Enchant:legendary creature",
+                TypeFilter::Creature,
+                Supertype::Legendary,
+                None,
+            ),
+        ];
+
+        for (text, type_filter, supertype, controller) in cases {
+            let enchant = Keyword::from_str(text).unwrap();
+            let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+                panic!("expected Typed enchant target for {text}, got {enchant:?}");
+            };
+            assert_eq!(tf.type_filters, vec![type_filter], "{text}");
+            assert_eq!(tf.controller, controller, "{text}");
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::HasSupertype { value: supertype }),
+                "expected HasSupertype({supertype:?}) for {text}; got {:?}",
+                tf.properties
+            );
+        }
     }
 
     /// CR 702.5d + CR 303.4: "Enchant player" maps to `TargetFilter::Player`,

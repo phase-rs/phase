@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{ActiveSearchDecisionAuthority, GameState, WaitingFor};
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -50,6 +50,40 @@ pub fn eliminate_players_simultaneously(
             }
         }
     }
+
+    let interrupted_ordinary_search = state
+        .pending_scoped_library_search
+        .is_none()
+        .then(|| {
+            state
+                .active_search_decision_controls
+                .iter()
+                .find(|(_, decision)| {
+                    leaving_set.contains(&decision.searched_zone_owner)
+                })
+                .map(|(&searcher, _)| {
+                    let split = match &state.waiting_for {
+                        WaitingFor::SearchChoice { player, split, .. } if *player == searcher => {
+                            split.clone()
+                        }
+                        _ => state.pending_search_found_batch.as_ref().and_then(|batch| {
+                            if batch.searcher != searcher {
+                                return None;
+                            }
+                            match &batch.continuation {
+                                crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                                    split,
+                                } => split.clone(),
+                                crate::types::game_state::PendingSearchFoundContinuation::Scoped => {
+                                    None
+                                }
+                            }
+                        }),
+                    };
+                    (searcher, split)
+                })
+        })
+        .flatten();
 
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
@@ -119,6 +153,59 @@ pub fn eliminate_players_simultaneously(
         // by emitting MulliganStarted-equivalent transition state.
         prune_mulligan_pending(state, events);
 
+        if let Some((searcher, split)) = interrupted_ordinary_search {
+            if state
+                .pending_search_found_batch
+                .as_ref()
+                .is_some_and(|batch| batch.searcher == searcher)
+            {
+                state.pending_search_found_batch = None;
+                if state.pending_replacement.as_ref().is_some_and(|pending| {
+                    matches!(
+                        pending.proposed,
+                        crate::types::proposed_event::ProposedEvent::SearchFound {
+                            searcher: pending_searcher,
+                            ..
+                        } if pending_searcher == searcher
+                    )
+                }) {
+                    state.pending_replacement = None;
+                    state.replacement_may_cost_paused = false;
+                }
+                if state
+                    .pending_batch_deliveries
+                    .as_ref()
+                    .and_then(|pending| pending.completion.as_ref())
+                    .is_some_and(|completion| {
+                        matches!(
+                            completion,
+                            crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                                ..
+                            }
+                        )
+                    })
+                {
+                    state.pending_batch_deliveries = None;
+                }
+            }
+            if let Err(error) =
+                super::engine_resolution_choices::settle_search_after_zone_owner_elimination(
+                    state, searcher, split, events,
+                )
+            {
+                debug_assert!(false, "ordinary search elimination resume failed: {error}");
+            }
+        }
+
+        // CR 800.4a + CR 101.4: if the departing player owned the current
+        // scoped-search acceptance/selection prompt, continue the already
+        // pruned APNAP cursor instead of replacing it with unrelated priority.
+        if let Err(error) =
+            super::effects::scoped_library_search::resume_after_elimination(state, events)
+        {
+            debug_assert!(false, "scoped search elimination resume failed: {error}");
+        }
+
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);
@@ -128,24 +215,17 @@ pub fn eliminate_players_simultaneously(
     }
 }
 
-/// CR 103.5 + CR 800.4a: Prune eliminated players from in-flight mulligan
-/// pending lists. If pruning empties the decision phase, transition to the
-/// bottoms phase (or finish mulligans). If it empties the bottoms phase,
-/// finish mulligans directly.
+/// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
+/// mulligan pending list. If pruning empties it, finish the mulligan flow
+/// directly — bottoming is now resolved per-entry at the declare point, so
+/// there is no separate batch bottoms phase left to advance to.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // CR 800.4a: Drop any final-mulligan-count entries for players who have
-    // been eliminated. Symmetric with the pending-list pruning below so
-    // enter_bottom_phase never sees stale entries for dead players.
     let alive: HashSet<PlayerId> = state
-        .final_mulligan_counts
+        .prepaid_mulligan_bottoms
         .keys()
-        .chain(state.prepaid_mulligan_bottoms.keys())
         .copied()
         .filter(|pid| players::is_alive(state, *pid))
         .collect();
-    state
-        .final_mulligan_counts
-        .retain(|pid, _| alive.contains(pid));
     state
         .prepaid_mulligan_bottoms
         .retain(|pid, _| alive.contains(pid));
@@ -155,30 +235,26 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             pending,
             free_first_mulligan,
         } => {
+            // CR 800.4a: A pruned player whose entry was mid-`BottomCards
+            // { then: UseSerumPowder { object_id } }` needs no special
+            // cleanup of `object_id` — that reference lives only inside this
+            // `MulliganDecisionEntry`. By the time this function runs,
+            // `eliminate_players_simultaneously` has already exiled every
+            // object the leaving player owned, including the Serum Powder
+            // itself. A plain is_alive-filtered removal of the whole entry
+            // is sufficient.
             let alive: Vec<_> = pending
                 .into_iter()
                 .filter(|e| players::is_alive(state, e.player))
                 .collect();
             if alive.is_empty() {
-                state.waiting_for = super::mulligan::enter_bottom_phase_public(state, events);
+                state.prepaid_mulligan_bottoms.clear();
+                state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
             } else {
                 state.waiting_for = WaitingFor::MulliganDecision {
                     pending: alive,
                     free_first_mulligan,
                 };
-            }
-        }
-        WaitingFor::MulliganBottomCards { pending } => {
-            let alive: Vec<_> = pending
-                .into_iter()
-                .filter(|e| players::is_alive(state, e.player))
-                .collect();
-            if alive.is_empty() {
-                state.final_mulligan_counts.clear();
-                state.prepaid_mulligan_bottoms.clear();
-                state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
-            } else {
-                state.waiting_for = WaitingFor::MulliganBottomCards { pending: alive };
             }
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
@@ -435,7 +511,107 @@ fn do_eliminate(
     if state.turn_decision_controller.is_some()
         && super::topology::normalize_shared_turn_recipient(state, state.active_player) == leaving
     {
-        state.turn_decision_controller = None;
+        state.active_full_turn_control = None;
+        state.active_combat_phase_control = None;
+        super::turn_control::recompute_active_player_control(state);
+    }
+
+    // CR 800.4a + CR 800.4b: a departing searcher/zone owner invalidates its
+    // live session, while a departing latched controller ends only that
+    // controller's decision/knowledge role and falls back to the searcher.
+    state.active_library_searches.retain(|searcher, search| {
+        if *searcher == player || search.searched_zone_owner() == player {
+            return false;
+        }
+        search.remove_from_audience(player);
+        true
+    });
+    state
+        .active_search_decision_controls
+        .retain(|searcher, decision| {
+            if *searcher == player {
+                return false;
+            }
+            if matches!(
+                decision.authority,
+                ActiveSearchDecisionAuthority::LatchedController { controller }
+                    if controller == player
+            ) {
+                decision.authority = ActiveSearchDecisionAuthority::SearcherFallback;
+            }
+            true
+        });
+    if let Some(pending) = state.pending_scoped_library_search.as_mut() {
+        match &mut pending.phase {
+            crate::types::game_state::ScopedLibrarySearchPhase::CollectAcceptance {
+                remaining_players,
+                accepted_players,
+                acceptance_authorities,
+                current_player,
+            } => {
+                remaining_players.retain(|participant| *participant != player);
+                accepted_players.retain(|participant| *participant != player);
+                acceptance_authorities.retain_mut(|(searcher, authority)| {
+                    if *searcher == player {
+                        return false;
+                    }
+                    if matches!(
+                        *authority,
+                        ActiveSearchDecisionAuthority::LatchedController { controller }
+                            if controller == player
+                    ) {
+                        *authority = ActiveSearchDecisionAuthority::SearcherFallback;
+                    }
+                    true
+                });
+                if *current_player == Some(player) {
+                    *current_player = None;
+                }
+            }
+            crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+                prepared_choices,
+                next_selection_index,
+                current_player,
+                selections,
+                frozen_dispositions,
+                pending_reveals,
+            } => {
+                let removed_before_cursor = prepared_choices
+                    .iter()
+                    .take(*next_selection_index)
+                    .filter(|choice| choice.player == player)
+                    .count();
+                prepared_choices.retain(|choice| choice.player != player);
+                *next_selection_index = next_selection_index
+                    .saturating_sub(removed_before_cursor)
+                    .min(prepared_choices.len());
+                selections.retain(|(searcher, _)| *searcher != player);
+                frozen_dispositions.retain(|frozen| frozen.searcher != player);
+                pending_reveals.retain(|(searcher, _)| *searcher != player);
+                if *current_player == Some(player) {
+                    *current_player = None;
+                }
+            }
+            crate::types::game_state::ScopedLibrarySearchPhase::Delivering { search_keys } => {
+                search_keys.retain(|searcher| *searcher != player);
+            }
+        }
+    }
+    if let Some(crate::types::game_state::PendingBatchDeliveries {
+        completion:
+            Some(crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                        search_keys,
+                        grants,
+                        ..
+                    },
+            }),
+        ..
+    }) = state.pending_batch_deliveries.as_mut()
+    {
+        search_keys.retain(|searcher| *searcher != player);
+        grants.retain(|(_, grant)| grant.grantee != player && grant.controller != player);
     }
 
     // CR 800.4a: A paused triggered ability on the stack is "an object on the
@@ -509,7 +685,30 @@ fn do_eliminate(
     // remaining players (not field-nulling), tracked as a separate follow-up. This
     // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
     // `pending_replacement` guard.
-    if state.pending_replacement.is_some() && state.waiting_for.acting_player() == Some(player) {
+    let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
+    // CR 800.4a: Tear down choices and continuations owned by the leaving player.
+    // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
+    // selected zone move may own a nested batch completion. The
+    // inner pause can be either replacement ordering or another zone-delivery
+    // choice, so this teardown is keyed to the batch plus its latched chooser,
+    // independently of `pending_replacement`.
+    if state.pending_search_found_batch.is_some() && leaving_is_latched_chooser {
+        state.pending_search_found_batch = None;
+        if state
+            .pending_batch_deliveries
+            .as_ref()
+            .and_then(|pending| pending.completion.as_ref())
+            .is_some_and(|completion| {
+                matches!(
+                    completion,
+                    crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery { .. }
+                )
+            })
+        {
+            state.pending_batch_deliveries = None;
+        }
+    }
+    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
@@ -556,7 +755,7 @@ fn do_eliminate(
                 if players::is_alive(state, state.active_player) && state.active_player != player {
                     state.active_player
                 } else {
-                    players::next_player(state, player)
+                    players::next_player_in_turn_order(state, player)
                 };
             state.monarch = Some(new_monarch);
             events.push(GameEvent::MonarchChanged {
@@ -565,7 +764,7 @@ fn do_eliminate(
         }
     }
 
-    // CR 725.4: If the player who has the initiative leaves the game,
+    // CR 726.4: If the player who has the initiative leaves the game,
     // the active player takes the initiative. If the active player is
     // also leaving, the next living player in turn order gets it.
     if state.initiative == Some(player) {
@@ -581,7 +780,7 @@ fn do_eliminate(
                 if players::is_alive(state, state.active_player) && state.active_player != player {
                     state.active_player
                 } else {
-                    players::next_player(state, player)
+                    players::next_player_in_turn_order(state, player)
                 };
             state.initiative = Some(new_holder);
             events.push(GameEvent::InitiativeTaken {
@@ -637,6 +836,7 @@ fn do_eliminate(
             .copied()
             .filter(|&id| crate::game::archenemy::is_scheme_object(state, id))
             .collect();
+        // allow-raw-zone: archenemy teardown removes command-zone-only schemes as their owner leaves (CR 800.4a + CR 904.4).
         state.command_zone.retain(|id| !scheme_ids.contains(id));
     }
 
@@ -725,7 +925,7 @@ mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
-    use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementId};
+    use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -749,6 +949,265 @@ mod tests {
         let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
         state.turn_number = 1;
         state
+    }
+
+    fn pending_search_found_batch(
+        searcher: PlayerId,
+        object_id: ObjectId,
+    ) -> crate::types::game_state::PendingSearchFoundBatch {
+        crate::types::game_state::PendingSearchFoundBatch {
+            searcher,
+            library_owner: Some(searcher),
+            remaining: vec![crate::types::identifiers::ObjectIncarnationRef::of(
+                object_id, 0,
+            )],
+            survivors: Vec::new(),
+            current: None,
+            continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                split: None,
+            },
+            visibility: crate::types::game_state::SearchFoundVisibility::Private,
+        }
+    }
+
+    fn pending_search_found_zone_delivery(
+        object_id: ObjectId,
+    ) -> crate::types::game_state::PendingBatchDeliveries {
+        crate::types::game_state::PendingBatchDeliveries {
+            remaining: Vec::new(),
+            destination: Zone::Exile,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: Some(
+                crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                    object_id,
+                    grant: None,
+                },
+            ),
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn searched_zone_owner_elimination_settles_ordinary_search_as_empty() {
+        use crate::types::ability::{
+            ControllerRef, QuantityExpr, SearchSelectionConstraint, TargetFilter, TypedFilter,
+        };
+
+        let mut state = setup_three_player();
+        let candidate = create_object(
+            &mut state,
+            CardId(90),
+            PlayerId(1),
+            "Departing library card".to_string(),
+            Zone::Library,
+        );
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::search_library::resolve(&mut state, &search, &mut events)
+            .expect("start opponent-library search");
+        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+            Box::new(shuffle),
+            &state,
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        events.clear();
+
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(state.active_library_searches.get(&PlayerId(0)).is_none());
+        assert!(state.active_search_decision_controls.is_empty());
+        assert!(state.pending_continuation.is_none());
+        assert!(state.pending_search_found_batch.is_none());
+        assert!(state.pending_replacement.is_none());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::Shuffle,
+                ..
+            }
+        )));
+        assert_ne!(
+            state.objects.get(&candidate).map(|object| object.zone),
+            Some(Zone::Hand)
+        );
+    }
+
+    #[test]
+    fn searched_zone_owner_elimination_reconciles_prompt_without_hidden_provenance() {
+        use crate::types::ability::{
+            ControllerRef, QuantityExpr, SearchSelectionConstraint, TargetFilter, TypedFilter,
+        };
+
+        for source_zones in [vec![Zone::Graveyard], vec![Zone::Hand, Zone::Graveyard]] {
+            let exercise_prompt_independent_reconciliation = source_zones.len() > 1;
+            let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+            state.turn_number = 1;
+            state.turn_decision_controller = Some(PlayerId(2));
+            create_object(
+                &mut state,
+                CardId(91),
+                PlayerId(1),
+                "Departing grave candidate".to_string(),
+                Zone::Graveyard,
+            );
+            let search = ResolvedAbility::new(
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: false,
+                    target_player: Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    )),
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(901),
+                PlayerId(0),
+            );
+            let mut events = Vec::new();
+            crate::game::effects::search_library::resolve(&mut state, &search, &mut events)
+                .expect("start cross-owner nonlibrary search");
+            assert!(state.active_library_searches.is_empty());
+            assert_eq!(
+                state
+                    .active_search_decision_controls
+                    .get(&PlayerId(0))
+                    .unwrap()
+                    .searched_zone_owner,
+                PlayerId(1)
+            );
+            assert!(matches!(
+                state
+                    .active_search_decision_controls
+                    .get(&PlayerId(0))
+                    .unwrap()
+                    .authority,
+                ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(2)
+                }
+            ));
+            eliminate_player(&mut state, PlayerId(2), &mut events);
+            assert!(matches!(
+                state
+                    .active_search_decision_controls
+                    .get(&PlayerId(0))
+                    .unwrap()
+                    .authority,
+                ActiveSearchDecisionAuthority::SearcherFallback
+            ));
+            if exercise_prompt_independent_reconciliation {
+                state.waiting_for = WaitingFor::Priority {
+                    player: PlayerId(0),
+                };
+            }
+
+            eliminate_player(&mut state, PlayerId(1), &mut events);
+
+            assert!(state.active_library_searches.get(&PlayerId(0)).is_none());
+            assert!(state.active_search_decision_controls.is_empty());
+            assert!(state.pending_search_found_batch.is_none());
+            assert!(!matches!(
+                state.waiting_for,
+                WaitingFor::SearchChoice { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn scoped_searcher_elimination_prunes_paused_delivery_resume_keys() {
+        let mut state = setup_three_player();
+        let ability = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(902),
+            PlayerId(0),
+        );
+        state.pending_scoped_library_search =
+            Some(crate::types::game_state::PendingScopedLibrarySearch {
+                ability: Box::new(ability),
+                phase: crate::types::game_state::ScopedLibrarySearchPhase::Delivering {
+                    search_keys: vec![PlayerId(0), PlayerId(1), PlayerId(2)],
+                },
+                after_scope: None,
+            });
+        let mut batch = pending_search_found_zone_delivery(ObjectId(77));
+        batch.completion = Some(
+            crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume: crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                    player: PlayerId(0),
+                    source_id: ObjectId(902),
+                    search_keys: vec![PlayerId(0), PlayerId(1), PlayerId(2)],
+                    grants: Vec::new(),
+                    after_scope: None,
+                },
+            },
+        );
+        state.pending_batch_deliveries = Some(batch);
+
+        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+
+        let phase_keys = match &state.pending_scoped_library_search.as_ref().unwrap().phase {
+            crate::types::game_state::ScopedLibrarySearchPhase::Delivering { search_keys } => {
+                search_keys
+            }
+            _ => panic!("delivery phase must remain parked"),
+        };
+        assert_eq!(phase_keys, &vec![PlayerId(0), PlayerId(2)]);
+        let resume_keys = match state
+            .pending_batch_deliveries
+            .as_ref()
+            .and_then(|batch| batch.completion.as_ref())
+            .unwrap()
+        {
+            crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                        search_keys, ..
+                    },
+            } => search_keys,
+            _ => panic!("scoped completion must remain parked"),
+        };
+        assert_eq!(resume_keys, &vec![PlayerId(0), PlayerId(2)]);
     }
 
     // --- 2-player elimination (immediate GameOver) ---
@@ -1080,7 +1539,9 @@ mod tests {
                 count: 1,
                 applied: HashSet::new(),
             },
+            sacrifice_provenance: None,
             candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -1097,8 +1558,8 @@ mod tests {
         };
         // Coupled continuation slots the resume drain would clear on a normal answer.
         state.replacement_may_cost_paused = true;
-        state.post_replacement_continuation = Some(PostReplacementContinuation::Resolved(
-            Box::new(ResolvedAbility::new(
+        state.install_ready_continuation(PostReplacementContinuation::Resolved(Box::new(
+            ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "psrc".into(),
                     description: None,
@@ -1106,24 +1567,41 @@ mod tests {
                 vec![],
                 o,
                 PlayerId(2),
-            )),
-        ));
-        state.post_replacement_source = Some(o);
-        state.post_replacement_event_source = Some(o);
-        state.post_replacement_event_target = Some(TargetRef::Object(o));
+            ),
+        )));
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .source = Some(o);
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .event_source = Some(o);
+        state
+            .post_replacement_drains
+            .resident_mut()
+            .expect("a drain must be resident")
+            .event_target = Some(TargetRef::Object(o));
         // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
         // seed, owned by this same abandoned continuation, must be abandoned
         // alongside its siblings — this field was added after the teardown
         // block below was written and was missed until this regression.
-        state.post_replacement_token_choice_applied = Some(HashSet::from([ReplacementId {
-            source: o,
-            index: 0,
-        }]));
+        state.post_replacement_token_choice_applied = Some(HashSet::from([
+            crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
+        ]));
         state.pending_connive_reentry = Some(PendingConniveReentry {
             conniver: o,
             count: 1,
             applied: HashSet::new(),
         });
+        state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(2), o));
+        state.pending_batch_deliveries = Some(pending_search_found_zone_delivery(o));
+        // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
+        // single-player-scoped, must clear alongside its siblings via
+        // `abandon_post_replacement_continuation` (replacement.rs).
+        state.draw_sequences.push(PlayerId(2), 1);
         // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
         state.pending_spell_resolution = Some(PendingSpellResolution {
             object_id: o,
@@ -1155,10 +1633,10 @@ mod tests {
         );
         // Every coupled continuation slot the resume drain owns is torn down.
         assert!(!state.replacement_may_cost_paused);
-        assert!(state.post_replacement_continuation.is_none());
-        assert!(state.post_replacement_source.is_none());
-        assert!(state.post_replacement_event_source.is_none());
-        assert!(state.post_replacement_event_target.is_none());
+        assert!(!state.has_post_replacement_drain());
+        assert!(state.post_replacement_source().is_none());
+        assert!(state.post_replacement_event_source().is_none());
+        assert!(state.post_replacement_event_target().is_none());
         assert!(
             state.post_replacement_token_choice_applied.is_none(),
             "abandoning the parked chooser's continuation must also clear the token-choice \
@@ -1166,9 +1644,66 @@ mod tests {
         );
         assert!(state.pending_connive_reentry.is_none());
         assert!(
+            state.pending_search_found_batch.is_none(),
+            "the eliminated chooser's outer found-card batch must be abandoned"
+        );
+        assert!(
+            state.pending_batch_deliveries.is_none(),
+            "the eliminated chooser's nested found-card zone completion must be abandoned"
+        );
+        assert!(
+            state.draw_sequences.is_empty(),
+            "CR 121.2: the leaving chooser's paused draw instruction must be \
+             cleared via abandon_post_replacement_continuation, not stranded"
+        );
+        assert!(
             state.pending_spell_resolution.is_none(),
             "the leaving chooser's coupled spell-resolution ctx must be torn down"
         );
+    }
+
+    #[test]
+    fn elimination_clears_outer_search_found_batch_without_nested_zone_completion() {
+        let mut state = setup_three_player();
+        let found = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(0),
+            "Found card".into(),
+            Zone::Library,
+        );
+        state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::SearchFound {
+                searcher: PlayerId(0),
+                library_owner: Some(PlayerId(0)),
+                object_id: found,
+                disposition: crate::types::proposed_event::SearchFoundDisposition::Original,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+        };
+        assert!(state.pending_batch_deliveries.is_none());
+
+        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+
+        assert!(state.pending_replacement.is_none());
+        assert!(state.pending_search_found_batch.is_none());
+        assert!(state.pending_batch_deliveries.is_none());
     }
 
     #[test]
@@ -1184,7 +1719,9 @@ mod tests {
                 count: 1,
                 applied: HashSet::new(),
             },
+            sacrifice_provenance: None,
             candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: false,
             library_placement: None,
@@ -1198,6 +1735,10 @@ mod tests {
             candidate_count: 1,
             candidates: vec![],
         };
+        let parked_found = ObjectId(77);
+        state.pending_search_found_batch =
+            Some(pending_search_found_batch(PlayerId(0), parked_found));
+        state.pending_batch_deliveries = Some(pending_search_found_zone_delivery(parked_found));
         // A coupled spell-resolution ctx owned by the LIVING chooser (P0).
         state.pending_spell_resolution = Some(PendingSpellResolution {
             object_id: create_object(&mut state, CardId(7), PlayerId(0), "S".into(), Zone::Stack),
@@ -1213,6 +1754,14 @@ mod tests {
             additional_cost_payments: vec![],
             convoked_creatures: vec![],
         });
+        // CR 121.2: a paused draw instruction owned by the LIVING chooser (P0)
+        // must survive a different player's departure — no over-clear.
+        let living_frame = state.draw_sequences.push(PlayerId(0), 2);
+        state
+            .draw_sequences
+            .active_if(living_frame)
+            .expect("the frame just pushed is active")
+            .accumulated = 1;
 
         let mut events = Vec::new();
         eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
@@ -1224,8 +1773,39 @@ mod tests {
             "an opponent leaving must not clear the living chooser's parked replacement"
         );
         assert!(
+            state.pending_search_found_batch.is_some(),
+            "an opponent leaving must not clear the living chooser's outer found-card batch"
+        );
+        assert!(
+            state
+                .pending_batch_deliveries
+                .as_ref()
+                .is_some_and(|pending| {
+                    matches!(
+                        pending.completion,
+                        Some(
+                            crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                                object_id,
+                                grant: None,
+                            }
+                        ) if object_id == parked_found
+                    )
+                }),
+            "an opponent leaving must preserve the living chooser's nested found-card completion"
+        );
+        assert!(
             state.pending_spell_resolution.is_some(),
             "an opponent leaving must not tear down the living player's spell-resolution ctx"
+        );
+        let survivor = state
+            .draw_sequences
+            .active()
+            .expect("an opponent leaving must not clear the living chooser's paused instruction");
+        assert_eq!(
+            (survivor.player, survivor.remaining, survivor.accumulated),
+            (PlayerId(0), 2, 1),
+            "the living chooser's paused draw instruction must survive intact — owed units and \
+             already-delivered count both preserved"
         );
         assert!(
             matches!(
@@ -1375,7 +1955,30 @@ mod tests {
         assert!(state.eliminated_players.contains(&PlayerId(1)));
     }
 
-    // --- Initiative transfer on elimination (CR 725.4) ---
+    // --- Monarch transfer on elimination (CR 725.4) ---
+
+    #[test]
+    fn monarch_transfers_to_next_turn_order_player_when_active_leaving_and_reversed() {
+        let mut state = setup_three_player();
+        state.active_player = PlayerId(0);
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        state.monarch = Some(PlayerId(0));
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        // CR 725.4 + CR 103.1: active player is leaving, so reversed turn
+        // order gives the monarch designation to P2, not physical-next P1.
+        assert_eq!(state.monarch, Some(PlayerId(2)));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::MonarchChanged {
+                player_id: PlayerId(2)
+            }
+        )));
+    }
+
+    // --- Initiative transfer on elimination (CR 726.4) ---
 
     #[test]
     fn initiative_transfers_on_elimination() {
@@ -1386,7 +1989,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
-        // CR 725.4: Active player (P0) takes the initiative.
+        // CR 726.4: Active player (P0) takes the initiative.
         assert_eq!(state.initiative, Some(PlayerId(0)));
         assert!(events.iter().any(|e| matches!(
             e,
@@ -1410,7 +2013,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(0), &mut events);
 
-        // CR 725.4: Active player is leaving, so next living player in turn order gets it.
+        // CR 726.4: Active player is leaving, so next living player in turn order gets it.
         // P1 is next after P0 in a 3-player game.
         assert_eq!(state.initiative, Some(PlayerId(1)));
         assert!(events.iter().any(|e| matches!(
@@ -1430,7 +2033,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(0), &mut events);
 
-        // CR 725.4: P1 is still alive, so they get initiative (game ends immediately after).
+        // CR 726.4: P1 is still alive, so they get initiative (game ends immediately after).
         assert_eq!(state.initiative, Some(PlayerId(1)));
         assert!(matches!(
             state.waiting_for,
@@ -1438,6 +2041,27 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
+    }
+
+    #[test]
+    fn initiative_transfers_to_next_turn_order_player_when_active_leaving_and_reversed() {
+        let mut state = setup_three_player();
+        state.active_player = PlayerId(0);
+        state.turn_direction = crate::types::phase::TurnDirection::Reversed;
+        state.initiative = Some(PlayerId(0));
+        let mut events = Vec::new();
+
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        // CR 726.4 + CR 103.1: active player is leaving, so reversed turn
+        // order gives the initiative to P2, not physical-next P1.
+        assert_eq!(state.initiative, Some(PlayerId(2)));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::InitiativeTaken {
+                player_id: PlayerId(2)
+            }
+        )));
     }
 
     // --- CR 800.4a: control effects end when a player leaves the game ---
@@ -1810,10 +2434,12 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: owner,
                 controller,
+                timestamp: 0,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
         state.turn_decision_controller = Some(controller);
+        state.turn_decision_control_timestamp = Some(0);
         // An unrelated control by a different controller (reach-guard: proves the
         // cleanup is scoped to the leaving player, not a blanket wipe).
         state
@@ -1821,6 +2447,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: other_owner,
                 controller: other_controller,
+                timestamp: 0,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -1832,6 +2459,7 @@ mod tests {
             state.turn_decision_controller, None,
             "the departed controller's live control ends"
         );
+        assert_eq!(state.turn_decision_control_timestamp, None);
         assert!(
             !state
                 .scheduled_turn_controls

@@ -7,6 +7,7 @@ import {
   detectAndParseDeck,
   deriveImportedDeckName,
   repairParsedDeck,
+  assignOathbreakerSlots,
   resolveCommander,
   expandParsedDeck,
   parsedDeckHasCards,
@@ -17,6 +18,28 @@ vi.mock('../engineRuntime', () => ({
 }));
 
 describe('deckParser', () => {
+  it('moves the selected Oathbreaker and signature spell into their special slots', () => {
+    const result = assignOathbreakerSlots(
+      {
+        main: [
+          { count: 1, name: 'Daretti, Ingenious Iconoclast' },
+          { count: 2, name: 'Scheming Symmetry' },
+          { count: 1, name: 'Mountain' },
+        ],
+        sideboard: [],
+      },
+      'Daretti, Ingenious Iconoclast',
+      'Scheming Symmetry',
+    );
+
+    expect(result.commander).toEqual(['Daretti, Ingenious Iconoclast']);
+    expect(result.signature_spell).toEqual(['Scheming Symmetry']);
+    expect(result.main).toEqual([
+      { count: 1, name: 'Scheming Symmetry' },
+      { count: 1, name: 'Mountain' },
+    ]);
+  });
+
   it('parses simple deck: "4 Lightning Bolt" -> { count: 4, name: "Lightning Bolt" }', () => {
     const result = parseDeckFile('4 Lightning Bolt');
     expect(result.main).toEqual([{ count: 4, name: 'Lightning Bolt' }]);
@@ -48,6 +71,34 @@ Deck
         count: 14,
         name: 'Swamp',
         sourcePrinting: { setCode: 'dmu', collectorNumber: '279' },
+      },
+    ]);
+  });
+
+  it('parses MTGA printing lines with a lowercase (Scryfall-style) set code', () => {
+    // Several exporters emit lowercase set codes. The set/number must be parsed
+    // out as a sourcePrinting, not swallowed into the card name.
+    const result = detectAndParseDeck('1 Lightning Bolt (2xm) 123');
+
+    expect(result.main).toEqual([
+      {
+        count: 1,
+        name: 'Lightning Bolt',
+        sourcePrinting: { setCode: '2xm', collectorNumber: '123' },
+      },
+    ]);
+  });
+
+  it('parses lowercase and uppercase set codes to the same result', () => {
+    const lower = detectAndParseDeck('2 Counterspell (mh2) 267').main;
+    const upper = detectAndParseDeck('2 Counterspell (MH2) 267').main;
+
+    expect(lower).toEqual(upper);
+    expect(lower).toEqual([
+      {
+        count: 2,
+        name: 'Counterspell',
+        sourcePrinting: { setCode: 'mh2', collectorNumber: '267' },
       },
     ]);
   });
@@ -379,6 +430,48 @@ Sideboard
 });
 
 describe('detectAndParseDeck', () => {
+  it('parses Forge .dck files with metadata, printing data, foil suffixes, and sections', () => {
+    const content = `[metadata]
+Name=Bloodlines
+[Main]
+1 Anje, Maid of Dishonor|VOW|[309]
+1 Olivia Voldaren+|SLD|[1264]
+2 Swamp|JMP|[60]|#{markedColors=B}
+[Sideboard]
+1 Bloodtracker|LCC|[186]
+[Commander]
+1 Edgar Markov|INR|[328]`;
+
+    const result = detectAndParseDeck(content);
+
+    expect(result.main).toEqual([
+      {
+        count: 1,
+        name: 'Anje, Maid of Dishonor',
+        sourcePrinting: { setCode: 'vow', collectorNumber: '309' },
+      },
+      {
+        count: 1,
+        name: 'Olivia Voldaren',
+        sourcePrinting: { setCode: 'sld', collectorNumber: '1264' },
+      },
+      {
+        count: 2,
+        name: 'Swamp',
+        sourcePrinting: { setCode: 'jmp', collectorNumber: '60' },
+      },
+    ]);
+    expect(result.sideboard).toEqual([
+      {
+        count: 1,
+        name: 'Bloodtracker',
+        sourcePrinting: { setCode: 'lcc', collectorNumber: '186' },
+      },
+    ]);
+    expect(result.commander).toEqual(['Edgar Markov']);
+    expect(deriveImportedDeckName(content, result)).toBe('Bloodlines');
+  });
+
   it('auto-detects MTGA format and parses correctly', () => {
     const mtgaContent = '4 Lightning Bolt (FDN) 123\n2 Counterspell (MKM) 56';
     const result = detectAndParseDeck(mtgaContent);

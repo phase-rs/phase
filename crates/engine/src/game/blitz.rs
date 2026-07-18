@@ -88,14 +88,18 @@ pub(crate) fn install_blitz_riders(
 /// refresh the live copy so the trigger is collectable this same resolution.
 fn grant_dies_draw_trigger(obj: &mut GameObject) {
     if obj.base_trigger_definitions.iter().any(is_blitz_dies_draw) {
-        if !obj.trigger_definitions.iter_all().any(is_blitz_dies_draw) {
+        if !obj
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| is_blitz_dies_draw(entry.definition()))
+        {
             obj.trigger_definitions.push(build_dies_draw_trigger());
         }
         return;
     }
     let trigger = build_dies_draw_trigger();
     std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-    obj.trigger_definitions.push(trigger);
+    obj.materialize_base_trigger_definitions();
 }
 
 /// Exact description of the Blitz-granted dies-draw trigger. Used both as the

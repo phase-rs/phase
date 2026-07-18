@@ -237,10 +237,15 @@ impl TacticalPolicy for RedundancyAvoidancePolicy {
                 .with_fact("effect_kind", kind_tag)
                 .with_fact("redundant_value", extra);
         }
-        PolicyVerdict::Score {
-            delta: total,
-            reason,
-        }
+        // Range check (issue #5473): per-effect penalties are small (-3.0 tap /
+        // untap / no-op, -2.0 keyword, -1.5 pump, -0.5 lifegain). Real cards
+        // carry 1-3 such redundant effects, so `total` stays within the critical
+        // band; only a pathological 5+ redundant-effect chain (no printed card)
+        // could approach 15, and there every candidate is already "strongly
+        // disprefer", so ceiling saturation is harmless — ordering that matters
+        // is preserved. PolicyVerdict::score is therefore identity in practice
+        // and upholds the band contract (no raw Score literal).
+        PolicyVerdict::score(total, reason)
     }
 }
 
@@ -378,6 +383,7 @@ fn redundancy_delta(
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }
         | Effect::Scry { .. }
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::PumpAll { .. }
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }
@@ -437,7 +443,7 @@ fn redundancy_delta(
         // spell with an exile-instead/linked-source rider. Its value is realized
         // by the stack resolution replacement path, so this policy has no static
         // redundancy signal to score.
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
@@ -460,6 +466,8 @@ fn redundancy_delta(
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -495,9 +503,14 @@ fn redundancy_delta(
         // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
         // triggered ability — it has no target and no static redundancy signal.
         | Effect::ChaosEnsues
+        // CR 119.7 + CR 119.8: RedistributeLifeTotals is a one-time interactive life
+        // permutation — no target and no static redundancy signal.
+        | Effect::RedistributeLifeTotals
+        // CR 103.1: ReverseTurnOrder has no target and no static redundancy signal.
+        | Effect::ReverseTurnOrder
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::EachPlayerCopyChosen { .. }

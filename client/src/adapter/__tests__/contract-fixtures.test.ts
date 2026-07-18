@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject, GameState, WaitingFor } from "../types";
-import { WebSocketAdapter } from "../ws-adapter";
+import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -39,7 +39,7 @@ const SERVER_HELLO = JSON.stringify({
   data: {
     server_version: "0.0.0-test",
     build_commit: "testhash",
-    protocol_version: 12,
+    protocol_version: PROTOCOL_VERSION,
     mode: "Full",
   },
 });
@@ -120,10 +120,15 @@ describe("shared adapter contract fixtures", () => {
 
     ws.dispatchSynthetic("message", JSON.stringify(stateUpdateFixture));
 
+    // The engine pair now travels as one seq-stamped `EngineSnapshot`, so the
+    // state is asserted through `snapshot.state` rather than a sibling field.
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "stateChanged",
-        state: stateUpdateFixture.data.state,
+        snapshot: expect.objectContaining({
+          state: expect.objectContaining(stateUpdateFixture.data.state),
+          seq: expect.any(Number),
+        }),
         events: stateUpdateFixture.data.events,
       }),
     );

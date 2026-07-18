@@ -1280,6 +1280,7 @@ fn play_land_from_graveyard_with_permission() {
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1347,6 +1348,7 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1415,6 +1417,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1494,6 +1497,7 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                enters_with_counter: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -2440,6 +2444,182 @@ fn miracle_sorcery_casts_during_draw_step() {
     );
 }
 
+/// CR 601.2f: The total cost of a miracle cast is the miracle ALTERNATIVE cost
+/// plus increases minus reductions — a Medallion-class battlefield static
+/// ("Red spells you cast cost {1} less to cast", Ruby Medallion) must discount
+/// the miracle cost, not just the printed cost. A red spell with miracle
+/// {1}{R} casts for {R} with the medallion out: the pool holds ONLY {R}, so if
+/// the reduction were dropped the Auto payment would demand {1}{R} and fail.
+#[test]
+fn miracle_cost_is_reduced_by_medallion_static() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let miracle_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 1,
+    };
+    // Ruby Medallion-class reducer on the battlefield (full parser path).
+    scenario
+        .add_creature(P0, "Ruby Medallion Stand-In", 2, 2)
+        .from_oracle_text("Red spells you cast cost {1} less to cast.");
+
+    // A RED spell (color derived from the printed {8}{R}) with miracle {1}{R}.
+    let miracle_obj = scenario
+        .add_spell_to_hand(P0, "ReducedMiracle", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 8,
+        })
+        .with_keyword(Keyword::Miracle(miracle_cost.clone()))
+        .with_ability(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    // EXACTLY {R} in pool: enough for the reduced {R}, not the unreduced {1}{R}.
+    runner.state_mut().players[0]
+        .mana_pool
+        .add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Red,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+    let card_id = runner.state().objects[&miracle_obj].card_id;
+
+    // Surface the reveal prompt directly (as the other miracle tests do).
+    runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
+        player: P0,
+        object_id: miracle_obj,
+        cost: miracle_cost,
+    };
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Reveal should succeed");
+    runner.act(GameAction::PassPriority).expect("P0 pass");
+    runner.act(GameAction::PassPriority).expect("P1 pass");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            }
+        ),
+        "should be MiracleCastOffer, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Revert-failing: with only {R} in pool this cast succeeds ONLY if the
+    // medallion reduced the miracle {1}{R} to {R} (CR 601.2f).
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("miracle cast should succeed at the medallion-reduced cost {R}");
+
+    assert!(
+        matches!(
+            &runner.state().stack.last().unwrap().kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Miracle,
+                ..
+            }
+        ),
+        "spell should be on the stack via Miracle variant"
+    );
+    assert!(
+        runner.state().players[0].mana_pool.mana.is_empty(),
+        "the reduced miracle cost {{R}} should consume the single red mana, got {:?}",
+        runner.state().players[0].mana_pool.mana
+    );
+}
+
+/// CR 601.2f floor: reductions meeting or exceeding an ALL-GENERIC miracle cost
+/// take it to {0}. A gold R/W spell (color from its printed {2}{R}{W}) with
+/// miracle {2} under BOTH a Ruby and a Pearl Medallion-class static ({1} less
+/// each, both apply to a red-and-white spell) casts with an EMPTY mana pool —
+/// any unreduced residue would make the Auto payment fail.
+#[test]
+fn miracle_cost_fully_reduced_casts_for_zero() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let miracle_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 2,
+    };
+    scenario
+        .add_creature(P0, "Ruby Medallion Stand-In", 2, 2)
+        .from_oracle_text("Red spells you cast cost {1} less to cast.");
+    scenario
+        .add_creature(P0, "Pearl Medallion Stand-In", 2, 2)
+        .from_oracle_text("White spells you cast cost {1} less to cast.");
+
+    let miracle_obj = scenario
+        .add_spell_to_hand(P0, "GoldMiracle", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::White],
+            generic: 2,
+        })
+        .with_keyword(Keyword::Miracle(miracle_cost.clone()))
+        .with_ability(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&miracle_obj].card_id;
+
+    runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
+        player: P0,
+        object_id: miracle_obj,
+        cost: miracle_cost,
+    };
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Reveal should succeed");
+    runner.act(GameAction::PassPriority).expect("P0 pass");
+    runner.act(GameAction::PassPriority).expect("P1 pass");
+
+    // Revert-failing: the pool is EMPTY, so the cast succeeds only if the two
+    // {1}-less reductions floored the all-generic miracle {2} at {0} (CR 601.2f).
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("miracle cast should succeed for {0} with both medallions out");
+
+    assert!(
+        matches!(
+            &runner.state().stack.last().unwrap().kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Miracle,
+                ..
+            }
+        ),
+        "spell should be on the stack via Miracle variant after the {{0}} cast"
+    );
+}
+
 /// CR 118.9: Rooftop Storm — "You may pay {0} rather than pay the mana cost for
 /// Zombie creature spells you cast." End-to-end: parse the Oracle text onto a
 /// battlefield permanent, then casting a Zombie creature offers the alternative
@@ -2582,6 +2762,242 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
                 WaitingFor::OptionalCostChoice { .. }
             ),
             "non-Zombie spell must not be offered the Rooftop Storm grant, got {:?}",
+            runner.state().waiting_for,
+        );
+    }
+}
+
+/// CR 118.9 + CR 202.3 + CR 601.2b: As Foretold — "Once each turn, you may pay
+/// {0} rather than pay the mana cost for a spell you cast with mana value X or
+/// less, where X is the number of time counters on ~". Runtime proof of the two
+/// NEW axes over the unlimited alt-cost grants:
+///  1. DYNAMIC mana-value gate: a spell with MV > (time counters on the source)
+///     is NOT offered the grant; a spell with MV ≤ that count IS offered {0}.
+///  2. ONCE-PER-TURN frequency: accepting consumes the source's per-turn slot
+///     (`alt_cost_grant_permissions_used`), so the grant is spent for the turn.
+#[test]
+fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // As Foretold on the battlefield (only the alt-cost line matters here; time
+    // counters are seeded directly). Hosted on a permanent via the full parser.
+    let foretold_id = scenario
+        .add_creature(P0, "As Foretold", 0, 0)
+        .from_oracle_text(
+            "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
+             you cast with mana value X or less, where X is the number of time counters on ~.",
+        )
+        .id();
+    // Two time counters → dynamic threshold X = 2.
+    scenario.with_counter(foretold_id, CounterType::Time, 2);
+
+    // MV-2 spell (≤ threshold): eligible for the grant.
+    let mv2_id = scenario
+        .add_creature_to_hand(P0, "Test Two Drop", 1, 1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // --- MV-2 spell: at/under the threshold → grant offered as {0} vs printed. ---
+    let mv2_card = runner.state().objects[&mv2_id].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: mv2_id,
+            card_id: mv2_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the MV-2 spell should succeed");
+    handle_target_selection(&mut runner, &result);
+
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalCostChoice { cost, .. } => match cost {
+            AdditionalCost::Choice(alt, printed) => {
+                assert_eq!(
+                    *alt,
+                    AbilityCost::Mana {
+                        cost: ManaCost::zero()
+                    },
+                    "alternative cost must be {{0}}"
+                );
+                assert_eq!(
+                    *printed,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic: 2,
+                        }
+                    },
+                    "printed fallback must be the spell's {{2}} mana cost"
+                );
+            }
+            other => panic!("expected AdditionalCost::Choice(alt, printed), got {other:?}"),
+        },
+        other => panic!("expected OptionalCostChoice for the As Foretold grant, got {other:?}"),
+    }
+
+    // Accept the {0} alternative → the spell reaches the stack and the source's
+    // once-per-turn slot is consumed (CR 118.9 + CR 601.2b).
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accepting the alternative cost should succeed");
+    assert_eq!(
+        runner.state().objects[&mv2_id].zone,
+        Zone::Stack,
+        "MV-2 spell should be on the stack after paying the {{0}} alternative"
+    );
+    assert!(
+        runner
+            .state()
+            .alt_cost_grant_permissions_used
+            .contains(&foretold_id),
+        "accepting As Foretold's alternative cost must consume its per-turn slot"
+    );
+}
+
+/// CR 118.9 + CR 601.2b: Declining As Foretold's alternative cost pays the
+/// printed mana cost instead and must NOT consume the once-per-turn slot — the
+/// grant remains available for a later spell the same turn.
+#[test]
+fn as_foretold_decline_printed_cost_does_not_consume_slot() {
+    use engine::types::counter::CounterType;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let foretold_id = scenario
+        .add_creature(P0, "As Foretold", 0, 0)
+        .from_oracle_text(
+            "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
+             you cast with mana value X or less, where X is the number of time counters on ~.",
+        )
+        .id();
+    scenario.with_counter(foretold_id, CounterType::Time, 2);
+
+    let mv2_id = scenario
+        .add_creature_to_hand(P0, "Test Two Drop", 1, 1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Two generic-payable mana so the printed {2} cost can be paid on decline.
+    for _ in 0..2 {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+    }
+
+    let mv2_card = runner.state().objects[&mv2_id].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: mv2_id,
+            card_id: mv2_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the MV-2 spell should succeed");
+    handle_target_selection(&mut runner, &result);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "As Foretold must offer the alternative cost, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Decline → pay the printed {2} cost; the slot must remain unspent.
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("declining the alternative cost should succeed");
+    assert_eq!(
+        runner.state().objects[&mv2_id].zone,
+        Zone::Stack,
+        "MV-2 spell should be on the stack after paying the printed {{2}} cost"
+    );
+    assert!(
+        !runner
+            .state()
+            .alt_cost_grant_permissions_used
+            .contains(&foretold_id),
+        "declining the alternative cost must NOT consume As Foretold's per-turn slot"
+    );
+}
+
+/// CR 202.3 + CR 118.9: As Foretold's DYNAMIC gate — a spell whose mana value
+/// EXCEEDS the number of time counters on the source is NOT offered the grant.
+/// With 2 time counters, an MV-3 spell is above the threshold. Sole cast so the
+/// pipeline is clean (mirrors the Rooftop Storm negative arm).
+#[test]
+fn as_foretold_dynamic_gate_excludes_above_threshold_spell() {
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let foretold_id = scenario
+        .add_creature(P0, "As Foretold", 0, 0)
+        .from_oracle_text(
+            "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
+             you cast with mana value X or less, where X is the number of time counters on ~.",
+        )
+        .id();
+    scenario.with_counter(foretold_id, CounterType::Time, 2);
+
+    // MV-3 spell: strictly above the 2-counter threshold.
+    let mv3_id = scenario
+        .add_creature_to_hand(P0, "Test Three Drop", 1, 1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Sanity: the grant static is present so the negative below is meaningful.
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|o| o.static_definitions.iter_unchecked().any(|d| matches!(
+                d.mode,
+                engine::types::statics::StaticMode::CastWithAlternativeCost { .. }
+            ))),
+        "As Foretold must carry a CastWithAlternativeCost static"
+    );
+
+    let mv3_card = runner.state().objects[&mv3_id].card_id;
+    if let Ok(res) = runner.act(GameAction::CastSpell {
+        object_id: mv3_id,
+        card_id: mv3_card,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    }) {
+        handle_target_selection(&mut runner, &res);
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "MV-3 spell exceeds the {{2}}-counter threshold and must NOT be offered \
+             the As Foretold grant, got {:?}",
             runner.state().waiting_for,
         );
     }

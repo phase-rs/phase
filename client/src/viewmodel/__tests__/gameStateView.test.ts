@@ -171,6 +171,18 @@ describe("getWaitingForObjectChoiceIds", () => {
       }),
     ).toEqual([]);
   });
+
+  // CR 707.9: Copy Enchantment's copy pool arrives as `CopyTargetChoice`.
+  // Every surface that can offer one of these objects — battlefield card or
+  // the player-attached-Aura dialog — must read the pool from here.
+  it("returns valid_targets for CopyTargetChoice", () => {
+    expect(
+      getWaitingForObjectChoiceIds({
+        type: "CopyTargetChoice",
+        data: { player: 0, source_id: 1, valid_targets: [30, 31] },
+      }),
+    ).toEqual([30, 31]);
+  });
 });
 
 describe("getBattlefieldSacrificeChoice", () => {
@@ -299,6 +311,7 @@ describe("getBoardChoiceView", () => {
       type: "CrewVehicle",
       data: { vehicle_id: 30, creature_ids: [10, 11] },
     });
+    expect(choice.cancelAction).toEqual({ type: "CancelCast" });
   });
 
   // Regression: a Pilot token (Shorikai) has printed power 1 but crews "as though
@@ -376,6 +389,25 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10, 11], objects)).toBe(true);
     // Keeping only the 5-power creature exceeds the cap of 4.
     expect(canConfirmBoardChoice(choice, [10], objects)).toBe(false);
+  });
+
+  it("renders the engine-provided exact keeper requirement without client-side capping", () => {
+    const choice = getBoardChoiceView({
+      type: "KeepExactPermanentsChoice",
+      data: {
+        player: 0,
+        target_player: 0,
+        eligible: [10, 11],
+        required_count: 5,
+        source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    expect(choice?.selection).toEqual({ type: "exactCount", count: 5 });
   });
 
   it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {

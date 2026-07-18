@@ -1053,13 +1053,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" — energy costs (CR 107.14)
-    if let Some(energy) = try_parse_energy_cost(&lower) {
-        return AbilityCost::PayEnergy {
-            amount: QuantityExpr::Fixed {
-                value: energy as i32,
-            },
-        };
+    // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" / "Pay X {E}" — energy costs (CR 107.14)
+    if let Some(amount) = try_parse_energy_cost(&lower) {
+        return AbilityCost::PayEnergy { amount };
     }
 
     // "Return a land you control to its owner's hand" — bounce cost
@@ -1078,6 +1074,28 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     .is_some()
     {
         return AbilityCost::Unattach;
+    }
+
+    // CR 701.3d + CR 608.2k: "Unattach a[n] <type> from ~" — unattach a matching
+    // attachment from the source host as a cost (Captain America's Throw). The
+    // detached object stays on the battlefield and becomes this ability's
+    // cost-referent. Kept AFTER the more-specific self-unattach branch above.
+    // The "from ~" recipient is normalized from the card name upstream
+    // (`normalize_card_name_refs`).
+    if let Some(((), after_article)) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag("unattach ").parse(i)?;
+        value((), alt((tag("an "), tag("a ")))).parse(i)
+    }) {
+        let (filter, remainder) = parse_type_phrase(after_article);
+        let rem_lower = remainder.to_lowercase();
+        if let Some(((), tail)) = nom_on_lower(remainder, &rem_lower, |i| {
+            value((), preceded(tag(" from "), parse_cost_self_reference)).parse(i)
+        }) {
+            if tail.is_empty() {
+                // Only count == 1 has Oracle support today ("a[n] <type>").
+                return AbilityCost::UnattachFrom { filter, count: 1 };
+            }
+        }
     }
 
     // "reveal your hand" — reveal the controller's entire hand.
@@ -1607,8 +1625,12 @@ fn try_parse_exile_top_library(rest: &str) -> Option<u32> {
     None
 }
 
-/// CR 107.9: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}".
-fn try_parse_energy_cost(lower: &str) -> Option<u32> {
+/// CR 107.3a + CR 107.14: Parse energy costs like "{E}", "{E}{E}", "pay N {e}", "pay eight {e}",
+/// "pay x {e}" (Chthonian Nightmare / issue #1092). Returns a `QuantityExpr` rather
+/// than a bare count so a variable-X amount ("pay x {e}") can be represented as
+/// `QuantityExpr::Ref { qty: Variable("X") }`, mirroring the "pay x life" /
+/// "pay x speed" branches above instead of silently collapsing X to 0.
+fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
     let text = nom_on_lower(lower, lower, |i| value((), tag("pay ")).parse(i))
         .map(|((), rest)| rest)
         .unwrap_or(lower)
@@ -1619,14 +1641,23 @@ fn try_parse_energy_cost(lower: &str) -> Option<u32> {
         // Verify the text is ONLY {E} symbols (no other text)
         let cleaned = text.replace("{e}", "").replace(' ', "");
         if cleaned.is_empty() {
-            return Some(count);
+            return Some(QuantityExpr::Fixed {
+                value: count as i32,
+            });
         }
     }
-    // "pay N {e}" / "pay eight {e}" / "pay six {e}"
+    // "pay N {e}" / "pay eight {e}" / "pay six {e}" / "pay x {e}"
     if text.ends_with("{e}") {
         let prefix = text.trim_end_matches("{e}").trim();
+        if prefix == "x" {
+            return Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            });
+        }
         if let Some((n, _)) = parse_number(prefix) {
-            return Some(n);
+            return Some(QuantityExpr::Fixed { value: n as i32 });
         }
     }
     None
@@ -2172,6 +2203,36 @@ mod tests {
             AbilityCost::Unattach
         );
         assert_eq!(parse_oracle_cost("Unattach ~"), AbilityCost::Unattach);
+    }
+
+    #[test]
+    fn cost_unattach_a_type_from_self() {
+        // CR 701.3d + CR 608.2k: Captain America's Throw cost. The recipient
+        // "from Captain America, First Avenger" is normalized to "from ~"
+        // upstream by `normalize_card_name_refs`.
+        let (expected_filter, remainder) = super::parse_type_phrase("Equipment from ~");
+        assert_eq!(remainder, " from ~");
+        assert_eq!(
+            parse_oracle_cost("Unattach an Equipment from ~"),
+            AbilityCost::UnattachFrom {
+                filter: expected_filter,
+                count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_unattach_self_still_unit_variant() {
+        // Negative: the more-specific self-unattach branch must win; it must NOT
+        // be captured by the new "unattach a[n] <type> from ~" branch.
+        assert_eq!(
+            parse_oracle_cost("Unattach this Equipment"),
+            AbilityCost::Unattach
+        );
+        assert!(!matches!(
+            parse_oracle_cost("Unattach this Equipment"),
+            AbilityCost::UnattachFrom { .. }
+        ));
     }
 
     #[test]
@@ -2791,12 +2852,13 @@ mod tests {
     }
 
     /// CR 508.1a + CR 601.2f: the conditional flat form gated by "you attacked
-    /// with a <filter>" extracts a filtered `YouAttackedWithAtLeast { count: 1 }`.
-    /// The trailing "this turn" is stripped upstream as a duration before the
-    /// reparse, so the bare form is what reaches the reducer (Thaumaton Torpedo).
+    /// with a <filter>" extracts a filtered `AttackedThisTurn` quantity gate
+    /// (GE 1). The trailing "this turn" is stripped upstream as a duration
+    /// before the reparse, so the bare form is what reaches the reducer
+    /// (Thaumaton Torpedo).
     #[test]
     fn cost_reduction_if_attacked_with_filter_gate() {
-        use crate::types::ability::ParsedCondition;
+        use crate::types::ability::{Comparator, CountScope, ParsedCondition, QuantityRef};
         let r = try_parse_cost_reduction(
             "this ability costs {3} less to activate if you attacked with a spacecraft",
         )
@@ -2804,9 +2866,17 @@ mod tests {
         assert_eq!(r.amount_per, 3);
         assert_eq!(r.count, QuantityExpr::Fixed { value: 1 });
         match r.condition {
-            Some(ParsedCondition::YouAttackedWithAtLeast {
-                count: 1,
-                filter: Some(TargetFilter::Typed(tf)),
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::AttackedThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(tf)),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             }) => assert!(
                 tf.type_filters
                     .iter()

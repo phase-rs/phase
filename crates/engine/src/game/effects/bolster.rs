@@ -84,6 +84,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Bolster,
             source_id,
+            subject: None,
         });
     } else {
         // CR 701.39a: Multiple creatures tied — controller chooses.
@@ -101,7 +102,7 @@ pub fn resolve(
             controller,
         );
 
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), state));
         state.waiting_for = WaitingFor::ChooseFromZoneChoice {
             player: controller,
             cards: tied,
@@ -114,6 +115,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Bolster,
             source_id,
+            subject: None,
         });
     }
 

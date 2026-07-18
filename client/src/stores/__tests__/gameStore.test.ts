@@ -1,7 +1,7 @@
 import { act } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { GameEvent } from "../../adapter/types";
+import type { GameEvent, GameState } from "../../adapter/types";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import {
   buildGameState,
@@ -125,6 +125,14 @@ describe("gameStore", () => {
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
     const adapter = buildEngineAdapterMock(state1);
+    // Model a real engine: `restoreState` actually rewinds it, so the read that
+    // follows returns the restored state. `undo` commits the snapshot's own
+    // post-restore state (post-restore, the engine is the source of truth and
+    // both halves of the pair must come from it), so a mock whose reads ignored
+    // `restoreState` would be lying about the engine.
+    adapter.restoreState.mockImplementation((restored: GameState) => {
+      adapter.getState.mockResolvedValue(restored);
+    });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);

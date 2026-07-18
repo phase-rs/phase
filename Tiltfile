@@ -17,8 +17,28 @@ enabled = config.parse().get('enable', [])
 # Build
 # ---------------------------------------------------------------------------
 
-ENGINE_SRC = ['crates/engine/src/']
+# Editor/agent tools write `<file>.tmp.<pid>.<hash>` staging files next to the
+# real file before renaming into place; without this, every such temp file
+# restarts the watching resources mid-build.
+TMP_IGNORE = ['**/*.tmp.*']
+
+# Must stay a SUPERSET of what `scripts/engine-source-hash.sh` hashes as the engine cache
+# key (src + data + build.rs + Cargo.toml). `data/` is `include_str!`d into the binary and
+# `build.rs`/`Cargo.toml` change what gets compiled, so a change to any of them changes the
+# engine -- but a resource only rebuilds on its `deps`, and `tilt-wait.sh` derives build
+# freshness from those same `deps`. So anything hashed-but-unwatched is doubly invisible:
+# Tilt does not rebuild, AND the freshness scan does not look there, so `tilt-wait.sh
+# card-data` answers "fresh + ok" for a change that was never compiled. Under-specifying
+# `deps` here silently re-opens the false green that tilt-wait.sh exists to close.
+ENGINE_SRC = [
+    'crates/engine/src/',
+    'crates/engine/data/',
+    'crates/engine/build.rs',
+    'crates/engine/Cargo.toml',
+]
+ENGINE_TESTS = ['crates/engine/tests/']
 AI_SRC = ['crates/phase-ai/src/']
+AI_TESTS = ['crates/phase-ai/tests/']
 WASM_SRC = ['crates/engine-wasm/src/']
 DRAFT_CORE_SRC = ['crates/draft-core/src/']
 DRAFT_WASM_SRC = ['crates/draft-wasm/src/']
@@ -32,6 +52,7 @@ DRAFT_WASM_SRC = ['crates/draft-wasm/src/']
 local_resource('wasm',
     cmd = 'CARGO_TARGET_DIR=target/wasm ./scripts/build-wasm.sh',
     deps = ENGINE_SRC + AI_SRC + WASM_SRC + DRAFT_CORE_SRC + DRAFT_WASM_SRC,
+    ignore = TMP_IGNORE,
     allow_parallel = True,
     labels = ['build'],
 )
@@ -77,6 +98,7 @@ local_resource('tauri',
     serve_cmd = 'pnpm tauri:dev',
     serve_dir = 'client',
     deps = ENGINE_SRC + AI_SRC + WASM_SRC + TAURI_SRC + ['crates/server-core/src/', 'crates/phase-server/src/'],
+    ignore = TMP_IGNORE,
     auto_init = 'tauri' in enabled,
     labels = ['serve'],
 )
@@ -91,6 +113,7 @@ local_resource('server',
     serve_cmd = './target/debug/phase-server',
     serve_env = {'PHASE_DATA_DIR': 'data'},
     deps = SERVER_SRC,
+    ignore = TMP_IGNORE,
     auto_init = 'server' in enabled,
     links = ['http://localhost:9374'],
     labels = ['serve'],
@@ -113,7 +136,8 @@ local_resource('server',
 # force a rebuild.
 local_resource('build-native',
     cmd = 'cargo nextest run -p engine -p phase-ai --no-run',
-    deps = ENGINE_SRC + AI_SRC,
+    deps = ENGINE_SRC + ENGINE_TESTS + AI_SRC + AI_TESTS,
+    ignore = TMP_IGNORE,
     allow_parallel = True,
     auto_init = 'test' in enabled,
     labels = ['test'],
@@ -121,7 +145,8 @@ local_resource('build-native',
 
 local_resource('test-engine',
     cmd = 'cargo nextest run -p engine',
-    deps = ENGINE_SRC,
+    deps = ENGINE_SRC + ENGINE_TESTS,
+    ignore = TMP_IGNORE,
     resource_deps = ['build-native'],
     allow_parallel = True,
     auto_init = 'test' in enabled,
@@ -130,7 +155,8 @@ local_resource('test-engine',
 
 local_resource('test-ai',
     cmd = 'cargo nextest run -p phase-ai',
-    deps = ENGINE_SRC + AI_SRC,
+    deps = ENGINE_SRC + AI_SRC + AI_TESTS,
+    ignore = TMP_IGNORE,
     resource_deps = ['build-native'],
     allow_parallel = True,
     auto_init = 'test' in enabled,
@@ -141,6 +167,7 @@ local_resource('test-frontend',
     cmd = 'pnpm test -- --run',
     dir = 'client',
     deps = ['client/src/'],
+    ignore = TMP_IGNORE,
     resource_deps = ['wasm'],
     allow_parallel = True,
     auto_init = 'test' in enabled,
@@ -159,6 +186,7 @@ local_resource('test-frontend',
 local_resource('clippy',
     cmd = 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings',
     deps = ['crates/'],
+    ignore = TMP_IGNORE,
     auto_init = 'lint' in enabled,
     allow_parallel = True,
     labels = ['lint'],
@@ -168,6 +196,7 @@ local_resource('check-frontend',
     cmd = 'pnpm run type-check && pnpm lint',
     dir = 'client',
     deps = ['client/src/'],
+    ignore = TMP_IGNORE,
     allow_parallel = True,
     auto_init = 'lint' in enabled,
     labels = ['lint'],
@@ -180,6 +209,7 @@ local_resource('check-frontend',
 local_resource('card-data',
     cmd = './scripts/gen-card-data.sh',
     deps = ENGINE_SRC,
+    ignore = TMP_IGNORE,
     auto_init = True,
     labels = ['data'],
 )
@@ -187,6 +217,7 @@ local_resource('card-data',
 local_resource('draft-pools',
     cmd = 'cargo run --bin draft-pool-gen',
     deps = DRAFT_CORE_SRC + ['data/mtgjson/sets/'],
+    ignore = TMP_IGNORE,
     auto_init = True,
     labels = ['data'],
 )

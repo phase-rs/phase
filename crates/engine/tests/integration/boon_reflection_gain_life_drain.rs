@@ -11,7 +11,7 @@
 //!      modifiers and returned the GainLife AST.
 //!   3. `apply_life_gain` Execute arm did NOT drain — only the Prevented arm
 //!      called `drain_substitution_continuation`.
-//!   4. The Template sat in `state.post_replacement_continuation` and drained
+//!   4. The Template sat in `state.post_replacement_continuation()` and drained
 //!      on the next zone-change / land-play as a phantom GainLife on the
 //!      wrong player. Same defect class as the Jace WinTheGame leak.
 //!
@@ -74,10 +74,10 @@ fn boon_reflection_doubles_gain_and_does_not_leak_continuation() {
     // The load-bearing assertion: a leaked Template here is the latent
     // GainLife class's analogue of the Jace empty-library win bug.
     assert!(
-        runner.state().post_replacement_continuation.is_none(),
+        runner.state().post_replacement_continuation().is_none(),
         "GainLife → GainLife amount-substitution must not leak a \
          post-replacement continuation; found {:?}",
-        runner.state().post_replacement_continuation
+        runner.state().post_replacement_continuation()
     );
 }
 
@@ -110,9 +110,9 @@ fn boon_reflection_two_sequential_gains_do_not_compound_or_leak() {
             .expect("first life gain must resolve");
     assert_eq!(first, 4, "first gain doubles to 4");
     assert!(
-        runner.state().post_replacement_continuation.is_none(),
+        runner.state().post_replacement_continuation().is_none(),
         "first gain must not leak a continuation; found {:?}",
-        runner.state().post_replacement_continuation
+        runner.state().post_replacement_continuation()
     );
 
     let second =
@@ -120,9 +120,9 @@ fn boon_reflection_two_sequential_gains_do_not_compound_or_leak() {
             .expect("second life gain must resolve");
     assert_eq!(second, 10, "second gain doubles to 10");
     assert!(
-        runner.state().post_replacement_continuation.is_none(),
+        runner.state().post_replacement_continuation().is_none(),
         "second gain must not leak a continuation; found {:?}",
-        runner.state().post_replacement_continuation
+        runner.state().post_replacement_continuation()
     );
 
     assert_eq!(

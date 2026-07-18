@@ -130,9 +130,39 @@ Keywords are granted/removed via `ContinuousModification::AddKeyword` / `RemoveK
 
 ### Phase 4 — Parser Integration
 
-- [ ] **Oracle text parsing** — Keywords on their own line (e.g., "Flying\nTrample") are handled by the line classifier in `oracle.rs` which calls `Keyword::from_str()`. No parser changes needed if `FromStr` is correct.
+> **Read this first if your keyword takes a cost or a parameter** ("Kicker {2}", "Ward {1}",
+> "Cycling {2}"). The keyword router is **strict**, and getting the surface wrong is the
+> silent-swallow bug class. Full surface table: `/oracle-parser` SKILL.md §3a.
 
-- [ ] **`crates/engine/src/parser/oracle_static.rs` — `map_keyword()`**
+**The two surfaces (`parser/oracle_keyword.rs`).** They are not interchangeable:
+
+| Surface | Contract | Where it may be used |
+|---|---|---|
+| `parse_router_keyword_line()` / `parse_router_keyword_fragment()` / `parse_router_keyword_list()` | **STRICT / all-consuming.** Return a typed keyword only when the text parses *completely* (keyword + permitted P/R/M tail). | The **only** surfaces that may license a router — or a routing classifier — to CONSUME a line. |
+| `parse_granted_keyword_fragment()` / `extract_granted_keyword_list()` | **PERMISSIVE.** Take the leading keyword and **discard the remainder** — by design. | **Embedded grant contexts only** (static / token / vote / class-level payloads), where the trailing clause belongs to the *enclosing* sentence: "… gains vanishing 3 if that creature doesn't have vanishing". |
+
+The axis is typed: `KeywordRemainderPolicy::{DiscardRemainder, RequireAllConsuming}`, one
+list walk parameterized by the per-part remainder contract.
+
+**Consume-on-success.** A router may advance past a line only after a strict surface returns
+a keyword all-consumingly, or after it emits `Effect::unimplemented`. A line with an
+unconsumed semantic tail must **DECLINE**, not commit: `Cycling {2} if you control an
+artifact` falls through to an honest, exact-unit `Effect::Unimplemented` rather than
+vanishing with no keyword and no diagnostic. Consuming it on a permissive parse drops the
+tail's semantics and the card then renders as **fully supported** while its text was never
+modelled.
+
+**The gate.** `scripts/check-parser-combinators.sh` **Gate G** is a whole-file invariant: a
+permissive keyword-parser symbol appearing anywhere inside `parse_oracle_ir`,
+`is_semicolon_keyword_line`, or `is_spell_resolution_instruction_line` fails the build, at
+any count. The migration is complete (task #123) — do not reintroduce it.
+
+- [ ] **Oracle text parsing** — Keywords on their own line (e.g., "Flying\nTrample") are handled by the line classifier in `oracle.rs`, which routes through `parse_router_keyword_list()` and ultimately `Keyword::from_str()`. No parser changes needed if `FromStr` is correct.
+
+- [ ] **`crates/engine/src/parser/oracle_keyword.rs` — the router registry** (parameterized/cost-bearing keywords only)
+  Add the keyword's prefix to the candidate recognizer `is_keyword_cost_line()` **and** a matching case to `ROUTER_KEYWORD_CASES` (the `#[cfg(test)]` typed family registry) in the same change. A set-equality test pins the two against each other: a prefix added to the recognizer without a strict parser, a valid fixture, a semantic-suffix rejection, and a declared production reach fails the build. That test is deliberate friction — it is the exact hole silent swallowing comes back through.
+
+- [ ] **`crates/engine/src/parser/oracle_static/grammar.rs` — `map_keyword()`**
   This delegates to `Keyword::from_str()`. No changes needed unless the keyword has non-standard Oracle text.
 
 - [ ] **`crates/engine/src/parser/oracle_effect/token.rs` — `parse_token_keyword_clause()`** (if applicable)
@@ -193,6 +223,8 @@ Some keywords require synthesis in `synthesis.rs` — converting the keyword int
 | Adding runtime behavior but no synthesis | Keyword parsed but its implied abilities (like Equip → Attach) never created | Add synthesis function in `synthesis.rs` |
 | Leaving keyword as `Unknown(String)` with partial support | Coverage report flags it as missing, but it partially works | Add proper enum variant |
 | Not testing parameterized parsing | `"ward:{W}"` might fail due to mana cost format | Test both `"Ward:{W}"` and `"Ward:W"` formats |
+| Consuming a keyword line via a **permissive** helper in a router | Silent swallow: the trailing clause's semantics are dropped, no keyword recorded, no `Unimplemented` raised — the card renders as fully supported | Use `parse_router_keyword_line` / `_list` / `_fragment`. `scripts/check-parser-combinators.sh` Gate G fails the build on any permissive symbol in a router context |
+| Adding a prefix to `is_keyword_cost_line()` without a `ROUTER_KEYWORD_CASES` entry | The recognizer nominates a line no strict parser can fully parse | The set-equality test reds. Add the case, a valid fixture, and a semantic-suffix rejection in the same change |
 
 ---
 
@@ -216,7 +248,12 @@ rg -q "fn parse_keywords" crates/engine/src/game/keywords.rs && \
 rg -q "fn synthesize_equip" crates/engine/src/database/synthesis.rs && \
 rg -q "fn synthesize_changeling_cda" crates/engine/src/database/synthesis.rs && \
 rg -q "fn check_keywords" crates/engine/src/game/coverage.rs && \
-rg -q "fn map_keyword" crates/engine/src/parser/oracle_static.rs && \
+rg -q "fn map_keyword" crates/engine/src/parser/oracle_static/grammar.rs && \
+rg -q "fn parse_router_keyword_list" crates/engine/src/parser/oracle_keyword.rs && \
+rg -q "fn parse_router_keyword_fragment" crates/engine/src/parser/oracle_keyword.rs && \
+rg -q "enum KeywordRemainderPolicy" crates/engine/src/parser/oracle_keyword.rs && \
+rg -q "fn is_keyword_cost_line" crates/engine/src/parser/oracle_keyword.rs && \
+rg -q "ROUTER_KEYWORD_CASES" crates/engine/src/parser/oracle_keyword.rs && \
 rg -q "AddKeyword" crates/engine/src/types/ability.rs && \
 echo "✓ add-keyword skill references valid" || \
 echo "✗ STALE — update skill references"

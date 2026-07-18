@@ -1,15 +1,18 @@
 import type {
   EngineAdapter,
+  EngineSnapshot,
   GameAction,
   GameEvent,
   GameLogEntry,
   GameState,
   LegalActionsResult,
   ManaCost,
+  ObjectId,
   PlayerId,
+  PersistedGameState,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -24,6 +27,8 @@ export interface DeckData {
   main_deck: string[];
   sideboard: string[];
   commander?: string[];
+  companion?: string[];
+  signature_spell?: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
   sticker_sheets?: string[];
@@ -33,8 +38,16 @@ export interface DeckData {
  * Wire-protocol version the client speaks. Must match `PROTOCOL_VERSION` in
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
+ *
+ * 17 — Dedicated companion deck slot and typed companion-reveal choices.
+ * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
+ * 15 — Mana-payment preview request/response variants.
+ * 14 — PrecastCopyShortcut action and its two WaitingFor variants.
+ * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
+ *      into a MulliganDecisionPhase::BottomCards sub-phase on
+ *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 17;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -86,7 +99,9 @@ export type WsAdapterEvent =
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   | { type: "reconnected" }
   | { type: "reconnectFailed" }
-  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult; logEntries?: GameLogEntry[] }
+  /** The engine pair travels as one `EngineSnapshot` — see the P2P adapter's
+   *  `stateChanged` for why the halves must stay inseparable. */
+  | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[] }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
@@ -112,13 +127,23 @@ function playerNamesFromWire(names: string[]): Record<number, string> {
  */
 export class WebSocketAdapter implements EngineAdapter {
   private ws: WebSocket | null = null;
-  private gameState: GameState | null = null;
+  /**
+   * The single cached engine pair, rebuilt (and re-stamped) once per inbound
+   * state-bearing message. `getState`/`getLegalActions` both read from THIS
+   * object, so they can no longer straddle two updates. The WebSocket delivers
+   * server messages in order, so stamping on arrival reproduces engine order.
+   */
+  private snapshot: EngineSnapshot | null = null;
   private _playerId: PlayerId | null = null;
-  private _legalActions: LegalActionsResult = { actions: [], autoPassRecommended: false };
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
+  private nextManaPaymentPreviewRequestId = 1;
+  private pendingManaPaymentPreviews = new Map<
+    number,
+    { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+  >();
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
   /** Starting-player contest event captured from the initial GameStarted
@@ -324,13 +349,16 @@ export class WebSocketAdapter implements EngineAdapter {
         this.pendingResolve = null;
         this.pendingReject = null;
       }
+      this.rejectPendingManaPaymentPreviews(
+        new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+      );
       if (this.initReject) {
         this.initReject(
           new AdapterError("WS_CLOSED", "Connection closed before game started", true),
         );
         this.initResolve = null;
         this.initReject = null;
-      } else if (this.gameState !== null || this.playerToken !== null) {
+      } else if (this.snapshot !== null || this.playerToken !== null) {
         this.attemptReconnect();
       }
     };
@@ -372,11 +400,26 @@ export class WebSocketAdapter implements EngineAdapter {
     });
   }
 
+  async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    const requestId = this.nextManaPaymentPreviewRequestId++;
+    return new Promise<ObjectId[]>((resolve, reject) => {
+      this.pendingManaPaymentPreviews.set(requestId, { resolve, reject });
+      if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
+        this.pendingManaPaymentPreviews.delete(requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
+      }
+    });
+  }
+
   async getState(): Promise<GameState> {
-    if (!this.gameState) {
+    if (!this.snapshot) {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
-    return this.gameState;
+    return this.snapshot.state;
   }
 
   getAiAction(_difficulty: string, _playerId: number): GameAction | null {
@@ -384,10 +427,24 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return this._legalActions;
+    return this.snapshot?.legalResult ?? EMPTY_LEGAL_ACTIONS;
   }
 
-  restoreState(_state: GameState): void {
+  async getSnapshot(): Promise<EngineSnapshot> {
+    if (!this.snapshot) {
+      throw new AdapterError("WS_ERROR", "No game state available", false);
+    }
+    return this.snapshot;
+  }
+
+  /** Rebuild the cached pair from an inbound state-bearing message, stamping
+   *  it with a fresh globally-monotonic seq at arrival. */
+  private cacheSnapshot(state: GameState, legalResult: LegalActionsResult): EngineSnapshot {
+    this.snapshot = { state, legalResult, seq: nextSnapshotSeq() };
+    return this.snapshot;
+  }
+
+  restoreState(_state: PersistedGameState): void {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,
       "Undo not supported in multiplayer",
@@ -453,12 +510,15 @@ export class WebSocketAdapter implements EngineAdapter {
       this.ws.close();
       this.ws = null;
     }
-    this.gameState = null;
+    this.snapshot = null;
     this._playerId = null;
     this.playerToken = null;
     this._gameCode = null;
     this.pendingResolve = null;
     this.pendingReject = null;
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
     this.initResolve = null;
     this.initReject = null;
     this.reconnectInFlight = false;
@@ -556,6 +616,13 @@ export class WebSocketAdapter implements EngineAdapter {
     }
   }
 
+  private rejectPendingManaPaymentPreviews(error: Error): void {
+    for (const { reject } of this.pendingManaPaymentPreviews.values()) {
+      reject(error);
+    }
+    this.pendingManaPaymentPreviews.clear();
+  }
+
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
   getServerInfo(): ServerInfo | null {
     return this._serverInfo;
@@ -625,14 +692,16 @@ export class WebSocketAdapter implements EngineAdapter {
             opponentName: data.opponent_name,
           });
         }
-        this.gameState = { ...data.state, derived: data.derived ?? data.state.derived };
+        const startedSnapshot = this.cacheSnapshot(
+          { ...data.state, derived: data.derived ?? data.state.derived },
+          {
+            actions: data.legal_actions ?? [],
+            autoPassRecommended: data.auto_pass_recommended ?? false,
+            spellCosts: data.spell_costs,
+            legalActionsByObject: data.legal_actions_by_object,
+          },
+        );
         this._playerId = data.your_player;
-        this._legalActions = {
-          actions: data.legal_actions ?? [],
-          autoPassRecommended: data.auto_pass_recommended ?? false,
-          spellCosts: data.spell_costs,
-          legalActionsByObject: data.legal_actions_by_object,
-        };
         // Joiners receive their player_token here (hosts get it via GameCreated).
         // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
         if (!this._gameCode && this.joinGameCode) {
@@ -662,8 +731,10 @@ export class WebSocketAdapter implements EngineAdapter {
           this.initReject = null;
         } else {
           // Reconnect path — no initResolve pending, so emit state change
-          // so GameProvider's event listener populates the store.
-          this.emit({ type: "stateChanged", state: data.state, events: [], legalResult: this._legalActions });
+          // so GameProvider's event listener populates the store. Emits the
+          // cached snapshot, which carries the derived-attached state (this
+          // emit previously sent the raw `data.state`, dropping `derived`).
+          this.emit({ type: "stateChanged", snapshot: startedSnapshot, events: [] });
         }
         break;
       }
@@ -674,13 +745,15 @@ export class WebSocketAdapter implements EngineAdapter {
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
         // crates/engine/src/game/derived_views.rs.
-        this.gameState = { ...data.state, derived: data.derived ?? data.state.derived };
-        this._legalActions = {
-          actions: data.legal_actions ?? [],
-          autoPassRecommended: data.auto_pass_recommended ?? false,
-          spellCosts: data.spell_costs,
-          legalActionsByObject: data.legal_actions_by_object,
-        };
+        const updateSnapshot = this.cacheSnapshot(
+          { ...data.state, derived: data.derived ?? data.state.derived },
+          {
+            actions: data.legal_actions ?? [],
+            autoPassRecommended: data.auto_pass_recommended ?? false,
+            spellCosts: data.spell_costs,
+            legalActionsByObject: data.legal_actions_by_object,
+          },
+        );
         if (this.pendingResolve) {
           this.emit({ type: "actionPendingChanged", pending: false });
           this.pendingResolve({ events: data.events, log_entries: data.log_entries });
@@ -689,9 +762,8 @@ export class WebSocketAdapter implements EngineAdapter {
         } else {
           this.emit({
             type: "stateChanged",
-            state: data.state,
+            snapshot: updateSnapshot,
             events: data.events,
-            legalResult: this._legalActions,
             logEntries: data.log_entries,
           });
         }
@@ -707,6 +779,26 @@ export class WebSocketAdapter implements EngineAdapter {
           );
           this.pendingResolve = null;
           this.pendingReject = null;
+        }
+        break;
+      }
+
+      case "ManaPaymentPreview": {
+        const data = msg.data as { request_id: number; source_ids: ObjectId[] };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.resolve(data.source_ids);
+        }
+        break;
+      }
+
+      case "ManaPaymentPreviewRejected": {
+        const data = msg.data as { request_id: number; reason: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("ACTION_REJECTED", data.reason, true));
         }
         break;
       }

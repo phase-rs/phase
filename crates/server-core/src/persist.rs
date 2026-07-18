@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use engine::types::game_state::GameState;
+use engine::types::game_state::PersistedGameState;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,7 @@ use crate::protocol::DraftLobbyMetadata;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSession {
     pub game_code: String,
-    pub state: GameState,
+    pub state: PersistedGameState,
     pub player_tokens: Vec<String>,
     pub display_names: Vec<String>,
     pub timer_seconds: Option<u32>,

@@ -204,6 +204,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::YouAttackUnblocked
         | TriggerMode::Blocks
         | TriggerMode::BlockersDeclared
+        | TriggerMode::BlocksOrBecomesBlocked
         | TriggerMode::BecomesBlocked => {
             push(TriggerEventKey::Blocks);
         }
@@ -332,10 +333,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::CaseSolved => push(TriggerEventKey::DungeonOrClassOrCase),
 
         // --- Planar ---
-        TriggerMode::PlanarDice
-        | TriggerMode::PlaneswalkedFrom
-        | TriggerMode::PlaneswalkedTo
-        | TriggerMode::ChaosEnsues => return (keys, true),
+        TriggerMode::PlanarDice | TriggerMode::Planeswalked { .. } | TriggerMode::ChaosEnsues => {
+            return (keys, true)
+        }
 
         // --- Dice / coin ---
         TriggerMode::RolledDie | TriggerMode::RolledDieOnce | TriggerMode::FlippedCoin => {
@@ -459,7 +459,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 
     match event {
         // CR 732.2: a halted-resolution notification produces no trigger keys.
-        GameEvent::GameStarted | GameEvent::ResolutionHalted { .. } => {}
+        GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::ResolutionHalted { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
@@ -597,6 +599,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
         // "whenever ~ becomes blocked" triggers are indexed for it.
         GameEvent::AttackerBecameBlockedByEffect { .. } => push(TriggerEventKey::Blocks),
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => push(TriggerEventKey::Blocks),
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {}
         GameEvent::BecomesTarget { .. } => push(TriggerEventKey::BecomesTarget),
         GameEvent::VehicleCrewed { .. }
@@ -633,7 +636,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);
         }
-        // Planechase trigger modes (PlaneswalkedFrom/To, ChaosEnsues) route to the
+        // Planechase trigger modes (Planeswalked { role }, ChaosEnsues) route to the
         // always-checked unclassified bucket in `keys_from_trigger_def`, so these
         // events need no dedicated index key — their matchers are always consulted.
         GameEvent::Planeswalked { .. }
@@ -802,6 +805,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileTop
         | EffectKind::TargetOnly
         | EffectKind::Choose
+        | EffectKind::OpponentGuess
         | EffectKind::ChooseDamageSource
         | EffectKind::Suspect
         | EffectKind::Unsuspect
@@ -841,8 +845,13 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
+        | EffectKind::ArrangePlanarDeckTop
         | EffectKind::Planeswalk
         | EffectKind::ChaosEnsues
+        // Redistribute emits LifeChanged handled by that event's own arm; no
+        // EffectResolved-dispatching matcher. No-op here.
+        | EffectKind::RedistributeLifeTotals
+        | EffectKind::ReverseTurnOrder
         | EffectKind::OpenAttractions
         | EffectKind::RollToVisitAttractions
         | EffectKind::ProcessRadCounters
@@ -985,8 +994,12 @@ pub fn reindex_object_triggers(state: &mut GameState, object_id: ObjectId) {
         state.trigger_index.remove(object_id);
         return;
     }
-    let defs: SmallVec<[TriggerDefinition; 4]> =
-        obj.trigger_definitions.as_slice().iter().cloned().collect();
+    let defs: SmallVec<[TriggerDefinition; 4]> = obj
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .map(|entry| entry.definition.clone())
+        .collect();
     let synthetic = has_synthetic_keyword_trigger_for(obj);
     state.trigger_index.remove(object_id);
     state.trigger_index.add(object_id, &defs, synthetic);
@@ -1059,7 +1072,13 @@ impl TriggerIndex {
                 // matcher gating in `active_trigger_definitions` runs at
                 // consult time — classification can register on the full set.
                 let synthetic = has_synthetic_keyword_trigger_for(obj);
-                fresh.add(obj_id, obj.trigger_definitions.as_slice(), synthetic);
+                let defs: SmallVec<[TriggerDefinition; 4]> = obj
+                    .trigger_definitions
+                    .as_slice()
+                    .iter()
+                    .map(|entry| entry.definition.clone())
+                    .collect();
+                fresh.add(obj_id, &defs, synthetic);
             }
         }
         state.trigger_index = fresh;
@@ -1103,9 +1122,12 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::GameObject;
     use crate::types::ability::{TargetFilter, TypedFilter};
     use crate::types::game_state::ZoneChangeRecord;
-    use crate::types::triggers::TriggerEventKey;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::triggers::{TriggerEventKey, TriggerMode};
 
     fn etb_creature_def() -> TriggerDefinition {
         TriggerDefinition::new(TriggerMode::ChangesZone)
@@ -1234,5 +1256,32 @@ mod tests {
 
         let candidates = candidates_for_event(&state, &event);
         assert!(candidates.contains(&watcher));
+    }
+
+    #[test]
+    fn rebuild_preserves_materialized_trigger_occurrence_refs() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(77);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(77),
+            PlayerId(0),
+            "Indexed Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions = std::sync::Arc::new(vec![etb_creature_def()]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let object = &state.objects[&object_id];
+        assert_eq!(
+            before,
+            object.trigger_definition_ref(&object.trigger_definitions[0]),
+            "index rebuild is classification-only and must not reallocate trigger identity"
+        );
     }
 }

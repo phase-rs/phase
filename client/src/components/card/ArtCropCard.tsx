@@ -8,10 +8,10 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, formatCounterTooltip, toRoman } from "../../viewmodel/cardProps.ts";
-import { KeywordStrip } from "../board/KeywordStrip.tsx";
+import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
+import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
@@ -29,7 +29,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
-  const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const isCompactHeight = useIsCompactHeight();
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
@@ -69,7 +68,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
   const devotionValue = obj.devotion ?? null;
-
   // --- Dynamic Text Sizing Logic ---
   let ptNumClass = "text-[14px]";
   let ptSlashClass = "text-[13px]";
@@ -82,16 +80,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     } else if (totalChars >= 4) {
       ptNumClass = "text-[12px] tracking-tight";
       ptSlashClass = "text-[11px]";
-    }
-  }
-
-  let loyaltyClass = "text-[14px]";
-  if (obj.loyalty != null) {
-    const loyaltyChars = String(obj.loyalty).length;
-    if (loyaltyChars >= 3) {
-      loyaltyClass = "text-[11px] tracking-tighter";
-    } else if (loyaltyChars >= 2) {
-      loyaltyClass = "text-[13px] tracking-tight";
     }
   }
 
@@ -181,25 +169,24 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
               <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />
 
-              {/* Keyword strip */}
-              {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
-                <KeywordStrip keywords={obj.keywords} baseKeywords={obj.base_keywords} />
-              )}
+              {/* Keyword badges are rendered by the parent PermanentCard at its
+                  overflow-visible level (so they can straddle the card edge),
+                  covering both art-crop and full-card modes. */}
 
-              {counters.length > 0 && (
-                <div className="absolute top-1 right-1 z-20 flex flex-col gap-0.5">
-                  {counters.map(([type, count]) => (
-                    <div
-                      key={type}
-                      title={formatCounterTooltip(type, count)}
+              {/* Top-right overlay stack: counter badges kept clear of the
+                  bottom P/T and loyalty badges. */}
+              <div className="absolute top-0.5 right-0.5 z-[60] flex flex-col items-end gap-0.5">
+                {counters.map(([type, count]) => (
+                  <CounterTooltip key={type} type={type} count={count}>
+                    <span
                       className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
                       style={counterStyle}
                     >
                       {count}
-                    </div>
-                  ))}
-                </div>
-              )}
+                    </span>
+                  </CounterTooltip>
+                ))}
+              </div>
 
               {hasDfc && (
                 <button
@@ -272,17 +259,20 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
         </div>
       )}
 
-      {/* Floating loyalty — shifts left when P/T is also visible (animated planeswalker-creature) */}
       {obj.loyalty != null && (
-        <div className={`absolute -bottom-[3px] z-20 ${ptDisplay ? "-left-[3px]" : "-right-[3px]"}`}>
-          <div className="rounded-full bg-gradient-to-b from-[#e2e4e6] to-[#888c91] p-[2px] shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.8)] border border-black/80">
-            <div className="bg-gray-800 border-[1px] border-amber-600/50 rounded-full px-2.5 py-[1px] min-w-[2.75rem] flex justify-center items-center shadow-[inset_0_2px_4px_rgba(0,0,0,0.8),inset_0_1px_2px_rgba(0,0,0,0.9),0_1px_0_rgba(255,255,255,0.2)]">
-              <span className={`font-bold text-amber-400 leading-none ${loyaltyClass}`}>
-                {obj.loyalty}
-              </span>
-            </div>
-          </div>
-        </div>
+        <LoyaltyBadge
+          amount={obj.loyalty}
+          kind="total"
+          size="battlefield"
+          reinforcedTopRim
+          className="absolute z-30"
+          style={{
+            position: "absolute",
+            fontSize: "clamp(13px, calc(var(--art-crop-h) * 0.19), 22px)",
+            bottom: "-5px",
+            ...(ptDisplay ? { left: "-5px" } : { right: "-5px" }),
+          }}
+        />
       )}
     </div>
   );

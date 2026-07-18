@@ -64,10 +64,60 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id,
+            subject: None,
         });
         return Ok(());
     }
 
+    // CR 701.3a + CR 614.1a: Route the attach through the replacement pipeline
+    // so an "as it becomes attached, choose …" definition on the attachment
+    // (`ReplacementEvent::Attached`, Psychic Paper) can bind its choice as the
+    // attachment resolves — the attach-time analogue of "as ~ enters, choose".
+    let proposed = crate::types::proposed_event::ProposedEvent::Attach {
+        attachment_id,
+        target_id,
+        applied: Default::default(),
+    };
+    match crate::game::replacement::replace_event(state, proposed, events) {
+        crate::game::replacement::ReplacementResult::Execute(_) => {
+            if let Some(waiting_for) =
+                deliver_attach(state, attachment_id, target_id, source_id, events)
+            {
+                state.waiting_for = waiting_for;
+            }
+        }
+        crate::game::replacement::ReplacementResult::Prevented => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id,
+                subject: None,
+            });
+        }
+        crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1: multiple "becomes attached" replacements apply — park
+            // for the ordering choice. `handle_replacement_choice`'s
+            // `ProposedEvent::Attach` arm resumes via `deliver_attach` once
+            // the player orders them.
+            crate::game::replacement::park_waiting_for(state, player);
+        }
+    }
+
+    Ok(())
+}
+
+/// CR 701.3a + CR 614.1a: Perform the attach mutation and, if the attachment
+/// carries an "as it becomes attached, choose …" replacement, drain its
+/// stashed continuation (`ReplacementEvent::Attached`). Single authority for
+/// completing an attach after the replacement pipeline consult — used both by
+/// the immediate `resolve()` path and by `handle_replacement_choice`'s
+/// post-ordering-choice resume, so the two paths cannot drift apart.
+pub(crate) fn deliver_attach(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
     if let Some(old_target) = attach_to(state, attachment_id, target_id) {
         events.push(GameEvent::Unattached {
             attachment_id,
@@ -76,11 +126,18 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
+        kind: EffectKind::Attach,
         source_id,
+        subject: None,
     });
 
-    Ok(())
+    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+        state,
+        Some(attachment_id),
+        None,
+        Some(crate::types::replacements::ReplacementEvent::Attached),
+        events,
+    )
 }
 
 /// CR 701.3d: Unattach each matching Equipment from the matched host, leaving
@@ -137,6 +194,7 @@ pub fn resolve_unattach_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -223,6 +281,7 @@ fn prompt_resolution_attachment_choice(
             // by the parent chain walker) with this exact attach instruction.
             state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
                 Box::new(ability.clone()),
+                state,
             ));
             state.waiting_for = WaitingFor::EffectZoneChoice {
                 player: ability.controller,
@@ -1294,7 +1353,8 @@ mod tests {
             events.as_slice(),
             [GameEvent::EffectResolved {
                 kind: EffectKind::UnattachAll,
-                source_id: ObjectId(999)
+                source_id: ObjectId(999),
+                ..
             }]
         ));
     }
@@ -1519,6 +1579,120 @@ mod tests {
             state.objects.get(&second).unwrap().attached_to,
             Some(AttachTarget::Object(host))
         );
+    }
+
+    #[test]
+    fn complete_resolution_attachment_choice_attaches_to_source_host() {
+        let mut state = setup();
+        let cloud = spawn_creature(&mut state, "Cloud, Ex-SOLDIER");
+        let equipment = spawn_equipment(&mut state, "Buster Sword", 12);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Equipment".to_string())
+                        .controller(ControllerRef::You),
+                ),
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            cloud,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        complete_resolution_attachment_choice(&mut state, ability, &[equipment], &mut events)
+            .unwrap();
+
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(cloud))
+        );
+        assert!(state
+            .objects
+            .get(&cloud)
+            .unwrap()
+            .attachments
+            .contains(&equipment));
+    }
+
+    #[test]
+    fn cloud_etb_attach_selection_equips_selected_equipment_to_cloud() {
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        let cloud = spawn_creature(&mut state, "Cloud, Ex-SOLDIER");
+        let other_host = spawn_creature(&mut state, "Other Soldier");
+        let first_equipment = spawn_equipment(&mut state, "Iron Sword", 12);
+        let selected_equipment = spawn_equipment(&mut state, "Buster Sword", 13);
+
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "When ~ enters, attach up to one target Equipment you control to it.",
+            "Cloud, Ex-SOLDIER",
+        );
+        let execute = trigger.execute.as_deref().expect("execute must be Some");
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            (*execute.effect).clone(),
+            vec![],
+            cloud,
+            PlayerId(0),
+        );
+        ability.multi_target = execute.multi_target.clone();
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                cards,
+                effect_kind,
+                min_count,
+                count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*effect_kind, EffectKind::Attach);
+                assert_eq!(*min_count, 0);
+                assert_eq!(*count, 1);
+                assert!(*up_to);
+                assert!(cards.contains(&first_equipment));
+                assert!(cards.contains(&selected_equipment));
+            }
+            other => panic!("expected Cloud attach EffectZoneChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![selected_equipment],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects.get(&selected_equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(cloud))
+        );
+        assert!(state
+            .objects
+            .get(&cloud)
+            .unwrap()
+            .attachments
+            .contains(&selected_equipment));
+        assert!(state
+            .objects
+            .get(&first_equipment)
+            .unwrap()
+            .attached_to
+            .is_none());
+        assert!(state
+            .objects
+            .get(&other_host)
+            .unwrap()
+            .attachments
+            .is_empty());
     }
 
     #[test]

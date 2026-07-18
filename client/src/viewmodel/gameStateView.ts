@@ -114,6 +114,29 @@ export function getPlayerZoneIds(
 }
 
 /**
+ * CR 701.20e: whether the engine's private "look at" set (Mishra's Bauble at an
+ * opponent's library, a scry look, Glasses of Urza / Gitaxian Probe at a hand)
+ * surfaces `objectId`'s identity to `viewerId`. Zone-agnostic — the engine's
+ * `private_look_ids`/`private_look_player` fields carry object ids regardless
+ * of which zone those objects sit in, so this same check backs both the
+ * library viewer and the opponent-hand viewer below.
+ */
+export function isPrivatelyLookedAtByViewer(
+  gameState: GameState | null,
+  objectId: ObjectId,
+  viewerId: PlayerId | null | undefined,
+): boolean {
+  // Guard against `undefined === undefined`: if the caller hasn't resolved a
+  // real viewer yet (e.g. mid-load) and `private_look_player` also happens to
+  // be unset, a bare `===` would match and leak the private look to nobody.
+  if (!gameState || viewerId == null) return false;
+  return (
+    gameState.private_look_player === viewerId &&
+    (gameState.private_look_ids?.includes(objectId) ?? false)
+  );
+}
+
+/**
  * Whether the engine has revealed a given library card's identity to `viewerId`.
  *
  * Mirrors the engine's library visibility (`crates/engine/src/game/visibility.rs`)
@@ -139,10 +162,7 @@ export function isLibraryCardRevealedToViewer(
   // CR 701.20e: a private "look at the top card" (Mishra's Bauble at an
   // opponent's library; your own scry look) surfaces the peeked ids only to the
   // looking player.
-  return (
-    gameState.private_look_player === viewerId &&
-    (gameState.private_look_ids?.includes(objectId) ?? false)
-  );
+  return isPrivatelyLookedAtByViewer(gameState, objectId, viewerId);
 }
 
 /**
@@ -296,7 +316,8 @@ export type BoardChoiceResponse =
   | { type: "SaddleMount"; mountId: ObjectId }
   | { type: "ChooseRingBearer" }
   | { type: "HarmonizeTap" }
-  | { type: "ChooseKeptCreatures" };
+  | { type: "ChooseKeptCreatures" }
+  | { type: "ChooseKeptPermanents" };
 
 export interface BoardChoiceView {
   player: PlayerId;
@@ -394,6 +415,18 @@ export function getBoardChoiceView(
         response: { type: "ChooseKeptCreatures" },
         sourceId: waitingFor.data.source_id,
       };
+    // CR 101.4 + CR 701.21a: exact keeper-cardinality selection. The engine
+    // supplies the legal pool and authoritative count; the board is display
+    // only and submits the typed choice action below.
+    case "KeepExactPermanentsChoice":
+      return {
+        player: waitingFor.data.player,
+        objectIds: waitingFor.data.eligible,
+        intent: "keep",
+        selection: { type: "exactCount", count: waitingFor.data.required_count },
+        response: { type: "ChooseKeptPermanents" },
+        sourceId: waitingFor.data.source_id,
+      };
     case "PayCost": {
       if (!isBattlefieldCostChoice(waitingFor, objects)) return null;
       switch (waitingFor.data.kind.type) {
@@ -467,6 +500,7 @@ export function getBoardChoiceView(
         },
         response: { type: "CrewVehicle", vehicleId: waitingFor.data.vehicle_id },
         sourceId: waitingFor.data.vehicle_id,
+        cancelAction: { type: "CancelCast" },
       };
     case "SaddleMount":
       return {
@@ -582,6 +616,8 @@ export function buildBoardChoiceAction(
       return { type: "HarmonizeTap", data: { creature_id: selectedIds[0] } };
     case "ChooseKeptCreatures":
       return { type: "ChooseKeptCreatures", data: { kept: selectedIds } };
+    case "ChooseKeptPermanents":
+      return { type: "ChooseKeptPermanents", data: { kept: selectedIds } };
   }
 }
 

@@ -159,6 +159,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -172,6 +173,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
+            subject: None,
         });
         state.waiting_for = WaitingFor::RevealUntilKeptChoice {
             player: revealing_player,
@@ -230,6 +232,7 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
                                     clear_markers,
@@ -279,6 +282,7 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
                                     clear_markers,
@@ -311,6 +315,7 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
                                     clear_markers,
@@ -350,6 +355,7 @@ pub fn resolve(
                 state,
                 BatchCompletion::RevealRestPile {
                     player: revealing_player,
+                    source_id: Some(ability.source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
                     clear_markers,
@@ -369,6 +375,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RevealUntil,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -444,6 +451,7 @@ fn resolve_choose_any_number(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -469,6 +477,7 @@ fn resolve_choose_any_number(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RevealUntil,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

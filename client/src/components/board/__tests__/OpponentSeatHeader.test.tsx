@@ -85,4 +85,40 @@ describe("OpponentSeatHeader", () => {
     expect(screen.queryByRole("button", { name: "Target Opp 2" })).not.toBeInTheDocument();
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  it("surfaces player-attached Auras (curses) for parity with the legacy HUD", () => {
+    const waitingFor = targetSelectionWaitingFor([]);
+    useGameStore.setState({
+      gameState: {
+        ...createGameState(waitingFor),
+        derived: {
+          auras_attached_to_player: { "1": [101, 102] },
+        },
+      },
+      waitingFor,
+    });
+
+    render(<OpponentSeatHeader playerId={1} />);
+
+    expect(
+      screen.getByRole("button", { name: "2 enchantments on this player" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders Next Up badge with tooltip text", () => {
+    const waitingFor = targetSelectionWaitingFor([]);
+    useGameStore.setState({
+      gameState: {
+        ...createGameState(waitingFor),
+        derived: {
+          turn_order: [{ player: 1, slot_index: 1, turns_from_now: 1 }],
+        },
+      },
+      waitingFor,
+    });
+
+    render(<OpponentSeatHeader playerId={1} />);
+
+    expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
+  });
 });

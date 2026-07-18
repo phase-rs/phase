@@ -423,6 +423,7 @@ fn until_end_of_turn_does_not_auto_submit_available_blockers() {
         valid_blocker_ids: vec![ObjectId(10)],
         valid_block_targets: [(ObjectId(10), vec![ObjectId(20)])].into_iter().collect(),
         block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
     };
     let mut state = GameState {
         phase: Phase::DeclareBlockers,
@@ -468,6 +469,7 @@ fn declare_blockers_opponents_turns_stop_pauses_empty_blocker_submit() {
         valid_blocker_ids: vec![],
         valid_block_targets: Default::default(),
         block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
     };
     let mut state = GameState {
         phase: Phase::DeclareBlockers,
@@ -540,6 +542,7 @@ fn declare_blockers_own_turn_stop_does_not_pause_on_opponents_turn() {
         valid_blocker_ids: vec![],
         valid_block_targets: Default::default(),
         block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
     };
     state.waiting_for = waiting_for.clone();
     state.phase_stops.insert(
@@ -572,6 +575,7 @@ fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
         player: PlayerId(0),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        attacker_constraints: Default::default(),
     };
     let mut state = GameState {
         phase: Phase::DeclareAttackers,
@@ -624,6 +628,7 @@ fn declare_attackers_opponents_turns_stop_does_not_pause_on_own_turn() {
         player: PlayerId(0),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        attacker_constraints: Default::default(),
     };
     let mut state = GameState {
         phase: Phase::DeclareAttackers,

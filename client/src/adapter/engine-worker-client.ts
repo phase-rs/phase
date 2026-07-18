@@ -11,6 +11,7 @@ import type {
   GameState,
   LegalActionsResult,
   MatchConfig,
+  ReplayHeader,
   SubmitResult,
   ViewerSnapshot,
 } from "./types";
@@ -213,6 +214,13 @@ export class EngineWorkerClient {
     );
   }
 
+  async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
+    return this.request<number[]>(
+      { type: "previewManaPayment", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   async getState(): Promise<GameState> {
     return this.request<GameState>({ type: "getState" }, ENGINE_REQUEST_TIMEOUT_MS);
   }
@@ -227,6 +235,19 @@ export class EngineWorkerClient {
   async getLegalActions(): Promise<LegalActionsResult> {
     return this.request<LegalActionsResult>(
       { type: "getLegalActions" },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  /**
+   * Atomic state + legal-actions read. The worker services this as one
+   * synchronous block, so the pair can never straddle an engine advance.
+   * Same timeout class as `getState`. The caller (`WasmAdapter.getSnapshot`)
+   * stamps the `seq` on arrival.
+   */
+  async getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }> {
+    return this.request<{ state: GameState; legalResult: LegalActionsResult }>(
+      { type: "getSnapshot" },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -376,6 +397,50 @@ export class EngineWorkerClient {
 
   async estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
     return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", deck });
+  }
+
+  // ── Replay system ──────────────────────────────────────────────────────
+  // Recording (hasReplayRecording / exportReplayLog) reads the in-progress
+  // recording WASM auto-starts alongside the live game. Playback
+  // (loadReplayForPlayback / replaySeek / replayLength / replayHeader /
+  // clearReplayPlayback) is independent of the live game entirely — a
+  // `ReplayAdapter` typically owns its own `EngineWorkerClient` instance so
+  // viewing a replay never touches an in-progress game's worker.
+
+  async hasReplayRecording(): Promise<boolean> {
+    return this.request<boolean>({ type: "hasReplayRecording" });
+  }
+
+  /** Serialize the current game's replay recording, suitable for downloading. */
+  async exportReplayLog(): Promise<string> {
+    return this.request<string>({ type: "exportReplayLog" });
+  }
+
+  /** Load a replay (the JSON `exportReplayLog` produced) for scrubbing. Returns the recorded action count. */
+  async loadReplayForPlayback(replayJson: string): Promise<number> {
+    return this.request<number>({ type: "loadReplayForPlayback", replayJson });
+  }
+
+  async replayLength(): Promise<number> {
+    return this.request<number>({ type: "replayLength" });
+  }
+
+  async replayHeader(): Promise<ReplayHeader | null> {
+    return this.request<ReplayHeader | null>({ type: "replayHeader" });
+  }
+
+  /**
+   * Seek the loaded replay to `target` (clamped to its length). Returns the
+   * raw `{ state, derived }` wire envelope (or `null`) — same shape
+   * `get_game_state` returns — so callers unwrap it the same way
+   * `wasm-adapter.ts`'s `unwrapClientGameState` does for live games.
+   */
+  async replaySeek(target: number): Promise<unknown> {
+    return this.request<unknown>({ type: "replaySeek", target });
+  }
+
+  async clearReplayPlayback(): Promise<void> {
+    await this.request<null>({ type: "clearReplayPlayback" });
   }
 
   dispose(): void {

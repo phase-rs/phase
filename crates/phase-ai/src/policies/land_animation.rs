@@ -26,8 +26,15 @@ use crate::features::DeckFeatures;
 /// Penalty for animating a land when mana is needed for other spells.
 const MANA_NEEDED_PENALTY: f64 = -2.0;
 
-/// Penalty for animating a land that ends up tapped (no combat value).
-const TAPPED_LAND_PENALTY: f64 = -100.0;
+/// Penalty for animating a land that ends up tapped (no combat value). Sits at
+/// the bottom of the critical band (`-CRITICAL_MAX`) — the strongest finite
+/// discouragement the score contract allows. Issue #5473: this was a raw -100.0
+/// sentinel that bypassed the band helpers and tripped the registry's
+/// critical-band assert once scaled by `activation` (turn_only, up to 1.3x).
+///
+/// Note: pinned at the critical ceiling, this branch is inert to `activation()`
+/// tuning — `-CRITICAL_MAX × any activation` re-bands back to `-CRITICAL_MAX`.
+const TAPPED_LAND_PENALTY: f64 = -super::registry::CRITICAL_MAX;
 
 /// Bonus for animating when sufficient alternative mana sources exist.
 const SUFFICIENT_MANA_BONUS: f64 = 0.3;
@@ -103,10 +110,13 @@ impl TacticalPolicy for LandAnimationPolicy {
         // turns it into a useless tapped creature. Strongly disprefer any
         // activation that leaves the source tapped.
         if animation_leaves_source_tapped(ctx, *source_id, obj, ability_def) {
-            return PolicyVerdict::Score {
-                delta: TAPPED_LAND_PENALTY,
-                reason: PolicyReason::new("land_animation_tapped"),
-            };
+            // Route the critical penalty through the band helper (CR-equivalent
+            // score contract) rather than a raw Score literal so the delta stays
+            // clamped to the critical band before `activation` scaling.
+            return PolicyVerdict::critical(
+                TAPPED_LAND_PENALTY,
+                PolicyReason::new("land_animation_tapped"),
+            );
         }
 
         // Check if this is the only source of a critical color

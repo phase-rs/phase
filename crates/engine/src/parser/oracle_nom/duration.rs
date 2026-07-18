@@ -3,9 +3,9 @@
 //! **Single authority for the phrase→`Duration` grammar** (oracle-parser
 //! SKILL §7). Parses: "until end of turn", "until end of combat", "until the
 //! end of your/their next turn", "until your/their next turn", "until your
-//! next end step", "until ~/this creature leaves the battlefield", "for the
-//! rest of the game", "for as long as [condition]", "this turn", "this/that
-//! combat".
+//! next end step", "until ~/this creature leaves the battlefield", "until you
+//! exile another card with ~/this ability", "for the rest of the game", "for
+//! as long as [condition]", "this turn", "this/that combat".
 //!
 //! Positional wrappers (`strip_trailing_duration` / `strip_leading_duration`
 //! in `oracle_effect/lower.rs`, the clause shell, and the combat-grant
@@ -23,7 +23,7 @@ use nom::Parser;
 use super::condition::{parse_inner_condition, parse_recipient_has_counters};
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::scan_contains;
-use crate::types::ability::{Duration, ObjectScope, PlayerScope, StaticCondition};
+use crate::types::ability::{Duration, ObjectScope, PlayerScope, StaticCondition, TargetFilter};
 use crate::types::phase::Phase;
 
 /// Parse a duration phrase from Oracle text.
@@ -60,6 +60,16 @@ fn parse_until_body(input: &str) -> OracleResult<'_, Duration> {
             },
             tag("your next end step"),
         ),
+        // CR 513.1 + CR 603.7b: definite-article "the next end step" (Niko) is
+        // turn-AGNOSTIC — co-fires with the return's AtNextPhase{End}. Distinct
+        // from possessive "your next end step" (disjoint prefix).
+        value(
+            Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::AnyTurn,
+            },
+            tag("the next end step"),
+        ),
         // Host-lifetime expiry: "until ~ leaves the battlefield" /
         // "until this creature leaves the battlefield".
         value(
@@ -69,8 +79,28 @@ fn parse_until_body(input: &str) -> OracleResult<'_, Duration> {
                 tag(" leaves the battlefield"),
             ),
         ),
+        // CR 607.2a + CR 611.2a: source-linked impulse grants such as
+        // Furious Rise last until the same source exiles another card.
+        value(
+            Duration::UntilSourceExilesAnotherCard,
+            parse_until_source_exiles_another_card_body,
+        ),
     ))
     .parse(input)
+}
+
+pub(crate) fn parse_until_source_exiles_another_card_body(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("you exile another card with ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("~"),
+        tag("this ability"),
+        tag("this enchantment"),
+        tag("this artifact"),
+        tag("this creature"),
+        tag("this permanent"),
+    ))
+    .parse(input)?;
+    Ok((input, ()))
 }
 
 /// Alternatives after the shared "for " prefix.
@@ -168,6 +198,15 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
         // creature", bare card names) bind to the source. See
         // `parse_remains_tapped`.
         parse_remains_tapped,
+        // CR 611.2b + CR 301.5: an Equipment's "for as long as ~ remains
+        // attached to it" duration follows the creature that received the
+        // effect. `AttachedTo` is evaluated source-relatively each layer pass,
+        // so the duration ends as soon as the Equipment leaves that creature.
+        parse_remains_attached_to_it,
+        // CR 311.2 + CR 901.7 + CR 611.2b: "[this plane] remains face up" — the
+        // plane-face-up-gated continuous-effect duration. Kept adjacent to
+        // `parse_remains_tapped` (the sibling source-status "remains X" family).
+        parse_remains_face_up,
         // "you control [subject]" → host-control lifetime, modeled with the
         // existing UntilHostLeavesPlay variant.
         value(
@@ -203,6 +242,22 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
             },
         }),
     ))
+    .parse(input)
+}
+
+fn parse_remains_attached_to_it(input: &str) -> OracleResult<'_, Duration> {
+    value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::RecipientMatchesFilter {
+                filter: TargetFilter::AttachedTo,
+            },
+        },
+        (
+            parse_self_reference_subject,
+            tag(" remains attached to it"),
+            rest,
+        ),
+    )
     .parse(input)
 }
 
@@ -280,6 +335,39 @@ fn parse_remains_tapped(input: &str) -> OracleResult<'_, Duration> {
     );
 
     alt((demonstrative, source_self_ref, source_fallback)).parse(input)
+}
+
+/// CR 311.2 + CR 901.7 + CR 611.2b: subject-aware "[this plane] remains face up"
+/// duration, mirroring `parse_remains_tapped`. Plane/phenomenon cards are always
+/// the source subject of their own face-up duration, so the referent normalizes
+/// to `~` (or a `SELF_REF_TYPE_PHRASES` self-reference). Emits
+/// `ForAsLongAs(SourceIsFaceUp)`; the layer system evaluates it against the
+/// command-zone active plane (`planechase::active_plane`), so the effect ends the
+/// instant the plane is planeswalked away and turned face down (CR 701.31b).
+///
+/// The Doctor's Childhood Barn ("They can't phase in for as long as ~ remains
+/// face up") is the source-subject witness; the `scan_contains` fallback catches
+/// any residual proper-name phrasing the same way the tapped fallback does.
+fn parse_remains_face_up(input: &str) -> OracleResult<'_, Duration> {
+    // Tier 1: explicit source self-reference ("~", "this creature", …).
+    let source_self_ref = value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsFaceUp,
+        },
+        (parse_self_reference_subject, tag(" remains face up"), rest),
+    );
+
+    // Tier 2: any other source phrasing (proper card names, compound remnants).
+    // Word-boundary scan, not a dispatch primitive, reached only after the
+    // self-reference tier fails.
+    let source_fallback = value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsFaceUp,
+        },
+        verify(rest, |tail: &str| scan_contains(tail, "remains face up")),
+    );
+
+    alt((source_self_ref, source_fallback)).parse(input)
 }
 
 /// Source self-reference subject combinator: "~" or any `SELF_REF_TYPE_PHRASES`
@@ -447,6 +535,23 @@ mod tests {
         ] {
             let (rest, d) = parse_duration(text).unwrap();
             assert_eq!(d, Duration::UntilHostLeavesPlay, "failed for {text:?}");
+            assert_eq!(rest, "");
+        }
+    }
+
+    #[test]
+    fn test_parse_duration_until_source_exiles_another_card() {
+        for text in [
+            "until you exile another card with ~",
+            "until you exile another card with this ability",
+            "until you exile another card with this enchantment",
+        ] {
+            let (rest, d) = parse_duration(text).unwrap();
+            assert_eq!(
+                d,
+                Duration::UntilSourceExilesAnotherCard,
+                "failed for {text:?}"
+            );
             assert_eq!(rest, "");
         }
     }
@@ -630,6 +735,59 @@ mod tests {
                 "self-reference subject {subject:?} must bind the source",
             );
         }
+    }
+
+    #[test]
+    fn test_remains_attached_to_it_binds_recipient() {
+        for subject in ["~", "this equipment", "this artifact", "this permanent"] {
+            let text = format!("for as long as {subject} remains attached to it");
+            let (rest, duration) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "failed for {subject:?}");
+            assert_eq!(
+                duration,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientMatchesFilter {
+                        filter: TargetFilter::AttachedTo,
+                    },
+                },
+                "attachment duration for {subject:?} must follow the recipient",
+            );
+        }
+    }
+
+    /// CR 311.2 + CR 901.7: "for as long as [this plane] remains face up" → the
+    /// source plane's face-up status (`SourceIsFaceUp`). The normalized `~` self-
+    /// reference (The Doctor's Childhood Barn) and any self-ref phrasing bind the
+    /// source; a leading-`The` proper name hits the `scan_contains` fallback.
+    #[test]
+    fn test_remains_face_up_binds_source() {
+        for subject in ["~", "this permanent", "The Doctor's Childhood Barn"] {
+            let text = format!("for as long as {subject} remains face up");
+            let (rest, d) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "failed for {subject:?}");
+            assert_eq!(
+                d,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::SourceIsFaceUp,
+                },
+                "face-up subject {subject:?} must bind the source plane",
+            );
+        }
+    }
+
+    /// The bare condition text arriving at `parse_for_as_long_as_condition`
+    /// (post-"for as long as " strip, normalized to `~`) resolves to
+    /// `SourceIsFaceUp`, NOT the `Unrecognized` fallback that left the Barn's
+    /// "can't phase in" lock permanently active.
+    #[test]
+    fn test_for_as_long_as_condition_face_up_not_unrecognized() {
+        let (_, d) = parse_for_as_long_as_condition("~ remains face up").unwrap();
+        assert_eq!(
+            d,
+            Duration::ForAsLongAs {
+                condition: StaticCondition::SourceIsFaceUp,
+            },
+        );
     }
 
     /// Proper-name regression: a card name beginning with "The" is a SOURCE

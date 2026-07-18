@@ -5,7 +5,9 @@ use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::parser::oracle_util::parse_subtype;
-use crate::types::ability::{AbilityCost, CastVariantPaid, NinjutsuVariant};
+use crate::types::ability::{
+    AbilityCost, AbilityDefinition, CastVariantPaid, Effect, NinjutsuVariant, RuntimeHandler,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
@@ -221,6 +223,11 @@ pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<Ma
 /// CR 702.188a + CR 604.1: honor web-slinging GRANTED by a CastWithKeyword static
 /// (Amazing Spider-Man), not only printed keywords. effective_spell_keywords merges
 /// printed obj.keywords with statically-granted keywords for `caster`.
+///
+/// CR 702.102b: CORRECTNESS-NEUTRAL — web-slinging (CR 702.188a) functions only on
+/// creature spells and is never carried by or value-key-granted to an
+/// instant/sorcery split card, so a fused split cast's combined-vs-front projection
+/// can never change this read. Left on the non-fuse-aware collector deliberately.
 pub fn effective_web_slinging_cost(
     state: &GameState,
     caster: PlayerId,
@@ -306,7 +313,10 @@ pub(crate) fn resolve_keyword_mana_cost(
         ManaCost::SelfManaValue => state
             .objects
             .get(&object_id)
-            .map(|obj| ManaCost::generic(obj.mana_cost.mana_value()))
+            // CR 202.3d + CR 709.4b: for a split card off the stack (e.g. an
+            // Encore/foretell cost bound to "its mana value" from the graveyard/
+            // exile), the mana value is the combined value of both halves.
+            .map(|obj| ManaCost::generic(obj.effective_mana_value()))
             .unwrap_or(ManaCost::NoCost),
         // CR 601.2f: "its mana cost reduced by {N}" (Dream Devourer foretell,
         // Aminatou miracle) — reduce only the generic component, floor at {0}.
@@ -368,10 +378,13 @@ pub(crate) fn concretize_encore_mana_value_in_ability_cost(
 ) {
     match cost {
         AbilityCost::Mana { cost: mana } if cost_has_x(mana) => {
+            // CR 202.3d + CR 709.4b + CR 702.141a: Encore is activated from the
+            // graveyard (off the stack), so a split card binds X to its combined
+            // mana value.
             let mana_value = state
                 .objects
                 .get(&source_id)
-                .map(|obj| obj.mana_cost.mana_value())
+                .map(|obj| obj.effective_mana_value())
                 .unwrap_or(0);
             mana.concretize_x(mana_value);
         }
@@ -466,14 +479,18 @@ pub fn source_matches_protection_target(
     protected: &GameObject,
     source: &GameObject,
 ) -> bool {
+    // CR 709.4b: A split source off the stack has the combined colors of both
+    // halves; on the stack (the usual protection-source case) it is the chosen
+    // half. `effective_colors` no-ops for single-face and on-stack sources.
+    let source_colors = source.effective_colors();
     match protection {
-        ProtectionTarget::Color(color) => source.color.contains(color),
+        ProtectionTarget::Color(color) => source_colors.contains(color),
         ProtectionTarget::CardType(type_name) => source_matches_card_type(source, type_name),
         ProtectionTarget::Quality(quality) => source_matches_quality(source, quality),
-        ProtectionTarget::Multicolored => source.color.len() > 1,
+        ProtectionTarget::Multicolored => source_colors.len() > 1,
         ProtectionTarget::ChosenColor => protected
             .chosen_color()
-            .is_some_and(|color| source.color.contains(&color)),
+            .is_some_and(|color| source_colors.contains(&color)),
         // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
         // This arm only fires for objects that themselves carry the choice
@@ -544,11 +561,16 @@ fn source_subtype_matches_protection_quality(source_subtype: &str, quality: &str
 }
 
 pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
+    // CR 709.4b: combined colors off the stack for a split source; no-op for
+    // single-face and on-stack sources.
+    let color_count = source.effective_colors().len();
     match quality {
-        // CR 105.2c: An object with no colors is colorless.
-        "colorless" => source.color.is_empty(),
-        "monocolored" => source.color.len() == 1,
-        "multicolored" => source.color.len() > 1,
+        // CR 105.2c: An object with no colors is colorless. Uses the split-aware
+        // combined color count so an off-stack split card is classified by both
+        // halves (CR 709.4b).
+        "colorless" => color_count == 0,
+        "monocolored" => color_count == 1,
+        "multicolored" => color_count > 1,
         _ => false,
     }
 }
@@ -575,7 +597,8 @@ fn source_matches_protection_filter(
             let QuantityExpr::Fixed { value: threshold } = value else {
                 return false;
             };
-            comparator.evaluate(source.mana_cost.mana_value() as i32, *threshold)
+            // CR 202.3d + CR 709.4b: combined MV off the stack for a split source.
+            comparator.evaluate(source.effective_mana_value() as i32, *threshold)
         }
         // Future: other intrinsic properties (HasColor, PowerLE/GE, etc.)
         // can be added here as the class of filter-based protection grows.
@@ -626,6 +649,25 @@ pub fn returnable_creatures_for_variant(
                 .collect()
         }
     }
+}
+
+/// CR 702.49: Marker activated ability synthesized from a Ninjutsu-family keyword.
+/// Real activation must use `GameAction::ActivateNinjutsu` — the marker's
+/// `AbilityCost::NinjutsuFamily` arm is a no-op in `pay_ability_cost`, so routing
+/// through `GameAction::ActivateAbility` would stack the ability without paying mana.
+pub fn is_ninjutsu_family_marker_ability(ability: &AbilityDefinition) -> bool {
+    if matches!(
+        ability.effect.as_ref(),
+        Effect::RuntimeHandled {
+            handler: RuntimeHandler::NinjutsuFamily
+        }
+    ) {
+        return true;
+    }
+    ability
+        .cost
+        .as_ref()
+        .is_some_and(|cost| matches!(cost, AbilityCost::NinjutsuFamily { .. }))
 }
 
 /// CR 702.49a-c: Resolve Ninjutsu-family activation.
@@ -723,16 +765,24 @@ pub fn activate_ninjutsu(
     let effective_cost = apply_ability_cost_reduction(state, player, "ninjutsu", mana_cost);
 
     // CR 702.49a/d: Pay the ninjutsu-family mana cost (after all validation, before mutations)
-    super::casting::pay_ability_cost(
+    match super::casting::pay_ability_cost_for_activation(
         state,
         player,
         ninjutsu_obj_id,
         &AbilityCost::Mana {
             cost: effective_cost,
         },
+        None,
         events,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    {
+        super::casting::PaymentOutcome::Paid => {}
+        super::casting::PaymentOutcome::Paused { .. }
+        | super::casting::PaymentOutcome::Failed { .. } => {
+            return Err("ninjutsu mana payment unexpectedly paused".to_string());
+        }
+    }
 
     // 1. Return creature to owner's hand
     // CR 702.49a + CR 614.6: ninjutsu returns the unblocked attacker to its
@@ -2072,6 +2122,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::BecomeCopy {
+                            recipient: TargetFilter::SelfRef,
                             target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
                             duration: None,
                             mana_value_limit: None,
@@ -2550,5 +2601,31 @@ mod tests {
             None,
             "Flashback (compound-cost kind) must be refused by the single authority",
         );
+    }
+
+    /// CR 702.49: synthesized marker must be classified so it cannot stack via
+    /// `ActivateAbility` without paying mana (issue #5338).
+    #[test]
+    fn ninjutsu_family_marker_ability_is_detected() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, RuntimeHandler};
+
+        let marker = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::RuntimeHandled {
+                handler: RuntimeHandler::NinjutsuFamily,
+            },
+        )
+        .cost(AbilityCost::NinjutsuFamily {
+            variant: NinjutsuVariant::Ninjutsu,
+            mana_cost: ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Blue],
+                generic: 0,
+            },
+        });
+        assert!(is_ninjutsu_family_marker_ability(&marker));
+
+        let ordinary = AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+            .cost(AbilityCost::Tap);
+        assert!(!is_ninjutsu_family_marker_ability(&ordinary));
     }
 }

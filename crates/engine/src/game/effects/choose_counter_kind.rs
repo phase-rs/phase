@@ -72,6 +72,7 @@ pub fn resolve(
     let resolved = || GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     };
 
     // CR 608.2d: no counters on the object → nothing to choose → no-op.
@@ -92,6 +93,7 @@ pub fn resolve(
             &choice_type,
             &only,
             Some(ability.source_id),
+            None,
         );
         events.push(resolved());
         return Ok(());
@@ -104,6 +106,7 @@ pub fn resolve(
         choice_type,
         options,
         source_id: Some(ability.source_id),
+        persist_player: None,
     };
     events.push(resolved());
     Ok(())

@@ -2,16 +2,17 @@ import { useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 
-import type { AttackTarget, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
+import type { AttackTarget, CombatRequirement, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
-import { useGameStore } from "../../stores/gameStore.ts";
-import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { type AttackerStack, evenSplit, groupAttackers } from "../../utils/combat.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { PeekTab } from "../modal/DialogShell.tsx";
+import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 
 /** Internal assignment map: every attacker maps to its chosen target, or `null`
  *  while it sits in the Unassigned bucket. */
@@ -20,6 +21,16 @@ type AssignmentMap = Map<ObjectId, AttackTarget | null>;
 interface AttackTargetPickerProps {
   validTargets: AttackTarget[];
   selectedAttackers: ObjectId[];
+  /**
+   * Engine-provided per-attacker combat requirements (`DeclareAttackers`
+   * `attacker_constraints`, keyed by stringified ObjectId). A
+   * `MustAttack{players}` with a non-empty `players` list is a
+   * `StaticMode::MustAttackPlayer` lure (CR 508.1d) that the engine enforces by
+   * requiring the attack be declared directly against one of those players; the
+   * picker mirrors that enforcement so the player never trips the invisible
+   * rejection. Optional/empty for 2-player games and generic goad.
+   */
+  attackerConstraints?: Record<string, CombatRequirement>;
   onConfirm: (attacks: [ObjectId, AttackTarget][]) => void;
   onCancel: () => void;
 }
@@ -49,6 +60,7 @@ interface AttackTargetPickerProps {
 export function AttackTargetPicker({
   validTargets,
   selectedAttackers,
+  attackerConstraints,
   onConfirm,
   onCancel,
 }: AttackTargetPickerProps) {
@@ -64,10 +76,10 @@ export function AttackTargetPicker({
   const shouldReduceMotion = useReducedMotion();
 
   const gameState = useGameStore((s) => s.gameState);
+  const playerNames = useMultiplayerStore((s) => s.playerNames);
   const myId = usePlayerId();
   const hoverProps = useInspectHoverProps();
   const seatOrder = gameState?.seat_order;
-
   const teamBased = gameState?.format_config?.team_based ?? false;
 
   const sortedTargets = useMemo(() => {
@@ -91,18 +103,86 @@ export function AttackTargetPicker({
     [selectedAttackers, gameState],
   );
 
+  // The board state supplies each creature's current evaluated power. This is
+  // intentionally only an unblocked, at-this-moment life estimate: blockers
+  // and later game actions still determine the actual combat result.
+  const assignedDamageByPlayer = useMemo(() => {
+    const damageByPlayer = new Map<PlayerId, number>();
+    for (const attackerId of selectedAttackers) {
+      const target = assignments.get(attackerId);
+      if (target?.type !== "Player") continue;
+      const damage = Math.max(0, gameState?.objects[attackerId]?.power ?? 0);
+      damageByPlayer.set(target.data, (damageByPlayer.get(target.data) ?? 0) + damage);
+    }
+    return damageByPlayer;
+  }, [assignments, gameState, selectedAttackers]);
+
   // Total attackers still in the Unassigned bucket — gates Confirm.
   const unassignedTotal = useMemo(
     () => selectedAttackers.reduce((n, id) => n + (assignments.get(id) == null ? 1 : 0), 0),
     [assignments, selectedAttackers],
   );
 
-  function getTargetLabel(target: AttackTarget): string {
+  // CR 508.1d: the first distribute-mode attacker whose assigned target fails
+  // its MustAttackPlayer lure, or null when every constrained attacker is aimed
+  // at a required player. Gates the distribute Confirm so the display matches
+  // what the engine will accept.
+  const distributeMisaim = useMemo(
+    () => firstMisaimedAttacker(selectedAttackers, (id) => assignments.get(id) ?? null, attackerConstraints),
+    [selectedAttackers, assignments, attackerConstraints],
+  );
+
+  /** "{creature} must attack {player}" message for a mis-aimed lure. */
+  function mustAttackMessage(misaim: MisaimedAttacker): string {
+    const creature =
+      gameState?.objects[misaim.objectId]?.name ??
+      t("attackTargetPicker.creatureFallback", { id: misaim.objectId });
+    const player = misaim.players
+      .map((playerId) => getTargetLabel({ type: "Player", data: playerId }))
+      .join(", ");
+    return t("attackTargetPicker.mustAttackPlayer", { creature, player });
+  }
+
+  function getTargetLabel(target: AttackTarget, showProjectedLife = false): string {
     if (target.type === "Player") {
-      return getPlayerLabel(t, target.data, myId, teamBased);
+      const life = gameState?.players.find((player) => player.id === target.data)?.life;
+      const name = target.data === myId
+        ? t("attackTargetPicker.you")
+        : teamBased && Math.floor(target.data / 2) === Math.floor(myId / 2)
+          ? t("attackTargetPicker.ally")
+          : playerNames.get(target.data) ?? `Opp ${target.data + 1}`;
+      const currentLife = life ?? 0;
+      const assignedDamage = showProjectedLife
+        ? (assignedDamageByPlayer.get(target.data) ?? 0)
+        : 0;
+      if (assignedDamage > 0) {
+        const projectedLife = Math.max(0, currentLife - assignedDamage);
+        return projectedLife === 0
+          ? t("attackTargetPicker.playerTargetLethal", {
+            name,
+            life: currentLife,
+            projectedLife,
+          })
+          : t("attackTargetPicker.playerTargetProjected", {
+            name,
+            life: currentLife,
+            projectedLife,
+          });
+      }
+      return t("attackTargetPicker.playerTarget", {
+        name,
+        life: currentLife,
+      });
     }
     const obj = gameState?.objects[target.data];
-    return obj?.name ?? t("attackTargetPicker.objectFallback", { id: target.data });
+    const name = obj?.name ?? t("attackTargetPicker.objectFallback", { id: target.data });
+    if (target.type === "Planeswalker") {
+      return t("attackTargetPicker.planeswalkerTarget", { name });
+    }
+    if (target.type === "Battle") {
+      return t("attackTargetPicker.battleTarget", { name });
+    }
+    return name;
   }
 
   function getTargetSeatColor(target: AttackTarget): string | undefined {
@@ -114,6 +194,9 @@ export function AttackTargetPicker({
   }
 
   function handleAttackAll(target: AttackTarget) {
+    // Defensive: the button is disabled when a lured creature can't legally
+    // attack this target, but guard the dispatch too (CR 508.1d).
+    if (firstMisaimedAttacker(selectedAttackers, () => target, attackerConstraints) != null) return;
     onConfirm(selectedAttackers.map((id) => [id, target]));
   }
 
@@ -156,10 +239,10 @@ export function AttackTargetPicker({
     mutate((next) => spreadStackEvenly(next, stack, sortedTargets));
   }
 
-  /** Spread every stack evenly across every target. */
+  /** Spread every selected attacker evenly across every target. */
   function spreadAll() {
     mutate((next) => {
-      for (const stack of stacks) spreadStackEvenly(next, stack, sortedTargets);
+      spreadAttackersEvenly(next, stacks.flatMap((stack) => stack.ids), sortedTargets);
     });
   }
 
@@ -190,6 +273,9 @@ export function AttackTargetPicker({
   }
 
   function handleDistributeConfirm() {
+    // The button is disabled while anything is unassigned or a lure is
+    // mis-aimed; guard here too so a stray call can't submit a rejected set.
+    if (unassignedTotal > 0 || distributeMisaim != null) return;
     // The gate guarantees no nulls, but flatMap also makes the types sound.
     const attacks = selectedAttackers.flatMap((id): [ObjectId, AttackTarget][] => {
       const target = assignments.get(id);
@@ -268,22 +354,33 @@ export function AttackTargetPicker({
                 <div className="flex flex-col gap-2">
                   {sortedTargets.map((target) => {
                     const color = getTargetSeatColor(target);
+                    // "Attack All" sends every selected creature here, so this
+                    // target is illegal if any of them is lured elsewhere.
+                    const blockedBy = firstMisaimedAttacker(selectedAttackers, () => target, attackerConstraints);
                     return (
-                      <button
-                        key={attackTargetKey(target)}
-                        onClick={() => handleAttackAll(target)}
-                        className={gameButtonClass({ tone: "red", size: "md" })}
-                      >
-                        <Trans
-                          t={t}
-                          i18nKey="attackTargetPicker.attackWith"
-                          count={selectedAttackers.length}
-                          values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
-                          components={{
-                            name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
-                          }}
-                        />
-                      </button>
+                      <div key={attackTargetKey(target)} className="flex flex-col gap-0.5">
+                        <button
+                          onClick={() => handleAttackAll(target)}
+                          disabled={blockedBy != null}
+                          title={blockedBy ? mustAttackMessage(blockedBy) : undefined}
+                          className={gameButtonClass({ tone: "red", size: "md", disabled: blockedBy != null })}
+                        >
+                          <Trans
+                            t={t}
+                            i18nKey="attackTargetPicker.attackWith"
+                            count={selectedAttackers.length}
+                            values={{ label: getTargetLabel(target), count: selectedAttackers.length }}
+                            components={{
+                              name: <span className="mx-1 font-bold" style={color ? { color } : undefined} />,
+                            }}
+                          />
+                        </button>
+                        {blockedBy && (
+                          <p className="px-1 text-center text-[11px] font-medium text-rose-300">
+                            {mustAttackMessage(blockedBy)}
+                          </p>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -336,7 +433,7 @@ export function AttackTargetPicker({
                                     style={color ? { color } : undefined}
                                   >
                                     <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
-                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target)}</span>
+                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target, true)}</span>
                                   </span>
                                   <button
                                     type="button"
@@ -381,7 +478,7 @@ export function AttackTargetPicker({
                               </td>
                               {sortedTargets.map((target) => {
                                 const count = countOnTarget(stack, target);
-                                const label = getTargetLabel(target);
+                                const label = getTargetLabel(target, true);
                                 return (
                                   <td key={attackTargetKey(target)} className="px-2 py-1.5">
                                     <StepperCell
@@ -461,7 +558,7 @@ export function AttackTargetPicker({
                               {sortedTargets.map((target) => {
                                 const color = getTargetSeatColor(target);
                                 const count = countOnTarget(stack, target);
-                                const label = getTargetLabel(target);
+                                const label = getTargetLabel(target, true);
                                 return (
                                   <div key={attackTargetKey(target)} className="flex items-center justify-between gap-2 rounded px-1 py-1">
                                     <span className="inline-flex min-w-0 items-center gap-1.5 text-sm" style={color ? { color } : undefined}>
@@ -496,15 +593,24 @@ export function AttackTargetPicker({
             {/* Footer — pinned actions, so Confirm/Cancel never scroll away */}
             <div className={`shrink-0 border-t border-white/10 pb-5 pt-3 ${sidePadding}`}>
               {mode === "distribute" && (
-                <button
-                  onClick={handleDistributeConfirm}
-                  disabled={unassignedTotal > 0}
-                  className={`w-full ${gameButtonClass({ tone: "emerald", size: "md", disabled: unassignedTotal > 0 })}`}
-                >
-                  {unassignedTotal > 0
-                    ? t("attackTargetPicker.assignRemaining", { count: unassignedTotal })
-                    : t("attackTargetPicker.confirmDistribute", { count: selectedAttackers.length })}
-                </button>
+                <>
+                  {/* Once everything is assigned, a mis-aimed lure is the only
+                      thing blocking Confirm — surface which creature and where. */}
+                  {unassignedTotal === 0 && distributeMisaim && (
+                    <p className="mb-2 text-center text-xs font-medium text-rose-300">
+                      {mustAttackMessage(distributeMisaim)}
+                    </p>
+                  )}
+                  <button
+                    onClick={handleDistributeConfirm}
+                    disabled={unassignedTotal > 0 || distributeMisaim != null}
+                    className={`w-full ${gameButtonClass({ tone: "emerald", size: "md", disabled: unassignedTotal > 0 || distributeMisaim != null })}`}
+                  >
+                    {unassignedTotal > 0
+                      ? t("attackTargetPicker.assignRemaining", { count: unassignedTotal })
+                      : t("attackTargetPicker.confirmDistribute", { count: selectedAttackers.length })}
+                  </button>
+                </>
               )}
               <button
                 onClick={onCancel}
@@ -538,6 +644,50 @@ function objectCounterChips(obj: GameObject | undefined): Array<{ type: string; 
 /** Stable key for an AttackTarget. */
 function attackTargetKey(target: AttackTarget): string {
   return `${target.type}-${target.data}`;
+}
+
+/** A constrained attacker whose assigned target fails its MustAttackPlayer lure. */
+interface MisaimedAttacker {
+  objectId: ObjectId;
+  players: PlayerId[];
+}
+
+/**
+ * Whether `target` satisfies a `MustAttack{players}` lure. Mirrors the engine's
+ * declare-attackers validation exactly (CR 508.1d; `combat.rs`
+ * `must_attack_players_for_creature` + `matches!(target, AttackTarget::Player(pid)
+ * if *pid == req_player)`): the requirement is satisfied ONLY by attacking one of
+ * the required players *directly*. Attacking a planeswalker/battle those players
+ * control does NOT satisfy it, so a non-`Player` target never counts — display
+ * must equal enforcement or the player hits the invisible engine rejection.
+ */
+function attackTargetSatisfies(target: AttackTarget, requiredPlayers: PlayerId[]): boolean {
+  return target.type === "Player" && requiredPlayers.includes(target.data);
+}
+
+/**
+ * First selected attacker under a specific-player MustAttack lure whose target
+ * (as resolved by `targetFor`) violates it, or null when every constrained
+ * attacker is aimed at a required player. `MustAttack{players: []}` (generic
+ * must-attack / goad) and non-MustAttack constraints impose no target
+ * restriction. A null `targetFor` result (still Unassigned) is skipped — that
+ * case is already gated by the unassigned count.
+ */
+function firstMisaimedAttacker(
+  attackerIds: ObjectId[],
+  targetFor: (id: ObjectId) => AttackTarget | null,
+  constraints: Record<string, CombatRequirement> | undefined,
+): MisaimedAttacker | null {
+  if (!constraints) return null;
+  for (const id of attackerIds) {
+    const requirement = constraints[id];
+    if (requirement?.kind !== "MustAttack" || requirement.players.length === 0) continue;
+    const target = targetFor(id);
+    if (target != null && !attackTargetSatisfies(target, requirement.players)) {
+      return { objectId: id, players: requirement.players };
+    }
+  }
+  return null;
 }
 
 function RestoreTab({ onClick }: { onClick: () => void }) {
@@ -607,12 +757,21 @@ function highestOnTarget(stack: AttackerStack, target: AttackTarget, map: Assign
  * in display order, with the remainder front-loaded by {@link evenSplit}.
  */
 function spreadStackEvenly(map: AssignmentMap, stack: AttackerStack, targets: AttackTarget[]): void {
+  spreadAttackersEvenly(map, stack.ids, targets);
+}
+
+/**
+ * Redistribute attackers evenly across `targets` (overrides prior assignments).
+ * Attackers are walked in stable UI order and handed to targets in display
+ * order, with the remainder front-loaded by {@link evenSplit}.
+ */
+function spreadAttackersEvenly(map: AssignmentMap, attackerIds: ObjectId[], targets: AttackTarget[]): void {
   if (targets.length === 0) return;
-  const counts = evenSplit(stack.count, targets.length);
+  const counts = evenSplit(attackerIds.length, targets.length);
   let member = 0;
   targets.forEach((target, ti) => {
     for (let k = 0; k < counts[ti]; k++) {
-      map.set(stack.ids[member], target);
+      map.set(attackerIds[member], target);
       member += 1;
     }
   });
@@ -702,23 +861,14 @@ function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
       {counters.length > 0 && (
         <div className="mt-0.5 flex flex-wrap gap-1">
           {counters.map(({ type, count }) => (
-            <span key={type} className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
-              {formatCounterType(type)} x{count}
-            </span>
+            <CounterTooltip key={type} type={type} count={count}>
+              <span className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
+                {formatCounterType(type)} x{count}
+              </span>
+            </CounterTooltip>
           ))}
         </div>
       )}
     </div>
   );
-}
-
-function getPlayerLabel(
-  t: ReturnType<typeof useTranslation>["t"],
-  playerId: PlayerId,
-  myId: PlayerId,
-  teamBased: boolean,
-): string {
-  if (playerId === myId) return t("attackTargetPicker.you");
-  if (teamBased && Math.floor(playerId / 2) === Math.floor(myId / 2)) return t("attackTargetPicker.ally");
-  return getPlayerDisplayName(playerId, myId);
 }

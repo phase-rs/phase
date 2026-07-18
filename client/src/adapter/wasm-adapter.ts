@@ -1,17 +1,20 @@
 import type {
   BatchResolveResult,
   EngineAdapter,
+  EngineSnapshot,
   FormatConfig,
   GameAction,
   GameState,
   LegalActionsResult,
   MatchConfig,
+  ObjectId,
+  PersistedGameState,
   PlayerId,
   SubmitResult,
   ViewerSnapshot,
   WaitingFor,
 } from "./types";
-import { AdapterError, AdapterErrorCode, isStaleActionMessage, isStateLostMessage } from "./types";
+import { AdapterError, AdapterErrorCode, isStaleActionMessage, isStateLostMessage, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
@@ -48,7 +51,7 @@ function isMemoryConstrainedDevice(): boolean {
  *
  * See `crates/engine/src/game/derived_views.rs`.
  */
-function unwrapClientGameState(raw: unknown): GameState {
+export function unwrapClientGameState(raw: unknown): GameState {
   if (raw != null && typeof raw === "object" && "state" in raw) {
     const wrapped = raw as { state: GameState; derived?: GameState["derived"] };
     return { ...wrapped.state, derived: wrapped.derived ?? wrapped.state.derived };
@@ -252,6 +255,16 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
+  async previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]> {
+    this.assertInitialized();
+    try {
+      if (this.engine) return await this.engine.previewManaPayment(actor, action);
+      return await this.fallback!.previewManaPayment(action, actor);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
   async getState(): Promise<GameState> {
     this.assertInitialized();
     try {
@@ -295,6 +308,32 @@ export class WasmAdapter implements EngineAdapter {
     try {
       if (this.engine) return await this.engine.getLegalActionsForViewer(viewerId);
       return await this.fallback!.getLegalActionsForViewer(viewerId);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /**
+   * Atomic state + legal-actions pair, stamped when the response ARRIVES.
+   *
+   * Worker responses post in worker-processing order and awaiting callers
+   * resume in resolution order, so stamping here reproduces engine order even
+   * with concurrent callers. The `state` half gets the same
+   * `unwrapClientGameState` envelope flatten `getState` applies — without it a
+   * raw `{ state, derived }` envelope would reach the store and silently break
+   * every `derived` consumer.
+   */
+  async getSnapshot(): Promise<EngineSnapshot> {
+    this.assertInitialized();
+    try {
+      const raw = this.engine
+        ? await this.engine.getSnapshot()
+        : await this.fallback!.getSnapshot();
+      return {
+        state: unwrapClientGameState(raw.state),
+        legalResult: raw.legalResult,
+        seq: nextSnapshotSeq(),
+      };
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -429,12 +468,23 @@ export class WasmAdapter implements EngineAdapter {
     throw new Error("resolveAll requires worker-based engine");
   }
 
-  async restoreState(state: GameState): Promise<void> {
+  async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
     await this.ensureCardDb();
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
+  }
+
+  /**
+   * Export the engine-authored trusted persistence envelope. The local store
+   * may retain this opaque JSON, but only the engine decodes its private route
+   * runtime on restore.
+   */
+  async exportPersistenceState(): Promise<string> {
+    this.assertInitialized();
+    if (this.engine) return this.engine.exportState();
+    return this.fallback!.exportState();
   }
 
   /**
@@ -479,7 +529,7 @@ export class WasmAdapter implements EngineAdapter {
    * Distinct from `restoreState` (undo semantics, deterministic re-seed).
    * Mirrors `server-core::GameSession::from_persisted`.
    */
-  async resumeMultiplayerHostState(state: GameState): Promise<void> {
+  async resumeMultiplayerHostState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
     const json = JSON.stringify(state);
     if (this.engine) {
@@ -634,12 +684,15 @@ export class WasmAdapter implements EngineAdapter {
 interface MainThreadFallback {
   ensureCardDatabase(): Promise<number>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
+  getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }>;
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null>;
+  exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
   resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;
@@ -684,6 +737,13 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
 
+    previewManaPayment: (action: GameAction, actor: PlayerId) =>
+      enqueue(() => {
+        const sources = wasm.preview_mana_payment_js(actor, action);
+        if (typeof sources === "string") throw new Error(sources);
+        return sources as ObjectId[];
+      }),
+
     // null from any of these three getters means WASM `GAME_STATE` is None
     // (worker restart, PWA update desync, panic recovery). Throw with the
     // Rust sentinel so the adapter's classifyEngineError escalates to
@@ -710,6 +770,20 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return r as LegalActionsResult;
       }),
 
+    // Same atomicity guarantee as the worker's `getSnapshot` case: both WASM
+    // exports are synchronous and run back-to-back inside ONE `enqueue`
+    // callback, so no other queued operation (notably `submit_action`) can
+    // interleave between them.
+    getSnapshot: () =>
+      enqueue(() => {
+        const s = wasm.get_game_state();
+        const r = wasm.get_legal_actions_js();
+        if (s === null || r === null) {
+          throw new Error("NOT_INITIALIZED: get_game_state/get_legal_actions_js returned null");
+        }
+        return { state: s as GameState, legalResult: r as LegalActionsResult };
+      }),
+
     getLegalActionsForViewer: (viewerId: number) =>
       enqueue(() => {
         const r = wasm.get_legal_actions_for_viewer_js(viewerId);
@@ -729,6 +803,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.get_ai_action(difficulty, playerId);
         return (r ?? null) as GameAction | null;
       }),
+
+    exportState: () => enqueue(() => wasm.export_game_state_json()),
 
     restoreState: (stateJson: string) =>
       enqueue(() => wasm.restore_game_state(stateJson)),

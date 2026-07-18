@@ -11,8 +11,9 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
-import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
   collectObjectActions,
@@ -33,6 +34,7 @@ import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
 import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { fanGeometry } from "../card/fanGeometry.ts";
+import { CompanionFanCard } from "./CompanionFanCard.tsx";
 
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
@@ -73,6 +75,7 @@ export function PlayerHand() {
   const [draggingCardId, setDraggingCardId] = useState<number | null>(null);
 
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const manaPaymentPreviewRequestId = useRef(0);
 
   // Hide the card being cast (shown on stack as preview during TargetSelection)
   const pendingObjectId = useGameStore((s) => {
@@ -120,6 +123,17 @@ export function PlayerHand() {
   const exileCards = useCastableZoneObjects("exile", playerId);
   const graveyardCards = useCastableZoneObjects("graveyard", playerId);
 
+  // The perspective player's companion trails the fan as its far-right card
+  // (see CompanionFanCard). Like the wings it carries no `data-card-hover`, so
+  // it stays out of the reorder DOM sweep. Shown only until used: on
+  // `CompanionToHand` the engine flips `used` AND creates the real hand
+  // GameObject, so a still-shown ghost would duplicate the real card.
+  const companion = player?.companion;
+  const companionCount = companion && !companion.used ? 1 : 0;
+  const canActivateCompanion = useGameStore((s) =>
+    s.legalActions.some((a) => a.type === "CompanionToHand"),
+  );
+
   const playCard = useCallback(
     (objectId: number) => {
       if (!hasPriority || !objects) return;
@@ -143,6 +157,41 @@ export function PlayerHand() {
     },
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
   );
+
+  const previewManaPayment = useCallback((objectId: number) => {
+    const requestId = ++manaPaymentPreviewRequestId.current;
+    const store = useGameStore.getState();
+    const object = store.gameState?.objects[objectId];
+    const action = object
+      ? resolveSingleActionDispatch(
+          collectObjectActions(store.legalActionsByObject, objectId as ObjectId),
+          object,
+        )
+      : null;
+    if (!action) {
+      store.clearManaPaymentPreview();
+      return;
+    }
+
+    void previewAutomaticManaPayment(action, getPlayerId())
+      .then((sourceIds) => {
+        const current = useGameStore.getState();
+        if (
+          manaPaymentPreviewRequestId.current === requestId
+          && sourceIds !== null
+        ) {
+          current.setManaPaymentPreviewSourceIds(sourceIds);
+        } else if (manaPaymentPreviewRequestId.current === requestId) {
+          current.clearManaPaymentPreview();
+        }
+      })
+      .catch(() => {
+        const current = useGameStore.getState();
+        if (manaPaymentPreviewRequestId.current === requestId) {
+          current.clearManaPaymentPreview();
+        }
+      });
+  }, []);
 
   const hoveredSlotRef = useRef<number | null>(null);
   const shouldReduceMotion = useReducedMotion();
@@ -211,7 +260,7 @@ export function PlayerHand() {
       let angle = 0;
       if (slot != null) {
         const { left, right } = flankingHandIndices(slot, fromIdx, rects.length);
-        const fan = fanGeometry(exileCards.length + rects.length + graveyardCards.length);
+        const fan = fanGeometry(exileCards.length + rects.length + graveyardCards.length + companionCount);
         const rotations = [left, right]
           .filter((idx): idx is number => idx != null)
           .map((idx) => fan.rotation(exileCards.length + idx));
@@ -266,7 +315,7 @@ export function PlayerHand() {
         draggingIndexMV.set(-1);
       }
     },
-    [isMobile, pendingObjectId, organizeActive, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length],
+    [isMobile, pendingObjectId, organizeActive, arrowXRaw, arrowYRaw, arrowRotateRaw, arrowOpacity, insertionSlotMV, draggingIndexMV, cardHeightMV, exileCards.length, graveyardCards.length, companionCount],
   );
 
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
@@ -374,6 +423,7 @@ export function PlayerHand() {
   const handleDragStart = useCallback(
     (id: number) => {
       setDraggingCardId(id);
+      previewManaPayment(id);
       // Measure the rendered card geometry once per drag (stable while dragging)
       // so the slide-apart gap opens to a visible 2/3 card width. getComputedStyle
       // returns transform-free layout values, so the fan's rotation/scale don't
@@ -392,9 +442,11 @@ export function PlayerHand() {
         if (Number.isFinite(cardHeightPx)) cardHeightMV.set(cardHeightPx);
       }
     },
-    [gapPxMV, cardHeightMV],
+    [gapPxMV, cardHeightMV, previewManaPayment],
   );
   const handleDragStop = useCallback(() => {
+    manaPaymentPreviewRequestId.current += 1;
+    useGameStore.getState().clearManaPaymentPreview();
     setDraggingCardId(null);
     arrowOpacity.set(0);
     arrowRotateRaw.set(0);
@@ -422,7 +474,7 @@ export function PlayerHand() {
   // visually groups the colored wings apart from the white hand cards.
   const handSize = handObjects.length;
   const exileCount = exileCards.length;
-  const fan = fanGeometry(exileCount + handSize + graveyardCards.length);
+  const fan = fanGeometry(exileCount + handSize + graveyardCards.length + companionCount);
 
   return (
     <div
@@ -502,6 +554,8 @@ export function PlayerHand() {
                 hasPriority={hasPriority}
                 isSelected={selectedCardId === obj.id}
                 onPlay={playCard}
+                onDragStart={previewManaPayment}
+                onDragStop={handleDragStop}
                 onClick={handleCardClick}
                 onDoubleClick={handleCardDoubleClick}
                 onMouseEnter={handleMouseEnter}
@@ -564,6 +618,8 @@ export function PlayerHand() {
                 hasPriority={hasPriority}
                 isSelected={selectedCardId === obj.id}
                 onPlay={playCard}
+                onDragStart={previewManaPayment}
+                onDragStop={handleDragStop}
                 onClick={handleCardClick}
                 onDoubleClick={handleCardDoubleClick}
                 onMouseEnter={handleMouseEnter}
@@ -571,6 +627,22 @@ export function PlayerHand() {
               />
             );
           })}
+          {/* Companion (far-right trailing card): absolute fan position N-1,
+              after the graveyard wing. Not a zone object — activates the global
+              CompanionToHand special action, not an object cast. Hidden once
+              used (the real hand card then exists). Synthetic key: no obj.id. */}
+          {companion && !companion.used && (
+            <CompanionFanCard
+              key="companion"
+              companion={companion}
+              canActivate={canActivateCompanion}
+              theme={ZONE_THEME.companion}
+              rotation={fan.rotation(exileCount + handSize + graveyardCards.length)}
+              arcOffset={fan.arc(exileCount + handSize + graveyardCards.length)}
+              marginLeft={0}
+              zIndex={handSize + graveyardCards.length}
+            />
+          )}
         </AnimatePresence>
       </motion.div>
       {/* Drop-position arrow: a single glowing arrow that bounces over the slot
@@ -851,6 +923,8 @@ interface ZoneFanCardProps {
   hasPriority: boolean;
   isSelected: boolean;
   onPlay: (objectId: number) => void;
+  onDragStart: (objectId: number) => void;
+  onDragStop: () => void;
   onClick: (objectId: number, e?: React.MouseEvent) => void;
   onDoubleClick: (objectId: number) => void;
   onMouseEnter: (id: number) => void;
@@ -877,6 +951,8 @@ const ZoneFanCard = memo(function ZoneFanCard({
   hasPriority,
   isSelected,
   onPlay,
+  onDragStart,
+  onDragStop,
   onClick,
   onDoubleClick,
   onMouseEnter,
@@ -915,9 +991,11 @@ const ZoneFanCard = memo(function ZoneFanCard({
         playedRef.current = false;
         setDragging(true);
         inspectObject(null);
+        onDragStart(objectId);
       }}
       onDragEnd={(_event, info: PanInfo) => {
         setDragging(false);
+        onDragStop();
         // Cast-only: flick up past the threshold while holding priority. There
         // is no reorder branch, so this card can never land in the hand.
         if (hasPriority && info.offset.y < DRAG_PLAY_THRESHOLD) {

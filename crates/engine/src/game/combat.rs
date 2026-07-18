@@ -90,7 +90,7 @@ pub enum TrampleKind {
 }
 
 /// Represents who a creature is attacking: a player, planeswalker, or battle (CR 506.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AttackTarget {
     Player(PlayerId),
@@ -102,6 +102,29 @@ pub enum AttackTarget {
 /// serialized before this field existed (all legacy attacks targeted a player).
 pub fn default_attack_target() -> AttackTarget {
     AttackTarget::Player(PlayerId(0))
+}
+
+/// Display-only combat legality constraint surfaced on the declare-attackers /
+/// declare-blockers waiting payloads so the frontend can render on-card badges
+/// and gate the Confirm action WITHOUT recomputing any rules. The engine is the
+/// single authority: each entry is derived from the same predicates that enforce
+/// legality in `validate_attackers` / `validate_blockers_for_player`. Mirrors the
+/// existing `block_requirements` (menace) precedent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum CombatRequirement {
+    /// CR 508.1d + CR 701.15b: this creature attacks this combat if able.
+    /// `players` carries the CR 508.1d specific-player requirements
+    /// (`StaticMode::MustAttackPlayer`) intersected with the currently
+    /// attackable players; empty for a generic "attacks each combat if able"
+    /// requirement or for goad with no surviving specific-player constraint.
+    MustAttack { players: Vec<PlayerId> },
+    /// CR 509.1c: this creature blocks this combat if able.
+    MustBlock,
+    /// CR 508.1c: this creature can't attack (informational — the UI greys it).
+    CantAttack,
+    /// CR 509.1b: this creature can't block (informational — the UI greys it).
+    CantBlock,
 }
 
 /// Tracks the state of the current combat phase.
@@ -131,6 +154,11 @@ pub struct CombatState {
     pub creature_attacked_defenders_this_combat: HashMap<ObjectId, HashSet<PlayerId>>,
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
+    /// CR 510.4: Combatants that had first strike or double strike as the first
+    /// combat-damage step began. `None` means the step has not been snapshotted;
+    /// `Some(empty)` means combat has only a regular damage step.
+    #[serde(default)]
+    pub first_strike_participants: Option<HashSet<ObjectId>>,
     /// Index into attacker list for resumable damage assignment iteration.
     pub damage_step_index: Option<usize>,
     /// CR 510.2: Collected assignments awaiting simultaneous application.
@@ -150,6 +178,7 @@ impl PartialEq for CombatState {
             && self.creature_attacked_defenders_this_combat
                 == other.creature_attacked_defenders_this_combat
             && self.first_strike_done == other.first_strike_done
+            && self.first_strike_participants == other.first_strike_participants
     }
 }
 
@@ -521,36 +550,9 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
                 return Err(format!("{:?} has Defender", id));
             }
         }
-        // CR 508.1 + CR 101.2 + CR 109.5: Intrinsic CantAttack statics live ON the
-        // attacker; remote CantAttack statics (e.g. Angelic Arbiter restricting
-        // opponents' creatures via an `affected` filter) live elsewhere and are
-        // resolved through the shared `check_static_ability` building block, which
-        // matches `def.affected` against this attacker and applies any
-        // per-affected-player gate.
-        if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
-            matches!(
-                sd.mode,
-                StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-            ) && sd.attack_defended.is_none()
-        }) || (gates.has_cant_attack
-            && crate::game::static_abilities::check_static_ability(
-                state,
-                StaticMode::CantAttack,
-                &crate::game::static_abilities::StaticCheckContext {
-                    target_id: Some(id),
-                    ..Default::default()
-                },
-            ))
-            || (gates.has_cant_attack_or_block
-                && crate::game::static_abilities::check_static_ability(
-                    state,
-                    StaticMode::CantAttackOrBlock,
-                    &crate::game::static_abilities::StaticCheckContext {
-                        target_id: Some(id),
-                        ..Default::default()
-                    },
-                ))
-        {
+        // CR 508.1c: local + remote "can't attack" restrictions, via the
+        // single authority shared with display and eligibility.
+        if creature_cant_attack_gated(state, id, &gates) {
             return Err(format!("{:?} can't attack", id));
         }
 
@@ -755,7 +757,8 @@ pub fn collect_block_restriction_statics(state: &GameState) -> Vec<(ObjectId, St
     if !(static_kind_present(state, StaticModeKind::CantBeBlocked)
         || static_kind_present(state, StaticModeKind::CantBeBlockedExceptBy)
         || static_kind_present(state, StaticModeKind::CantBeBlockedBy)
-        || static_kind_present(state, StaticModeKind::CantBeBlockedByMoreThan))
+        || static_kind_present(state, StaticModeKind::CantBeBlockedByMoreThan)
+        || static_kind_present(state, StaticModeKind::CantBeBlockedUnlessAllBlock))
     {
         return Vec::new();
     }
@@ -767,6 +770,7 @@ pub fn collect_block_restriction_statics(state: &GameState) -> Vec<(ObjectId, St
                     | StaticMode::CantBeBlockedExceptBy { .. }
                     | StaticMode::CantBeBlockedBy { .. }
                     | StaticMode::CantBeBlockedByMoreThan { .. }
+                    | StaticMode::CantBeBlockedUnlessAllBlock
             )
         })
         .map(|(src, def)| (src.id, def.clone()))
@@ -1092,6 +1096,90 @@ pub fn validate_blockers(
     let defending_player = next_defending_player_to_declare_blockers(state)
         .unwrap_or_else(|| players::next_player(state, state.active_player));
     validate_blockers_for_player(state, defending_player, assignments)
+}
+
+/// CR 509.1c: Whether `obj_id` carries an *obey-able* generic MustBlock
+/// requirement for `player` — the enforcement predicate from the generic-MustBlock
+/// loop in `validate_blockers_for_player` MINUS the "already assigned" check. It
+/// is true iff the creature has a generic `MustBlock` (local or remote-gated),
+/// is `player`'s, is untapped, is not decayed, is not detained, has no "can't
+/// block" static, and can legally block at least one attacker attacking `player`.
+/// The hoisted restriction slices + gate keep it O(N) when called per creature.
+#[allow(clippy::too_many_arguments)]
+fn creature_has_must_block_requirement(
+    state: &GameState,
+    obj_id: ObjectId,
+    player: PlayerId,
+    has_must_block_static: bool,
+    blocker_restriction: &[(ObjectId, StaticDefinition)],
+    block_restriction: &[(ObjectId, StaticDefinition)],
+    blocker_allowed: &[(ObjectId, StaticDefinition)],
+    can_block_shadow_exists: bool,
+) -> bool {
+    let Some(obj) = state.objects.get(&obj_id) else {
+        return false;
+    };
+    if obj.controller != player {
+        return false;
+    }
+    if !obj.card_types.core_types.contains(&CoreType::Creature) {
+        return false;
+    }
+    // CR 509.1c: MustBlock — directly on this creature or from a cross-permanent
+    // static ("All creatures block each combat if able").
+    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
+    let has_must_block = super::functioning_abilities::active_static_definitions(state, obj)
+        .any(|sd| sd.mode == StaticMode::MustBlock)
+        || (has_must_block_static
+            && crate::game::static_abilities::check_static_ability(
+                state,
+                StaticMode::MustBlock,
+                &crate::game::static_abilities::StaticCheckContext {
+                    target_id: Some(obj_id),
+                    ..Default::default()
+                },
+            ));
+    if !has_must_block {
+        return false;
+    }
+    // Tapped creatures can't block (CR 509.1a).
+    if obj.tapped {
+        return false;
+    }
+    // CR 702.147a: Decayed creatures can't block.
+    if obj.has_keyword(&Keyword::Decayed) {
+        return false;
+    }
+    if blocker_has_cant_block_static_from_precomputed(state, obj_id, blocker_restriction) {
+        return false;
+    }
+    // CR 701.35a: Detained creatures can't block.
+    if !obj.detained_by.is_empty() {
+        return false;
+    }
+    // CR 509.1c: the requirement is only obey-able if the creature could legally
+    // block some attacker attacking its controller. CR 506.4: an attacker that
+    // has left the battlefield or phased out is no longer an attacker, so it
+    // can't satisfy (or force) the must-block requirement — mirror the exact
+    // `is_attacker_in_play` filter `get_valid_block_targets` uses so the shared
+    // predicate stays display==enforcement and doesn't over-force a block
+    // against an out-of-play attacker.
+    let Some(combat) = state.combat.as_ref() else {
+        return false;
+    };
+    combat.attackers.iter().any(|ai| {
+        ai.defending_player == obj.controller
+            && is_attacker_in_play(state, ai.object_id)
+            && can_block_pair_with_precomputed(
+                state,
+                obj_id,
+                ai.object_id,
+                blocker_restriction,
+                block_restriction,
+                blocker_allowed,
+                can_block_shadow_exists,
+            )
+    })
 }
 
 /// Validate one defending player's blocker declaration per CR 509.1 and CR 802.4.
@@ -1489,6 +1577,89 @@ pub fn validate_blockers_for_player(
         }
     }
 
+    // CR 509.1b (Tromokratis): "can't be blocked unless all creatures defending
+    // player controls block it." If the attacker carries this static and has at
+    // least one blocker assigned, then EVERY untapped creature the defending player
+    // controls that could legally block it must also be assigned as a blocker.
+    // Unblocked (zero blockers) is always legal — the restriction only fires when
+    // at least one creature is declared as a blocker.
+    //
+    // NOTE: In shared-team-turn games (CR 802), `player` is the one declaring
+    // blockers and may be a teammate rather than the attacked player. We look up
+    // `defending_player` from `AttackerInfo` to correctly scope the "all creatures"
+    // requirement to the player being attacked.
+    for (attacker_id, blockers) in &blockers_per_attacker {
+        let has_unless_all = block_restriction_statics_against_from_precomputed(
+            state,
+            *attacker_id,
+            &block_restriction,
+        )
+        .any(|(def, _src_id)| def.mode == StaticMode::CantBeBlockedUnlessAllBlock);
+        if !has_unless_all {
+            continue;
+        }
+        // Determine the defending player from combat state (falls back to `player`
+        // when combat state is unavailable, e.g. in unit tests).
+        let defending = state
+            .combat
+            .as_ref()
+            .and_then(|combat| {
+                combat
+                    .attackers
+                    .iter()
+                    .find(|a| a.object_id == *attacker_id)
+                    .map(|a| a.defending_player)
+            })
+            .unwrap_or(player);
+        // At least one blocker is assigned — verify every able creature also blocks.
+        for &obj_id in &state.battlefield {
+            // Skip creatures already assigned to this attacker.
+            if blockers.contains(&obj_id) {
+                continue;
+            }
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            if obj.controller != defending
+                || !obj.card_types.core_types.contains(&CoreType::Creature)
+                || obj.tapped
+            {
+                continue;
+            }
+            // CR 702.26b: phased-out can't block.
+            if obj.is_phased_out() {
+                continue;
+            }
+            // CR 702.147a: Decayed can't block.
+            if obj.has_keyword(&Keyword::Decayed) {
+                continue;
+            }
+            // CR 701.35a: Detained can't block.
+            if !obj.detained_by.is_empty() {
+                continue;
+            }
+            // CantBlock static on the potential blocker.
+            if blocker_has_cant_block_static_from_precomputed(state, obj_id, &blocker_restriction) {
+                continue;
+            }
+            // Check if this creature could legally form a block pair.
+            if can_block_pair_with_precomputed(
+                state,
+                obj_id,
+                *attacker_id,
+                &blocker_restriction,
+                &block_restriction,
+                &blocker_allowed,
+                can_block_shadow_exists,
+            ) {
+                return Err(format!(
+                    "{:?} can't be blocked unless all creatures defending player controls block it (CR 509.1b)",
+                    attacker_id
+                ));
+            }
+        }
+    }
+
     // CR 509.1c: MustBeBlocked — if a creature with a "must be blocked if able"
     // requirement is attacking, the defending player must obey it by assigning a
     // qualifying blocker whenever one is able. Each requirement on the attacker
@@ -1696,67 +1867,22 @@ pub fn validate_blockers_for_player(
         // skipped when no functioning MustBlock static exists (O(N^2) -> O(N)).
         let has_must_block_static = static_kind_present(state, StaticModeKind::MustBlock);
         for &obj_id in &state.battlefield {
-            let Some(obj) = state.objects.get(&obj_id) else {
-                continue;
-            };
-            if obj.controller != player {
-                continue;
-            }
-            if !obj.card_types.core_types.contains(&CoreType::Creature) {
-                continue;
-            }
-            // CR 509.1c: Check MustBlock — directly on this creature or from
-            // a cross-permanent static (e.g., "All creatures block each combat if able").
-            // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
-            let has_must_block =
-                super::functioning_abilities::active_static_definitions(state, obj)
-                    .any(|sd| sd.mode == StaticMode::MustBlock)
-                    || (has_must_block_static
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::MustBlock,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(obj_id),
-                                ..Default::default()
-                            },
-                        ));
-            if !has_must_block {
-                continue;
-            }
-            // Already assigned as a blocker — constraint satisfied
+            // Already assigned as a blocker — constraint satisfied. The rest of
+            // the enforcement predicate is the shared authority used by the
+            // display-population helper (`blocker_constraints_for_player`).
             if assigned_blockers.contains(&obj_id) {
                 continue;
             }
-            // Tapped creatures can't block (CR 509.1a)
-            if obj.tapped {
-                continue;
-            }
-            // CR 702.147a: Decayed creatures can't block, so an unassigned
-            // decayed MustBlock creature cannot make the declaration illegal.
-            if obj.has_keyword(&Keyword::Decayed) {
-                continue;
-            }
-            if blocker_has_cant_block_static_from_precomputed(state, obj_id, &blocker_restriction) {
-                continue;
-            }
-            // CR 701.35a: Detained creatures can't block.
-            if !obj.detained_by.is_empty() {
-                continue;
-            }
-            // Check if this creature could legally block any attacker attacking its controller
-            let can_block_any = combat.attackers.iter().any(|ai| {
-                ai.defending_player == obj.controller
-                    && can_block_pair_with_precomputed(
-                        state,
-                        obj_id,
-                        ai.object_id,
-                        &blocker_restriction,
-                        &block_restriction,
-                        &blocker_allowed,
-                        can_block_shadow_exists,
-                    )
-            });
-            if can_block_any {
+            if creature_has_must_block_requirement(
+                state,
+                obj_id,
+                player,
+                has_must_block_static,
+                &blocker_restriction,
+                &block_restriction,
+                &blocker_allowed,
+                can_block_shadow_exists,
+            ) {
                 return Err(format!("{:?} must block if able (CR 509.1c)", obj_id));
             }
         }
@@ -1878,13 +2004,23 @@ pub fn compute_combat_tax(
         .collect();
     let mut any_tax = false;
 
-    // CR 114.4: Emblems in the command zone contribute their statics too.
+    // CR 113.6b + CR 114.3/114.4: command-zone sources contribute their
+    // statics when they're an emblem (function unconditionally) or when a
+    // non-emblem object (a plane, scheme, or conspiracy) has at least one
+    // static that opts into the command zone via `active_zones` — the same
+    // admission rule `functioning_abilities::object_sources_static_from_command_zone`
+    // already applies for every other command-zone-consuming gather. An
+    // emblem-only gate here would silently drop legitimate Eminence-style
+    // command-zone opt-in sources before their `CantAttack`/`CantBlock`
+    // definitions ever reach the per-def zone check below.
     let zones = state.battlefield.iter().chain(state.command_zone.iter());
     for &source_id in zones {
         let Some(source_obj) = state.objects.get(&source_id) else {
             continue;
         };
-        if source_obj.zone == Zone::Command && !source_obj.is_emblem {
+        if source_obj.zone == Zone::Command
+            && !super::functioning_abilities::object_sources_static_from_command_zone(source_obj)
+        {
             continue;
         }
         // CR 702.26b: Phased-out permanents' statics don't function.
@@ -1898,6 +2034,19 @@ pub fn compute_combat_tax(
         // gates are enforced by the outer `if obj.is_phased_out()` / command-
         // zone check above this loop.
         for def in source_obj.static_definitions.iter_all() {
+            // CR 113.6 + CR 113.6b: single-authority zone-of-function gate,
+            // shared with every other statics gather (see
+            // `functioning_abilities::static_functions_in_zone`) so they cannot
+            // disagree. A zone-restricted `CantAttack`/`CantBlock`/
+            // `CantAttackOrBlock` static must not tax from a zone its
+            // `active_zones` excludes — e.g. a battlefield permanent whose
+            // static only functions from the graveyard must not tax attacks or
+            // blocks. Command-zone emblems are already admitted by the outer
+            // gate and function from command regardless of `active_zones`;
+            // every other zone follows the default/listed-zone rule.
+            if !super::functioning_abilities::static_functions_in_zone(source_obj, def) {
+                continue;
+            }
             let mode_matches = match context {
                 CombatTaxContext::Attacking => matches!(
                     def.mode,
@@ -2066,8 +2215,9 @@ pub fn compute_combat_tax(
         return None;
     }
 
-    // Drop creatures with no tax — keep per_creature as the subset that is actually taxed.
-    per_creature.retain(|(_, cost)| cost.mana_value() > 0 || !matches!(cost, ManaCost::NoCost));
+    // Drop creatures with no tax — the decline path uses this exact subset to
+    // remove only creatures that actually owe a cost from the declaration.
+    per_creature.retain(|(_, cost)| cost.mana_value() > 0);
     if per_creature.is_empty() {
         return None;
     }
@@ -2171,6 +2321,74 @@ fn extract_combat_tax_payload<'a>(
         }
         _ => None,
     }
+}
+
+/// CR 508.1c: Whether `obj_id` is under a functioning "can't attack" restriction.
+/// Single-permanent entry point — computes the loop-invariant gates once and
+/// delegates. Batch callers reuse the `_gated` form with hoisted gates.
+pub fn creature_cant_attack(state: &GameState, obj_id: ObjectId) -> bool {
+    let gates = CombatStaticGates::compute(state);
+    creature_cant_attack_gated(state, obj_id, &gates)
+}
+
+/// CR 508.1c: The three-part "can't attack" restriction check, extracted
+/// verbatim from `get_valid_attacker_ids` so display, enforcement, and
+/// eligibility share one authority. Reproduces ALL THREE sub-checks: (1) local
+/// `CantAttack` / `CantAttackOrBlock` definitions scoped to
+/// `attack_defended.is_none()` (a defender-scoped "can't attack player X" must
+/// NOT count — the creature can still attack someone else); (2) remote gated
+/// `CantAttack`; (3) remote gated `CantAttackOrBlock`.
+fn creature_cant_attack_gated(
+    state: &GameState,
+    obj_id: ObjectId,
+    gates: &CombatStaticGates,
+) -> bool {
+    let Some(obj) = state.objects.get(&obj_id) else {
+        return false;
+    };
+    // CR 508.1c: local CantAttack / CantAttackOrBlock, but only the
+    // non-defender-scoped forms — a defender-scoped restriction ("can't attack
+    // player X") leaves the creature able to attack another target.
+    super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
+        matches!(
+            sd.mode,
+            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
+        ) && sd.attack_defended.is_none()
+            && match sd.affected.as_ref() {
+                // CR 604.1 + CR 109.5: an unscoped source-local attack
+                // restriction is intrinsic to its own source.
+                None => true,
+                // CR 508.1c: scoped attack restrictions affect this source only
+                // when their affected filter actually matches it.
+                Some(filter) => matches_target_filter(
+                    state,
+                    obj_id,
+                    filter,
+                    &FilterContext::from_source(state, obj_id),
+                ),
+            }
+    })
+    // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics (Angelic
+    // Arbiter restricting opponents' creatures) resolved via the shared
+    // `check_static_ability` building block.
+    || (gates.has_cant_attack
+        && crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CantAttack,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(obj_id),
+                ..Default::default()
+            },
+        ))
+    || (gates.has_cant_attack_or_block
+        && crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CantAttackOrBlock,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(obj_id),
+                ..Default::default()
+            },
+        ))
 }
 
 /// CR 508.1d / CR 701.15b: True if `obj_id` is a creature controlled by the
@@ -2296,6 +2514,24 @@ fn creature_must_attack_with_attackable_players_gated(
     }
     // CR 302.6: Summoning sickness — reuse existing helper.
     if has_summoning_sickness(obj) {
+        return false;
+    }
+    // CR 508.1c beats CR 508.1d: a "can't attack" restriction overrides an
+    // "attacks if able" requirement — a creature under Pacifism is not forced to
+    // attack even while goaded. Enforcement must agree with display.
+    if creature_cant_attack_gated(state, obj_id, gates) {
+        return false;
+    }
+    // CR 702.26b: A phased-out permanent is treated as though it doesn't exist
+    // and is removed from combat. The enforcement loop iterates raw
+    // `state.battlefield` (which includes phased-out permanents), so this guard
+    // is load-bearing here even though `get_valid_attacker_ids` filters them out.
+    if obj.is_phased_out() {
+        return false;
+    }
+    // CR 508.1c + CR 611.2c: additional-combat attacker restriction (Last Night
+    // Together / Bumi). A restriction beats the "attacks if able" requirement.
+    if !passes_combat_attacker_restriction(state, obj_id) {
         return false;
     }
     true
@@ -2545,6 +2781,35 @@ pub fn declare_attackers_with_bands(
     bands: &[Vec<ObjectId>],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
+    declare_attackers_with_bands_impl(state, attacks, bands, None, events)
+}
+
+/// CR 508.1d: Finalize a declaration after its player declined an "unless pay"
+/// attack cost. A declined creature is unavailable for requirement maximization,
+/// so its attack requirements do not make the reduced declaration illegal.
+pub(super) fn declare_attackers_with_bands_after_combat_tax_declined(
+    state: &mut GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
+    declined_taxed_attackers: &HashSet<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), String> {
+    declare_attackers_with_bands_impl(
+        state,
+        attacks,
+        bands,
+        Some(declined_taxed_attackers),
+        events,
+    )
+}
+
+fn declare_attackers_with_bands_impl(
+    state: &mut GameState,
+    attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
+    declined_taxed_attackers: Option<&HashSet<ObjectId>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), String> {
     let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
     validate_attackers(state, &attacker_ids)?;
     // CR 508.1c + CR 508.5: defender-scoped attacker caps ("...attack you each
@@ -2565,6 +2830,12 @@ pub fn declare_attackers_with_bands(
     // exemption logic; this loop only adds the "already declared?" check and
     // the rejection error text.
     for &obj_id in &state.battlefield {
+        // CR 508.1d: A player need not pay a cost just to satisfy an attack
+        // requirement. A creature removed after its tax was declined is therefore
+        // unavailable when maximizing requirements for this declaration.
+        if declined_taxed_attackers.is_some_and(|ids| ids.contains(&obj_id)) {
+            continue;
+        }
         if !creature_must_attack_with_attackable_players_gated(
             state,
             obj_id,
@@ -2785,8 +3056,10 @@ pub fn declare_attackers_with_bands(
                 crate::types::ability::RestrictionPlayerScope::TargetedPlayer
                 | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
                 | crate::types::ability::RestrictionPlayerScope::DefendingPlayer
-                // CR 109.5: resolved to `SpecificPlayer` by `add_restriction` at
-                // creation time, so an unresolved scope here restricts no one.
+                // CR 109.4 + CR 109.5: resolved to `SpecificPlayer` by
+                // `add_restriction` at creation time, so an unresolved scope here
+                // restricts no one.
+                | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetController
                 | crate::types::ability::RestrictionPlayerScope::ScopedPlayer => false,
             };
             if !attacker_is_affected {
@@ -3206,33 +3479,11 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                                 ..Default::default()
                             },
                         )))
-                && !super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
-                    matches!(
-                        sd.mode,
-                        StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-                    ) && sd.attack_defended.is_none()
-                })
-                // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
-                // (Angelic Arbiter restricting opponents' creatures) resolved via
-                // the shared `check_static_ability` building block.
-                && !(gates.has_cant_attack
-                    && crate::game::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::CantAttack,
-                        &crate::game::static_abilities::StaticCheckContext {
-                            target_id: Some(*id),
-                            ..Default::default()
-                        },
-                    ))
-                && !(gates.has_cant_attack_or_block
-                    && crate::game::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::CantAttackOrBlock,
-                        &crate::game::static_abilities::StaticCheckContext {
-                            target_id: Some(*id),
-                            ..Default::default()
-                        },
-                    ))
+                // CR 508.1c: local + remote "can't attack" restrictions, via
+                // the single authority shared with display and enforcement. The
+                // `attack_defended.is_none()` scoping (a defender-scoped "can't
+                // attack player X" must NOT count) is preserved inside.
+                && !creature_cant_attack_gated(state, *id, &gates)
                 // CR 302.6: delegate to the single authority for summoning
                 // sickness — folds in Haste at query time without duplicating
                 // the flag/keyword logic here.
@@ -3247,6 +3498,120 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
             }
         })
         .collect()
+}
+
+/// CR 508.1c / CR 508.1d: Display-only attacker constraints for the active
+/// player, keyed by object id, for the `DeclareAttackers` waiting payload. Takes
+/// the already-computed `valid_attacker_ids` (from `get_valid_attacker_ids`) as
+/// the eligible set — no second eligibility sweep. One entry per creature at
+/// most: a creature that both would-must-attack and can't-attack resolves to
+/// `CantAttack`, because B1 makes `creature_must_attack...` return false under a
+/// "can't attack" restriction (CR 508.1c beats CR 508.1d). Reuses the same
+/// gated predicates the enforcement path uses, so display and enforcement agree.
+pub fn attacker_constraints_for_active_player(
+    state: &GameState,
+    valid_attacker_ids: &[ObjectId],
+) -> HashMap<ObjectId, CombatRequirement> {
+    let active = state.active_player;
+    let gates = CombatStaticGates::compute(state);
+    let attackable = attackable_player_targets(state);
+    let valid: HashSet<ObjectId> = valid_attacker_ids.iter().copied().collect();
+
+    let mut constraints = HashMap::new();
+    for &obj_id in &state.battlefield {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        if obj.controller != active || !obj.card_types.core_types.contains(&CoreType::Creature) {
+            continue;
+        }
+        // A creature under a "can't attack" restriction is never an eligible
+        // attacker (`get_valid_attacker_ids` filters it out), and B1 makes the
+        // must-attack predicate return false for it — so eligible creatures are
+        // the only MustAttack candidates and the complement carries CantAttack.
+        if valid.contains(&obj_id) {
+            if creature_must_attack_with_attackable_players_gated(
+                state,
+                obj_id,
+                &attackable,
+                &gates,
+            ) {
+                // CR 508.1d: specific-player requirements intersected with the
+                // currently attackable players; empty for generic / goad.
+                let players: Vec<PlayerId> = must_attack_players_for_creature(state, obj)
+                    .into_iter()
+                    .filter(|p| attackable.contains(p))
+                    .collect();
+                constraints.insert(obj_id, CombatRequirement::MustAttack { players });
+            }
+        } else if creature_cant_attack_gated(state, obj_id, &gates) {
+            constraints.insert(obj_id, CombatRequirement::CantAttack);
+        }
+    }
+    constraints
+}
+
+/// CR 509.1b / CR 509.1c: Display-only blocker constraints for `player`, keyed by
+/// object id, for the `DeclareBlockers` waiting payload. Takes the already-computed
+/// `valid_block_targets` (from `get_valid_block_targets_for_player`) as the
+/// eligible set — its keys are the creatures that can legally block some attacker,
+/// so they are the only MustBlock candidates and the complement carries any
+/// CantBlock static. Uses the same `creature_has_must_block_requirement`
+/// predicate the enforcement loop uses, so display and enforcement agree. N3: a
+/// MustBlock creature with zero legal targets is absent from `valid_block_targets`
+/// and fails the predicate's `can_block_any` guard — it carries NO entry.
+pub fn blocker_constraints_for_player(
+    state: &GameState,
+    player: PlayerId,
+    valid_block_targets: &HashMap<ObjectId, Vec<ObjectId>>,
+) -> HashMap<ObjectId, CombatRequirement> {
+    // Hoist the restriction slices + gate once so the per-creature predicate
+    // stays O(N) (mirrors `validate_blockers_for_player`).
+    let blocker_restriction = collect_blocker_restriction_statics(state);
+    let block_restriction = collect_block_restriction_statics(state);
+    let blocker_allowed = collect_blocker_allowed_statics(state);
+    let can_block_shadow_exists = static_kind_present(state, StaticModeKind::CanBlockShadow);
+    let has_must_block_static = static_kind_present(state, StaticModeKind::MustBlock);
+
+    let mut constraints = HashMap::new();
+    for &obj_id in &state.battlefield {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        if obj.controller != player || !obj.card_types.core_types.contains(&CoreType::Creature) {
+            continue;
+        }
+        if valid_block_targets.contains_key(&obj_id) {
+            if creature_has_must_block_requirement(
+                state,
+                obj_id,
+                player,
+                has_must_block_static,
+                &blocker_restriction,
+                &block_restriction,
+                &blocker_allowed,
+                can_block_shadow_exists,
+            ) {
+                constraints.insert(obj_id, CombatRequirement::MustBlock);
+            }
+        } else if blocker_has_cant_block_static_from_precomputed(
+            state,
+            obj_id,
+            &blocker_restriction,
+        ) {
+            constraints.insert(obj_id, CombatRequirement::CantBlock);
+        }
+    }
+    constraints
+}
+
+/// Return the blocker keys in stable numeric object-id order for prompt payloads.
+pub(crate) fn ordered_valid_blocker_ids(
+    valid_block_targets: &HashMap<ObjectId, Vec<ObjectId>>,
+) -> Vec<ObjectId> {
+    let mut blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+    blocker_ids.sort_unstable_by_key(|id| id.0);
+    blocker_ids
 }
 
 /// CR 508.1a / CR 509.1a: Rebuild the eligibility snapshot carried by the
@@ -3264,14 +3629,20 @@ pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
             // CR 508.1a: Mirror turns.rs:1369-1370 — rebuild both payload fields.
             let valid_attacker_ids = get_valid_attacker_ids(state);
             let valid_attack_targets = get_valid_attack_targets(state);
+            // CR 508.1c/d: recompute the display constraints from the same
+            // recomputed `valid_attacker_ids` (self-heal parity).
+            let attacker_constraints =
+                attacker_constraints_for_active_player(state, &valid_attacker_ids);
             if let crate::types::game_state::WaitingFor::DeclareAttackers {
                 valid_attacker_ids: ids,
                 valid_attack_targets: targets,
+                attacker_constraints: constraints,
                 ..
             } = &mut state.waiting_for
             {
                 *ids = valid_attacker_ids;
                 *targets = valid_attack_targets;
+                *constraints = attacker_constraints;
             }
         }
         crate::types::game_state::WaitingFor::DeclareBlockers { player, .. } => {
@@ -3279,18 +3650,24 @@ pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
             let player = *player;
             // CR 509.1a: Mirror turns.rs:1394-1396 — player-scoped block targets.
             let valid_block_targets = get_valid_block_targets_for_player(state, player);
-            let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+            let valid_blocker_ids = ordered_valid_blocker_ids(&valid_block_targets);
             let block_requirements = block_requirements_for_player(state, player);
+            // CR 509.1b/c: recompute the display constraints from the same
+            // recomputed `valid_block_targets` (self-heal parity).
+            let blocker_constraints =
+                blocker_constraints_for_player(state, player, &valid_block_targets);
             if let crate::types::game_state::WaitingFor::DeclareBlockers {
                 valid_blocker_ids: ids,
                 valid_block_targets: targets,
                 block_requirements: reqs,
+                blocker_constraints: constraints,
                 ..
             } = &mut state.waiting_for
             {
                 *ids = valid_blocker_ids;
                 *targets = valid_block_targets;
                 *reqs = block_requirements;
+                *constraints = blocker_constraints;
             }
         }
         _ => {}
@@ -3955,6 +4332,116 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
     targets
 }
 
+/// CR 508.4 + CR 508.4c: destinations for a creature put onto the battlefield
+/// attacking. This intentionally does not call attack-declaration legality:
+/// requirements, restrictions, costs, protection, goad, summoning sickness,
+/// and taxes do not apply to an object that was never declared as an attacker.
+pub fn valid_entry_attack_targets(
+    state: &GameState,
+    controller: PlayerId,
+    domain: &crate::types::ability::EntryAttackDestination,
+) -> Vec<AttackTarget> {
+    let attacking_players: Vec<PlayerId> = std::iter::once(state.active_player)
+        .chain(players::teammates(state, state.active_player))
+        .collect();
+    if state.combat.is_none() || !attacking_players.contains(&controller) {
+        return Vec::new();
+    }
+    let allies = players::teammates(state, controller);
+    let defending_players: Vec<PlayerId> = state
+        .players
+        .iter()
+        .filter(|player| {
+            player.id != controller
+                && !allies.contains(&player.id)
+                && !state.eliminated_players.contains(&player.id)
+                && player.is_phased_in()
+        })
+        .map(|player| player.id)
+        .collect();
+    let mut targets: Vec<AttackTarget> = defending_players
+        .iter()
+        .copied()
+        .map(AttackTarget::Player)
+        .collect();
+    for &id in &state.battlefield {
+        let Some(object) = state.objects.get(&id) else {
+            continue;
+        };
+        if defending_players.contains(&object.controller)
+            && object
+                .card_types
+                .core_types
+                .contains(&CoreType::Planeswalker)
+        {
+            targets.push(AttackTarget::Planeswalker(id));
+        }
+        if object.card_types.core_types.contains(&CoreType::Battle)
+            && object
+                .protector()
+                .is_some_and(|protector| defending_players.contains(&protector))
+        {
+            targets.push(AttackTarget::Battle(id));
+        }
+    }
+
+    match domain {
+        crate::types::ability::EntryAttackDestination::AnyDefender => targets,
+        crate::types::ability::EntryAttackDestination::PlayerOrPlaneswalker => targets
+            .into_iter()
+            .filter(|candidate| !matches!(candidate, AttackTarget::Battle(_)))
+            .collect(),
+        crate::types::ability::EntryAttackDestination::Exact { target } => targets
+            .into_iter()
+            .filter(|candidate| candidate == target)
+            .collect(),
+    }
+}
+
+/// CR 508.4a: resolve a still-valid entry-attack target to its defending
+/// player. Returns `None` when the selected player/permanent is no longer a
+/// legal combat destination, in which case the permanent enters nonattacking.
+pub fn entry_attack_target_defender(
+    state: &GameState,
+    controller: PlayerId,
+    target: AttackTarget,
+) -> Option<PlayerId> {
+    if !valid_entry_attack_targets(
+        state,
+        controller,
+        &crate::types::ability::EntryAttackDestination::AnyDefender,
+    )
+    .contains(&target)
+    {
+        return None;
+    }
+    match target {
+        AttackTarget::Player(player) => state
+            .players
+            .iter()
+            .any(|candidate| {
+                candidate.id == player
+                    && candidate.is_phased_in()
+                    && !state.eliminated_players.contains(&player)
+            })
+            .then_some(player),
+        AttackTarget::Planeswalker(id) => state.objects.get(&id).and_then(|object| {
+            (object.zone == Zone::Battlefield
+                && object
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Planeswalker))
+            .then_some(object.controller)
+        }),
+        AttackTarget::Battle(id) => state.objects.get(&id).and_then(|object| {
+            (object.zone == Zone::Battlefield
+                && object.card_types.core_types.contains(&CoreType::Battle))
+            .then(|| object.protector())
+            .flatten()
+        }),
+    }
+}
+
 /// CR 506.4: A creature stops being an attacker when it leaves the battlefield
 /// or phases out. Attackers that left during the declare-attackers step may
 /// remain listed until pruned.
@@ -4019,34 +4506,10 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                                     ..Default::default()
                                 },
                             )))
-                    && !super::functioning_abilities::active_static_definitions(state, obj).any(
-                        |sd| {
-                            matches!(
-                                sd.mode,
-                                StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-                            ) && sd.attack_defended.is_none()
-                        },
-                    )
-                    // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
-                    // (Angelic Arbiter) resolved via `check_static_ability`.
-                    && !(gates.has_cant_attack
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::CantAttack,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(*id),
-                                ..Default::default()
-                            },
-                        ))
-                    && !(gates.has_cant_attack_or_block
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::CantAttackOrBlock,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(*id),
-                                ..Default::default()
-                            },
-                        ))
+                    // CR 508.1c: local + remote "can't attack" restrictions,
+                    // via the single authority shared with display and
+                    // enforcement.
+                    && !creature_cant_attack_gated(state, *id, &gates)
                     && (obj.has_keyword(&Keyword::Haste)
                         || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
             })
@@ -4058,7 +4521,7 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::parser::oracle_static::parse_static_line;
+    use crate::parser::oracle_static::{parse_static_line, parse_static_line_multi};
     use crate::types::ability::{
         ChosenAttribute, Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope,
         QuantityExpr, QuantityRef, SeatDirection, StaticCondition, StaticDefinition, TargetFilter,
@@ -4068,6 +4531,24 @@ mod tests {
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
+
+    #[test]
+    fn ordered_valid_blocker_ids_sorts_numeric_keys_and_handles_small_maps() {
+        let mut targets = HashMap::new();
+        for id in [ObjectId(91), ObjectId(7), ObjectId(42), ObjectId(3)] {
+            targets.insert(id, Vec::new());
+        }
+        assert_eq!(
+            ordered_valid_blocker_ids(&targets),
+            vec![ObjectId(3), ObjectId(7), ObjectId(42), ObjectId(91)]
+        );
+
+        assert!(ordered_valid_blocker_ids(&HashMap::new()).is_empty());
+        assert_eq!(
+            ordered_valid_blocker_ids(&HashMap::from([(ObjectId(12), Vec::new())])),
+            vec![ObjectId(12)]
+        );
+    }
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -4515,6 +4996,152 @@ mod tests {
         assert!(validate_attackers(&state, &[attacker]).is_err());
     }
 
+    /// CR 508.1c + CR 201.2a: Akron Legionnaire's exempt-list restriction
+    /// end-to-end through actual attacker declaration — not just the parsed
+    /// AST shape (see `oracle_static::tests::
+    /// akron_legionnaire_leading_except_for_exempts_named_and_artifact_creatures`
+    /// for that unit-level check). Attaches the REAL parsed static via
+    /// `parse_static_line_multi` — the only entry point that reaches
+    /// `parse_leading_except_for_rule_static`, since the scoped (non-self)
+    /// subject defers the single-return `parse_static_line` path — to Akron
+    /// Legionnaire itself, then proves the restriction actually gates
+    /// `validate_attackers`/`get_valid_attacker_ids`: a plain nonartifact
+    /// creature you control is excluded, while Akron Legionnaire (exempted by
+    /// name) and an artifact creature you control (exempted by type) remain
+    /// legal attackers.
+    #[test]
+    fn akron_legionnaire_exempts_named_and_artifact_creatures_from_attacking() {
+        let mut state = setup();
+
+        let akron = create_creature(&mut state, PlayerId(0), "Akron Legionnaire", 8, 4);
+        let defs = parse_static_line_multi(
+            "Except for creatures named Akron Legionnaire and artifact creatures, \
+             creatures you control can't attack.",
+        );
+        assert_eq!(defs.len(), 1, "{defs:?}");
+        assert_eq!(defs[0].mode, StaticMode::CantAttack);
+        state
+            .objects
+            .get_mut(&akron)
+            .unwrap()
+            .static_definitions
+            .push(defs.into_iter().next().unwrap());
+
+        let artifact_creature = create_creature(&mut state, PlayerId(0), "Ornithopter", 0, 2);
+        state
+            .objects
+            .get_mut(&artifact_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let plain_creature = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        let valid = get_valid_attacker_ids(&state);
+        assert!(
+            valid.contains(&akron),
+            "Akron Legionnaire exempts itself by name"
+        );
+        assert!(
+            valid.contains(&artifact_creature),
+            "artifact creatures are exempt"
+        );
+        assert!(
+            !valid.contains(&plain_creature),
+            "a plain nonartifact creature you control can't attack"
+        );
+
+        assert!(validate_attackers(&state, &[akron]).is_ok());
+        assert!(validate_attackers(&state, &[artifact_creature]).is_ok());
+        assert!(validate_attackers(&state, &[plain_creature]).is_err());
+        assert!(validate_attackers(&state, &[akron, artifact_creature]).is_ok());
+        assert!(validate_attackers(&state, &[akron, plain_creature]).is_err());
+    }
+
+    /// CR 508.1c + CR 509.1b: Storm, Windrider's compound static is enforced
+    /// through the parser and combat pipeline. The restriction applies to all
+    /// flying creatures, not only Storm, and it distinguishes the source's
+    /// controller from another defending player.
+    #[test]
+    fn storm_windrider_compound_static_scopes_attack_and_block_restrictions() {
+        let defs = parse_static_line_multi(
+            "Creatures with flying can't attack you or block creatures you control.",
+        );
+        assert_eq!(
+            defs.len(),
+            2,
+            "compound static must parse to two definitions"
+        );
+
+        let mut attack_state = setup_multiplayer_combat(3);
+        attack_state.active_player = PlayerId(1);
+        let storm = create_creature(&mut attack_state, PlayerId(0), "Storm, Windrider", 3, 3);
+        let storm_definitions = &mut attack_state
+            .objects
+            .get_mut(&storm)
+            .unwrap()
+            .static_definitions;
+        for definition in defs.clone() {
+            storm_definitions.push(definition);
+        }
+        let flyer = create_creature(&mut attack_state, PlayerId(1), "Sky Drake", 2, 2);
+        attack_state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        assert!(
+            declare_attackers(
+                &mut attack_state,
+                &[(flyer, AttackTarget::Player(PlayerId(0)))],
+                &mut vec![],
+            )
+            .is_err(),
+            "a flying creature cannot attack Storm's controller"
+        );
+        assert!(
+            declare_attackers(
+                &mut attack_state,
+                &[(flyer, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![],
+            )
+            .is_ok(),
+            "the same flyer may attack another defending player"
+        );
+
+        let mut block_state = setup_multiplayer_combat(3);
+        let storm = create_creature(&mut block_state, PlayerId(0), "Storm, Windrider", 3, 3);
+        let storm_definitions = &mut block_state
+            .objects
+            .get_mut(&storm)
+            .unwrap()
+            .static_definitions;
+        for definition in defs {
+            storm_definitions.push(definition);
+        }
+        let flyer = create_creature(&mut block_state, PlayerId(1), "Sky Drake", 2, 2);
+        block_state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let protected_attacker = create_creature(&mut block_state, PlayerId(0), "Bear", 2, 2);
+        let other_attacker = create_creature(&mut block_state, PlayerId(2), "Wolf", 2, 2);
+
+        assert!(
+            validate_blockers(&block_state, &[(flyer, protected_attacker)]).is_err(),
+            "a flying creature cannot block a creature Storm's controller controls"
+        );
+        assert!(
+            validate_blockers(&block_state, &[(flyer, other_attacker)]).is_ok(),
+            "the same flyer may block a creature another player controls"
+        );
+    }
+
     #[test]
     fn tapped_creature_cannot_attack() {
         let mut state = setup();
@@ -4698,6 +5325,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: get_valid_attacker_ids(&state),
             valid_attack_targets: get_valid_attack_targets(&state),
+            attacker_constraints: Default::default(),
         };
         match &state.waiting_for {
             WaitingFor::DeclareAttackers {
@@ -4765,6 +5393,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: get_valid_attacker_ids(&state),
             valid_attack_targets: get_valid_attack_targets(&state),
+            attacker_constraints: Default::default(),
         };
         match &state.waiting_for {
             WaitingFor::DeclareAttackers {
@@ -5534,6 +6163,83 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("cannot attack player"), "err={err}");
+    }
+
+    #[test]
+    fn entry_attacker_controlled_by_active_teammate_uses_defending_team() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+
+        let targets = valid_entry_attack_targets(
+            &state,
+            PlayerId(1),
+            &crate::types::ability::EntryAttackDestination::AnyDefender,
+        );
+        assert!(targets.contains(&AttackTarget::Player(PlayerId(2))));
+        assert!(targets.contains(&AttackTarget::Player(PlayerId(3))));
+        assert!(!targets.contains(&AttackTarget::Player(PlayerId(0))));
+        assert!(!targets.contains(&AttackTarget::Player(PlayerId(1))));
+        assert_eq!(
+            entry_attack_target_defender(&state, PlayerId(1), AttackTarget::Player(PlayerId(2)),),
+            Some(PlayerId(2))
+        );
+    }
+
+    /// CR 508.4a-c: an effect may specify the player, planeswalker, or battle
+    /// that an entering creature attacks. Exact destinations use the same live
+    /// defender validation as the open choice domain, including protected
+    /// battles, and disappear when the specified destination becomes stale.
+    #[test]
+    fn exact_entry_attack_destination_validates_all_target_kinds_and_staleness() {
+        use crate::types::ability::EntryAttackDestination;
+
+        let mut state = setup();
+        state.combat = Some(CombatState::default());
+        let planeswalker = create_planeswalker(&mut state, PlayerId(1), "Defending Jace");
+        let battle = create_battle(&mut state, PlayerId(0), "Protected Invasion", PlayerId(1));
+
+        for target in [
+            AttackTarget::Player(PlayerId(1)),
+            AttackTarget::Planeswalker(planeswalker),
+            AttackTarget::Battle(battle),
+        ] {
+            assert_eq!(
+                valid_entry_attack_targets(
+                    &state,
+                    PlayerId(0),
+                    &EntryAttackDestination::Exact { target },
+                ),
+                vec![target],
+                "each exact live defender kind must remain available"
+            );
+        }
+
+        crate::game::zones::move_to_zone(
+            &mut state,
+            planeswalker,
+            Zone::Graveyard,
+            &mut Vec::new(),
+        );
+        crate::game::zones::move_to_zone(&mut state, battle, Zone::Graveyard, &mut Vec::new());
+        state.eliminated_players.push(PlayerId(1));
+
+        for target in [
+            AttackTarget::Player(PlayerId(1)),
+            AttackTarget::Planeswalker(planeswalker),
+            AttackTarget::Battle(battle),
+        ] {
+            assert!(
+                valid_entry_attack_targets(
+                    &state,
+                    PlayerId(0),
+                    &EntryAttackDestination::Exact { target },
+                )
+                .is_empty(),
+                "a stale exact destination must produce a nonattacking entry"
+            );
+        }
     }
 
     /// CR 805.10d: "Creatures controlled by the defending players can block
@@ -7022,7 +7728,7 @@ mod tests {
         let labeled = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &labeled, "Right", Some(pramikon));
+        bind_named_choice(&mut state, &labeled, "Right", Some(pramikon), None);
 
         // Exactly one Direction persists, and it is Right.
         assert_eq!(
@@ -7126,7 +7832,7 @@ mod tests {
         let labeled = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &labeled, "Left", Some(teyo));
+        bind_named_choice(&mut state, &labeled, "Left", Some(teyo), None);
         assert_eq!(
             state.objects.get(&teyo).unwrap().chosen_direction(),
             Some(SeatDirection::Left),
@@ -9198,6 +9904,238 @@ mod tests {
         assert!(validate_blockers(&state, &[]).is_ok());
     }
 
+    // ---- Combat-requirement display (blocker_constraints) tests ----
+
+    #[test]
+    fn blocker_constraints_surface_must_block() {
+        // CR 509.1c: a creature with a functioning MustBlock static that can
+        // legally block the attacker surfaces as `MustBlock`.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Ground Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Guard", 2, 2);
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustBlock));
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let valid = get_valid_block_targets_for_player(&state, PlayerId(1));
+        let constraints = blocker_constraints_for_player(&state, PlayerId(1), &valid);
+        assert_eq!(
+            constraints.get(&blocker),
+            Some(&CombatRequirement::MustBlock),
+            "a must-block creature able to block the attacker is MustBlock"
+        );
+    }
+
+    #[test]
+    fn blocker_constraints_omit_must_block_with_zero_legal_targets() {
+        // N3 (CR 509.1c): a MustBlock creature with ZERO legal targets carries NO
+        // entry. Positive reach-guard: the SAME creature IS MustBlock against a
+        // ground attacker, proving the omission is the zero-target case and not a
+        // helper no-op.
+        let mut state = setup();
+        let ground = create_creature(&mut state, PlayerId(0), "Ground Bear", 2, 2);
+        let flyer = create_creature(&mut state, PlayerId(0), "Flyer", 2, 2);
+        state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let blocker = create_creature(&mut state, PlayerId(1), "Ground Guard", 2, 2);
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustBlock));
+
+        // Positive reach-guard: against the ground attacker the blocker can block,
+        // so it surfaces as MustBlock.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(ground, PlayerId(1))],
+            ..Default::default()
+        });
+        let valid = get_valid_block_targets_for_player(&state, PlayerId(1));
+        assert_eq!(
+            blocker_constraints_for_player(&state, PlayerId(1), &valid).get(&blocker),
+            Some(&CombatRequirement::MustBlock),
+            "reach-guard: ground blocker CAN block the ground attacker"
+        );
+
+        // Negative: against a flyer-only combat the ground blocker has zero legal
+        // targets and carries NO entry.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(flyer, PlayerId(1))],
+            ..Default::default()
+        });
+        let valid = get_valid_block_targets_for_player(&state, PlayerId(1));
+        assert!(
+            !blocker_constraints_for_player(&state, PlayerId(1), &valid).contains_key(&blocker),
+            "N3: a must-block creature with zero legal targets carries no constraint"
+        );
+    }
+
+    #[test]
+    fn must_block_not_forced_when_only_attacker_left_play() {
+        // CR 506.4 + CR 509.1c: a MustBlock creature is only forced to block an
+        // attacker still in play. When its only blockable attacker has left the
+        // battlefield, the requirement is no longer obey-able, so an empty blocker
+        // declaration is legal. The shared enforcement predicate mirrors the exact
+        // `is_attacker_in_play` filter `get_valid_block_targets` uses, keeping
+        // display == enforcement and preventing over-forcing.
+        //
+        // REVERT-FAIL: without the `is_attacker_in_play` guard added to
+        // `creature_has_must_block_requirement`, the predicate evaluates
+        // `can_block_pair_with_precomputed` against the left-play attacker (which
+        // fetches the still-present object and does NOT check its zone), returns
+        // true, and enforcement rejects the empty declaration.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Ground Bear", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Sworn Guard", 2, 2);
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustBlock));
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // Reach-guard: with the attacker in play the MustBlock creature IS forced,
+        // so an empty declaration is rejected. This proves the Ok below is the
+        // leave-play correction, not a vacuous pass.
+        assert!(
+            validate_blockers_for_player(&state, PlayerId(1), &[]).is_err(),
+            "reach-guard: a MustBlock creature is forced to block an in-play attacker"
+        );
+
+        // CR 506.4: the sole attacker leaves the battlefield but stays listed in
+        // combat.attackers until pruned — it is no longer an attacker.
+        state.objects.get_mut(&attacker).unwrap().zone = crate::types::zones::Zone::Graveyard;
+
+        assert!(
+            validate_blockers_for_player(&state, PlayerId(1), &[]).is_ok(),
+            "CR 506.4: a MustBlock creature is not forced to block an attacker that left play"
+        );
+    }
+
+    #[test]
+    fn blocker_constraints_surface_cant_block() {
+        // CR 509.1b: a creature with a functioning CantBlock static is excluded
+        // from `valid_block_targets` and surfaces as `CantBlock` via the else-branch
+        // of `blocker_constraints_for_player`. REVERT-FAIL: removing that else-branch
+        // emission drops the entry, so the first assertion (`Some(CantBlock)`) fails.
+        //
+        // Positive reach-guard: a sibling vanilla blocker in the SAME combat IS a
+        // valid blocker and carries NO constraint — proving the CantBlock entry is
+        // the static specifically, not a blanket helper behavior, and that the
+        // negative (`!contains_key`) below is non-vacuous.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Ground Bear", 2, 2);
+        let restricted = create_creature(&mut state, PlayerId(1), "Pacified Wall", 0, 4);
+        let normal = create_creature(&mut state, PlayerId(1), "Free Guard", 2, 2);
+        state
+            .objects
+            .get_mut(&restricted)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBlock));
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        let valid = get_valid_block_targets_for_player(&state, PlayerId(1));
+        // Reach-guard: the CantBlock creature is excluded from valid blockers while
+        // the vanilla sibling is a legal blocker — so the else-branch is reached for
+        // `restricted` and NOT for `normal`.
+        assert!(
+            !valid.contains_key(&restricted),
+            "reach-guard: the CantBlock creature is excluded from valid blockers"
+        );
+        assert!(
+            valid.contains_key(&normal),
+            "reach-guard: the vanilla sibling is a valid blocker"
+        );
+
+        let constraints = blocker_constraints_for_player(&state, PlayerId(1), &valid);
+        assert_eq!(
+            constraints.get(&restricted),
+            Some(&CombatRequirement::CantBlock),
+            "a creature with a CantBlock static surfaces as CantBlock"
+        );
+        assert!(
+            !constraints.contains_key(&normal),
+            "a vanilla blocker with no restriction carries no constraint"
+        );
+    }
+
+    #[test]
+    fn attacker_constraints_surface_must_attack_specific_player() {
+        // CR 508.1d: a creature under a `MustAttackPlayer{P2}` static surfaces as
+        // `MustAttack { players: [P2] }` (non-empty) — the specific-player list
+        // intersected with the currently attackable players. REVERT-FAIL: dropping
+        // the `must_attack_players_for_creature` intersection would emit an empty
+        // `players` list, failing the `vec![P2]` assertion.
+        //
+        // Differential: a sibling creature under a generic `MustAttack` static in
+        // the SAME state surfaces as `MustAttack { players: [] }`, proving the
+        // non-empty list is the specific-player requirement, not a constant.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+
+        let lured = create_creature(&mut state, PlayerId(0), "Lured Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&lured)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustAttackPlayer {
+                player: PlayerId(2),
+            }));
+
+        let generic = create_creature(&mut state, PlayerId(0), "Frenzied Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&generic)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustAttack));
+
+        let valid_attacker_ids = get_valid_attacker_ids(&state);
+        // Reach-guard: both creatures are eligible attackers, so the MustAttack
+        // branch of the display helper is reached for each.
+        assert!(
+            valid_attacker_ids.contains(&lured) && valid_attacker_ids.contains(&generic),
+            "reach-guard: both creatures are eligible attackers"
+        );
+
+        let constraints = attacker_constraints_for_active_player(&state, &valid_attacker_ids);
+        assert_eq!(
+            constraints.get(&lured),
+            Some(&CombatRequirement::MustAttack {
+                players: vec![PlayerId(2)]
+            }),
+            "MustAttackPlayer{{P2}} surfaces the specific attackable player"
+        );
+        assert_eq!(
+            constraints.get(&generic),
+            Some(&CombatRequirement::MustAttack { players: vec![] }),
+            "a generic must-attack creature surfaces an empty specific-player list"
+        );
+    }
+
     // ---- MustAttack enforcement tests ----
 
     fn setup_combat_phase() -> GameState {
@@ -9354,6 +10292,29 @@ mod tests {
         // Goaded creature controlled by the non-active player.
         let goaded = create_goaded_creature(&mut state, PlayerId(1), PlayerId(0));
         assert!(!creature_must_attack(&state, goaded));
+    }
+
+    #[test]
+    fn creature_must_attack_false_when_goaded_but_cant_attack() {
+        // CR 508.1c beats CR 508.1d: a goaded creature under a functioning
+        // "can't attack" restriction is NOT forced to attack. Before B1 the
+        // must-attack predicate returned true for this creature (goad alone).
+        let mut state = setup_combat_phase();
+        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+        state
+            .objects
+            .get_mut(&goaded)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantAttackOrBlock));
+        assert!(
+            creature_cant_attack(&state, goaded),
+            "sanity: the CantAttackOrBlock restriction must be functioning"
+        );
+        assert!(
+            !creature_must_attack(&state, goaded),
+            "a goaded creature that can't attack is not forced to attack"
+        );
     }
 
     #[test]
@@ -10271,6 +11232,196 @@ mod tests {
         assert_eq!(total.mana_value(), 4);
         assert_eq!(per_creature.len(), 1);
         assert_eq!(per_creature[0].1.mana_value(), 4);
+    }
+
+    /// CR 113.6 + CR 113.6b: a `CantAttack` tax static whose `active_zones`
+    /// restricts it to a non-battlefield zone must NOT tax attacks while its
+    /// source sits on the battlefield. This mirrors the zone-of-function gate
+    /// already enforced by every other statics gather via
+    /// `functioning_abilities::static_functions_in_zone`. No shipping card
+    /// currently builds a zone-restricted `CantAttack`, but the tax loop must
+    /// agree with the single-authority predicate the moment one does.
+    ///
+    /// The positive reach-guard (an identically-shaped static with EMPTY
+    /// `active_zones`, i.e. battlefield-only, on the same kind of battlefield
+    /// object) proves the negative assertion is not vacuous: the only
+    /// difference between the two branches is `active_zones`, and the empty
+    /// case still taxes.
+    #[test]
+    fn compute_attack_tax_respects_zone_of_function_active_zones() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        // Builds a Ghostly-Prison-shaped `CantAttack` tax static on a
+        // battlefield enchantment controlled by `controller`, restricted to the
+        // given `active_zones` (empty = battlefield-only default).
+        let build_prison =
+            |state: &mut GameState, controller: PlayerId, active_zones: Vec<Zone>| -> ObjectId {
+                let id = create_object(
+                    state,
+                    CardId(state.next_object_id),
+                    controller,
+                    "Zone-Gated Prison".to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let mut def = StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::Opponent),
+                        properties: vec![],
+                    }))
+                    .active_zones(active_zones)
+                    .description("Zone-Gated Prison".to_string());
+                def.condition = Some(StaticCondition::UnlessPay {
+                    cost: ManaCost::generic(2),
+                    scaling: UnlessPayScaling::PerAffectedCreature,
+                    defended: Some(crate::types::triggers::AttackTargetFilter::Player),
+                });
+                obj.static_definitions.push(def);
+                id
+            };
+
+        // Negative: source is on the battlefield but the static only functions
+        // from the graveyard — no tax may be produced.
+        {
+            let mut state = setup();
+            let _prison = build_prison(&mut state, PlayerId(1), vec![Zone::Graveyard]);
+            let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+            assert!(
+                compute_attack_tax(&state, &attacks).is_none(),
+                "a CantAttack static restricted to the graveyard must not tax \
+                 attacks from the battlefield"
+            );
+        }
+
+        // Positive reach-guard: identical static with empty `active_zones`
+        // (battlefield-only default) on a battlefield source still taxes.
+        {
+            let mut state = setup();
+            let _prison = build_prison(&mut state, PlayerId(1), vec![]);
+            let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+            let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+            let (total, per_creature) = compute_attack_tax(&state, &attacks)
+                .expect("battlefield-only CantAttack tax must apply from the battlefield");
+            assert_eq!(total.mana_value(), 2);
+            assert_eq!(per_creature.len(), 1);
+            assert_eq!(per_creature[0].1.mana_value(), 2);
+        }
+    }
+
+    /// CR 113.6b + CR 311.2/312.2: a non-emblem command-zone source (an active
+    /// plane or scheme) that opts into the command zone via
+    /// `active_zones.contains(Command)` must still contribute its `CantAttack`
+    /// tax — mirroring the admission rule
+    /// `functioning_abilities::object_sources_static_from_command_zone`
+    /// already applies for every other command-zone-consuming gather. An
+    /// emblem-only outer gate would silently drop this source before its
+    /// static ever reaches the per-def zone check, even though the static
+    /// itself explicitly opts in.
+    #[test]
+    fn compute_attack_tax_admits_non_emblem_command_zone_opt_in_source() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let card_id = CardId(state.next_object_id);
+        let plane = create_object(
+            &mut state,
+            card_id,
+            PlayerId(1),
+            "Command-Opted Prison".to_string(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&plane).unwrap();
+        // Explicitly NOT an emblem — the opt-in comes from `active_zones`
+        // alone, per CR 113.6b Eminence-style command-zone functioning.
+        obj.is_emblem = false;
+        let mut def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .active_zones(vec![Zone::Command])
+            .description("Command-Opted Prison".to_string());
+        def.condition = Some(StaticCondition::UnlessPay {
+            cost: ManaCost::generic(2),
+            scaling: UnlessPayScaling::PerAffectedCreature,
+            defended: Some(crate::types::triggers::AttackTargetFilter::Player),
+        });
+        obj.static_definitions.push(def);
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+        let (total, per_creature) = compute_attack_tax(&state, &attacks).expect(
+            "a non-emblem command-zone source with an explicit Command opt-in \
+             must still tax attacks",
+        );
+        assert_eq!(total.mana_value(), 2);
+        assert_eq!(per_creature.len(), 1);
+        assert_eq!(per_creature[0].1.mana_value(), 2);
+    }
+
+    /// Negative sibling: the same non-emblem command-zone source, but WITHOUT
+    /// the `active_zones` opt-in (battlefield-default empty list) — must NOT
+    /// tax, since CR 114.4 excludes non-emblem command-zone objects by
+    /// default. Proves the positive test above isn't vacuously admitting
+    /// every command-zone object regardless of opt-in.
+    #[test]
+    fn compute_attack_tax_excludes_non_emblem_command_zone_source_without_opt_in() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let card_id = CardId(state.next_object_id);
+        let plane = create_object(
+            &mut state,
+            card_id,
+            PlayerId(1),
+            "Unopted Command Prison".to_string(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&plane).unwrap();
+        obj.is_emblem = false;
+        let mut def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .description("Unopted Command Prison".to_string());
+        def.condition = Some(StaticCondition::UnlessPay {
+            cost: ManaCost::generic(2),
+            scaling: UnlessPayScaling::PerAffectedCreature,
+            defended: Some(crate::types::triggers::AttackTargetFilter::Player),
+        });
+        obj.static_definitions.push(def);
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+        assert!(
+            compute_attack_tax(&state, &attacks).is_none(),
+            "a non-emblem command-zone source without an explicit Command \
+             opt-in must not tax attacks"
+        );
     }
 
     #[test]

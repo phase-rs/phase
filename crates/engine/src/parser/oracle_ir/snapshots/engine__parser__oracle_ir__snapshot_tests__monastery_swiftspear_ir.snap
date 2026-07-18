@@ -5,41 +5,77 @@ expression: "&ir"
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "unknown",
-          "description": "Haste"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": null,
-        "description": "Haste",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 5,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Haste"
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Haste"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Haste",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     },
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "unknown",
-          "description": "Prowess"
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": null,
-        "description": "Prowess",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 6,
+          "end_byte": 86,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Prowess (Whenever you cast a noncreature spell, ~ gets +1/+1 until end of turn.)"
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Prowess"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Prowess",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     }
   ],

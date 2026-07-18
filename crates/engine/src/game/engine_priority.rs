@@ -12,8 +12,16 @@ pub(super) fn run_post_action_pipeline(
     events: &mut Vec<GameEvent>,
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
+    skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
-    run_post_action_pipeline_from(state, events, 0, default_wf, skip_trigger_scan)
+    run_post_action_pipeline_from(
+        state,
+        events,
+        0,
+        default_wf,
+        skip_trigger_scan,
+        skip_deferred_trigger_drain,
+    )
 }
 
 /// Run the normal post-action settlement while scanning only events produced at
@@ -25,6 +33,7 @@ pub(crate) fn run_post_action_pipeline_from(
     event_start: usize,
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
+    skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
@@ -132,6 +141,32 @@ pub(crate) fn run_post_action_pipeline_from(
         }
     }
 
+    // CR 610.3a: "until this leaves" returns are immediate one-shot effects.
+    // A resolving effect can remove the source and then pause for a later
+    // SearchChoice (Boseiju) or other resolution choice. Process the return
+    // before that choice is surfaced; otherwise the source's ZoneChanged
+    // event is lost with this pipeline pass and its exiled card never returns.
+    let events_before_exile_returns = events.len();
+    check_exile_returns(state, events);
+    if events.len() > events_before_exile_returns {
+        let exile_return_events: Vec<_> = events[events_before_exile_returns..].to_vec();
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            triggers::collect_triggers_into_deferred(state, &exile_return_events);
+        } else {
+            let outcome = triggers::process_triggers_with_delayed_events(
+                state,
+                &exile_return_events,
+                &exile_return_events,
+                events,
+            );
+            if let Some(waiting_for) = outcome.prompt {
+                state.waiting_for = waiting_for.clone();
+                state.consumed_before_priority_trigger_events.clear();
+                return Ok(waiting_for);
+            }
+        }
+    }
+
     // CR 603.3b: Triggered abilities parked while a resolution choice was open
     // (e.g. "whenever you scry, ..." deferred above so it couldn't clobber the
     // choice's WaitingFor) go on the stack once resolution truly settles. The
@@ -141,6 +176,7 @@ pub(crate) fn run_post_action_pipeline_from(
     // handled by the check below.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
+        && !skip_deferred_trigger_drain
     {
         if let Some(wf) = triggers::drain_deferred_trigger_queue(state, events) {
             state.waiting_for = wf;
@@ -163,8 +199,6 @@ pub(crate) fn run_post_action_pipeline_from(
             return Ok(state.waiting_for.clone());
         }
     }
-
-    check_exile_returns(state, events);
 
     consumed_trigger_events.extend(std::mem::take(
         &mut state.consumed_before_priority_trigger_events,
@@ -194,22 +228,38 @@ pub(crate) fn run_post_action_pipeline_from(
     }
 
     if state.stack.len() > stack_before {
-        return Ok(flush_pending_priority_intercepts(
+        let outgoing = flush_pending_priority_intercepts(
             state,
             WaitingFor::Priority {
                 player: state.active_player,
             },
-        ));
+            default_wf.acting_player(),
+        );
+        return Ok(outgoing);
     }
 
     super::layers::flush_layers(state);
 
-    Ok(flush_pending_priority_intercepts(state, default_wf.clone()))
+    Ok(flush_pending_priority_intercepts(
+        state,
+        default_wf.clone(),
+        default_wf.acting_player(),
+    ))
 }
 
-fn flush_pending_priority_intercepts(state: &mut GameState, outgoing: WaitingFor) -> WaitingFor {
+fn flush_pending_priority_intercepts(
+    state: &mut GameState,
+    outgoing: WaitingFor,
+    semantic_caster: Option<crate::types::player::PlayerId>,
+) -> WaitingFor {
     let outgoing = super::effects::paradigm::flush_pending_remaining_offers(state, outgoing);
-    flush_pending_miracle_offer(state, outgoing)
+    let outgoing = flush_pending_miracle_offer(state, outgoing);
+    match semantic_caster {
+        Some(caster) => {
+            super::precast_copy_shortcut::maybe_offer_after_cast_triggers(state, caster, outgoing)
+        }
+        None => outgoing,
+    }
 }
 
 /// CR 702.94a + CR 603.11: Intercept a `WaitingFor::Priority` and replace it

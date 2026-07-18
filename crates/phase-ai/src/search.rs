@@ -11,7 +11,8 @@ use engine::types::ability::{
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastOfferKind, CostResume, GameState, ManaChoice, ManaChoicePrompt, WaitingFor,
+    CastOfferKind, CompanionDeclaration, CostResume, GameState, ManaChoice, ManaChoicePrompt,
+    MulliganDecisionPhase, PendingMulliganAction, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -139,11 +140,6 @@ pub fn choose_action_with_session(
         {
             return None;
         }
-        WaitingFor::MulliganBottomCards { pending }
-            if !pending.iter().any(|e| e.player == ai_player) =>
-        {
-            return None;
-        }
         WaitingFor::OpeningHandBottomCards { pending, .. }
             if !pending.iter().any(|e| e.player == ai_player) =>
         {
@@ -204,6 +200,23 @@ pub fn choose_action_with_session(
         }
     }
 
+    // CR 608.2d (hidden information): the guesser has no legal access to the
+    // committed value / chosen-card identity — it is genuinely a guess. The AI
+    // MUST NOT score guess branches via `score_candidates` (eval/search runs on
+    // the UNFILTERED GameState and would read the secret, always guessing
+    // correctly). Uniform random is rules-fair and the information-theoretic
+    // optimum, and uses the caller-owned RNG so seeded measurement runs remain
+    // reproducible. Parallel to the TributeChoice / SearchChoice / ChooseManaColor
+    // pre-emptions above.
+    if let WaitingFor::OpponentGuess { ref options, .. } = state.waiting_for {
+        use rand::seq::IndexedRandom;
+        if let Some(choice) = options.choose(rng) {
+            return Some(GameAction::ChooseOption {
+                choice: choice.clone(),
+            });
+        }
+    }
+
     if let Some(action) = fast_priority_action(state, ai_player) {
         return Some(action);
     }
@@ -214,9 +227,9 @@ pub fn choose_action_with_session(
         // so the game never deadlocks waiting for the AI.
         return fallback_action(state);
     }
-    if config.execution_mode.is_measurement() {
-        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
-    }
+    // Issue #4878: total order before softmax so equal scores never depend on
+    // HashSet/HashMap allocation order.
+    scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
     let chosen = if scored.len() == 1 {
         Some(scored[0].0.clone())
     } else {
@@ -238,6 +251,7 @@ fn random_card_predicate_guess(
         choice_type,
         options,
         source_id: Some(source_id),
+        persist_player: _,
     } = &state.waiting_for
     else {
         return None;
@@ -741,6 +755,62 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Priority is the only state where PassPriority is valid.
         WaitingFor::Priority { .. } => Some(GameAction::PassPriority),
 
+        // CR 732.2a: if tactical scoring found no choice, take the conservative legal escape
+        // from the engine's candidate set. The AI is never forced to propose a shortcut.
+        WaitingFor::LoopShortcut { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::DeclineShortcut)),
+        // CR 732.2a: the finite pre-cast family has the same conservative
+        // proposer fallback as the legacy shortcut. Ask the engine for its
+        // issued decline capability instead of fabricating a route response.
+        WaitingFor::PrecastCopyShortcutOffer { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::PrecastCopyShortcut {
+                        response: engine::types::actions::PrecastCopyShortcutResponse::Decline,
+                        ..
+                    }
+                )
+            }),
+        // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
+        // `smart_shortcut_response` — Shorten when the polled player has a meaningful
+        // way to break the loop, else Accept.
+        WaitingFor::RespondToShortcut { player, .. } => Some(GameAction::RespondToShortcut {
+            response: engine::ai_support::smart_shortcut_response(state, *player),
+        }),
+        // CR 732.2b/c: use the same meaningful-priority probe as the legacy
+        // responder. A finite route can only shorten at its engine-issued
+        // breakpoint, so translate a legacy-style Shorten to that concrete
+        // capability; if none is issued, accepting is the only legal fallback.
+        WaitingFor::RespondToPrecastCopyShortcut {
+            player,
+            epoch,
+            breakpoint_ids,
+            ..
+        } => {
+            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
+                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
+                    breakpoint_ids.first().map_or(
+                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
+                        |breakpoint_id| {
+                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
+                                breakpoint_id: *breakpoint_id,
+                            }
+                        },
+                    )
+                }
+                engine::analysis::loop_check::ShortcutResponse::Accept => {
+                    engine::types::actions::PrecastCopyShortcutResponse::Accept
+                }
+            };
+            Some(GameAction::PrecastCopyShortcut {
+                epoch: *epoch,
+                response,
+            })
+        }
+
         // Combat declarations: an empty declaration is NOT always legal —
         // CR 508.1d / CR 701.15b require goaded / "attacks if able" creatures
         // to be declared. Delegate to the engine's `legal_actions`, which runs
@@ -773,6 +843,23 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // CR 508.1g + CR 702.154a: Enlist is optional; the conservative
         // fallback declines while normal search evaluates legal tap choices.
         WaitingFor::EnlistChoice { .. } => Some(GameAction::ChooseEnlist { target: None }),
+
+        // CR 701.42b / CR 508.4: deadlock-safe deterministic fallbacks. Normal
+        // public `choose_action` evaluates these legal actions through search;
+        // when time expires, preserve the engine's canonical physical-pair
+        // authority before falling back to the first legal live-name choice.
+        WaitingFor::MeldPairChoice { choices, .. } => choices
+            .iter()
+            .find(|choice| engine::game::meld::is_canonical_physical_meld_pair(state, choice))
+            .or_else(|| choices.first())
+            .map(|choice| GameAction::ChooseMeldPair {
+                source_id: choice.source_id,
+                partner_id: choice.partner_id,
+            }),
+        WaitingFor::MeldAttackTargetChoice { valid_targets, .. } => valid_targets
+            .first()
+            .copied()
+            .map(|target| GameAction::ChooseEntryAttackTarget { target }),
 
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is
@@ -876,6 +963,25 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
+        // CR 901.15: Planar deck arrange requires exactly `keep_on_top` cards
+        // on top — pick the highest-valued looked-at planes.
+        WaitingFor::ArrangePlanarDeckTopChoice {
+            cards, keep_on_top, ..
+        } => {
+            let mut scored: Vec<_> = cards
+                .iter()
+                .map(|&id| (id, evaluate_card_value(state, id)))
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            Some(GameAction::SelectCards {
+                cards: scored
+                    .iter()
+                    .take(*keep_on_top)
+                    .map(|(id, _)| *id)
+                    .collect(),
+            })
+        }
+
         // Multi-target selection: zero targets is valid when min == 0.
         WaitingFor::MultiTargetSelection { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
@@ -949,26 +1055,43 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             order: (0..triggers.len()).collect(),
         }),
 
-        // CR 103.5 + 103.5b: Mulligan default = keep, unless the AI has a
-        // Serum Powder in hand, in which case use it first (auto-heuristic —
-        // see `first_serum_powder_in_hand`).
+        // CR 103.5 + 103.5b: Mulligan default. In `Declare`, keep unless the AI
+        // has a Serum Powder in hand, in which case use it first (auto-heuristic
+        // — see `first_serum_powder_in_hand`). In `BottomCards`, submit an empty
+        // `SelectCards` as the deadlock-safe escape hatch.
         WaitingFor::MulliganDecision { pending, .. } => {
             let entry = pending.first()?;
-            Some(match first_serum_powder_in_hand(state, entry.player) {
-                Some(object_id) => GameAction::MulliganDecision {
-                    choice: MulliganChoice::UseSerumPowder { object_id },
-                },
-                None => GameAction::MulliganDecision {
-                    choice: MulliganChoice::Keep,
-                },
-            })
+            match &entry.phase {
+                MulliganDecisionPhase::Declare => {
+                    Some(match first_serum_powder_in_hand(state, entry.player) {
+                        Some(object_id) => GameAction::MulliganDecision {
+                            choice: MulliganChoice::UseSerumPowder { object_id },
+                        },
+                        None => GameAction::MulliganDecision {
+                            choice: MulliganChoice::Keep,
+                        },
+                    })
+                }
+                MulliganDecisionPhase::BottomCards { .. } => {
+                    Some(GameAction::SelectCards { cards: Vec::new() })
+                }
+            }
         }
-        WaitingFor::MulliganBottomCards { .. } | WaitingFor::OpeningHandBottomCards { .. } => {
+        WaitingFor::OpeningHandBottomCards { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
         // Named choice: pick the first option if available.
         WaitingFor::NamedChoice { options, .. } => {
+            options.first().map(|choice| GameAction::ChooseOption {
+                choice: choice.clone(),
+            })
+        }
+
+        // CR 608.2d: opponent-guess fallback — any printed guess is legal. The
+        // hidden-info determinization in `choose_action` already pre-empts this
+        // for the live AI; this is only the deadlock-safe escape hatch.
+        WaitingFor::OpponentGuess { options, .. } => {
             options.first().map(|choice| GameAction::ChooseOption {
                 choice: choice.clone(),
             })
@@ -1002,6 +1125,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Choose-one-of branch: pick the first branch.
         WaitingFor::ChooseOneOfBranch { .. } => Some(GameAction::ChooseBranch { index: 0 }),
+        // CR 119.7 + CR 119.8: option 0 is always the identity ("keep current totals")
+        // assignment and always legal — a safe deterministic fallback.
+        WaitingFor::RedistributeLifeTotals { .. } => {
+            Some(GameAction::SubmitLifeRedistribution { option_index: 0 })
+        }
 
         // Discover/Cascade: decline.
         WaitingFor::CastOffer {
@@ -1075,6 +1203,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
             .first()
             .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
+
+        // CR 601.2c + CR 115.1: "of an opponent's choice" announcer — the
+        // controller picks which opponent announces; fall back to the first.
+        WaitingFor::ChooseAnnouncingOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseAnnouncingOpponent { opponent }),
 
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::CastOffer {
@@ -1374,9 +1508,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         }),
 
         // Companion reveal: decline.
-        WaitingFor::CompanionReveal { .. } => {
-            Some(GameAction::DeclareCompanion { card_index: None })
-        }
+        WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {
+            choice: CompanionDeclaration::Decline,
+        }),
 
         // Explore choice: pick the first choosable creature.
         WaitingFor::ExploreChoice { choosable, .. } => {
@@ -1501,10 +1635,23 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseKeptCreatures { kept })
         }
 
+        // CR 101.4 + CR 701.21a: choose a valid exact-size baseline subset.
+        WaitingFor::KeepExactPermanentsChoice {
+            eligible,
+            required_count,
+            ..
+        } => {
+            let kept = eligible.iter().copied().take(*required_count).collect();
+            Some(GameAction::ChooseKeptPermanents { kept })
+        }
+
         // CR 700.3: Pile-separation fallbacks — empty pile-A partition (every
         // object goes to derived pile B) is the simplest legal partition, and
         // pile A is the default choice for the chooser. Tactical AI override
         // happens through legal_actions; this is the safety net.
+        WaitingFor::SeparatePilesChooseOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opp| GameAction::ChoosePileOpponent { opponent: opp }),
         WaitingFor::SeparatePilesPartition { .. } => {
             Some(GameAction::SubmitPilePartition { pile_a: Vec::new() })
         }
@@ -1671,7 +1818,10 @@ pub fn score_candidates_with_session(
         let scored = score_candidates_core(&sampled, ai_player, config, session, Some(deadline));
         merge_into(&mut acc, &mut positions, &mut counts, scored);
     }
-    finalize_mean(acc, counts, k as usize)
+    let mut out = finalize_mean(acc, counts, k as usize);
+    // Issue #4878: canonical order after K-sample merge (measurement + play).
+    out.sort_by(|a, b| a.0.cmp_stable(&b.0));
+    out
 }
 
 /// Core scoring for a single (possibly determinized) state. Byte-identical to
@@ -1796,9 +1946,8 @@ fn score_candidates_core(
             _ => true,
         })
         .collect();
-    if config.execution_mode.is_measurement() {
-        gated.sort_by_cached_key(|g| action_order_key(&g.candidate.action));
-    }
+    // Issue #4878: deterministic candidate order before scoring / search.
+    gated.sort_by(|a, b| a.candidate.action.cmp_stable(&b.candidate.action));
 
     let actions: Vec<GameAction> = gated
         .iter()
@@ -1876,10 +2025,7 @@ fn score_candidates_core(
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| {
-                    action_order_key(&a.candidate.action)
-                        .cmp(&action_order_key(&b.candidate.action))
-                })
+                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
         });
         ranked.truncate(branching);
 
@@ -1956,9 +2102,7 @@ fn score_candidates_core(
         }
 
         let mut out = best_scored;
-        if config.execution_mode.is_measurement() {
-            out.sort_by_cached_key(|(action, _)| action_order_key(action));
-        }
+        out.sort_by(|a, b| a.0.cmp_stable(&b.0));
         out
     } else {
         // Heuristic-only scoring
@@ -1975,15 +2119,9 @@ fn score_candidates_core(
                 (candidate.candidate.action, score)
             })
             .collect();
-        if config.execution_mode.is_measurement() {
-            out.sort_by_cached_key(|(action, _)| action_order_key(action));
-        }
+        out.sort_by(|a, b| a.0.cmp_stable(&b.0));
         out
     }
-}
-
-fn action_order_key(action: &GameAction) -> String {
-    format!("{action:?}")
 }
 
 /// Build AI context from the player's deck pool, or a neutral default if unavailable.
@@ -2106,48 +2244,65 @@ pub(crate) fn deterministic_choice(
             .get(&player)
             .unwrap_or(&default_features);
         let plan = ctx.session.plan.get(&player).unwrap_or(&default_plan);
-        let hand: Vec<_> = state.players[player.0 as usize]
-            .hand
-            .iter()
-            .copied()
-            .collect();
-        let turn_order = crate::policies::mulligan::turn_order_for(state, player);
-        let decision = crate::policies::mulligan::MulliganRegistry::default().evaluate_hand(
-            &hand,
-            state,
-            features,
-            plan,
-            turn_order,
-            mulligan_count,
-        );
-        // CR 103.5b + Serum Powder Oracle text: if the AI would mulligan and
-        // it has a Serum Powder in hand, prefer the Powder — it's a strictly
-        // better action than a mulligan (no bottoming, no mulligan count
-        // increment). When the registry says keep, take the keep — don't burn
-        // a Powder on a hand the policies already endorsed.
-        let choice = if decision.keep {
-            MulliganChoice::Keep
-        } else if let Some(object_id) = first_serum_powder_in_hand(state, player) {
-            MulliganChoice::UseSerumPowder { object_id }
-        } else {
-            MulliganChoice::Mulligan
-        };
-        return Some(GameAction::MulliganDecision { choice });
+
+        match &entry.phase {
+            // CR 103.5: This player's entry owes bottoms at their own declare
+            // point. Bottom the N least valuable cards, using the cached plan
+            // to preserve expected land count and structurally detected payoff
+            // cards. The earmarked Serum Powder (if `then` is `UseSerumPowder`)
+            // is excluded from the selection pool — it's committed to its own
+            // activation.
+            MulliganDecisionPhase::BottomCards { count, then } => {
+                let exclude = match then {
+                    PendingMulliganAction::UseSerumPowder { object_id } => Some(*object_id),
+                    PendingMulliganAction::Keep => None,
+                };
+                let to_bottom = plan_aware_bottom_cards(
+                    state,
+                    player,
+                    *count as usize,
+                    features,
+                    plan,
+                    exclude,
+                );
+                return Some(GameAction::SelectCards { cards: to_bottom });
+            }
+            MulliganDecisionPhase::Declare => {
+                let hand: Vec<_> = state.players[player.0 as usize]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect();
+                let turn_order = crate::policies::mulligan::turn_order_for(state, player);
+                let decision = crate::policies::mulligan::MulliganRegistry::default()
+                    .evaluate_hand(&hand, state, features, plan, turn_order, mulligan_count);
+                // CR 103.5b + Serum Powder Oracle text: if the AI would mulligan
+                // and it has a Serum Powder in hand, prefer the Powder — it's a
+                // strictly better action than a mulligan (no mulligan count
+                // increment). When the registry says keep, take the keep — don't
+                // burn a Powder on a hand the policies already endorsed.
+                let choice = if decision.keep {
+                    MulliganChoice::Keep
+                } else if let Some(object_id) = first_serum_powder_in_hand(state, player) {
+                    MulliganChoice::UseSerumPowder { object_id }
+                } else {
+                    MulliganChoice::Mulligan
+                };
+                return Some(GameAction::MulliganDecision { choice });
+            }
+        }
     }
 
-    // CR 103.5 + TL:R 906.6: Mulligan / opening-hand bottoming. Each pending
-    // player owes a distinct `count`, and several players can be pending at
-    // once (simultaneous bottoming). The AI controller must scope to
-    // `ai_player`'s own entry: the shared candidate pool mixes every pending
-    // player's combos, and `validate_candidates` simulates them as the first
-    // authorized submitter (seat order) rather than `ai_player` — so without
-    // this branch the AI can pick a selection sized for a different player and
-    // the engine rejects it ("Expected N cards to bottom, got M"). Bottom the
-    // N least valuable cards, using the cached plan to preserve expected land
-    // count and structurally detected payoff cards.
-    if let WaitingFor::MulliganBottomCards { pending }
-    | WaitingFor::OpeningHandBottomCards { pending, .. } = &state.waiting_for
-    {
+    // TL:R 906.6: Opening-hand forced bottoming. Each pending player owes a
+    // distinct `count`, and several players can be pending at once. The AI
+    // controller must scope to `ai_player`'s own entry: the shared candidate
+    // pool mixes every pending player's combos, and `validate_candidates`
+    // simulates them as the first authorized submitter (seat order) rather than
+    // `ai_player` — so without this branch the AI can pick a selection sized for
+    // a different player and the engine rejects it. Bottom the N least valuable
+    // cards, using the cached plan to preserve expected land count and
+    // structurally detected payoff cards.
+    if let WaitingFor::OpeningHandBottomCards { pending, .. } = &state.waiting_for {
         let entry = pending.iter().find(|e| e.player == ai_player)?;
         let count = entry.count as usize;
         let owned_ctx;
@@ -2166,7 +2321,7 @@ pub(crate) fn deterministic_choice(
             .get(&ai_player)
             .unwrap_or(&default_features);
         let plan = ctx.session.plan.get(&ai_player).unwrap_or(&default_plan);
-        let to_bottom = plan_aware_bottom_cards(state, ai_player, count, features, plan);
+        let to_bottom = plan_aware_bottom_cards(state, ai_player, count, features, plan, None);
         return Some(GameAction::SelectCards { cards: to_bottom });
     }
 
@@ -2216,6 +2371,23 @@ pub(crate) fn deterministic_choice(
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let keep_count = scored.len() / 2;
         let top_cards: Vec<_> = scored.iter().take(keep_count).map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: top_cards });
+    }
+
+    if let WaitingFor::ArrangePlanarDeckTopChoice {
+        cards, keep_on_top, ..
+    } = &state.waiting_for
+    {
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_cards: Vec<_> = scored
+            .iter()
+            .take(*keep_on_top)
+            .map(|(id, _)| *id)
+            .collect();
         return Some(GameAction::SelectCards { cards: top_cards });
     }
 
@@ -2311,7 +2483,7 @@ pub(crate) fn deterministic_choice(
         }
     }
 
-    // CR 700.2: ChooseFromZoneChoice — select cards from a tracked set.
+    // CR 608.2d: ChooseFromZoneChoice — select cards from a tracked set.
     if let WaitingFor::ChooseFromZoneChoice {
         cards,
         count,
@@ -2683,7 +2855,11 @@ fn plan_aware_bottom_cards(
     count: usize,
     features: &DeckFeatures,
     plan: &PlanSnapshot,
+    exclude: Option<ObjectId>,
 ) -> Vec<ObjectId> {
+    // The full hand — including any earmarked-Serum-Powder `exclude` object —
+    // drives the hand-size and land-target arithmetic, because the earmarked
+    // card is still physically in hand until its effect runs.
     let hand: Vec<_> = state.players[player.0 as usize]
         .hand
         .iter()
@@ -2703,7 +2879,8 @@ fn plan_aware_bottom_cards(
     let mut surplus_lands = land_count.saturating_sub(land_target);
     let mut scored = Vec::with_capacity(hand.len());
 
-    for id in hand {
+    // Only the candidate selection POOL excludes the earmarked object.
+    for id in hand.into_iter().filter(|id| Some(*id) != exclude) {
         let score = state.objects.get(&id).map_or(0.0, |obj| {
             if is_plan_payoff_name(features, &obj.name) {
                 25.0 + evaluate_card_value(state, id)
@@ -2807,10 +2984,15 @@ pub fn softmax_select_pairs(
 
     let total: f64 = weights.iter().sum();
     if total <= 0.0 || !total.is_finite() {
-        // Fallback: pick the highest-scored action
+        // Fallback: pick the highest-scored action (tie-break by action key —
+        // issue #4878).
         return scored
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp_stable(&b.0))
+            })
             .map(|s| s.0.clone());
     }
 
@@ -2862,6 +3044,232 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    #[test]
+    fn loop_shortcut_fallback_selects_legal_decline() {
+        let mut state = make_state();
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: PlayerId(0),
+            predicted_winner: Some(PlayerId(1)),
+            certificate: engine::analysis::loop_check::LoopCertificate {
+                unbounded: vec![],
+                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            },
+            schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
+        };
+
+        assert_eq!(
+            fallback_action(&state),
+            Some(GameAction::DeclineShortcut),
+            "the no-score fallback must select DeclineShortcut from engine legal actions"
+        );
+    }
+
+    /// CR 701.42b: the public search path prefers the physical canonical meld
+    /// pair over an earlier live-name impostor that would exile both selected
+    /// objects without producing the result permanent. This proves the choice
+    /// is handled by ordinary simulation/evaluation, not bespoke name scoring.
+    #[test]
+    fn choose_action_simulates_meld_pair_outcomes() {
+        use engine::types::ability::{PermanentEntryMode, PtValue};
+        use engine::types::card::CardFace;
+        use engine::types::game_state::{MeldPairRecord, MeldSelection};
+
+        const SOURCE: &str = "AI Meld Source";
+        const PARTNER: &str = "AI Meld Partner";
+        const RESULT: &str = "AI Meld Result";
+
+        let mut state = make_state();
+        let impostor_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let impostor_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        for (id, live_name, base_name) in [
+            (impostor_source, SOURCE, "Printed Impostor Source"),
+            (impostor_partner, PARTNER, "Printed Impostor Partner"),
+            (real_source, SOURCE, SOURCE),
+            (real_partner, PARTNER, PARTNER),
+        ] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.name = live_name.to_string();
+            object.base_name = base_name.to_string();
+        }
+        let mut result = CardFace {
+            name: RESULT.to_string(),
+            power: Some(PtValue::Fixed(9)),
+            toughness: Some(PtValue::Fixed(9)),
+            ..CardFace::default()
+        };
+        result.card_type.core_types.push(CoreType::Creature);
+        Arc::make_mut(&mut state.card_face_registry).insert(RESULT.to_lowercase(), result);
+        Arc::make_mut(&mut state.meld_pair_registry).insert(
+            format!("{}\0{}", SOURCE.to_lowercase(), PARTNER.to_lowercase()),
+            MeldPairRecord {
+                source: SOURCE.to_string(),
+                partner: PARTNER.to_string(),
+                result: RESULT.to_string(),
+            },
+        );
+        let selection = |source_id, partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller: PlayerId(0),
+            expected_source: SOURCE.to_string(),
+            expected_partner: PARTNER.to_string(),
+            result: RESULT.to_string(),
+            entry: PermanentEntryMode::Normal,
+        };
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: vec![
+                selection(impostor_source, impostor_partner),
+                selection(real_source, real_partner),
+            ],
+        };
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(9);
+        let mut rng = SmallRng::seed_from_u64(9);
+        assert_eq!(
+            choose_action(&state, PlayerId(0), &config, &mut rng),
+            Some(GameAction::ChooseMeldPair {
+                source_id: real_source,
+                partner_id: real_partner,
+            })
+        );
+    }
+
+    /// CR 701.42b: even when search cannot run, the deterministic fallback
+    /// prefers the canonical physical pair over an earlier live-name impostor.
+    #[test]
+    fn meld_pair_fallback_prefers_canonical_pair_in_hostile_order() {
+        use engine::types::ability::PermanentEntryMode;
+        use engine::types::game_state::{MeldPairRecord, MeldSelection};
+
+        const SOURCE: &str = "Fallback Meld Source";
+        const PARTNER: &str = "Fallback Meld Partner";
+        const RESULT: &str = "Fallback Meld Result";
+
+        let mut state = make_state();
+        let impostor_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let impostor_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_source = add_creature(&mut state, PlayerId(0), 3, 3);
+        let real_partner = add_creature(&mut state, PlayerId(0), 3, 3);
+        for (id, base_name) in [
+            (impostor_source, "Printed Impostor Source"),
+            (impostor_partner, "Printed Impostor Partner"),
+            (real_source, SOURCE),
+            (real_partner, PARTNER),
+        ] {
+            state.objects.get_mut(&id).unwrap().base_name = base_name.to_string();
+        }
+        Arc::make_mut(&mut state.meld_pair_registry).insert(
+            format!("{}\0{}", SOURCE.to_lowercase(), PARTNER.to_lowercase()),
+            MeldPairRecord {
+                source: SOURCE.to_string(),
+                partner: PARTNER.to_string(),
+                result: RESULT.to_string(),
+            },
+        );
+        let selection = |source_id, partner_id| MeldSelection {
+            source_id,
+            partner_id,
+            controller: PlayerId(0),
+            expected_source: SOURCE.to_string(),
+            expected_partner: PARTNER.to_string(),
+            result: RESULT.to_string(),
+            entry: PermanentEntryMode::Normal,
+        };
+        state.waiting_for = WaitingFor::MeldPairChoice {
+            player: PlayerId(0),
+            choices: vec![
+                selection(impostor_source, impostor_partner),
+                selection(real_source, real_partner),
+            ],
+        };
+
+        assert_eq!(
+            fallback_action(&state),
+            Some(GameAction::ChooseMeldPair {
+                source_id: real_source,
+                partner_id: real_partner,
+            })
+        );
+    }
+
+    /// Issue #4878: the degenerate-weight fallback in `softmax_select_pairs`
+    /// must break score ties with `GameAction::cmp_stable`, not fall back to the
+    /// input-list order. Here every score is `-inf` (weights become `NaN`, so
+    /// the fallback branch runs). `PassPriority` (discriminant 0) sorts before
+    /// `PlayLand` (discriminant 1), so the `cmp_stable`-maximum is the `PlayLand`
+    /// listed FIRST. Removing the `then_with(cmp_stable)` tie-break makes
+    /// `max_by` return the last equally-maximal element (`PassPriority`) instead,
+    /// flipping this assertion.
+    #[test]
+    fn softmax_fallback_tiebreak_is_cmp_stable_deterministic() {
+        let scored = vec![
+            (
+                GameAction::PlayLand {
+                    object_id: ObjectId(5),
+                    card_id: CardId(1),
+                },
+                f64::NEG_INFINITY,
+            ),
+            (GameAction::PassPriority, f64::NEG_INFINITY),
+        ];
+        // Reach guard: `PlayLand` must outrank `PassPriority` under cmp_stable so
+        // the expected pick is the first (non-last) element, distinguishing the
+        // tie-break from `max_by`'s last-on-ties behavior.
+        assert_eq!(
+            scored[0].0.cmp_stable(&scored[1].0),
+            std::cmp::Ordering::Greater,
+            "precondition: PlayLand > PassPriority under cmp_stable"
+        );
+
+        let mut rng = SmallRng::seed_from_u64(0);
+        let chosen = softmax_select_pairs(&scored, 1.0, &mut rng)
+            .expect("non-empty scored list must select an action");
+        assert_eq!(
+            chosen, scored[0].0,
+            "degenerate-weight fallback must pick the cmp_stable-max action"
+        );
+    }
+
+    /// Issue #4878: the candidate sort was previously gated behind measurement
+    /// mode. A *normal* (non-measurement) config must still emit candidates in
+    /// the canonical `cmp_stable` order. Reverting the always-on
+    /// `out.sort_by(cmp_stable)` returns candidates in score / enumeration order,
+    /// which is not `cmp_stable`-sorted for this set, flipping the assertion.
+    #[test]
+    fn score_candidates_non_measurement_order_is_cmp_stable_canonical() {
+        let mut state = make_state();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellA", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellB", 2);
+        add_spell_to_hand(&mut state, PlayerId(0), "SpellC", 3);
+        // Normal config: NOT measurement mode (the guard this test protects only
+        // ever sorted under measurement before #4878).
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+
+        let scored = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let actions: Vec<GameAction> = scored.iter().map(|(a, _)| a.clone()).collect();
+        // Reach guard: several distinct candidates (3 castable spells + Pass)
+        // so the order is non-trivial.
+        assert!(
+            actions.len() >= 3,
+            "expected several scored candidates, got {}",
+            actions.len()
+        );
+
+        let mut expected = actions.clone();
+        expected.sort_by(|a, b| a.cmp_stable(b));
+        assert_eq!(
+            actions, expected,
+            "non-measurement scoring must emit cmp_stable-canonical order"
+        );
     }
 
     fn add_creature(
@@ -2942,6 +3350,52 @@ mod tests {
                 ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
             },
         }
+    }
+    fn add_cycler_to_hand(
+        state: &mut GameState,
+        core_type: CoreType,
+        keyword: engine::types::keywords::Keyword,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            "Cycler".to_string(),
+            Zone::Hand,
+        );
+        let ability = engine::database::synthesis::cycling_ability_for_keyword(&keyword)
+            .expect("cycling keyword must synthesize an activated ability");
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(core_type);
+        object.base_card_types = object.card_types.clone();
+        Arc::make_mut(&mut object.abilities).push(ability);
+        id
+    }
+
+    fn add_plain_land(state: &mut GameState, zone: Zone) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, PlayerId(0), "Land".to_string(), zone);
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.base_card_types = object.card_types.clone();
+        id
+    }
+
+    fn priority_on_opponent_end_step(state: &mut GameState) {
+        state.phase = Phase::End;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+    }
+
+    fn action_score(scored: &[(GameAction, f64)], expected: &GameAction) -> f64 {
+        scored
+            .iter()
+            .find_map(|(action, score)| (action == expected).then_some(*score))
+            .unwrap_or_else(|| panic!("expected scored action {expected:?}"))
     }
 
     fn temporary_combat_modifier_effect() -> Effect {
@@ -3094,6 +3548,131 @@ mod tests {
             "with X >= 1 affordable the gate stands down; activation must score finite"
         );
     }
+    #[test]
+    fn ordinary_cycling_is_finite_and_scored_below_pass_at_root() {
+        // Production regression for the generic "always cycle" report. Cycling
+        // replaces itself, so without the registered patience policy its generic
+        // activation prior beats Pass at this otherwise-neutral end-step window.
+        let mut state = make_state();
+        priority_on_opponent_end_step(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+        create_object(
+            &mut state,
+            CardId(9_000),
+            PlayerId(0),
+            "Replacement".to_string(),
+            Zone::Library,
+        );
+        let cycler = add_cycler_to_hand(
+            &mut state,
+            CoreType::Creature,
+            engine::types::keywords::Keyword::Cycling(engine::types::keywords::CyclingCost::Mana(
+                engine::types::mana::ManaCost::generic(2),
+            )),
+        );
+        let activation = GameAction::ActivateAbility {
+            source_id: cycler,
+            ability_index: 0,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(1);
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        let cycling_score = action_score(&scored, &activation);
+        let pass_score = action_score(&scored, &GameAction::PassPriority);
+
+        assert!(
+            cycling_score.is_finite(),
+            "cycling must remain a finite option"
+        );
+        assert!(pass_score.is_finite(), "Pass must reach registered scoring");
+        assert!(
+            cycling_score < pass_score,
+            "registered cycling patience must make neutral cycling wait: cycle={cycling_score}, pass={pass_score}"
+        );
+    }
+
+    #[test]
+    fn printed_typecycling_is_not_rejected_by_self_cost_policy() {
+        // Nonland Typecycling searches rather than draws. SelfCostValue used to
+        // classify that SearchLibrary payoff as trivial and hard-reject the
+        // discard; the exact Cycling tag now delegates to finite patience.
+        let mut state = make_state();
+        priority_on_opponent_end_step(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        let cycler = add_cycler_to_hand(
+            &mut state,
+            CoreType::Creature,
+            engine::types::keywords::Keyword::Typecycling {
+                cost: engine::types::mana::ManaCost::generic(1),
+                subtype: "Wizard".to_string(),
+            },
+        );
+        let activation = GameAction::ActivateAbility {
+            source_id: cycler,
+            ability_index: 0,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(2);
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+
+        assert!(
+            action_score(&scored, &activation).is_finite(),
+            "printed Typecycling must reach finite registered scoring"
+        );
+    }
+
+    #[test]
+    fn sole_planned_cycling_land_waits_but_remains_finite() {
+        let mut state = make_state();
+        priority_on_opponent_end_step(&mut state);
+        for _ in 0..5 {
+            add_plain_land(&mut state, Zone::Battlefield);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+        create_object(
+            &mut state,
+            CardId(9_001),
+            PlayerId(0),
+            "Replacement".to_string(),
+            Zone::Library,
+        );
+        let cycler = add_cycler_to_hand(
+            &mut state,
+            CoreType::Land,
+            engine::types::keywords::Keyword::Cycling(engine::types::keywords::CyclingCost::Mana(
+                engine::types::mana::ManaCost::generic(2),
+            )),
+        );
+        let activation = GameAction::ActivateAbility {
+            source_id: cycler,
+            ability_index: 0,
+        };
+
+        let mut ai_session = AiSession::empty();
+        ai_session.plan.insert(
+            PlayerId(0),
+            PlanSnapshot {
+                expected_lands: [1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+                ..PlanSnapshot::default()
+            },
+        );
+        let session = Arc::new(ai_session);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(3);
+        let scored = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        let cycling_score = action_score(&scored, &activation);
+        let pass_score = action_score(&scored, &GameAction::PassPriority);
+
+        assert!(
+            cycling_score.is_finite(),
+            "needed-land patience is not a veto"
+        );
+        assert!(
+            cycling_score < pass_score,
+            "the sole next planned land must wait: cycle={cycling_score}, pass={pass_score}"
+        );
+    }
 
     #[test]
     fn determinization_candidate_set_stable_over_resampled_opponent_hand() {
@@ -3122,6 +3701,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(opp_creature)],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4145,6 +4725,7 @@ mod tests {
             .push(CoreType::Land);
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: vec![titan, land],
             count: 1,
             reveal: false,
@@ -4237,6 +4818,7 @@ mod tests {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4275,6 +4857,7 @@ mod tests {
             target_slots: vec![engine::types::game_state::TargetSelectionSlot {
                 legal_targets: Vec::new(),
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -4336,6 +4919,7 @@ mod tests {
                 m
             },
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
 
         for difficulty in [
@@ -4368,6 +4952,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![],
+            attacker_constraints: Default::default(),
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -4400,6 +4985,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![target],
+            attacker_constraints: Default::default(),
         };
 
         let action = validated_declare_attackers(&state, vec![(creature, target)]);
@@ -4461,6 +5047,7 @@ mod tests {
 
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards,
             count: 4,
             reveal: true,
@@ -4584,6 +5171,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let mut saw_land = false;
@@ -4625,6 +5213,7 @@ mod tests {
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
             source_id: Some(source_id),
+            persist_player: None,
         };
         let mut rng = SmallRng::seed_from_u64(1);
 
@@ -5045,17 +5634,26 @@ mod tests {
         let mut state = make_state();
         let vanilla = two_player_bottom_fixture(&mut state, 4, 3);
 
-        state.waiting_for = WaitingFor::MulliganBottomCards {
+        state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![
-                engine::types::game_state::MulliganBottomEntry {
+                engine::types::game_state::MulliganDecisionEntry {
                     player: PlayerId(0),
-                    count: 1,
+                    mulligan_count: 1,
+                    phase: MulliganDecisionPhase::BottomCards {
+                        count: 1,
+                        then: PendingMulliganAction::Keep,
+                    },
                 },
-                engine::types::game_state::MulliganBottomEntry {
+                engine::types::game_state::MulliganDecisionEntry {
                     player: PlayerId(1),
-                    count: 3,
+                    mulligan_count: 3,
+                    phase: MulliganDecisionPhase::BottomCards {
+                        count: 3,
+                        then: PendingMulliganAction::Keep,
+                    },
                 },
             ],
+            free_first_mulligan: false,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -5077,10 +5675,10 @@ mod tests {
         }
     }
 
-    /// The fix's `|`-combined arm must hold for `OpeningHandBottomCards`
-    /// (TL:R 906.6 Tiny Leaders forced bottom), not just `MulliganBottomCards`:
-    /// the AI must still scope to its own owed count when a second player is
-    /// pending. Guards against a future refactor silently dropping one variant.
+    /// The AI must scope to its own owed count for the `OpeningHandBottomCards`
+    /// path (TL:R 906.6 Tiny Leaders forced bottom), not just the folded
+    /// `MulliganDecision` bottoming, when a second player is pending. Guards
+    /// against a future refactor silently dropping one variant.
     #[test]
     fn ai_opening_hand_bottom_scopes_to_own_count_via_choose_action() {
         let mut state = make_state();
@@ -5130,8 +5728,14 @@ mod tests {
 
         let mut plan = PlanSnapshot::default();
         plan.expected_lands[2] = 3;
-        let bottoms =
-            plan_aware_bottom_cards(&state, PlayerId(1), 2, &DeckFeatures::default(), &plan);
+        let bottoms = plan_aware_bottom_cards(
+            &state,
+            PlayerId(1),
+            2,
+            &DeckFeatures::default(),
+            &plan,
+            None,
+        );
         let land_set: std::collections::HashSet<_> = lands.iter().copied().collect();
 
         assert_eq!(bottoms.len(), 2);
@@ -5156,8 +5760,14 @@ mod tests {
             ..Default::default()
         };
 
-        let bottoms =
-            plan_aware_bottom_cards(&state, PlayerId(1), 1, &features, &PlanSnapshot::default());
+        let bottoms = plan_aware_bottom_cards(
+            &state,
+            PlayerId(1),
+            1,
+            &features,
+            &PlanSnapshot::default(),
+            None,
+        );
 
         assert_ne!(bottoms, vec![payoff]);
         assert!(
@@ -5277,7 +5887,7 @@ mod tests {
     }
 
     fn sorted_by_action(mut scored: Vec<(GameAction, f64)>) -> Vec<(GameAction, f64)> {
-        scored.sort_by_cached_key(|(action, _)| action_order_key(action));
+        scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
         scored
     }
 

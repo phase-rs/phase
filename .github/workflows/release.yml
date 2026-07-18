@@ -13,6 +13,14 @@ on:
 permissions:
   contents: write
 
+# Serialize per release tag, so a tag-push and a recovery dispatch for the same tag can
+# never build and publish it concurrently. Both triggers resolve to the same group: a push
+# has no `tag` input and carries the tag in ref_name; a dispatch passes it explicitly.
+# Never cancel-in-progress — a half-cancelled release is what leaves a tag stuck.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   resolve-release-ref:
     name: Resolve Release Ref
@@ -686,7 +694,12 @@ jobs:
     name: Build Server (${{ matrix.os }})
     needs: [resolve-release-ref, tauri-preflight, build-wasm, build-server-binary]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 35
+    # The Windows leg ran ~33-34 min warm against a 35-min ceiling, so any cache
+    # miss tripped the timeout and cancelled the release (a timed-out job reports
+    # as `cancelled`, which fails the publish job's `build-server == success`
+    # gate). The server-release profile change cuts this well below 35; the
+    # headroom here guards against a cold cache or a slow runner.
+    timeout-minutes: 55
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
@@ -811,40 +824,12 @@ jobs:
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - name: Check macOS signing secrets
-        id: macos-signing
-        if: matrix.os == 'macos'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          missing=0
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!name:-}" ]; then
-              echo "::warning::Missing macOS signing secret: ${name}"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "::warning::Skipping macOS Tauri build — Apple signing secrets not configured. The .dmg requires notarization to avoid Gatekeeper errors."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-        shell: bash
-
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-        if: steps.macos-signing.outputs.skip != 'true'
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-tauri-${{ matrix.os }}
 
       - uses: taiki-e/install-action@v2
-        if: steps.macos-signing.outputs.skip != 'true'
         with:
           tool: wasm-bindgen-cli@0.2.121
 
@@ -855,7 +840,7 @@ jobs:
           echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
 
       - name: Install binaryen (macOS)
-        if: matrix.os == 'macos' && steps.macos-signing.outputs.skip != 'true'
+        if: matrix.os == 'macos'
         run: brew install binaryen
 
       - name: Install binaryen (Windows)
@@ -867,12 +852,10 @@ jobs:
         shell: pwsh
 
       - uses: pnpm/action-setup@v4
-        if: steps.macos-signing.outputs.skip != 'true'
         with:
           version: 9
 
       - uses: actions/setup-node@v4
-        if: steps.macos-signing.outputs.skip != 'true'
         with:
           node-version: 22
           cache: pnpm
@@ -886,21 +869,18 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
 
       - name: Download card data
-        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: card-data
           path: client/public
 
       - name: Download frontend data files
-        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: frontend-data-files
           path: client/public
 
       - name: Verify Tauri bundled data files
-        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           test -s client/public/card-data.json
           node - <<'NODE'
@@ -915,7 +895,6 @@ jobs:
         shell: bash
 
       - name: Build phase-server sidecar
-        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           if [ "${{ matrix.os }}" = "linux" ]; then
             cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
@@ -926,7 +905,7 @@ jobs:
         shell: bash
 
       - name: Place sidecar binary (Unix)
-        if: matrix.os != 'windows' && steps.macos-signing.outputs.skip != 'true'
+        if: matrix.os != 'windows'
         run: |
           if [ "${{ matrix.os }}" = "linux" ]; then
             cp target/x86_64-unknown-linux-musl/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
@@ -940,16 +919,59 @@ jobs:
         shell: pwsh
 
       - name: Build WASM for Tauri
-        if: steps.macos-signing.outputs.skip != 'true'
         run: ./scripts/build-wasm.sh release
         shell: bash
 
       - name: Install frontend dependencies
-        if: steps.macos-signing.outputs.skip != 'true'
         run: cd client && pnpm install --frozen-lockfile
 
+      # Tauri selects its macOS signing path by the PRESENCE of these vars, not their
+      # value (tauri-bundler macos/sign.rs keys off `var_os("APPLE_CERTIFICATE")`), and a
+      # workflow `env:` key backed by an undefined secret is still DEFINED -- as "". So
+      # listing the Apple secrets directly on the build step made Tauri take the
+      # import-certificate branch and run `security import` on an empty certificate,
+      # failing the whole macOS bundle. $GITHUB_ENV only defines what it is handed, so
+      # export the signing vars only when a certificate actually exists. With no
+      # certificate, ad-hoc self-sign: identity "-" is passed straight to `codesign -s -`
+      # and needs no keychain (tauri-macos-sign Keychain::with_signing_identity).
+      - name: Configure macOS signing
+        if: matrix.os == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            echo "No APPLE_CERTIFICATE secret; ad-hoc self-signing the macOS bundle."
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "APPLE_CERTIFICATE found; signing with the Developer ID certificate."
+          {
+            echo "APPLE_CERTIFICATE<<__EOF__"
+            echo "$APPLE_CERTIFICATE"
+            echo "__EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+          # Each of these is independently optional: an identity is inferred from the
+          # certificate when unset, and notarization is skipped unless all three Apple ID
+          # vars are present. Only forward the ones that actually carry a value, so an
+          # empty secret never reaches Tauri as a defined-but-blank variable.
+          for var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!var:-}" ]; then
+              echo "$var=${!var}" >> "$GITHUB_ENV"
+            fi
+          done
+
       - name: Build Tauri
-        if: steps.macos-signing.outputs.skip != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           # tauri-action runs beforeBuildCommand (pnpm build) as a child process,
@@ -967,17 +989,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The APPLE_* signing vars are deliberately absent here -- listing them would
+          # define them as "" whenever the secret is unset, which is the failure the
+          # "Configure macOS signing" step above exists to avoid. That step exports them
+          # through $GITHUB_ENV only when they carry a value.
         with:
           projectPath: client
 
       - name: Stage Tauri artifacts
-        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           mkdir -p staging
           find client/src-tauri/target/release/bundle \
@@ -990,7 +1009,6 @@ jobs:
         shell: bash
 
       - name: Upload Tauri artifact
-        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

@@ -1,0 +1,126 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Dig",
+        "player": {
+          "type": "Controller"
+        },
+        "count": {
+          "type": "Fixed",
+          "value": 4
+        },
+        "destination": "Hand",
+        "keep_count": 2,
+        "up_to": false,
+        "filter": {
+          "type": "Or",
+          "filters": [
+            {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            },
+            {
+              "type": "Typed",
+              "type_filters": [
+                "Land"
+              ],
+              "controller": null,
+              "properties": []
+            }
+          ]
+        },
+        "rest_destination": "Library",
+        "reveal": false,
+        "enter_tapped": false
+      },
+      "cost": null,
+      "sub_ability": null,
+      "else_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Dig",
+          "player": {
+            "type": "Controller"
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 4
+          },
+          "destination": "Hand",
+          "keep_count": 1,
+          "up_to": true,
+          "filter": {
+            "type": "Or",
+            "filters": [
+              {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": null,
+                "properties": []
+              },
+              {
+                "type": "Typed",
+                "type_filters": [
+                  "Land"
+                ],
+                "controller": null,
+                "properties": []
+              }
+            ]
+          },
+          "rest_destination": "Library",
+          "reveal": true,
+          "enter_tapped": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "duration": null,
+      "description": "Infusion — Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+      "target_prompt": null,
+      "condition": {
+        "type": "QuantityCheck",
+        "lhs": {
+          "type": "Ref",
+          "qty": {
+            "type": "LifeGainedThisTurn",
+            "player": {
+              "type": "Controller"
+            }
+          }
+        },
+        "comparator": "GE",
+        "rhs": {
+          "type": "Fixed",
+          "value": 1
+        }
+      },
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

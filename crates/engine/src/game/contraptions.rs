@@ -48,6 +48,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::AssembleContraptions,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -64,6 +65,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::AssembleContraptionsFromRollDifference,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -83,6 +85,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::AssembleContraptionOnSprocket,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -91,6 +94,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CrankContraptions,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -102,6 +106,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ReassembleContraption,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -114,6 +119,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ReassembleContraptionOnSprocket,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -160,7 +166,7 @@ pub fn perform_contraption_upkeep_turn_based_action(
         ObjectId(0),
         player,
     );
-    state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+    state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), state));
     state.waiting_for = WaitingFor::ChooseObjectsSelection {
         player,
         eligible,

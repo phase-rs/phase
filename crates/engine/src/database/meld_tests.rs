@@ -45,6 +45,7 @@ fn atomic(name: &str, type_line: &str, types: &[&str], text: &str) -> AtomicCard
             scryfall_id: Some(format!("{}-face", name.to_lowercase())),
         },
         foreign_data: Vec::new(),
+        related_cards: crate::database::mtgjson::SetRelatedCards::default(),
     }
 }
 
@@ -52,28 +53,34 @@ fn parse_face(card: &AtomicCard) -> CardFace {
     crate::database::synthesis::build_oracle_face(card, None)
 }
 
-/// Find an `Effect::Meld` anywhere in a face's abilities or trigger payloads.
+/// Find an `Effect::Meld` anywhere in a face's abilities or trigger payloads,
+/// descending sub/else/mode branches so a gated meld sub-ability (the optional-cost
+/// Vanille form, where the meld lives under an "If you do" `PayCost`) is found.
 fn find_meld(face: &CardFace) -> Option<(String, String, String)> {
-    for a in &face.abilities {
+    fn in_def(def: &crate::types::ability::AbilityDefinition) -> Option<(String, String, String)> {
         if let Effect::Meld {
             source,
             partner,
             result,
-        } = a.effect.as_ref()
+            ..
+        } = def.effect.as_ref()
         {
             return Some((source.clone(), partner.clone(), result.clone()));
         }
+        def.sub_ability
+            .as_deref()
+            .and_then(in_def)
+            .or_else(|| def.else_ability.as_deref().and_then(in_def))
+            .or_else(|| def.mode_abilities.iter().find_map(in_def))
+    }
+    for a in &face.abilities {
+        if let Some(m) = in_def(a) {
+            return Some(m);
+        }
     }
     for t in &face.triggers {
-        if let Some(exec) = &t.execute {
-            if let Effect::Meld {
-                source,
-                partner,
-                result,
-            } = exec.effect.as_ref()
-            {
-                return Some((source.clone(), partner.clone(), result.clone()));
-            }
+        if let Some(m) = t.execute.as_deref().and_then(in_def) {
+            return Some(m);
         }
     }
     None
@@ -88,15 +95,97 @@ const HANWEIR_TEXT: &str = "{T}: Add {R}.\n\
     {3}{R}{R}, {T}: If you both own and control this land and a creature named Hanweir Garrison, \
     exile them, then meld them into Hanweir, the Writhing Township. Activate only as a sorcery.";
 
+const URZA_TEXT: &str = "Artifact, instant, and sorcery spells you cast cost {1} less to cast.\n\
+    {7}: If you both own and control Urza, Lord Protector and an artifact named The Mightstone and \
+    Weakstone, exile them, then meld them into Urza, Planeswalker. Activate only as a sorcery.";
+
 /// The optional-cost triggered meld form (Vanille / Fang): the own/control gate
-/// is followed by a "you may pay {C}. If you do," additional cost before the
-/// meld sentinel. The bare-gate combinator does NOT model this cost, so the card
-/// must DEFER (no `Effect::Meld`) rather than swallow the "you may pay" clause.
+/// is followed by a reflexive "you may pay {C}. If you do," additional cost before
+/// the meld sentinel. The gate models this (CR 118.12): the own/control gate
+/// becomes the trigger's intervening-if, the "you may pay {3}{B}{G}" lowers to an
+/// optional `PayCost`, and the meld lands as a gated sub-ability — fully supported.
 const VANILLE_TEXT: &str = "When Vanille enters, mill two cards, then return a permanent card \
     from your graveyard to your hand.\n\
     At the beginning of your first main phase, if you both own and control Vanille and a \
     creature named Fang, Fearless l'Cie, you may pay {3}{B}{G}. If you do, exile them, then \
     meld them into Ragnarok, Divine Deliverance.";
+
+const MISHRA_TEXT: &str = "Whenever you attack, each opponent loses X life and you gain X life, \
+    where X is the number of attacking creatures. If Mishra, Claimed by Gix and a creature named \
+    Phyrexian Dragon Engine are attacking, and you both own and control them, exile them, then meld \
+    them into Mishra, Lost to Phyrexia. It enters tapped and attacking.";
+
+/// CR 608.2d + CR 701.42 + CR 508.4: Mishra's later conditional remains a
+/// resolution-time child after the unconditional life-swing, and carries the
+/// live attacking pair filters plus the typed tapped-and-attacking entry mode.
+#[test]
+fn mishra_later_conditional_meld_is_fully_lowered() {
+    use crate::types::ability::{
+        EntryAttackDestination, FilterProp, PermanentEntryMode, TargetFilter,
+    };
+
+    fn in_def(def: &crate::types::ability::AbilityDefinition) -> Option<&Effect> {
+        if matches!(def.effect.as_ref(), Effect::Meld { .. }) {
+            return Some(def.effect.as_ref());
+        }
+        def.sub_ability
+            .as_deref()
+            .and_then(in_def)
+            .or_else(|| def.else_ability.as_deref().and_then(in_def))
+            .or_else(|| def.mode_abilities.iter().find_map(in_def))
+    }
+
+    let mishra = parse_face(&atomic(
+        "Mishra, Claimed by Gix",
+        "Legendary Creature — Phyrexian Human Artificer",
+        &["Creature"],
+        MISHRA_TEXT,
+    ));
+    let meld = mishra
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find_map(in_def)
+        .expect("Mishra's attack trigger contains a meld child");
+    let Effect::Meld {
+        source,
+        partner,
+        result,
+        source_filter,
+        partner_filter,
+        entry,
+    } = meld
+    else {
+        unreachable!("finder only returns Meld")
+    };
+    assert_eq!(source, "Mishra, Claimed by Gix");
+    assert_eq!(partner, "Phyrexian Dragon Engine");
+    assert_eq!(result, "Mishra, Lost to Phyrexia");
+    assert!(matches!(
+        entry,
+        PermanentEntryMode::TappedAndAttacking {
+            destination: EntryAttackDestination::AnyDefender
+        }
+    ));
+    assert!(matches!(source_filter, TargetFilter::And { .. }));
+    let TargetFilter::Typed(partner_typed) = partner_filter else {
+        panic!("partner filter must be one typed live-filter")
+    };
+    assert!(partner_typed
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::Attacking { .. })));
+    assert!(partner_typed.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::Owned {
+            controller: crate::types::ability::ControllerRef::You
+        }
+    )));
+    assert!(
+        !crate::game::coverage::card_face_has_unimplemented_parts(&mishra),
+        "Mishra's attack trigger must not retain an Unimplemented residual"
+    );
+}
 
 /// CR 701.42a: the triggered instigator (Gisela, creature partner) parses to an
 /// `Effect::Meld { source, partner, result }` carrying the correct source,
@@ -104,12 +193,8 @@ const VANILLE_TEXT: &str = "When Vanille enters, mill two cards, then return a p
 /// intervening-if, so the bare residual "exile them, then meld them into R"
 /// parses cleanly.
 ///
-/// The activated / inline-gate form (Hanweir Battlements) is DEFERRED: its text
-/// leads with the inline "if you both own and control ..." gate, which the meld
-/// effect interception does not strip (stripping it would swallow the
-/// `Condition_If` — a coverage-honesty regression). It therefore yields NO
-/// `Effect::Meld` and remains Unimplemented until a real activated-ability
-/// condition node is added (follow-up).
+/// Activated inline gates lower through the same typed AbilityCondition seam as
+/// other resolution-time conditions; they are not intervening-if triggers.
 #[test]
 fn synthesize_or_parse_derives_self_partner_result() {
     let gisela = parse_face(&atomic(
@@ -129,33 +214,49 @@ fn synthesize_or_parse_derives_self_partner_result() {
         &["Land"],
         HANWEIR_TEXT,
     ));
-    assert!(
-        find_meld(&hanweir).is_none(),
-        "the activated/inline-gate form is deferred (must NOT swallow the inline \
-         Condition_If by emitting an Effect::Meld)"
-    );
+    let (source, partner, result) =
+        find_meld(&hanweir).expect("Hanweir's activated inline gate parses Meld");
+    assert_eq!(source, "Hanweir Battlements");
+    assert_eq!(partner, "Hanweir Garrison");
+    assert_eq!(result, "Hanweir, the Writhing Township");
+
+    let urza = parse_face(&atomic(
+        "Urza, Lord Protector",
+        "Legendary Creature — Human Artificer",
+        &["Creature"],
+        URZA_TEXT,
+    ));
+    let (source, partner, result) =
+        find_meld(&urza).expect("Urza's activated inline gate parses Meld");
+    assert_eq!(source, "Urza, Lord Protector");
+    assert_eq!(partner, "The Mightstone and Weakstone");
+    assert_eq!(result, "Urza, Planeswalker");
 }
 
-/// CR 701.42b: the optional-cost meld form (Vanille / Fang) carries a "you may
-/// pay {C}. If you do," additional cost between the own/control gate and the meld
-/// sentinel. The bare-gate combinator does NOT model that cost, so the gate must
-/// be REJECTED and the card must yield NO `Effect::Meld` — deferring to baseline
-/// parsing rather than silently swallowing the "you may pay" optional clause (a
-/// coverage-honesty regression). On the pre-guard code the gate `take_until`
-/// over-consumed the cost sentence and emitted an `Effect::Meld`, dropping the
-/// optional cost, so this assertion flips with the sentence-boundary guard.
+/// CR 118.12 + CR 701.42a: the optional-cost meld form (Vanille / Fang) carries a
+/// reflexive "you may pay {C}. If you do," additional cost between the own/control
+/// gate and the meld sentinel. The gate models it: the own/control gate hoists to
+/// the trigger's intervening-if, the "you may pay {3}{B}{G}" becomes an optional
+/// `PayCost`, and the meld lands as a gated sub-ability. The card is fully
+/// supported — the `Effect::Meld` carries the real pair names and NO Unimplemented
+/// survives. Reverting the `parse_meld_gate` rewrite (or the reflexive sub-clause
+/// dispatch) drops the meld back to Unimplemented, flipping both assertions.
 #[test]
-fn optional_cost_meld_form_defers() {
+fn optional_cost_meld_form_lowers_to_gated_meld() {
     let vanille = parse_face(&atomic(
         "Vanille, Cheerful l'Cie",
         "Legendary Creature — Human",
         &["Creature"],
         VANILLE_TEXT,
     ));
+    let (source, partner, result) =
+        find_meld(&vanille).expect("the optional-cost meld form lowers to a gated Effect::Meld");
+    assert_eq!(source, "Vanille, Cheerful l'Cie");
+    assert_eq!(partner, "Fang, Fearless l'Cie");
+    assert_eq!(result, "Ragnarok, Divine Deliverance");
     assert!(
-        find_meld(&vanille).is_none(),
-        "the optional-cost meld form must defer (must NOT swallow the 'you may pay' \
-         clause by emitting an Effect::Meld)"
+        !crate::game::coverage::card_face_has_unimplemented_parts(&vanille),
+        "Vanille flips to fully supported — the 'you may pay' clause is modeled, not swallowed"
     );
 }
 
@@ -206,10 +307,14 @@ fn triggered_vs_activated_shape() {
         HANWEIR_TEXT,
     ));
     assert!(
-        !hanweir.abilities.iter().any(|a| {
-            a.kind == AbilityKind::Activated && matches!(a.effect.as_ref(), Effect::Meld { .. })
+        hanweir.abilities.iter().any(|a| {
+            a.kind == AbilityKind::Activated
+                && (matches!(a.effect.as_ref(), Effect::Meld { .. })
+                    || a.sub_ability
+                        .as_ref()
+                        .is_some_and(|sub| matches!(sub.effect.as_ref(), Effect::Meld { .. })))
         }),
-        "the activated/inline-gate form is deferred — no activated Effect::Meld is emitted"
+        "the activated inline-gate form emits a conditioned Meld"
     );
 }
 

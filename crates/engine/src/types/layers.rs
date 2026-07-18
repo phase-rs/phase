@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ContinuousModification, StaticCondition, TargetFilter};
+use super::ability::{
+    ContinuousModification, StaticCondition, TargetFilter, TriggerDefinitionRef,
+    TriggerProducerOrigin,
+};
 use super::identifiers::ObjectId;
 use super::player::PlayerId;
 use super::statics::StaticMode;
@@ -99,6 +102,10 @@ impl ContinuousModification {
             | ContinuousModification::RemoveChosenKeyword
             | ContinuousModification::AddChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
+            // CR 613.1f: derived-cost cast-from-off-zone keyword grant is an
+            // ability-adding effect (Layer 6). This is what makes the off-zone
+            // collector's `effect.layer == Layer::Ability` filter retain it.
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
@@ -147,7 +154,7 @@ impl ContinuousModification {
             ),
             ContinuousModification::SetColor { .. }
             | ContinuousModification::AddColor { .. }
-            | ContinuousModification::AddChosenColor => Layer::Color,
+            | ContinuousModification::AddChosenColor { .. } => Layer::Color,
             // CR 613.4d: Switch P/T is applied in layer 7d.
             ContinuousModification::SwitchPowerToughness => Layer::SwitchPT,
             ContinuousModification::AssignDamageFromToughness
@@ -162,7 +169,8 @@ impl ContinuousModification {
             // CopyValues / SetName so downstream copy effects observe the
             // retained ability when reading copiable values.
             ContinuousModification::RetainPrintedTriggerFromSource { .. }
-            | ContinuousModification::RetainPrintedAbilityFromSource { .. } => Layer::Copy,
+            | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+            | ContinuousModification::RetainAllOtherAbilitiesFromSource => Layer::Copy,
         }
     }
 }
@@ -181,6 +189,16 @@ pub struct ActiveContinuousEffect {
     /// the canonical `TransientContinuousEffect` (which carries the snapshotted
     /// source name for spells whose source has left the stack).
     pub transient_id: Option<u64>,
+    /// Exact static or transient producer identity used when this effect
+    /// creates a recipient-local trigger occurrence. Synthetic effects that
+    /// cannot create trigger definitions leave this absent.
+    pub trigger_producer_origin: Option<TriggerProducerOrigin>,
+    /// For `GrantAllTriggeredAbilitiesOf`, the exact provider occurrence whose
+    /// triggered ability was expanded into this synthetic Layer-6 effect. This
+    /// is separate from the host producer origin: replacing an otherwise
+    /// byte-identical provider occurrence must retire the old recipient grant
+    /// and allocate a new one (CR 113.2c).
+    pub expanded_trigger_provider: Option<TriggerDefinitionRef>,
     /// Index of this modification within the originating source's
     /// `modifications` vector (`StaticDefinition.modifications` or
     /// `TransientContinuousEffect.modifications`). Used by source-attribution

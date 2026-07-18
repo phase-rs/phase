@@ -6,9 +6,9 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerFilter;
-use nom::character::complete::{alphanumeric1, digit1, one_of};
-use nom::combinator::{all_consuming, not, opt, peek, recognize};
-use nom::sequence::{delimited, pair};
+use nom::character::complete::{alphanumeric1, char, digit1, one_of};
+use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
+use nom::sequence::{delimited, pair, terminated};
 
 /// Lower a parsed rule-static predicate into the runtime static mode.
 pub(crate) fn lower_rule_static(
@@ -39,6 +39,8 @@ pub(crate) fn lower_rule_static(
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
                 exemption: ActivationExemption::None,
+                // CR 606.2: not kind-narrowed — blocks any activated ability.
+                kind: None,
             })
             .affected(affected)
             .description(description.to_string())
@@ -122,6 +124,10 @@ pub(crate) fn rule_static_affected_is_player_scope(affected: &TargetFilter) -> b
             | TargetFilter::OriginalController
             | TargetFilter::ScopedPlayer
             | TargetFilter::SpecificPlayer { .. }
+            // CR 607.2d / CR 607.2m (by analogy): "players who last chose <anchor>"
+            // is a player-scope subject for rule statics (Two Streams Facility's
+            // land-drop grant).
+            | TargetFilter::PlayerWhoChoseLabel { .. }
             | TargetFilter::SourceChosenPlayer
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
@@ -281,6 +287,28 @@ pub(crate) fn try_parse_core_type_descriptor(descriptor_lower: &str) -> Option<T
 /// to their parent type instead of defaulting everything to Creature.
 pub(crate) fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
     use crate::types::ability::TypeFilter;
+    // CR 205.4a + CR 205.3m: a compound "<supertype> <subtype>" descriptor
+    // ("Legendary Human", "Snow Elf") peels its leading supertype word into a
+    // `HasSupertype` property so the remainder resolves to the REAL subtype —
+    // rather than fabricating a zero-match `Subtype("Legendary Human")` (General's
+    // Enforcer "Legendary Humans you control", Kashi-Tribe Elite "Legendary
+    // Snakes you control").
+    if let Some((supertype, rest)) = split_leading_supertype(subtype) {
+        let mut filter = typed_filter_for_subtype(rest);
+        filter
+            .properties
+            .push(FilterProp::HasSupertype { value: supertype });
+        return filter;
+    }
+    // CR 110.5a + CR 506.3: a bare battlefield descriptor ("Untapped", "Tapped",
+    // "Attacking", …) used as a whole creature descriptor names a status the
+    // creature HAS (CR 110.5a: "status is not a characteristic") or a combat role
+    // it's in (CR 506.3), not a creature subtype — resolve it to a typed FilterProp
+    // instead of fabricating a zero-match `Subtype("Untapped")` (Builder's
+    // Blessing / Castle "Untapped creatures you control get +0/+2").
+    if let Some(filter) = bare_status_creature_filter(subtype) {
+        return filter;
+    }
     if let Some(core_type) = infer_core_type_for_subtype(subtype) {
         let type_filter = match core_type {
             crate::types::card_type::CoreType::Artifact => TypeFilter::Artifact,
@@ -292,6 +320,41 @@ pub(crate) fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
     } else {
         TypedFilter::creature().subtype(subtype.to_string())
     }
+}
+
+/// CR 110.5a + CR 506.3: Recognize a bare battlefield descriptor ("untapped",
+/// "tapped", "attacking", "blocking", "transformed", "suspected") used as a whole
+/// creature descriptor and resolve it to a creature filter carrying the matching
+/// `FilterProp`. These name a permanent's status (CR 110.5, "not a characteristic"
+/// per CR 110.5a) or its combat role (CR 506.3), never a creature subtype.
+/// Reuses the `parse_combat_status_prefix`
+/// allowlist (appending a space to satisfy its prefix-boundary rule, then
+/// requiring the whole word be consumed) so "Untapped creatures you control"
+/// filters on `FilterProp::Untapped` rather than a zero-match `Subtype("Untapped")`.
+fn bare_status_creature_filter(descriptor: &str) -> Option<TypedFilter> {
+    let with_space = format!("{} ", descriptor.to_lowercase());
+    let (prop, consumed) = crate::parser::oracle_target::parse_combat_status_prefix(&with_space)?;
+    (consumed == with_space.len()).then(|| TypedFilter::creature().properties(vec![prop]))
+}
+
+/// CR 205.4a: Peel a leading supertype word off a compound "<supertype>
+/// <subtype>" subject descriptor ("Legendary Human", "Snow Elf"), returning the
+/// supertype and the original-case remainder. Returns `None` for a bare
+/// supertype (no following subtype) or a descriptor with no leading supertype,
+/// so a plain subtype falls through to the subtype path unchanged.
+fn split_leading_supertype(descriptor: &str) -> Option<(Supertype, &str)> {
+    let lower = descriptor.to_lowercase();
+    // Consume the supertype word AND its separating space atomically: a bare
+    // supertype (no following subtype) fails the trailing ` ` and declines here,
+    // so a plain subtype falls through to the subtype path unchanged.
+    let (rest_lower, supertype) = terminated(
+        nom_target::parse_supertype_word,
+        tag::<_, _, OracleError<'_>>(" "),
+    )
+    .parse(&lower)
+    .ok()?;
+    let rest = descriptor[descriptor.len() - rest_lower.len()..].trim();
+    (!rest.is_empty()).then_some((supertype, rest))
 }
 
 pub(crate) fn is_capitalized_words(s: &str) -> bool {
@@ -1037,15 +1100,47 @@ pub(crate) fn remove_trailing_quote_connector(text: &mut String) {
 /// Returns AddDynamicPower + AddDynamicToughness modifications if found.
 /// CR 613.4c: Parse a variable P/T modifier pattern like "+x/+x", "-x/-0", "+0/-x".
 /// Returns (power_sign, power_is_x, toughness_sign, toughness_is_x) and remaining text.
+/// CR 613.4c: parse a variable P/T grant body "±P/±T" where each axis is either
+/// the variable X (dynamic — returned as `None`) or a fixed integer magnitude
+/// (returned as `Some(n)`, `n >= 0`). Accepting a fixed magnitude alongside X is
+/// what lets a MIXED grant like Cranial Ram "+X/+1" parse: previously each axis
+/// was restricted to `x`/`0`, so the fixed `+1` failed `digit`-matching and the
+/// whole pattern was rejected, dropping the equip static. The sign is returned
+/// separately per axis so the caller applies it uniformly to the dynamic
+/// One axis of a variable P/T grant: a fixed integer magnitude, the primary
+/// variable `x`, or the secondary variable `y`. `y` is meaningful only on a
+/// "+X/+Y" pump whose two axes bind to different quantities (Aspect of Wolf);
+/// the caller must accept a distinct `y` axis only when a paired
+/// "where X is <A>, and Y is <B>" binding was structurally parsed — otherwise
+/// the pattern is left unsupported (Snowblind's `-X/-Y`, whose X/Y are defined
+/// by later conditional sentences, must NOT synthesize a cost-X static).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PtAxisMag {
+    Fixed(i32),
+    VarX,
+    VarY,
+}
+
+/// Parsed axes of a variable P/T grant: `(p_sign, p_mag, t_sign, t_mag)`.
+type VariablePtAxes = (i32, PtAxisMag, i32, PtAxisMag);
+
 pub(crate) fn parse_variable_pt_pattern(
     input: &str,
-) -> nom::IResult<&str, (i32, bool, i32, bool), OracleError<'_>> {
-    let (rest, p_sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
-    let (rest, p_is_x) = alt((value(true, tag("x")), value(false, tag("0")))).parse(rest)?;
+) -> nom::IResult<&str, VariablePtAxes, OracleError<'_>> {
+    fn axis(input: &str) -> nom::IResult<&str, (i32, PtAxisMag), OracleError<'_>> {
+        let (rest, sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
+        let (rest, mag) = alt((
+            value(PtAxisMag::VarX, tag("x")),
+            value(PtAxisMag::VarY, tag("y")),
+            map_res(digit1, |d: &str| d.parse::<i32>().map(PtAxisMag::Fixed)),
+        ))
+        .parse(rest)?;
+        Ok((rest, (sign, mag)))
+    }
+    let (rest, (p_sign, p_mag)) = axis(input)?;
     let (rest, _) = tag("/").parse(rest)?;
-    let (rest, t_sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(rest)?;
-    let (rest, t_is_x) = alt((value(true, tag("x")), value(false, tag("0")))).parse(rest)?;
-    Ok((rest, (p_sign, p_is_x, t_sign, t_is_x)))
+    let (rest, (t_sign, t_mag)) = axis(rest)?;
+    Ok((rest, (p_sign, p_mag, t_sign, t_mag)))
 }
 
 pub(crate) fn parse_fixed_pt_in_text(lower: &str) -> Option<(i32, i32)> {
@@ -1463,11 +1558,37 @@ pub(crate) fn is_text_based_cost_prefix(lower_prefix: &str) -> bool {
 /// no boundary is present. Mirrors the keyword recognition in
 /// `extract_keyword_clause` but in the inverse direction (returns the
 /// pre-boundary span instead of the post-boundary one).
+/// Peel a trailing grant conjunct off a dynamic "for each <count>" clause so the
+/// count itself parses cleanly. Strips a trailing keyword grant (" and has
+/// flying") and — CR 205.1b — a trailing type-addition (" and is an Avatar in
+/// addition to its other types"). The peeled clause is recovered separately by
+/// the caller (`extract_keyword_clause` / `parse_additive_type_clause_modifications`
+/// over the full description); without this the count parse fails on the tail and
+/// the whole dynamic pump collapses to a fixed +N/+M (Avatar Destiny, Machinist's
+/// Arsenal). The type-addition arm is guarded on the "in addition to" marker so a
+/// genuine "<count> and is <...>" count phrase is never mis-truncated.
 pub(crate) fn strip_trailing_keyword_clause(clause: &str) -> &str {
     for needle in [" and gains ", " and gain ", " and has ", " and have "] {
         if let Some(pos) = clause.find(needle) {
             return &clause[..pos];
         }
+    }
+    // CR 205.1b: peel a trailing type-addition (" and is an Avatar in addition
+    // to its other types"), guarded on the "in addition to " tail so a genuine
+    // "<count> and is <...>" count phrase is never mis-truncated. Mirrors the
+    // type-addition grammar in `type_change.rs`: scan word boundaries for the
+    // "and is " verb boundary whose remainder reaches " in addition to ", and
+    // return the span preceding it. `clause` is already lowercase (caller passes
+    // `after_for_each.lower`), so tags match directly.
+    if let Some((before, _)) = nom_primitives::scan_split_at_phrase(clause, |i| {
+        (
+            tag::<_, _, OracleError<'_>>("and is "),
+            take_until::<_, _, OracleError<'_>>(" in addition to "),
+            tag::<_, _, OracleError<'_>>(" in addition to "),
+        )
+            .parse(i)
+    }) {
+        return before.trim_end();
     }
     clause
 }
@@ -1527,6 +1648,26 @@ pub(crate) fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
     None
 }
 
+/// Parse a leading P/T pair from Oracle text, returning values and remainder.
+///
+/// CR 613.4b: Layer 7b base power/toughness literals after "with base power
+/// and toughness". Composes the signed [`nom_primitives::parse_pt_modifier`]
+/// path and an unsigned `N/N` path so trailing clause text (e.g. "and loses
+/// all abilities") is left in the nom remainder for downstream parsers.
+pub(crate) fn parse_pt_mod_with_remainder(input: &str) -> OracleResult<'_, (i32, i32)> {
+    let input = input.trim();
+    alt((
+        nom_primitives::parse_pt_modifier,
+        (
+            nom_primitives::parse_number,
+            char('/'),
+            nom_primitives::parse_number,
+        )
+            .map(|(power, _, toughness)| (power as i32, toughness as i32)),
+    ))
+    .parse(input)
+}
+
 /// Parse a P/T modifier like "+2/+3", "-1/-1", "+3/-2" from Oracle text.
 ///
 /// Delegates to the shared nom P/T combinator for signed P/T values.
@@ -1534,6 +1675,20 @@ pub(crate) fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
 /// nom combinator doesn't handle (it requires explicit +/- signs).
 pub(crate) fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
     let text = text.trim();
+    // CR 613.4c: consume an optional "an additional " qualifier ("gets an
+    // additional +N/+M" — Taste for Mayhem, Divine Sacrament, Patriarch's Desire,
+    // Strange Augmentation). It marks a second Layer 7c grant stacked on the base
+    // modification but carries no P/T semantics of its own, so the underlying
+    // +N/+M is parsed identically (the enclosing gate is attached separately). The
+    // cheap "an" guard keeps the common no-qualifier call off the lowercase
+    // allocation path.
+    let text = match text.get(..2) {
+        Some(head) if head.eq_ignore_ascii_case("an") => {
+            let lower = text.to_lowercase();
+            nom_tag_lower(text, &lower, "an additional ").unwrap_or(text)
+        }
+        _ => text,
+    };
     // Try the nom combinator first — handles +N/+M, -N/-M, +N/-M patterns.
     if let Ok((_, (p, t))) = nom_primitives::parse_pt_modifier.parse(text) {
         return Some((p, t));
@@ -1612,7 +1767,7 @@ pub(crate) fn map_keyword(text: &str) -> Option<Keyword> {
         Ok(Keyword::Unknown(_)) => {
             // Fall through to Oracle-format parser for parameterized keywords
             // like "protection from red" that use spaces instead of colons.
-            super::oracle_keyword::parse_keyword_from_oracle(word)
+            super::oracle_keyword::parse_granted_keyword_fragment(word)
         }
         Ok(kw) => Some(kw),
         Err(_) => None, // Infallible, but satisfy the compiler

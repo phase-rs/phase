@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { WebSocketAdapter } from "../ws-adapter";
+import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
 import type { GameState } from "../types";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
@@ -43,7 +43,7 @@ const SERVER_HELLO = JSON.stringify({
   data: {
     server_version: "0.0.0-test",
     build_commit: "testhash",
-    protocol_version: 12,
+    protocol_version: PROTOCOL_VERSION,
     mode: "Full",
   },
 });
@@ -146,10 +146,14 @@ describe("WebSocketAdapter", () => {
         }),
       );
 
+      // The engine pair now travels as one seq-stamped `EngineSnapshot`.
       expect(listener).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "stateChanged",
-          state: mockState,
+          snapshot: expect.objectContaining({
+            state: expect.objectContaining(mockState),
+            seq: expect.any(Number),
+          }),
           events: mockEvents,
           logEntries: mockLogEntries,
         }),
@@ -274,6 +278,27 @@ describe("WebSocketAdapter", () => {
           data: { action: { type: "PassPriority" } },
         }),
       );
+    });
+
+    it("resolves a mana-payment preview only for its matching request", async () => {
+      ws.send.mockClear();
+      const preview = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+      expect(ws.send).toHaveBeenCalledWith(
+        JSON.stringify({
+          type: "PreviewManaPayment",
+          data: { request_id: 1, action: { type: "PassPriority" } },
+        }),
+      );
+
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ManaPaymentPreview",
+          data: { request_id: 1, source_ids: [12] },
+        }),
+      );
+
+      await expect(preview).resolves.toEqual([12]);
     });
 
     it("rejects submitAction and clears pending state when the socket throws on send", async () => {

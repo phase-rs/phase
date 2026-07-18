@@ -1,3 +1,4 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::layers::compute_current_copiable_values;
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
@@ -12,12 +13,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (duration, additional_modifications) = match &ability.effect {
+    let (recipient, duration, additional_modifications) = match &ability.effect {
         Effect::BecomeCopy {
+            recipient,
             duration,
             additional_modifications,
             ..
         } => (
+            recipient.clone(),
             duration
                 .clone()
                 .or(ability.duration.clone())
@@ -25,6 +28,7 @@ pub fn resolve(
             additional_modifications.clone(),
         ),
         _ => (
+            TargetFilter::SelfRef,
             ability.duration.clone().unwrap_or(Duration::Permanent),
             Vec::new(),
         ),
@@ -108,24 +112,72 @@ pub fn resolve(
     }];
     modifications.extend(layered_mods);
 
-    // CR 611.2b + CR 110.5d: the copy modification applies to the SOURCE
-    // (`affected = SpecificObject { source_id }`), but a "for as long as that
-    // creature remains tapped" duration (Zygon Infiltrator) tracks the copy
-    // *target*'s tap state — a third object distinct from both source and
-    // affected. The parser cannot know the target's runtime `ObjectId`; capture
-    // it here and bind it as the duration subject so the target-relative
-    // `IsTapped { scope: Target }` condition resolves against the copy target.
-    let tce_id = state.add_transient_continuous_effect(
-        ability.source_id,
-        ability.controller,
-        duration,
-        TargetFilter::SpecificObject {
-            id: ability.source_id,
-        },
-        modifications,
-        None,
-    );
-    state.set_transient_duration_subject(tce_id, target_id);
+    // CR 611.2c: resolve the locked recipient set at resolution time. `SelfRef`
+    // (every existing single-subject card) is the source `~`; a typed group
+    // filter ("Shards you control", Niko) or `ParentTarget` selects a mass set,
+    // snapshotted to concrete ids now — later-entering members never join.
+    match &recipient {
+        // Existing single-subject cards — EXACT prior behavior, byte-identical.
+        TargetFilter::SelfRef => {
+            let tce_id = state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration,
+                TargetFilter::SpecificObject {
+                    id: ability.source_id,
+                },
+                modifications,
+                None,
+            );
+            // CR 611.2b + CR 110.5d: the copy modification applies to the SOURCE
+            // (`affected = SpecificObject { source_id }`), but a "for as long as
+            // that creature remains tapped" duration (Zygon Infiltrator) tracks
+            // the copy *target*'s tap state — a third object distinct from both
+            // source and affected. Bind the donor as the duration subject so the
+            // target-relative `IsTapped { scope: Target }` condition resolves
+            // against the copy target.
+            state.set_transient_duration_subject(tce_id, target_id);
+        }
+        // CR 611.2c: mass recipient set. `ParentTarget` reads the inherited
+        // object target(s); a typed group filter resolves against the
+        // battlefield at resolution (Niko: "Shards you control").
+        _ => {
+            let recipient_ids: Vec<crate::types::identifiers::ObjectId> = match &recipient {
+                TargetFilter::ParentTarget => ability
+                    .targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect(),
+                _ => {
+                    let ctx = FilterContext::from_ability(ability);
+                    state
+                        .battlefield
+                        .iter()
+                        .copied()
+                        .filter(|id| matches_target_filter(state, *id, &recipient, &ctx))
+                        .collect()
+                }
+            };
+            for id in recipient_ids {
+                let tce_id = state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id },
+                    modifications.clone(),
+                    None,
+                );
+                state.set_transient_duration_subject(tce_id, id);
+            }
+            // ponytail: `resolution_mods` (enter-as-copy counter / mana-cost
+            // exceptions, applied below on `source_id`) apply only on the SelfRef
+            // path — no mass become-copy card class carries those exceptions
+            // (Niko has none), so they stay a no-op here.
+        }
+    }
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — flush the layer re-evaluation
@@ -210,6 +262,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -270,6 +323,7 @@ mod tests {
     ) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration,
                 mana_value_limit: None,
@@ -326,6 +380,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -392,6 +447,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: Some(Duration::UntilEndOfTurn),
                 mana_value_limit: None,
@@ -581,6 +637,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -648,6 +705,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -710,6 +768,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1106,6 +1165,7 @@ mod tests {
         // Resolve BecomeCopy with exactly the modifications the parser would emit.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1171,6 +1231,7 @@ mod tests {
         // Spider-Man copies Elesh Norn with SetName override.
         let spidey_ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1241,6 +1302,7 @@ mod tests {
         // current_trigger_index = 0.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1278,7 +1340,7 @@ mod tests {
             copied
                 .trigger_definitions
                 .iter_all()
-                .any(|t| matches!(t.mode, TriggerMode::Phase)),
+                .any(|t| matches!(t.definition.mode, TriggerMode::Phase)),
             "retained trigger must be the printed BeginCombat phase trigger"
         );
     }
@@ -1333,6 +1395,7 @@ mod tests {
         // exactly what the parser emits for "and she has this ability").
         let irma_to_bear = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1389,7 +1452,7 @@ mod tests {
             phantasmal_obj
                 .trigger_definitions
                 .iter_all()
-                .any(|t| matches!(t.mode, TriggerMode::Phase)),
+                .any(|t| matches!(t.definition.mode, TriggerMode::Phase)),
             "the propagated trigger must be the printed BoC phase trigger"
         );
     }
@@ -1422,6 +1485,7 @@ mod tests {
 
         let assassin_to_bear = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1440,7 +1504,7 @@ mod tests {
             state.objects[&assassin]
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t == &trigger),
+                .any(|t| t.definition == trigger),
             "the first copy must receive the granted trigger"
         );
 
@@ -1453,7 +1517,7 @@ mod tests {
             state.objects[&image]
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t == &trigger),
+                .any(|t| t.definition == trigger),
             "CR 707.9a: copy-effect granted triggers are copiable values"
         );
     }
@@ -1472,6 +1536,7 @@ mod tests {
         // Source has zero printed triggers — index 0 is out of bounds.
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1515,6 +1580,7 @@ mod tests {
         let copy_ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1527,6 +1593,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1550,6 +1617,79 @@ mod tests {
             copied.abilities.iter().any(|a| a == &copy_ability),
             "retained activated copy ability must survive Layer 1; got {:?}",
             copied.abilities
+        );
+    }
+
+    /// CR 707.9a (issue #6009): Sakashima of a Thousand Faces — "except it has
+    /// ~'s other abilities" retains the SOURCE's entire other ability surface
+    /// (static abilities + keywords here) on the copy, not just a single
+    /// indexed ability like `RetainPrintedAbilityFromSource`.
+    #[test]
+    fn become_copy_retains_all_other_abilities_from_source() {
+        use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, StaticDefinition, TypedFilter,
+        };
+        use crate::types::keywords::PartnerType;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Target Bear", 2, 2);
+
+        let source = create_creature(&mut state, 2, PlayerId(0), "Sakashima", 3, 1);
+        {
+            let src = state.objects.get_mut(&source).unwrap();
+            src.base_keywords = vec![Keyword::Partner(PartnerType::Generic)];
+            src.base_static_definitions = Arc::new(vec![StaticDefinition::new(
+                StaticMode::LegendRuleDoesntApply,
+            )
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))]);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::RetainAllOtherAbilitiesFromSource,
+                ],
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied = state.objects.get(&source).unwrap();
+        // The copy target's characteristics (name, P/T) are copied normally.
+        assert_eq!(copied.name, "Target Bear");
+        assert_eq!(copied.power, Some(2));
+        assert_eq!(copied.toughness, Some(2));
+        // Sakashima's own other abilities survive the copy.
+        assert!(
+            copied
+                .keywords
+                .contains(&Keyword::Partner(PartnerType::Generic)),
+            "Partner keyword must be retained; got {:?}",
+            copied.keywords
+        );
+        assert!(
+            check_static_ability(
+                &state,
+                StaticMode::LegendRuleDoesntApply,
+                &StaticCheckContext {
+                    target_id: Some(source),
+                    ..Default::default()
+                },
+            ),
+            "LegendRuleDoesntApply static must be retained on the copy"
         );
     }
 
@@ -1601,6 +1741,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: None,
                 mana_value_limit: None,
@@ -1622,11 +1763,15 @@ mod tests {
             "Myriad keyword should be granted via except clause"
         );
         let has_myriad_trigger = source_obj.trigger_definitions.iter_all().any(|trigger| {
-            matches!(trigger.mode, TriggerMode::Attacks)
-                && matches!(trigger.valid_card, Some(TargetFilter::SelfRef))
-                && trigger.execute.as_deref().is_some_and(|ability| {
-                    ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
-                })
+            matches!(trigger.definition.mode, TriggerMode::Attacks)
+                && matches!(trigger.definition.valid_card, Some(TargetFilter::SelfRef))
+                && trigger
+                    .definition
+                    .execute
+                    .as_deref()
+                    .is_some_and(|ability| {
+                        ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
+                    })
         });
         assert!(
             has_myriad_trigger,
@@ -1760,7 +1905,7 @@ mod tests {
             stage_obj
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t.mode == TriggerMode::StateCondition),
+                .any(|t| t.definition.mode == TriggerMode::StateCondition),
             "the copy must inherit Dark Depths' state-triggered ability (CR 603.8)"
         );
 
@@ -1958,6 +2103,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assimilation_aegis_copy_follows_attached_host_and_ends_on_detach() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::attach::{attach_to, unattach};
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::filter::{matches_target_filter, FilterContext};
+        use crate::parser::oracle_trigger::parse_trigger_line;
+
+        let mut state = GameState::new_two_player(17);
+        let donor = create_creature(&mut state, 1, PlayerId(1), "Exiled Beast", 5, 4);
+        let mut events = Vec::new();
+        let first_host = create_creature(&mut state, 2, PlayerId(0), "First Host", 1, 1);
+        let second_host = create_creature(&mut state, 3, PlayerId(0), "Second Host", 2, 2);
+        let equipment = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Assimilation Aegis".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aegis = state.objects.get_mut(&equipment).unwrap();
+            aegis.base_name = "Assimilation Aegis".to_string();
+            aegis.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Equipment".to_string()],
+            };
+            aegis.card_types = aegis.base_card_types.clone();
+        }
+
+        let etb = parse_trigger_line(
+            "When ~ enters, exile up to one target creature until ~ leaves the battlefield.",
+            "Assimilation Aegis",
+        );
+        let etb_ability = build_resolved_from_def_with_targets(
+            etb.execute.as_ref().expect("ETB must execute"),
+            equipment,
+            PlayerId(0),
+            vec![TargetRef::Object(donor)],
+        );
+        resolve_ability_chain(&mut state, &etb_ability, &mut events, 0).unwrap();
+        assert_eq!(state.objects[&donor].zone, Zone::Exile);
+        assert!(state
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == equipment && link.exiled_id == donor));
+
+        attach_to(&mut state, equipment, first_host);
+        let attached = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, for as long as ~ remains attached to it, that creature becomes a copy of a creature card exiled with ~.",
+            "Assimilation Aegis",
+        );
+        let execute = attached
+            .execute
+            .as_ref()
+            .expect("attached trigger must execute");
+        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
+            panic!("attached trigger must resolve BecomeCopy");
+        };
+        let context = FilterContext::from_source(&state, equipment);
+        assert!(matches_target_filter(&state, donor, target, &context));
+        assert!(!matches_target_filter(&state, first_host, target, &context));
+        let ability = build_resolved_from_def_with_targets(
+            execute,
+            equipment,
+            PlayerId(0),
+            vec![TargetRef::Object(donor)],
+        );
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&first_host].name, "Exiled Beast");
+        assert_eq!(state.objects[&first_host].power, Some(5));
+        assert_eq!(state.objects[&equipment].name, "Assimilation Aegis");
+        assert_eq!(state.objects[&equipment].power, None);
+
+        unattach(&mut state, equipment);
+        assert_eq!(state.objects[&first_host].name, "First Host");
+        assert_eq!(state.objects[&first_host].power, Some(1));
+
+        attach_to(&mut state, equipment, first_host);
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&first_host].name, "First Host");
+        assert_eq!(state.objects[&first_host].power, Some(1));
+
+        attach_to(&mut state, equipment, second_host);
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&first_host].name, "First Host");
+        assert_eq!(state.objects[&second_host].name, "Second Host");
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&first_host].name, "First Host");
+        assert_eq!(state.objects[&second_host].name, "Exiled Beast");
+        assert_eq!(state.objects[&second_host].power, Some(5));
+        assert_eq!(state.objects[&equipment].name, "Assimilation Aegis");
+    }
+
     /// CR 707.2: Keyword abilities such as Persist are copiable values. When
     /// the copied object carries the keyword but its printed trigger list was
     /// not populated (or was stripped before the copy snapshot), the copy must
@@ -1988,7 +2232,7 @@ mod tests {
                 .iter_all()
                 .any(|trigger| {
                     KeywordTriggerInstaller::trigger_matches_keyword_kind(
-                        trigger,
+                        &trigger.definition,
                         &Keyword::Persist,
                     )
                 }),

@@ -68,6 +68,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -87,7 +88,7 @@ pub fn resolve(
         if resolved.targets.is_empty() {
             resolved.targets.push(TargetRef::Object(source_id));
         }
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(resolved)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(resolved), state));
     } else {
         state.pending_continuation = None;
     }
@@ -103,6 +104,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Reveal,
         source_id,
+        subject: None,
     });
 
     Ok(())

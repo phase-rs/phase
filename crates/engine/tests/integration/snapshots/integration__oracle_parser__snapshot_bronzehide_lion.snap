@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
-assertion_line: 662
 expression: result
 ---
 {
@@ -119,10 +118,10 @@ expression: result
                         "effect_zone": null,
                         "active_zones": [],
                         "characteristic_defining": false,
-                        "description": "gain indestructible until end of turn,"
+                        "description": "gain indestructible"
                       }
                     ],
-                    "duration": null,
+                    "duration": "UntilEndOfTurn",
                     "target": null
                   },
                   "cost": {
@@ -137,8 +136,8 @@ expression: result
                     }
                   },
                   "sub_ability": null,
-                  "duration": null,
-                  "description": "{G}{W}: Enchanted creature gains indestructible until end of turn,",
+                  "duration": "UntilEndOfTurn",
+                  "description": "{G}{W}: Enchanted creature gains indestructible until end of turn",
                   "target_prompt": null,
                   "condition": null,
                   "optional_targeting": false,

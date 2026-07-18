@@ -17,6 +17,7 @@ use super::effects::change_zone::shuffle_library;
 use super::engine::EngineError;
 use super::game_object::AttachTarget;
 use super::zones;
+use crate::game::token_presets::TokenPtProvenance;
 
 pub fn apply_debug_action(
     state: &mut GameState,
@@ -80,6 +81,7 @@ pub fn apply_debug_action(
                 }
             }
 
+            // allow-raw-zone: debug-only object deletion forces state, not a CR zone-change event (CR 400.1).
             zones::remove_from_zone(state, object_id, zone, owner);
             state.objects.remove(&object_id);
             crate::game::layers::mark_layers_full(state);
@@ -111,17 +113,14 @@ pub fn apply_debug_action(
 
         DebugAction::DrawCards { player_id, count } => {
             validate_player(state, player_id)?;
-            // CR 614.6 + CR 614.11 + CR 704.3: route through the single-authority
-            // helper so post-replacement continuations (Jace WinTheGame,
-            // Abundance reveal-until) drain in the same step as the draw.
+            // CR 121.6b + CR 614.6 + CR 614.11 + CR 704.3: route through
+            // `resume_multi_draw` (not the raw `draw_through_replacement`) so a
+            // `count > 1` debug draw offers replacement independently per unit,
+            // matching the real draw pipeline, and post-replacement
+            // continuations (Jace WinTheGame, Abundance reveal-until) still
+            // drain in the same step.
             let event_start = events.len();
-            let result = super::effects::draw::draw_through_replacement(
-                state,
-                player_id,
-                count,
-                events,
-                super::effects::draw::apply_draw_after_replacement,
-            );
+            let result = super::effects::draw::start_draw_sequence(state, player_id, count, events);
             // CR 603.2: Mirror the normal draw pipeline — `PassPriority` /
             // `run_post_action_pipeline` scans CardDrawn events after the draw
             // step's turn-based action. Debug draw previously returned without
@@ -439,6 +438,8 @@ pub fn apply_debug_action(
                 DebugTokenRequest::Preset {
                     preset_id,
                     owner,
+                    power_override,
+                    toughness_override,
                     enter_with_counters,
                 } => {
                     let preset = crate::game::token_presets::known_token_preset_by_id(&preset_id)
@@ -447,9 +448,31 @@ pub fn apply_debug_action(
                             "Debug: unknown token preset id {preset_id}"
                         ))
                     })?;
+                    let mut characteristics = preset.body.clone();
+                    match (&preset.pt_provenance, power_override, toughness_override) {
+                        (
+                            TokenPtProvenance::SourceDefinedOrDynamic { .. },
+                            Some(power),
+                            Some(toughness),
+                        ) => {
+                            characteristics.power = Some(power);
+                            characteristics.toughness = Some(toughness);
+                        }
+                        (TokenPtProvenance::SourceDefinedOrDynamic { .. }, _, _) => {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Debug: token preset {preset_id} requires both power_override and toughness_override"
+                            )));
+                        }
+                        (TokenPtProvenance::FixedOrAbsent, None, None) => {}
+                        (TokenPtProvenance::FixedOrAbsent, _, _) => {
+                            return Err(EngineError::InvalidAction(format!(
+                                "Debug: token preset {preset_id} has fixed or absent P/T and does not accept overrides"
+                            )));
+                        }
+                    }
                     (
                         owner,
-                        preset.body.clone(),
+                        characteristics,
                         enter_with_counters,
                         preset.token_image_ref.clone(),
                     )
@@ -876,6 +899,8 @@ mod tests {
             request: DebugTokenRequest::Preset {
                 preset_id: sos_pest_preset_id.to_string(),
                 owner: PlayerId(0),
+                power_override: None,
+                toughness_override: None,
                 enter_with_counters: Vec::new(),
             },
             run_etb: true,
@@ -902,7 +927,7 @@ mod tests {
             "SOS Pest preset must install its attack-life trigger"
         );
         assert_eq!(
-            obj.trigger_definitions[0].mode,
+            obj.trigger_definitions[0].definition.mode,
             crate::types::triggers::TriggerMode::Attacks
         );
         assert!(
@@ -913,6 +938,76 @@ mod tests {
                 .any(|bucket| bucket.contains(&token_id)),
             "catalog trigger must be registered in the trigger index"
         );
+    }
+
+    #[test]
+    fn debug_create_source_defined_preset_requires_both_pt_overrides() {
+        let mut state = sandbox_state();
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: "1545ee29-d9c1-57ff-acae-431cfd6d60cf".to_string(),
+                owner: PlayerId(0),
+                power_override: Some(4),
+                toughness_override: None,
+                enter_with_counters: Vec::new(),
+            },
+            run_etb: true,
+        });
+
+        let err = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect_err("source-defined preset must reject incomplete P/T overrides");
+
+        assert!(format!("{err:?}").contains("requires both power_override and toughness_override"));
+    }
+
+    #[test]
+    fn debug_create_source_defined_preset_accepts_pt_overrides() {
+        let mut state = sandbox_state();
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: "1545ee29-d9c1-57ff-acae-431cfd6d60cf".to_string(),
+                owner: PlayerId(0),
+                power_override: Some(4),
+                toughness_override: Some(5),
+                enter_with_counters: Vec::new(),
+            },
+            run_etb: true,
+        });
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("complete source-defined P/T overrides should create token");
+
+        let token_id = result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .expect("TokenCreated event should fire");
+        let token = state.objects.get(&token_id).expect("token remains live");
+
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(5));
+    }
+
+    #[test]
+    fn debug_create_fixed_preset_rejects_pt_overrides() {
+        let mut state = sandbox_state();
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            request: DebugTokenRequest::Preset {
+                preset_id: "25b62fd5-b036-5c64-88fd-8f50d0675e4d".to_string(),
+                owner: PlayerId(0),
+                power_override: Some(4),
+                toughness_override: Some(5),
+                enter_with_counters: Vec::new(),
+            },
+            run_etb: true,
+        });
+
+        let err = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect_err("fixed preset must reject P/T overrides");
+
+        assert!(format!("{err:?}").contains("does not accept overrides"));
     }
 
     #[test]
@@ -1572,7 +1667,7 @@ mod tests {
             watcher
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t.mode == TriggerMode::Drawn),
+                .any(|t| t.definition.mode == TriggerMode::Drawn),
             "sanity: watcher carries a Drawn trigger"
         );
     }

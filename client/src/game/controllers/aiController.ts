@@ -92,7 +92,7 @@ export function createAIController(config: AIControllerConfig): AIController {
   /**
    * Stable identity key for a WaitingFor — type + player so Priority{0} ≠ Priority{1}.
    *
-   * For simultaneous-mulligan states (`MulliganDecision`, `MulliganBottomCards`,
+   * For simultaneous-mulligan states (`MulliganDecision`,
    * `OpeningHandBottomCards`)
    * `data.player` is undefined, so falling back to -1 would collapse every
    * pending seat to the same key. We instead key by the AI seat that the
@@ -116,7 +116,6 @@ export function createAIController(config: AIControllerConfig): AIController {
   }): number | null {
     if (
       wf.type !== "MulliganDecision" &&
-      wf.type !== "MulliganBottomCards" &&
       wf.type !== "OpeningHandBottomCards"
     ) {
       return null;
@@ -152,7 +151,6 @@ export function createAIController(config: AIControllerConfig): AIController {
       waitingPlayerId = mulliganPid;
     } else if (
       waitingFor.type === "MulliganDecision" ||
-      waitingFor.type === "MulliganBottomCards" ||
       waitingFor.type === "OpeningHandBottomCards"
     ) {
       // Local human is pending (or no AI players left in pending) — do nothing.
@@ -165,7 +163,12 @@ export function createAIController(config: AIControllerConfig): AIController {
       if (
         !("data" in waitingFor) ||
         !waitingFor.data ||
-        !("player" in waitingFor.data)
+        // CR 732.2a: shortcut offers carry `proposer`, not `player`; route both
+        // legacy and finite pre-cast offers via the engine-derived
+        // `priority_player` like every `player in` state.
+        (!("player" in waitingFor.data) &&
+          waitingFor.type !== "LoopShortcut" &&
+          waitingFor.type !== "PrecastCopyShortcutOffer")
       )
         return;
       // CR 723.5: Under a turn-control effect (Emrakul, the Promised End /
@@ -317,7 +320,6 @@ export function createAIController(config: AIControllerConfig): AIController {
     // engine returns (computation is near-instant after our optimizations).
     const isMulligan =
       waitingForType === "MulliganDecision" ||
-      waitingForType === "MulliganBottomCards" ||
       waitingForType === "OpeningHandBottomCards";
     // Collapse the humanization delay under stack pressure. The depth-based skip
     // gate (checkAndSchedule) only fires at Elevated depth, which a 0↔1 trigger

@@ -229,6 +229,11 @@
       "remove": "Remove signature spell",
       "mustBeInstantOrSorcery": "Signature spell must be an instant or sorcery",
       "outsideColorIdentity": "{{name}}: outside Oathbreaker color identity"
+    },
+    "companion": {
+      "heading": "Companion",
+      "noCompanion": "No companion selected",
+      "remove": "Remove companion"
     }
   },
   "manaCurve": {

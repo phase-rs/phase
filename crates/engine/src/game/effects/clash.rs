@@ -105,6 +105,7 @@ pub fn perform_clash(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Clash,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // Build the sub_ability chain with updated context for optional_effect_performed.
@@ -126,7 +127,7 @@ pub fn perform_clash(
     // redundant sub_ability processing.
     let stash_sub = |state: &mut GameState| {
         if let Some(sub) = original_sub {
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(sub)));
+            state.pending_continuation = Some(PendingContinuation::new(Box::new(sub), state));
         }
     };
 
@@ -183,7 +184,11 @@ fn top_card_of_library(state: &GameState, player: PlayerId) -> Option<ObjectId> 
 }
 
 /// Get the mana value of a card by its object ID.
+///
+/// CR 202.3d + CR 709.4b: A clashed card is on top of a library (off the stack),
+/// so a split card reports its combined mana value; `effective_mana_value`
+/// no-ops for single-face cards.
 fn card_mana_value(state: &GameState, object_id: ObjectId) -> Option<u32> {
     let obj = state.objects.get(&object_id)?;
-    Some(obj.mana_cost.mana_value())
+    Some(obj.effective_mana_value())
 }

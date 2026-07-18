@@ -72,4 +72,31 @@ describe("OpponentHand", () => {
     expect(screen.getByAltText("Explicit Opponent Card")).toBeInTheDocument();
     expect(screen.queryByAltText("Focused Opponent Card")).toBeNull();
   });
+
+  // CR 701.20e (phase-rs/phase#5251): Glasses of Urza / Gitaxian Probe "look at
+  // target player's hand" surfaces the looked-at cards' identities only to the
+  // looking player (`private_look_player`/`private_look_ids`), distinct from
+  // the public reveal sets already covered above. Before this fix, the
+  // opponent-hand card thumbnail only consulted `revealed_cards` /
+  // `public_revealed_cards`, so a private look never made the card visible to
+  // the looker even though the engine had already sent them its real name.
+  it("shows a card the engine privately looked at for this viewer, without showCards", () => {
+    useGameStore.setState({
+      gameState: { ...createGameState(), private_look_player: 0, private_look_ids: [22] },
+    });
+
+    render(<OpponentHand playerId={2} />);
+
+    expect(screen.getByAltText("Explicit Opponent Card")).toBeInTheDocument();
+  });
+
+  it("does not show a privately-looked-at card to a player other than the looker", () => {
+    useGameStore.setState({
+      gameState: { ...createGameState(), private_look_player: 1, private_look_ids: [22] },
+    });
+
+    render(<OpponentHand playerId={2} />);
+
+    expect(screen.queryByAltText("Explicit Opponent Card")).toBeNull();
+  });
 });

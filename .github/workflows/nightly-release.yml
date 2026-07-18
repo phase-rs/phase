@@ -170,46 +170,20 @@ jobs:
 
           echo "skip_creation=true" >> "$GITHUB_OUTPUT"
 
-          TAG_SHA=$(git rev-list -n 1 "$TAG")
-          RUNS=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs" \
-            -f per_page=50)
-          MATCH=$(jq -r --arg sha "$TAG_SHA" '
-            [
-              .workflow_runs[]
-              | select(.head_sha == $sha)
-              | {status, conclusion, html_url, created_at}
-            ]
-            | sort_by(.created_at)
-            | reverse
-            | .[0] // empty
-            | @base64
-          ' <<< "$RUNS")
-
-          if [ -z "$MATCH" ]; then
-            echo "No Release workflow run exists for $TAG; dispatching recovery in the follow-up job."
-            echo "dispatch_recovery=true" >> "$GITHUB_OUTPUT"
+          # The published GitHub Release is the authoritative signal, not a release-run
+          # conclusion. The version step above already derives next_minor from the highest
+          # published release, so keying recovery off that same fact keeps the two
+          # consistent. Matching on run conclusions instead let them disagree: a tag whose
+          # release run died before the publish gate (e.g. a build-server timeout) left the
+          # version step forever recomputing that same version while this guard hard-failed
+          # on the stale run — a deadlock no nightly could clear.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG is already published; nothing to recover."
             exit 0
           fi
 
-          run_field() {
-            echo "$MATCH" | base64 -d | jq -r "$1"
-          }
-
-          STATUS=$(run_field '.status')
-          CONCLUSION=$(run_field '.conclusion')
-          URL=$(run_field '.html_url')
-
-          if [ "$STATUS" != "completed" ]; then
-            echo "Release workflow for $TAG is already $STATUS: $URL"
-            exit 0
-          fi
-          if [ "$CONCLUSION" = "success" ]; then
-            echo "Release workflow for $TAG already succeeded: $URL"
-            exit 0
-          fi
-
-          echo "::error::Release workflow for $TAG completed with $CONCLUSION. Rerun it here: $URL"
-          exit 1
+          echo "Tag $TAG exists but its release is not published; dispatching recovery."
+          echo "dispatch_recovery=true" >> "$GITHUB_OUTPUT"
 
       - name: Stop after existing tag handling
         if: ${{ steps.release-run.outputs.skip_creation == 'true' }}
@@ -422,4 +396,9 @@ jobs:
           TAG: ${{ needs.cut-nightly-release.outputs.release_tag }}
         run: |
           set -euo pipefail
-          gh workflow run release.yml --ref "$TAG" -f tag="$TAG"
+          # Dispatch from main, not from the tag: --ref selects which release.yml is
+          # EXECUTED, and the tag's copy is frozen at whatever was broken when it was cut,
+          # so a CI fix landed on main could never reach a stuck tag. `-f tag=` still pins
+          # the SOURCE that gets built to the tag's SHA (see release.yml resolve-release-ref),
+          # so this changes the CI config only, never the released code.
+          gh workflow run release.yml --ref main -f tag="$TAG"

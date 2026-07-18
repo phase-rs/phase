@@ -7,9 +7,9 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, GameState, MayTriggerAutoChoiceKey,
-    MayTriggerOrigin, PendingCounterPostAction, StackEntry, StackEntryKind, StackPaidSnapshot,
-    WaitingFor,
+    AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
+    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, StackEntry,
+    StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -23,11 +23,90 @@ use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// CR 405.1: Add an object to the stack.
-pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
+pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut Vec<GameEvent>) {
+    // CR 701.27f: an activated or triggered ability of a permanent may
+    // transform that permanent only if it has not transformed/converted since
+    // the ability was put onto the stack. Spells and keyword actions do not
+    // receive this guard.
+    if matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
+    ) {
+        let source = state
+            .objects
+            .get(&entry.source_id)
+            .filter(|object| object.back_face.is_some());
+        let count = source.map(|object| object.transformation_count);
+        let incarnation = source.map(|object| object.incarnation);
+        if let Some(ability) = entry.ability_mut() {
+            // CR 701.27f: delayed triggered abilities already carry their
+            // creation-time generation and must not be restamped when fired.
+            if ability.context.source_transformation_count.is_none() {
+                ability.set_source_transformation_count_recursive(count);
+                // CR 400.7: a re-entered source can share the same storage ID
+                // and transformation generation, so retain its incarnation too.
+                if ability.source_incarnation.is_none() {
+                    ability.set_source_incarnation_recursive(incarnation);
+                }
+            }
+        }
+    }
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
     });
     state.stack.push_back(entry);
+}
+
+/// The ability currently represented by a stack entry for presentation.
+///
+/// A spell is placed on the stack before its cast is finalized (CR 601.2a-b),
+/// so its final entry can still hold `None` while the matching `PendingCast`
+/// carries the selected modes and targets. Identity is always the stack entry
+/// ID; this deliberately never falls back to the top stack entry.
+pub(crate) struct EffectiveStackAbility<'a> {
+    pub ability: Option<&'a ResolvedAbility>,
+    pub is_pending: bool,
+}
+
+pub(crate) fn effective_stack_ability<'a>(
+    state: &'a GameState,
+    entry: &'a StackEntry,
+) -> EffectiveStackAbility<'a> {
+    if let Some(ability) = entry.ability() {
+        return EffectiveStackAbility {
+            ability: Some(ability),
+            is_pending: false,
+        };
+    }
+
+    if let Some(pending) = state
+        .waiting_for
+        .pending_cast_ref()
+        .filter(|pending| pending.object_id == entry.id)
+    {
+        return EffectiveStackAbility {
+            ability: Some(&pending.ability),
+            is_pending: true,
+        };
+    }
+
+    if matches!(entry.kind, StackEntryKind::Spell { .. }) {
+        if let Some(pending) = state
+            .pending_cast
+            .as_deref()
+            .filter(|pending| pending.object_id == entry.id)
+        {
+            return EffectiveStackAbility {
+                ability: Some(&pending.ability),
+                is_pending: true,
+            };
+        }
+    }
+
+    EffectiveStackAbility {
+        ability: None,
+        is_pending: false,
+    }
 }
 
 pub(crate) fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
@@ -189,6 +268,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // spell has left the stack) — so it is cleared here at the start of the
     // *next* resolution rather than at the end of this one.
     state.resolving_stack_entry = None;
+    // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
+    // `resolving_stack_entry` so it never leaks into the next resolution.
+    state.resolution_source_relatch = None;
+    // CR 107.3a: the announced activation-X carrier is scoped to the activation that
+    // published it. Clear it here so it never leaks into an unrelated resolution; it is
+    // republished below for an `ActivatedAbility` entry (and only for that kind).
+    state.announced_source_x = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let entry = match state.stack.pop_back() {
@@ -460,6 +546,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // optional copy decision is pending. Cleared at the start of the next
     // `resolve_top`.
     state.resolving_stack_entry = Some(entry.clone());
+    // CR 107.3a + CR 107.3i: republish the resolving activated ability's announced X for
+    // the duration of its own resolution, so a triggered ability of the SAME object that
+    // this resolution causes (Hydra Broodmaster / Polukranos: "when this becomes
+    // monstrous, …X…", fired off the `EffectResolved{Monstrosity}` emitted below) reads
+    // that X. Deliberately restricted to `ActivatedAbility`: a resolving SPELL must NOT
+    // publish, because a permanent it puts onto the battlefield has X = 0 (CR 107.3m) and
+    // its ETB trigger reads the spell's X through `GameObject::cost_x_paid` instead.
+    if let StackEntryKind::ActivatedAbility {
+        source_id,
+        ability: activated,
+    } = &entry.kind
+    {
+        state.announced_source_x = activated.chosen_x.map(|x| (*source_id, x));
+    }
     let resolution_start_phase = state.phase;
 
     // Only run targeting validation and effect execution when an ability exists.
@@ -629,8 +729,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 608.3: Determine destination zone for spells.
-    if is_spell {
+    // CR 608.2g + CR 608.3: A spell paused on a during-resolution free-cast
+    // window remains on the stack and targetable until its continuation ends.
+    if is_spell
+        && !matches!(
+            state.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
+            }
+        )
+    {
         let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
             matches!(ability.effect, Effect::EndTheTurn)
                 || (matches!(ability.effect, Effect::EndCombatPhase)
@@ -733,6 +842,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 Zone::Battlefield,
                 None,
             );
+            // CR 601.2a + CR 110.2 + CR 110.2a (GitHub #696): A cast permanent's
+            // controller defaults to whoever cast it, not the card's owner —
+            // "that player becomes its controller" (CR 601.2a) when the spell is
+            // put on the stack, and per CR 110.2a "that object enters the
+            // battlefield under that player's control unless the effect
+            // states otherwise." `entry.controller` is the actual caster
+            // (stamped at announce_spell_on_stack from the real
+            // GameAction::CastSpell dispatch), fixed for the spell's lifetime
+            // on the stack. This is a no-op for the overwhelmingly common
+            // owner==caster case. A genuine self-ETB "enters under [X]'s
+            // control" replacement (enters_under) still wins — it runs later,
+            // in replace_event below, and hard-overwrites this default
+            // unconditionally.
+            if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                controller_override,
+                ..
+            } = &mut proposed
+            {
+                *controller_override = Some(entry.controller);
+            }
             // CR 702.190b: Sneak-cast permanent enters the battlefield tapped.
             // Seed the ZoneChange so ETB-tapped goes through the replacement
             // pipeline (CR 614.1c).
@@ -1035,8 +1164,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Sets `state.waiting_for` to the resulting prompt, if any — the
                     // caller's post-stack resolution checks waiting_for before returning
                     // priority. Without this drain the choice would be silently dropped.
-                    if state.post_replacement_continuation.is_some() {
-                        state.post_replacement_source = None;
+                    if state.has_post_replacement_drain() {
+                        state.clear_post_replacement_source();
                         let _ = super::engine_replacement::apply_pending_post_replacement_effect(
                             state,
                             Some(entry.id),
@@ -1182,6 +1311,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // trigger context, then bail so the replacement-choice resume
                 // path delivers the redirected move.
                 let stack_exile_link_source = stack_exile_linked_source(state, entry.id);
+                // CR 603.7a + CR 702.170c: snapshot the exile-instead
+                // consequence rider BEFORE the move — every zone exit clears the
+                // transient rider fields (zones.rs), so the post-move apply site
+                // below must read the pre-move value.
+                let exile_rider = state
+                    .objects
+                    .get(&entry.id)
+                    .and_then(|o| o.exile_from_stack_rider.clone());
                 let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
                 match zone_pipeline::move_object(state, req, events) {
                     ZoneMoveResult::Done => {
@@ -1204,9 +1341,35 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     link_source,
                                 );
                             }
+                            // CR 603.7a + CR 702.170c: the exile-instead
+                            // replacement has now actually been APPLIED (the
+                            // spell landed in exile), so this is the moment the
+                            // "If you do, ..." consequence is applied — Feather's
+                            // return-to-hand delayed trigger, or Lilah's plotted
+                            // grant — never earlier (a countered or fizzled
+                            // spell's marker was cleared on its stack exit and
+                            // never reaches here).
+                            if let Some(rider) = exile_rider {
+                                effects::exile_resolving_spell::apply_exile_rider(
+                                    state,
+                                    entry.id,
+                                    entry.controller,
+                                    stack_exile_link_source.unwrap_or(entry.id),
+                                    rider,
+                                    events,
+                                );
+                            }
                         }
                     }
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        // NOTE: the `exile_rider` snapshot is intentionally
+                        // dropped on this bail — a parked move here can only be
+                        // a Graveyard-destination replacement-ordering prompt
+                        // (RIP/Leyline redirects match Graveyard destinations
+                        // only), so no stack→Exile move that could apply the
+                        // consequence rider can currently park. If a stack→Exile
+                        // replacement choice is ever added, the rider must be
+                        // carried through the pending-resolution resume path.
                         events.push(GameEvent::StackResolved {
                             object_id: entry.id,
                         });
@@ -1248,7 +1411,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        // CR 303.4f: Aura resolving to battlefield attaches to its target.
+        // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
+        // battlefield attached to the player or object it was targeting.
+        // (NOT CR 303.4f, which explicitly governs Auras entering "by any means
+        // other than by resolving as an Aura spell.")
         if spell_in_zone(state, entry.id, Zone::Battlefield) {
             let is_aura = state
                 .objects
@@ -1257,19 +1423,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .unwrap_or(false);
             if is_aura {
                 match spell_targets.first() {
-                    // CR 303.4f + CR 608.2b: Object Aura — verify the target is
-                    // still on the battlefield (last-known-information check); a
-                    // gone target leaves the Aura unattached and SBA
-                    // (CR 704.5m) cleans it up at the next checkpoint.
+                    // CR 608.3c + CR 608.2b: Object Aura — verify the target is
+                    // still a legal host per the Aura's own zone-scoped enchant
+                    // ability (`is_valid_attachment_target`, the single legality
+                    // authority shared with `attach::resolve` and the SBA
+                    // re-check). A battlefield-only Enchant filter still requires
+                    // battlefield presence; a graveyard-scoped filter (Animate
+                    // Dead) legally accepts a graveyard host. A now-illegal target
+                    // leaves the Aura unattached and SBA (CR 704.5m) cleans it up
+                    // at the next checkpoint.
                     Some(crate::types::ability::TargetRef::Object(target_id))
-                        if state.battlefield.contains(target_id) =>
+                        if crate::game::sba::is_valid_attachment_target(
+                            state, entry.id, *target_id,
+                        ) =>
                     {
                         effects::attach::attach_to(state, entry.id, *target_id);
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
-                        // Target left the battlefield — SBA cleanup follows.
+                        // Target is no longer a legal host — SBA cleanup follows.
                     }
-                    // CR 303.4f + CR 702.5d: Player Aura (Curse cycle, Faith's
+                    // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
                     // Fetters-class). Validity check is "player still in game"
                     // — `attach_to_player` makes no liveness check itself, but
                     // `check_unattached_auras` (CR 303.4c) will detach + grave
@@ -1577,6 +1750,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Equip,
                 source_id: equipment_id,
+                subject: None,
             });
         }
         // CR 702.122a: This permanent becomes an artifact creature UEOT.
@@ -1606,6 +1780,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Crew,
                 source_id: vehicle_id,
+                subject: None,
             });
         }
         // CR 702.171a: This permanent becomes saddled UEOT.
@@ -1622,6 +1797,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Saddle,
                 source_id: mount_id,
+                subject: None,
             });
         }
         // CR 702.184a: Put charge counters equal to the tapped creature's power.
@@ -1668,6 +1844,7 @@ fn resolve_keyword_action(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Station,
                 source_id: spacecraft_id,
+                subject: None,
             });
         }
     }
@@ -1814,6 +1991,7 @@ fn resolve_proven_self_counter_batch(
             &mut proof_events,
             event_start,
             &default_wf,
+            false,
             false,
         )
         .ok()?;
@@ -1994,8 +2172,10 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         target_constraints,
         target_choice_timing,
         description,
+        selected_mode_labels,
         repeat_for,
         min_x_value,
+        announced_x,
         cant_be_copied,
         copy_count_status,
         forward_result,
@@ -2005,6 +2185,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         starting_with,
         chosen_x,
         cost_paid_object,
+        cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
         ability_index,
@@ -2017,7 +2198,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         sub_link,
         modal,
         mode_abilities,
-        dig_found_nothing_for_parent_target,
+        parent_target_missing_reason,
     } = ability;
 
     let self_counter = matches!(
@@ -2048,8 +2229,12 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && target_constraints.is_empty()
         && *target_choice_timing == TargetChoiceTiming::Stack
         && description.is_none()
+        && selected_mode_labels.is_empty()
         && repeat_for.is_none()
         && *min_x_value == 0
+        // CR 601.2b: an announce-locked X makes this ability's X board-dependent;
+        // it is not the vanilla self-counter shape this batch path proves safe.
+        && announced_x.is_none()
         && !*cant_be_copied
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
@@ -2059,6 +2244,13 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        // CR 117.1 (issue #4948): a batched triggered ability must not carry
+        // per-instance cost-paid-object state either — mirrors the
+        // `cost_paid_object` gate above. Always empty for triggered
+        // abilities today (only cost-payment handlers populate it), kept
+        // here so this exhaustive-field check stays correct if that ever
+        // changes.
+        && cost_paid_object_ids.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
         && ability_index.is_none()
@@ -2070,7 +2262,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && *sub_link == SubAbilityLink::ContinuationStep
         && modal.is_none()
         && mode_abilities.is_empty()
-        && !*dig_found_nothing_for_parent_target
+        && parent_target_missing_reason.is_none()
 }
 
 /// CR 608.2: Apply a proven-safe batch. The per-resolution handler body runs
@@ -2097,6 +2289,8 @@ fn resolve_batched(
     let consumed = plan.consumed();
     crate::game::perf_counters::record_stack_batched_entries(consumed);
     state.resolving_stack_entry = None;
+    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+    state.resolution_source_relatch = None;
 
     // Pop the run's entries (resolution order is back-to-front), cleaning the
     // per-entry side tables exactly as `resolve_top` does for a single entry.
@@ -2211,9 +2405,10 @@ fn observer_candidates_are_inert(
 ) -> bool {
     let event_keys = crate::game::trigger_index::keys_from_event(event, state);
     for candidate in candidates.iter().copied() {
-        let Some((controller, triggers)) = state.objects.get(&candidate).map(|obj| {
+        let Some((controller, source, triggers)) = state.objects.get(&candidate).map(|obj| {
             (
                 obj.controller,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(obj),
                 obj.trigger_definitions
                     .iter_all()
                     .cloned()
@@ -2224,7 +2419,12 @@ fn observer_candidates_are_inert(
             continue;
         };
 
-        for (trigger_index, trigger) in triggers {
+        for (trigger_index, entry) in triggers {
+            let definition_ref = crate::types::ability::TriggerDefinitionRef {
+                source,
+                occurrence: entry.occurrence.clone(),
+            };
+            let trigger = entry.definition;
             let (trigger_keys, unclassified) =
                 crate::game::trigger_index::keys_from_trigger_def(&trigger);
             if !unclassified && !trigger_keys.iter().any(|key| event_keys.contains(key)) {
@@ -2245,7 +2445,7 @@ fn observer_candidates_are_inert(
             let mut ability =
                 super::triggers::build_triggered_ability(state, &trigger, candidate, controller);
             ability.ability_index = Some(trigger_index);
-            ability.may_trigger_origin = Some(MayTriggerOrigin::Printed { trigger_index });
+            ability.may_trigger_origin = Some(MayTriggerOrigin::Definition { definition_ref });
             if !optional_ability_is_inert_under_auto_choice(state, &ability, Some(event)) {
                 return false;
             }
@@ -2262,7 +2462,7 @@ fn optional_ability_is_inert_under_auto_choice(
     if !ability.optional {
         return false;
     }
-    let Some(origin) = ability.may_trigger_origin else {
+    let Some(origin) = ability.may_trigger_origin.clone() else {
         return false;
     };
     let key = MayTriggerAutoChoiceKey {
@@ -2292,7 +2492,16 @@ fn ability_has_no_legal_resolution_targets(
     let context_snapshot =
         super::triggers::push_trigger_event_context(state, trigger_event, &trigger_events, None);
     let empty = build_target_slots(state, ability).is_ok_and(|slots| {
-        (ability.effect.target_filter().is_some() && slots.is_empty())
+        // CR 115.1: only effects that DECLARE a target surface a chooseable slot.
+        // `extract_target_filter_from_effect` is the single authority the slot
+        // builder itself uses — it returns `None` not only for context-refs
+        // ("you may draw a card") but for every resolution-time selection
+        // (Sacrifice, at-resolution Bounce, put-from-hand ChangeZone/CastFromZone,
+        // etc.), all of which are ALWAYS resolvable. Testing raw `target_filter()`
+        // here would fork from that authority and silently drop an auto-accepted
+        // "you may put a creature from your hand …" trigger (Kaalia et al.).
+        (super::triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+            && slots.is_empty())
             || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
     });
     super::triggers::restore_trigger_event_context(state, context_snapshot);
@@ -2414,6 +2623,8 @@ fn resolve_inert_noop_batch(
     events: &mut Vec<GameEvent>,
 ) -> u32 {
     state.resolving_stack_entry = None;
+    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
+    state.resolution_source_relatch = None;
     for _ in 0..consumed {
         let Some(entry) = state.stack.pop_back() else {
             break;
@@ -2775,8 +2986,10 @@ struct StackGroupKey {
     source_name: String,
     tag: &'static str,
     description: Option<String>,
+    selected_mode_labels: Vec<String>,
     targets: Vec<TargetRef>,
     paid: Option<StackPaidSnapshot>,
+    is_pending: bool,
 }
 
 /// Grouping signature for `stack_display_groups`. Two entries coalesce iff
@@ -2798,17 +3011,24 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
         }
         StackEntryKind::KeywordAction { .. } => ("keyword", None),
     };
-    let targets = entry
-        .ability()
+    let effective_ability = effective_stack_ability(state, entry);
+    let targets = effective_ability
+        .ability
         .map(flatten_targets_in_chain)
+        .unwrap_or_default();
+    let selected_mode_labels = effective_ability
+        .ability
+        .map(|ability| ability.selected_mode_labels.clone())
         .unwrap_or_default();
     let paid = state.stack_paid_facts.get(&entry.id).cloned();
     StackGroupKey {
         source_name,
         tag,
         description: description.map(str::to_owned),
+        selected_mode_labels,
         targets,
         paid,
+        is_pending: effective_ability.is_pending,
     }
 }
 
@@ -2918,11 +3138,14 @@ mod tests {
     use crate::game::triggers::{check_delayed_triggers, PendingTrigger};
     use crate::game::zones::{self, create_object, move_to_zone};
     use crate::types::ability::{
-        CastingPermission, ControllerRef, CostPaidObjectSnapshot, Effect, QuantityExpr,
-        ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        CastingPermission, ControllerRef, CostPaidObjectSnapshot, Effect, ModalChoice,
+        QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{MayTriggerOrigin, WaitingFor};
+    use crate::types::game_state::{
+        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCast, StackPaidSnapshot,
+        WaitingFor,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
@@ -2931,6 +3154,169 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    fn pending_spell_entry(id: ObjectId) -> StackEntry {
+        StackEntry {
+            id,
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(id.0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn effective_stack_ability_prefers_final_entry_over_matching_inline_pending_cast() {
+        let id = ObjectId(10);
+        let mut final_ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), id, PlayerId(0));
+        final_ability.selected_mode_labels = vec!["Final mode.".to_string()];
+        let entry = StackEntry {
+            kind: StackEntryKind::Spell {
+                card_id: CardId(10),
+                ability: Some(final_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+            ..pending_spell_entry(id)
+        };
+
+        let mut pending_ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), id, PlayerId(0));
+        pending_ability.selected_mode_labels = vec!["Pending mode.".to_string()];
+        let pending = PendingCast::new(id, CardId(10), pending_ability, ManaCost::NoCost);
+        let mut state = setup();
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(pending),
+            unavailable_modes: Vec::new(),
+        };
+
+        let effective = effective_stack_ability(&state, &entry);
+        assert!(
+            !effective.is_pending,
+            "finalized entry must take precedence"
+        );
+        assert_eq!(
+            effective.ability.unwrap().selected_mode_labels,
+            ["Final mode."],
+            "the matching inline pending cast must not replace a finalized ability",
+        );
+    }
+
+    #[test]
+    fn effective_stack_ability_uses_only_the_matching_inline_pending_cast() {
+        let pending_id = ObjectId(11);
+        let other_id = ObjectId(12);
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), pending_id, PlayerId(0));
+        ability.selected_mode_labels = vec!["Selected mode.".to_string()];
+        let pending = PendingCast::new(pending_id, CardId(11), ability, ManaCost::NoCost);
+        let mut state = setup();
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(pending),
+            unavailable_modes: Vec::new(),
+        };
+        state.stack.push_back(pending_spell_entry(pending_id));
+        state.stack.push_back(pending_spell_entry(other_id));
+
+        let lower = effective_stack_ability(&state, state.stack.front().unwrap());
+        assert!(
+            lower.is_pending,
+            "the matching lower stack entry is pending"
+        );
+        assert_eq!(
+            lower.ability.unwrap().selected_mode_labels,
+            ["Selected mode."],
+        );
+        let top = effective_stack_ability(&state, state.stack.back().unwrap());
+        assert!(
+            top.ability.is_none(),
+            "a nonmatching top entry must not inherit labels"
+        );
+        assert!(!top.is_pending);
+    }
+
+    #[test]
+    fn effective_stack_ability_uses_only_the_matching_outer_pending_spell() {
+        let pending_id = ObjectId(13);
+        let other_id = ObjectId(14);
+        let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), pending_id, PlayerId(0));
+        ability.selected_mode_labels = vec!["Mana-payment mode.".to_string()];
+        let mut state = setup();
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            pending_id,
+            CardId(13),
+            ability,
+            ManaCost::NoCost,
+        )));
+        state.stack.push_back(pending_spell_entry(pending_id));
+        state.stack.push_back(pending_spell_entry(other_id));
+
+        let lower = effective_stack_ability(&state, state.stack.front().unwrap());
+        assert!(
+            lower.is_pending,
+            "matching pending spell is discovered by object id"
+        );
+        let top = effective_stack_ability(&state, state.stack.back().unwrap());
+        assert!(
+            top.ability.is_none(),
+            "no top-of-stack fallback is permitted"
+        );
+        assert!(!top.is_pending);
+    }
+
+    /// CR 115.1 + CR 603.3d — regression twin for the "don't ask again → Yes
+    /// silently answers No" bug, covering the stack.rs consumer
+    /// (`optional_ability_is_inert_under_auto_choice` →
+    /// `ability_has_no_legal_resolution_targets`, reached by the on-stack
+    /// inert-noop fast-forward). An auto-ACCEPTED optional ability that surfaces
+    /// no stack-time target slot must NOT be classified inert. The `Sacrifice`
+    /// arm (a non-context-ref filter that `extract_target_filter_from_effect`
+    /// still declines) is the discriminator a context-ref-only guard would drop.
+    #[test]
+    fn auto_accepted_no_target_slot_ability_is_not_inert() {
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        for effect in [
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        ] {
+            let mut state = setup();
+            let mut ability = ResolvedAbility::new(effect, vec![], source_id, PlayerId(0));
+            ability.optional = true;
+            ability.may_trigger_origin = Some(origin.clone());
+            state.set_may_trigger_auto_choice(
+                MayTriggerAutoChoiceKey {
+                    player: PlayerId(0),
+                    source_id,
+                    origin: origin.clone(),
+                },
+                AutoMayChoice::Accept,
+            );
+
+            assert!(
+                !optional_ability_is_inert_under_auto_choice(&mut state, &ability, None),
+                "an auto-accepted ability with no stack-time target slot is always \
+                 resolvable and must not be suppressed as an inert no-op"
+            );
+        }
     }
 
     fn back_face_data(
@@ -4789,6 +5175,140 @@ mod tests {
             "triggers with divergent targets must not coalesce: got {:?}",
             groups
         );
+    }
+
+    #[test]
+    fn stack_display_groups_distinguish_selected_spell_modes() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brotherhood's End".to_string(),
+            Zone::Stack,
+        );
+        for (id, label) in [
+            (ObjectId(10_003), "Deal 3 damage."),
+            (ObjectId(10_004), "Destroy artifacts."),
+        ] {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0));
+            ability.selected_mode_labels = vec![label.to_string()];
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: Some(ability),
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        assert_eq!(
+            stack_display_groups(&state).len(),
+            2,
+            "spells with different selected mode labels must not coalesce",
+        );
+    }
+
+    #[test]
+    fn stack_display_groups_distinguish_pending_modal_spells_from_finalized_spells() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brotherhood's End".to_string(),
+            Zone::Stack,
+        );
+        let target = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        let lower_id = ObjectId(10_005);
+        let pending_id = ObjectId(10_006);
+        let mut modal_ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        modal_ability.selected_mode_labels = vec![
+            "Brotherhood's End deals 3 damage to each creature and each planeswalker.".to_string(),
+        ];
+        let paid = StackPaidSnapshot {
+            actual_mana_spent: 3,
+            ..Default::default()
+        };
+        state.stack.push_back(StackEntry {
+            id: lower_id,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(modal_ability.clone()),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+        state.stack.push_back(StackEntry {
+            id: pending_id,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+        state.stack_paid_facts.insert(lower_id, paid.clone());
+        state.stack_paid_facts.insert(pending_id, paid);
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(PendingCast::new(
+                pending_id,
+                CardId(1),
+                modal_ability.clone(),
+                ManaCost::NoCost,
+            )),
+            unavailable_modes: Vec::new(),
+        };
+
+        let views = crate::game::derived_views::derive_views(&state, None);
+        assert_eq!(
+            views.stack_display_groups.len(),
+            2,
+            "an otherwise-identical pending modal spell must not coalesce with a finalized spell",
+        );
+        assert_eq!(views.stack_display_groups[1].representative, pending_id);
+        assert!(
+            views.stack_entry_details[&pending_id].is_pending,
+            "the pending group representative must retain its casting state",
+        );
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.back_mut().unwrap().kind = StackEntryKind::Spell {
+            card_id: CardId(1),
+            ability: Some(modal_ability),
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 3,
+        };
+        let finalized_views = crate::game::derived_views::derive_views(&state, None);
+        assert_eq!(
+            finalized_views.stack_display_groups.len(),
+            1,
+            "entries with the same finalized state must continue to coalesce",
+        );
+        assert_eq!(finalized_views.stack_display_groups[0].count, 2);
     }
 
     #[test]
@@ -7866,7 +8386,7 @@ mod tests {
             let mut normal = setup_board();
             flush_layers(&mut normal);
             add_entry(&mut normal);
-            let entered_ids: std::collections::HashSet<ObjectId> = match &normal.layers_dirty {
+            let entered_ids: std::collections::BTreeSet<ObjectId> = match &normal.layers_dirty {
                 crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
                 other => panic!("expected EnteredObjects dirty state, got {other:?}"),
             };
@@ -8639,7 +9159,7 @@ mod tests {
             flush_layers(&mut state);
             // A green entry perturbs the < 7 gate (would flip 6 → 7).
             add_green_devotion_entry(&mut state, 322);
-            let entered_ids: std::collections::HashSet<ObjectId> = match &state.layers_dirty {
+            let entered_ids: std::collections::BTreeSet<ObjectId> = match &state.layers_dirty {
                 crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
                 other => panic!("expected EnteredObjects, got {other:?}"),
             };

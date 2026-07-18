@@ -3,7 +3,8 @@ use rand::seq::SliceRandom;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -21,13 +22,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (card_filter, count, random, choice_optional, is_reveal) = match &ability.effect {
+    let (card_filter, count, random, choice_optional, is_reveal, target) = match &ability.effect {
         Effect::RevealHand {
             card_filter,
             count,
             selection,
             choice_optional,
             reveal,
+            target,
             ..
         } => (
             card_filter.clone(),
@@ -35,17 +37,48 @@ pub fn resolve(
             selection.is_random(),
             *choice_optional,
             *reveal,
+            target.clone(),
         ),
-        _ => (TargetFilter::Any, None, false, false, true),
+        _ => (
+            TargetFilter::Any,
+            None,
+            false,
+            false,
+            true,
+            TargetFilter::Any,
+        ),
     };
 
-    // Find the target player from resolved targets
+    // Find the target player from resolved targets. Targeted RevealHand
+    // (Thoughtseize, Duress) builds a real `TargetRef::Player` slot — keep that
+    // fast path unchanged (zero regression).
     let target_player = ability
         .targets
         .iter()
         .find_map(|t| match t {
             TargetRef::Player(pid) => Some(*pid),
             _ => None,
+        })
+        // CR 608.2d + CR 608.2c: "an opponent" is a choice the controller
+        // announces while resolving the effect. For the as-enters look-at-hand
+        // class (Anointed Peacekeeper, Sorcerous Spyglass), the parser's as-enters
+        // composition (`parse_as_enters_choose` →
+        // `front_opponent_choice_for_nontargeted_look`) now FRONTS an explicit
+        // `Choose(Opponent)` step and rebinds this look's player filter to
+        // `ControllerRef::ChosenPlayer { index: 0 }` (CR 608.2c "that player").
+        // So by the time control reaches here, `collect_player_targets` resolves
+        // that filter to exactly the single chosen opponent — a 1-element vec — and
+        // `.first()` is EXACT, not a multiplayer simplification (CR 608.2d
+        // satisfied by the fronted choice, not by picking the first opponent here).
+        // Any residual non-fronted `Typed`/`Controller` opponent filter that still
+        // reaches this arm (a hand-look shape outside the as-enters seam) falls
+        // back to the first opponent, exact in two-player. `TargetFilter::Any`
+        // (RevealAll/RevealPartial) hits `collect_player_targets`' empty arm → still
+        // `MissingParam`, so those reveals are unchanged.
+        .or_else(|| {
+            crate::game::ability_utils::collect_player_targets(state, ability, &target)
+                .first()
+                .copied()
         })
         .ok_or(EffectError::MissingParam("target player".to_string()))?;
 
@@ -66,10 +99,22 @@ pub fn resolve(
         hand.truncate(n);
     }
 
+    let needs_reveal_choice = choice_optional || !matches!(card_filter, TargetFilter::None);
+
     if hand.is_empty() {
+        if choice_optional && ability.sub_ability.is_some() {
+            state.waiting_for = WaitingFor::RevealChoice {
+                player: ability.controller,
+                cards: vec![],
+                filter: card_filter,
+                optional: true,
+                decline_runs_continuation: false,
+            };
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -96,11 +141,11 @@ pub fn resolve(
         state.private_look_player = Some(ability.controller);
     }
 
-    let needs_reveal_choice = choice_optional || !matches!(card_filter, TargetFilter::None);
     if !needs_reveal_choice {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -121,9 +166,28 @@ pub fn resolve(
             state.private_look_ids.clear();
             state.private_look_player = None;
         }
+        // CR 608.2c + issue #4950 (Thoughtseize): a choice WAS required
+        // (`needs_reveal_choice`) but the eligible set came up empty — there
+        // is nothing to choose. Signal this so an immediately-chained
+        // `ParentTarget`-bound sub-ability (e.g. Thoughtseize's
+        // `DiscardCard{target: ParentTarget}`) can resolve to a hard no-op
+        // instead of falling back to a whole-hand action. Consumed by
+        // `apply_parent_chain_context` at the very next parent->child
+        // hand-off — see `GameState::last_parent_target_missing_reason`.
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::RevealHandChoice);
+        if choice_optional && ability.sub_ability.is_some() {
+            state.waiting_for = WaitingFor::RevealChoice {
+                player: ability.controller,
+                cards: vec![],
+                filter: card_filter,
+                optional: true,
+                decline_runs_continuation: false,
+            };
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -139,6 +203,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Reveal,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -152,6 +217,165 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn deep_cavern_bat_reveal_choice_excludes_lands() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let bat = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Deep-Cavern Bat".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Plains".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let spell = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Deduce".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let parsed = parse_oracle_text(
+            "Flying, lifelink\nWhen this creature enters, look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield.",
+            "Deep-Cavern Bat",
+            &[],
+            &["Creature".to_string()],
+            &["Bat".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Bat ETB execute");
+        let mut ability = build_resolved_from_def(execute, bat, PlayerId(0));
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+        resolve(&mut state, &ability, &mut Vec::new()).expect("Bat hand look resolves");
+
+        match &state.waiting_for {
+            WaitingFor::RevealChoice {
+                cards, optional, ..
+            } => {
+                assert!(*optional);
+                assert_eq!(cards, &vec![spell]);
+                assert!(!cards.contains(&land));
+            }
+            other => panic!("expected Bat RevealChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deep_cavern_bat_empty_or_land_only_hand_does_not_exile_itself() {
+        use crate::ai_support::candidate_actions;
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply_as_current;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+
+        for land_count in [0, 2] {
+            let mut state = GameState::new_two_player(42);
+            let bat = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Deep-Cavern Bat".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&bat)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+
+            for index in 0..land_count {
+                let land = create_object(
+                    &mut state,
+                    CardId(11 + index),
+                    PlayerId(1),
+                    format!("Plains {index}"),
+                    Zone::Hand,
+                );
+                state
+                    .objects
+                    .get_mut(&land)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Land);
+            }
+
+            let parsed = parse_oracle_text(
+                "Flying, lifelink\nWhen this creature enters, look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield.",
+                "Deep-Cavern Bat",
+                &[],
+                &["Creature".to_string()],
+                &["Bat".to_string()],
+            );
+            let execute = parsed.triggers[0]
+                .execute
+                .as_deref()
+                .expect("Bat ETB execute");
+            let mut ability = build_resolved_from_def(execute, bat, PlayerId(0));
+            ability.targets = vec![TargetRef::Player(PlayerId(1))];
+
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &ability, &mut events, 0).expect("Bat ETB resolves");
+
+            assert!(matches!(
+                &state.waiting_for,
+                WaitingFor::RevealChoice {
+                    cards,
+                    optional: true,
+                    decline_runs_continuation: false,
+                    ..
+                } if cards.is_empty()
+            ));
+            assert!(state.pending_continuation.is_some());
+            assert_eq!(
+                candidate_actions(&state).len(),
+                1,
+                "an empty hand choice must be a forced decline"
+            );
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] })
+                .expect("forced decline resolves");
+
+            assert_eq!(state.objects[&bat].zone, Zone::Battlefield);
+            assert!(state.battlefield.contains(&bat));
+            assert!(state.pending_continuation.is_none());
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == bat
+            )));
+        }
+    }
 
     fn make_reveal_ability(controller: PlayerId, target_player: PlayerId) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -167,6 +391,147 @@ mod tests {
             ObjectId(100),
             controller,
         )
+    }
+
+    /// CR 701.20e + CR 608.2d: A non-targeted "look at an opponent's hand"
+    /// (Anointed Peacekeeper) carries a controller-scoped `Typed(Opponent)`
+    /// target and an Object source slot (no explicit player target). The
+    /// resolver must fall back to `collect_player_targets` and privately look at
+    /// the OPPONENT's hand — never the controller's, even when both are
+    /// non-empty (multi-authority hostile fixture). Reverting the `.or_else`
+    /// fallback makes this return `MissingParam` and the assertions below fail.
+    #[test]
+    fn look_at_an_opponents_hand_falls_back_to_opponent_controller_choice() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        // Controller (PlayerId(0)) also holds a card — must NOT be looked at.
+        let own_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "My Secret".to_string(),
+            Zone::Hand,
+        );
+        let opp_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Their Secret".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                card_filter: TargetFilter::None,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: false,
+            },
+            // Source object slot only — no explicit player target.
+            vec![TargetRef::Object(ObjectId(100))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("opponent-hand look should resolve");
+
+        assert_eq!(
+            state.private_look_ids,
+            vec![opp_card],
+            "must privately look at the opponent's hand"
+        );
+        assert!(
+            !state.private_look_ids.contains(&own_card),
+            "must never look at the controller's own hand"
+        );
+        assert_eq!(
+            state.private_look_player,
+            Some(PlayerId(0)),
+            "the looker is the ability controller"
+        );
+    }
+
+    /// An explicit `TargetRef::Player` slot (Thoughtseize-style) still wins the
+    /// fast path even when the effect also carries a `Typed(Opponent)` filter
+    /// that would resolve to a different player — zero regression for targeted
+    /// RevealHand.
+    #[test]
+    fn explicit_player_target_wins_over_controller_filter() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let controller_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Controller Card".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                // Filter would resolve to the opponent (PlayerId(1))…
+                target: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                card_filter: TargetFilter::None,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: false,
+            },
+            // …but the explicit player target is the controller itself.
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.private_look_ids,
+            vec![controller_card],
+            "explicit player target must win over the filter fallback"
+        );
+    }
+
+    /// R2: `TargetFilter::Any` (RevealAll/RevealPartial shapes) with no explicit
+    /// player target hits `collect_player_targets`' empty arm, so the resolver
+    /// still errors `MissingParam` — the fallback is strictly additive.
+    #[test]
+    fn any_target_without_player_slot_still_missing_param() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: true,
+            },
+            vec![TargetRef::Object(ObjectId(100))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(
+            matches!(result, Err(EffectError::MissingParam(_))),
+            "Any-target reveal without a player slot must still be MissingParam, got {result:?}"
+        );
     }
 
     #[test]
@@ -513,7 +878,7 @@ mod tests {
             PlayerId(0),
         );
         continuation.kind = AbilityKind::Spell;
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), &state));
 
         let mut events = Vec::new();
         handle_resolution_choice(

@@ -90,6 +90,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastCopyOfCard,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -125,6 +126,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastCopyOfCard,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -173,6 +175,7 @@ fn cast_one_copy(
     copy.controller = ability.controller;
     copy.owner = ability.controller;
     // CR 707.12 + CR 601.2a: The copy is created and cast as a spell on the stack.
+    // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.12).
     copy.zone = Zone::Stack;
     copy.is_token = false;
     // CR 707.12a: the copy is NOT represented by a card, so abilities gated on

@@ -93,6 +93,26 @@ pub(super) fn handle_discard_for_cost(
     )
 }
 
+pub(super) fn handle_reveal_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: PendingCast,
+    count: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting::handle_reveal_for_cost(
+        state,
+        player,
+        pending_cast,
+        count,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
 pub(super) fn handle_activation_cost_one_of_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -397,13 +417,9 @@ pub(super) fn handle_harmonize_tap_choice(
 
         let power = obj.power.unwrap_or(0).max(0) as u32;
 
-        if let Some(obj) = state.objects.get_mut(&creature_id) {
-            obj.tapped = true;
-        }
-        events.push(GameEvent::PermanentTapped {
-            object_id: creature_id,
-            caused_by: None,
-        });
+        // CR 701.26a + CR 508.1f: route the Harmonize tap through the single
+        // authority so a "can't become tapped" creature is refused.
+        crate::game::restrictions::tap_permanent_for_cost(state, creature_id, events)?;
 
         if let ManaCost::Cost {
             ref mut generic, ..
@@ -423,6 +439,7 @@ pub(super) fn handle_harmonize_tap_choice(
         &pending.cost,
         base_cost,
         pending.casting_variant,
+        pending.casting_permission_index,
         pending.cast_timing_permission,
         pending.distribute,
         pending.origin_zone,

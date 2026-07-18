@@ -7,8 +7,10 @@ use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
     AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
-    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ModalChoice, ReplacementDefinition,
-    SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
+    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
+    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
+    TriggerOccurrenceState,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -109,7 +111,7 @@ pub struct PrototypeFormState {
 /// treatment as other command-zone leaders. Stored as a typed marker to avoid
 /// proliferating bare role booleans on `GameObject`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SignatureSpellState;
+pub struct SignatureSpellState {}
 
 /// CR 702.148a-b + CR 612: Cleave form marker — `Some(_)` while this object's
 /// cleave text-changing effect is live (the spell was cast for its cleave cost
@@ -126,11 +128,13 @@ pub struct SignatureSpellState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleaveFormState {
     pub abilities: Arc<Vec<AbilityDefinition>>,
-    pub triggers: Definitions<TriggerDefinition>,
+    pub triggers: Definitions<TriggerEntry>,
     pub statics: Definitions<StaticDefinition>,
     pub replacements: Definitions<ReplacementDefinition>,
     pub base_abilities: Arc<Vec<AbilityDefinition>>,
     pub base_triggers: Arc<Vec<TriggerDefinition>>,
+    pub trigger_base_set_instance: TriggerBaseSetInstanceRef,
+    pub next_trigger_base_set_instance: u64,
     pub base_statics: Arc<Vec<StaticDefinition>>,
     pub base_replacements: Arc<Vec<ReplacementDefinition>>,
 }
@@ -186,6 +190,8 @@ pub struct BackFaceData {
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
+    /// Stored card-face payload. Live object definitions are materialized with
+    /// recipient-local occurrence provenance when this face is installed.
     pub trigger_definitions: Definitions<TriggerDefinition>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
@@ -219,7 +225,7 @@ pub struct CaseState {
 /// truth and lets exhaustive `match` arms force every consumer to handle both
 /// variants. Equipment-only call sites use `as_object()` with a CR-cited
 /// `expect` to assert the rules invariant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AttachTarget {
     /// CR 301.5 / CR 303.4f: attached to a permanent.
@@ -260,7 +266,7 @@ impl From<ObjectId> for AttachTarget {
 
 /// CR 709.5c: Which half, or door, of a shared-type-line split permanent is
 /// being locked or unlocked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RoomDoor {
     Left,
     Right,
@@ -351,6 +357,11 @@ pub struct GameObject {
     pub face_down: bool,
     pub flipped: bool,
     pub transformed: bool,
+    /// CR 701.27f: Number of successful transforms/conversions of this object.
+    /// Stack abilities capture this generation so a stale self-transform
+    /// instruction can be ignored after another ability has already flipped it.
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub transformation_count: u32,
     /// CR 712.8a + CR 400.7: True when this object is showing its MDFC back face
     /// (set via ChooseModalFace back_face=true). Reverted to front face on any
     /// zone exit that is not to the battlefield (CR 712.8a: front face only in
@@ -443,7 +454,9 @@ pub struct GameObject {
     /// `GameState::clone()` shares the ability list across cloned states
     /// (AI search); mutations go through `Arc::make_mut` for copy-on-write.
     pub abilities: Arc<Vec<AbilityDefinition>>,
-    pub trigger_definitions: Definitions<TriggerDefinition>,
+    /// Live trigger definitions are identity-bearing entries. Parser and card-face
+    /// data remain payload-only in `base_trigger_definitions` / `BackFaceData`.
+    pub trigger_definitions: Definitions<TriggerEntry>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
     /// CR 702.148a-b + CR 612: When this object is a cleave spell, the alternate
@@ -508,6 +521,17 @@ pub struct GameObject {
     /// than the `Definitions<T>` wrapper that gates live reads.
     /// Wrapped in `Arc` for structural sharing across cloned `GameState`s.
     pub base_trigger_definitions: Arc<Vec<TriggerDefinition>>,
+    /// Current ordered printed/base trigger-set generation. This stays stable
+    /// across ordinary layer resets and only changes when a caller intentionally
+    /// installs a new base/face/cleave trigger set.
+    #[serde(default = "GameObject::initial_trigger_base_set_instance")]
+    pub trigger_base_set_instance: TriggerBaseSetInstanceRef,
+    /// Next object-local base-set generation. Never rewound or reused.
+    #[serde(default = "GameObject::initial_next_trigger_base_set_instance")]
+    pub next_trigger_base_set_instance: u64,
+    /// Recipient-local Layer-6 grant allocator and active producer table.
+    #[serde(default)]
+    pub trigger_occurrence_state: TriggerOccurrenceState,
     /// CR 613.1: printed-card baseline for replacement definitions. See
     /// `base_trigger_definitions`.
     pub base_replacement_definitions: Arc<Vec<ReplacementDefinition>>,
@@ -529,13 +553,14 @@ pub struct GameObject {
     // Timestamp for layer ordering
     pub timestamp: u64,
 
-    /// CR 400.7: Monotonic per-object incarnation, bumped on every battlefield
-    /// entry (`reset_for_battlefield_entry`). A permanent that leaves and
-    /// re-enters the battlefield becomes a new object even though the engine
-    /// reuses its `ObjectId` as storage identity. Pairing the id with this
-    /// counter distinguishes the new object from the old one at the same id, so
-    /// a pending ability that captured the previous incarnation no longer
-    /// resolves its self-reference against the re-entered permanent (blink/flicker).
+    /// CR 400.7: Monotonic per-object incarnation, bumped on every real zone
+    /// change (`bump_incarnation`) — battlefield entry via
+    /// `reset_for_battlefield_entry`, plus every non-battlefield move in the zone
+    /// movers. An object that leaves and re-enters any zone becomes a new object
+    /// even though the engine reuses its `ObjectId` as storage identity. Pairing
+    /// the id with this counter distinguishes the new object from the old one at
+    /// the same id, so a pending ability that captured the previous incarnation no
+    /// longer resolves its self-reference against the moved object (blink/flicker).
     #[serde(default)]
     pub incarnation: u64,
 
@@ -612,6 +637,17 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_x_paid: Option<u32>,
 
+    /// CR 702.102b + CR 709.4d: `true` when this stack object is a *fused* split
+    /// spell (both halves cast via Fuse), so its characteristics are the combined
+    /// characteristics of both halves *while on the stack* — unlike a non-fused
+    /// split spell, whose on-stack characteristics are those of the chosen half
+    /// alone (CR 202.3d). Set at fuse finalize; only meaningful on the stack (off
+    /// the stack a split card combines regardless, per CR 709.4). Read by
+    /// [`GameObject::effective_mana_value`]/[`effective_colors`] so mana-value and
+    /// color reads of a fused spell see both halves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fused_split_spell: bool,
+
     /// CR 702.33d + CR 702.33f: Kicker payments declared while casting the
     /// spell that produced this permanent, in payment order. Mirrors
     /// `SpellContext.kickers_paid`; copied at cast resolution from the
@@ -640,6 +676,14 @@ pub struct GameObject {
     /// currently resolves the count.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 700.2a + CR 700.2d: The modal-mode indices chosen for this spell as it
+    /// was cast (ascending, with repeats per CR 700.2d), latched from
+    /// `SpellContext.chosen_modes` at cast finalize and surviving on the stack
+    /// object so cast-triggers resolving above it (Riku:
+    /// `QuantityRef::EventContextSourceModesChosen`) read the mode count. Empty
+    /// for non-modal spells.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_modes: Vec<usize>,
 
     /// CR 702.103b + CR 702.103f: `Some(_)` while this object is in the
     /// "bestowed Aura" form. Set by `apply_bestow_aura_form`; cleared per
@@ -957,6 +1001,18 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_from_stack_linked_source: Option<ObjectId>,
 
+    /// CR 603.7a + CR 614.1a + CR 702.170c: While set alongside the
+    /// exile-instead rider, the stack-resolution router applies the "If you do,
+    /// ..." consequence at the moment the replacement is actually APPLIED (the
+    /// spell lands in exile), per CR 603.7a — arming Feather, the Redeemed's
+    /// return-to-hand delayed trigger, or granting Lilah, Undefeated
+    /// Slickshot's plotted permission. Set by
+    /// `Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(..) }`.
+    /// Transient: cleared on any zone exit, so a spell countered or fizzled
+    /// before it would have resolved never takes the consequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_from_stack_rider: Option<ExiledSpellRider>,
+
     /// CR 305.1 + CR 603.4: Transient field tracking the zone a land was played
     /// from. Consumed by ETB trigger processing for conditions like "without
     /// being played"; permanents put onto the battlefield by effects leave this
@@ -1015,6 +1071,161 @@ pub struct GameObject {
     pub phase_status: PhaseStatus,
 }
 
+/// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
+/// (types/game_state.rs) — the §5.2c 137-field partition. `GameObject` deliberately
+/// does NOT derive `PartialEq` (constant-depth loop detection must omit `timestamp`
+/// / `incarnation`), so the row comparator is hand-rolled and needs this no-`..`
+/// destructure: adding a field breaks the build until it is classified into a
+/// bucket (compared / omitted-safe-by-write-site / immutable / projected). Fail-
+/// closed — a new per-object accumulator cannot silently escape the partition.
+#[cfg(test)]
+fn _gameobject_partition_is_total(o: &GameObject) {
+    let GameObject {
+        id: _,
+        card_id: _,
+        owner: _,
+        base_controller: _,
+        controller: _,
+        zone: _,
+        tapped: _,
+        face_down: _,
+        flipped: _,
+        transformed: _,
+        transformation_count: _,
+        modal_back_face: _,
+        damage_marked: _,
+        dealt_deathtouch_damage: _,
+        attached_to: _,
+        attachments: _,
+        paired_with: _,
+        pair_controller: _,
+        counters: _,
+        intensity: _,
+        perpetual_mods: _,
+        name: _,
+        power: _,
+        toughness: _,
+        loyalty: _,
+        defense: _,
+        token_rules_text: _,
+        card_types: _,
+        attraction_lights: _,
+        in_attraction_deck: _,
+        in_contraption_deck: _,
+        contraption_sprocket: _,
+        stickers: _,
+        mana_cost: _,
+        keywords: _,
+        abilities: _,
+        trigger_definitions: _,
+        replacement_definitions: _,
+        static_definitions: _,
+        cleave_variant: _,
+        color: _,
+        printed_ref: _,
+        token_image_ref: _,
+        source_related_token_ids: _,
+        spellbook: _,
+        back_face: _,
+        specialize_faces: _,
+        specialized_color: _,
+        base_power: _,
+        base_toughness: _,
+        base_name: _,
+        base_loyalty: _,
+        base_defense: _,
+        base_card_types: _,
+        base_mana_cost: _,
+        base_keywords: _,
+        base_abilities: _,
+        base_trigger_definitions: _,
+        trigger_base_set_instance: _,
+        next_trigger_base_set_instance: _,
+        trigger_occurrence_state: _,
+        base_replacement_definitions: _,
+        base_static_definitions: _,
+        base_color: _,
+        base_printed_ref: _,
+        base_characteristics_initialized: _,
+        timestamp: _,
+        incarnation: _,
+        entered_battlefield_turn: _,
+        discarded_turn: _,
+        summoning_sick: _,
+        echo_due: _,
+        cast_variant_paid: _,
+        cast_cost_paid_object: _,
+        entered_via_ability_source: _,
+        cast_timing_permission: _,
+        cost_x_paid: _,
+        fused_split_spell: _,
+        kickers_paid: _,
+        additional_cost_payment_count: _,
+        additional_cost_payments: _,
+        convoked_creatures: _,
+        chosen_modes: _,
+        bestow_form: _,
+        prototype_form: _,
+        mutate_form: _,
+        merged_components: _,
+        merge_kind: _,
+        merge_layer_effect_id: _,
+        pre_merge_is_token: _,
+        split_from_merge_survivor: _,
+        cleave_form: _,
+        unimplemented_mechanics: _,
+        has_summoning_sickness: _,
+        devotion: _,
+        has_mana_ability: _,
+        mana_ability_index: _,
+        available_mana_pips: _,
+        loyalty_activations_this_turn: _,
+        is_commander: _,
+        signature_spell: _,
+        commander_tax: _,
+        is_renowned: _,
+        is_emblem: _,
+        emblem_source: _,
+        is_token: _,
+        is_copy: _,
+        display_source: _,
+        modal: _,
+        additional_cost: _,
+        strive_cost: _,
+        casting_restrictions: _,
+        casting_options: _,
+        casting_permissions: _,
+        foretold: _,
+        chosen_attributes: _,
+        goaded_by: _,
+        detained_by: _,
+        is_suspected: _,
+        monstrous: _,
+        harnessed: _,
+        prepared: _,
+        is_saddled: _,
+        saddled_by: _,
+        assigns_damage_from_toughness: _,
+        assigns_damage_as_though_unblocked: _,
+        assigns_no_combat_damage: _,
+        case_state: _,
+        room_unlocks: _,
+        class_level: _,
+        cast_from_zone: _,
+        cast_controller: _,
+        cast_spell_keywords: _,
+        exile_from_stack_linked_source: _,
+        exile_from_stack_rider: _,
+        played_from_zone: _,
+        mana_spent_to_cast: _,
+        colors_spent_to_cast: _,
+        mana_spent_to_cast_amount: _,
+        phyrexian_life_paid: _,
+        mana_spent_source_snapshots: _,
+        phase_status: _,
+    } = o;
+}
+
 /// CR 205.2 + CR 205.2a: Resolve a stored card-type choice from a chosen-attribute
 /// slice. The generic "choose a card type" persists as a `CardType` attribute; a
 /// restricted card-type choice ("Choose creature or land", Winding Way) parses as
@@ -1030,6 +1241,134 @@ pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType>
 }
 
 impl GameObject {
+    const fn initial_trigger_base_set_instance() -> TriggerBaseSetInstanceRef {
+        TriggerBaseSetInstanceRef::INITIAL
+    }
+
+    const fn initial_next_trigger_base_set_instance() -> u64 {
+        2
+    }
+
+    /// Allocates an intentionally-new printed/base trigger-set generation.
+    /// This is the sole mutation site for the serialized base-set counter.
+    pub fn allocate_trigger_base_set_instance(&mut self) -> Result<(), &'static str> {
+        let next = self.next_trigger_base_set_instance;
+        self.next_trigger_base_set_instance = next
+            .checked_add(1)
+            .ok_or("trigger base-set allocator exhausted")?;
+        self.trigger_base_set_instance = TriggerBaseSetInstanceRef(next);
+        Ok(())
+    }
+
+    /// Re-materializes the live base slots without changing their generation.
+    /// Ordinary full/incremental layer resets and same-face rehydration use this
+    /// path, preserving each printed slot's occurrence identity.
+    pub fn materialize_base_trigger_definitions(&mut self) {
+        self.trigger_definitions = self
+            .base_trigger_definitions
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(printed_index, definition)| {
+                TriggerEntry::new(
+                    TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: self.trigger_base_set_instance,
+                        printed_index,
+                    },
+                    definition,
+                )
+            })
+            .collect();
+    }
+
+    /// Installs a new intentional base/face/cleave trigger set and then
+    /// materializes its ordered printed slots. Allocation occurs before the
+    /// live entries become observable.
+    pub fn install_trigger_base_definitions(
+        &mut self,
+        definitions: Arc<Vec<TriggerDefinition>>,
+    ) -> Result<(), &'static str> {
+        self.allocate_trigger_base_set_instance()?;
+        self.base_trigger_definitions = definitions;
+        self.materialize_base_trigger_definitions();
+        Ok(())
+    }
+
+    /// Returns the exact source-side identity for a currently materialized
+    /// trigger entry.
+    pub fn trigger_definition_ref(
+        &self,
+        entry: &TriggerEntry,
+    ) -> crate::types::ability::TriggerDefinitionRef {
+        crate::types::ability::TriggerDefinitionRef {
+            source: crate::types::identifiers::ObjectIncarnationRef::from_object(self),
+            occurrence: entry.occurrence.clone(),
+        }
+    }
+
+    /// Validates the object-local portion of trigger occurrence provenance.
+    pub fn validate_trigger_definitions(&self) -> Result<(), &'static str> {
+        for entry in self.trigger_definitions.iter_all() {
+            match &entry.occurrence {
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set,
+                    printed_index,
+                } => {
+                    if *base_set != self.trigger_base_set_instance {
+                        return Err("printed trigger refers to a noncurrent base set");
+                    }
+                    if self.base_trigger_definitions.get(*printed_index) != Some(&entry.definition)
+                    {
+                        return Err("printed trigger slot does not match the active base set");
+                    }
+                }
+                TriggerDefinitionOccurrenceRef::Unmaterialized => {
+                    return Err("observable trigger entry lacks occurrence provenance");
+                }
+                TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+                | TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+                | TriggerDefinitionOccurrenceRef::CopyRetained { .. }
+                | TriggerDefinitionOccurrenceRef::Granted { .. }
+                | TriggerDefinitionOccurrenceRef::ExpandedGrant { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Promotes a legacy payload-only live list only when its persisted base
+    /// slots prove the exact ordered printed mapping. Copied and granted
+    /// runtime payloads are rejected rather than guessed from equal definition
+    /// bytes.
+    pub fn migrate_legacy_trigger_definitions(&mut self) -> Result<(), &'static str> {
+        let has_legacy_entries = self.trigger_definitions.iter_all().any(|entry| {
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Unmaterialized
+            )
+        });
+        if !has_legacy_entries {
+            return self.validate_trigger_definitions();
+        }
+        if self.base_trigger_definitions.is_empty()
+            || self.trigger_definitions.len() != self.base_trigger_definitions.len()
+            || !self.trigger_definitions.iter_all().all(|entry| {
+                matches!(
+                    entry.occurrence,
+                    TriggerDefinitionOccurrenceRef::Unmaterialized
+                )
+            })
+            || !self
+                .trigger_definitions
+                .iter_all()
+                .zip(self.base_trigger_definitions.iter())
+                .all(|(entry, base)| entry.definition == *base)
+        {
+            return Err("legacy runtime trigger payload has no provable producer or base slot");
+        }
+        self.materialize_base_trigger_definitions();
+        self.validate_trigger_definitions()
+    }
+
     /// Apply an Alchemy "perpetually" modification to this card: record it on the
     /// object (so it persists across zones/serialization and can be re-applied
     /// after a copy rebuilds base characteristics) and edit the corresponding
@@ -1172,13 +1511,184 @@ impl GameObject {
 
     /// Oathbreaker RC: mark this command-zone object as a signature spell.
     pub fn mark_signature_spell(&mut self) {
-        self.signature_spell = Some(SignatureSpellState);
+        self.signature_spell = Some(SignatureSpellState {});
     }
 
     /// CR 903 + Oathbreaker RC: command-zone cards that use commander tax and
     /// zone-return handling.
     pub fn uses_command_zone_rules(&self) -> bool {
         self.is_commander || self.is_signature_spell()
+    }
+
+    /// CR 202.3d + CR 709.4/709.4b/709.4d: A split card's mana value and colors
+    /// are the COMBINED value of both halves off the stack, AND for a *fused*
+    /// split spell on the stack (CR 702.102b — both halves were cast). A *non-fused*
+    /// split spell on the stack uses only the chosen half. When this returns
+    /// `Some(bf)`, `bf` is the *other* half's back-face data (its `mana_cost`/
+    /// `color` describe the half NOT stored in `self`), and the caller should
+    /// combine it with `self`.
+    ///
+    /// CR 709.5 / CR 709.5c: A Room permanent ON THE BATTLEFIELD is characterized
+    /// by its unlocked-half static abilities (the "left/right half unlocked"
+    /// designations are battlefield-only, CR 709.5c), NOT this naive combine, so a
+    /// Room on the battlefield is gated out here and falls through to the
+    /// single-face path. A Room card OFF the battlefield still combines per
+    /// CR 709.4. `room_unlocks` is populated on any Room card regardless of zone
+    /// (see `apply_card_face_to_object`), so the gate keys on the actual zone —
+    /// a Room card in hand/graveyard/exile has `zone != Battlefield` and combines.
+    fn split_half_to_combine(&self) -> Option<&BackFaceData> {
+        let bf = self.back_face.as_ref()?;
+        if bf.layout_kind != Some(LayoutKind::Split) {
+            return None;
+        }
+        // CR 709.5c: a Room on the battlefield is characterized by its unlocked
+        // halves, not a naive combine.
+        let is_battlefield_room = self.zone == Zone::Battlefield && self.room_unlocks.is_some();
+        if is_battlefield_room {
+            return None;
+        }
+        // CR 202.3d + CR 709.4d: combine off the stack, or on the stack when this
+        // is a fused split spell. A non-fused split spell on the stack keeps the
+        // chosen half only.
+        let combine = self.zone != Zone::Stack || self.fused_split_spell;
+        combine.then_some(bf)
+    }
+
+    /// CR 202.3d + CR 709.4b: This object's mana value accounting for the split
+    /// card rule. Off the stack, a split card's mana value is the combined mana
+    /// value of both halves; in every other case it is this object's own cost
+    /// (including announced X while on the stack, per CR 202.3e). Every off-stack
+    /// mana-value read for a split-capable object must route through here rather
+    /// than reading `self.mana_cost.mana_value()` directly.
+    pub fn effective_mana_value(&self) -> u32 {
+        match self.split_half_to_combine() {
+            // CR 202.3e: X = 0 off the stack, so `mana_value()` (X treated as 0)
+            // on each half is the correct combined off-stack mana value. A fused
+            // split spell on the stack also reaches this arm; no printed Fuse card
+            // has {X} in either half, so summing X-as-0 mana values is exact there.
+            Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
+            None => self
+                .mana_cost
+                .mana_value_with_x(self.zone, self.cost_x_paid),
+        }
+    }
+
+    /// CR 202.3d + CR 709.4/709.4b: This object's colors accounting for the split
+    /// card rule. Off the stack, a split card's colors are determined from the
+    /// combined mana cost of both halves; otherwise they are this object's own
+    /// colors. The union is de-duplicated in canonical WUBRG order
+    /// (`ManaColor::ALL`) so the result is deterministic and order-stable.
+    pub fn effective_colors(&self) -> Vec<ManaColor> {
+        match self.split_half_to_combine() {
+            Some(bf) => ManaColor::ALL
+                .into_iter()
+                .filter(|c| self.color.contains(c) || bf.color.contains(c))
+                .collect(),
+            None => self.color.clone(),
+        }
+    }
+
+    /// The other Split half to combine when this object is being cast as a FUSED
+    /// split spell (CR 702.102b). `None` for non-fused casts and non-split objects,
+    /// so callers combine both halves ONLY for a fused spell. Distinct from
+    /// `split_half_to_combine`, which also fires for ANY split card off the stack
+    /// (the object-characteristic rule, CR 709.4). `fused` is the caller's
+    /// determination — either the persisted `fused_split_spell` marker
+    /// (already-finalized casts) OR a pre-payment `CastingVariant::Fuse` override,
+    /// which is not yet reflected in the marker while enumerating / preparing on an
+    /// immutable `&GameState`. The single-face guard (`layout_kind == Split`) still
+    /// applies, so a non-split object returns `None` even when `fused == true`.
+    fn fused_split_half_for(&self, fused: bool) -> Option<&BackFaceData> {
+        if !fused {
+            return None;
+        }
+        self.back_face
+            .as_ref()
+            .filter(|bf| bf.layout_kind == Some(LayoutKind::Split))
+    }
+
+    /// CR 202.3d + CR 709.4d + CR 702.102b + CR 202.3e: The mana value of the SPELL
+    /// this object represents while being cast / on the stack. For a FUSED split
+    /// spell (both halves cast) this is the COMBINED mana value of both halves; for
+    /// every other object it is the object's own cost, honoring announced X on the
+    /// stack. Distinct from [`effective_mana_value`](Self::effective_mana_value),
+    /// which ALSO combines a split card merely SITTING off the stack: mid-cast the
+    /// spell is still in its origin zone yet must be characterized as its single
+    /// (chosen) half unless it was fused, so restricted-mana payment metadata and
+    /// spell-cast history must key on the fuse marker, not the zone. The
+    /// `fused_split_spell` marker is set BEFORE mana payment so both consumers see
+    /// the combined value.
+    pub fn spell_mana_value(&self) -> u32 {
+        self.spell_mana_value_for(self.fused_split_spell)
+    }
+
+    /// Variant-aware sibling of [`spell_mana_value`](Self::spell_mana_value).
+    /// `fused` lets a pre-payment caller (option enumeration / cast preparation on
+    /// an immutable `&GameState`, where the `fused_split_spell` marker is not yet
+    /// set) request the COMBINED mana value a fused split spell would present to
+    /// spell filters (CR 202.3d + CR 702.102b + CR 709.4d). The public
+    /// [`spell_mana_value`](Self::spell_mana_value) delegates with the persisted
+    /// marker so its existing callers stay byte-identical.
+    pub fn spell_mana_value_for(&self, fused: bool) -> u32 {
+        match self.fused_split_half_for(fused) {
+            // Fuse cards carry no {X} in either half, so summing X-as-0 mana values
+            // is exact (CR 202.3e is moot here).
+            Some(bf) => self.mana_cost.mana_value() + bf.mana_cost.mana_value(),
+            None => self
+                .mana_cost
+                .mana_value_with_x(self.zone, self.cost_x_paid),
+        }
+    }
+
+    /// CR 202.3d + CR 709.4d + CR 702.102b: The colors of the SPELL this object
+    /// represents while being cast / on the stack — the COMBINED colors of both
+    /// halves for a fused split spell, otherwise the object's own colors. See
+    /// [`spell_mana_value`](Self::spell_mana_value) for why this keys on the
+    /// `fused_split_spell` marker rather than the zone gate used by
+    /// `effective_colors`.
+    pub fn spell_colors(&self) -> Vec<ManaColor> {
+        self.spell_colors_for(self.fused_split_spell)
+    }
+
+    /// Variant-aware sibling of [`spell_colors`](Self::spell_colors). `fused`
+    /// requests the COMBINED colors (CR 202.3d + CR 702.102b) a fused split spell
+    /// would present pre-payment, before the `fused_split_spell` marker is set.
+    /// The public [`spell_colors`](Self::spell_colors) delegates with the marker.
+    pub fn spell_colors_for(&self, fused: bool) -> Vec<ManaColor> {
+        match self.fused_split_half_for(fused) {
+            Some(bf) => ManaColor::ALL
+                .into_iter()
+                .filter(|c| self.color.contains(c) || bf.color.contains(c))
+                .collect(),
+            None => self.color.clone(),
+        }
+    }
+
+    /// CR 702.102b + CR 709.4d: Restore the combined card types and colors of
+    /// a fused split spell after a characteristic reset. The fusion marker is
+    /// cast-state, while the union is a derived stack characteristic and must
+    /// therefore be re-applied on every layer pass.
+    pub fn restore_fused_split_characteristics(&mut self) {
+        if self.zone != Zone::Stack || !self.fused_split_spell {
+            return;
+        }
+        let right_half_characteristics = self
+            .back_face
+            .as_ref()
+            .filter(|back| back.layout_kind == Some(LayoutKind::Split))
+            .map(|back| (back.card_types.core_types.clone(), back.color.clone()));
+        if let Some((core_types, colors)) = right_half_characteristics {
+            for core_type in core_types {
+                if !self.card_types.core_types.contains(&core_type) {
+                    self.card_types.core_types.push(core_type);
+                }
+            }
+            for color in colors {
+                if !self.color.contains(&color) {
+                    self.color.push(color);
+                }
+            }
+        }
     }
 
     /// CR 603.10 + CR 400.7: Snapshot this object's public characteristics
@@ -1208,11 +1718,13 @@ impl GameObject {
             // current 2).
             base_power: self.base_power,
             base_toughness: self.base_toughness,
-            colors: self.color.clone(),
-            // CR 202.3e: While on the stack, X equals the announced value, not 0.
-            mana_value: self
-                .mana_cost
-                .mana_value_with_x(self.zone, self.cost_x_paid),
+            // CR 709.4b: Off the stack, a split card's colors are the combined
+            // colors of both halves (`effective_colors` no-ops for single-face).
+            colors: self.effective_colors(),
+            // CR 202.3d + CR 202.3e: On the stack, X equals the announced value
+            // and a split spell's mana value is the chosen half; off the stack a
+            // split card's mana value is the combined value of both halves.
+            mana_value: self.effective_mana_value(),
             controller: self.controller,
             owner: self.owner,
             from_zone: from,
@@ -1269,10 +1781,8 @@ impl GameObject {
             // Both sides are `Arc<Vec<_>>` — refcount-only clone.
             self.base_abilities = Arc::clone(&self.abilities);
         }
-        if self.base_trigger_definitions.is_empty() && !self.trigger_definitions.is_empty() {
-            self.base_trigger_definitions =
-                Arc::new(self.trigger_definitions.iter_all().cloned().collect());
-        }
+        #[cfg(any(test, feature = "test-support"))]
+        self.materialize_test_fixture_trigger_base();
         if self.base_replacement_definitions.is_empty() && !self.replacement_definitions.is_empty()
         {
             self.base_replacement_definitions =
@@ -1292,6 +1802,26 @@ impl GameObject {
         self.base_characteristics_initialized = true;
     }
 
+    /// Test-fixture-only construction seam for pre-identity unit fixtures.
+    ///
+    /// Production restore never calls this: deserialization instead requires
+    /// `migrate_legacy_trigger_definitions` to prove every legacy payload from
+    /// persisted printed slots. Keeping the compatibility path behind the same
+    /// `test-support` boundary as scenario construction makes that distinction
+    /// explicit rather than dependent on layer-flush call order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn materialize_test_fixture_trigger_base(&mut self) {
+        if self.base_trigger_definitions.is_empty() && !self.trigger_definitions.is_empty() {
+            self.base_trigger_definitions = Arc::new(
+                self.trigger_definitions
+                    .iter_all()
+                    .map(|entry| entry.definition.clone())
+                    .collect(),
+            );
+            self.materialize_base_trigger_definitions();
+        }
+    }
+
     pub fn new(id: ObjectId, card_id: CardId, owner: PlayerId, name: String, zone: Zone) -> Self {
         GameObject {
             id,
@@ -1304,6 +1834,7 @@ impl GameObject {
             face_down: false,
             flipped: false,
             transformed: false,
+            transformation_count: 0,
             modal_back_face: false,
             damage_marked: 0,
             dealt_deathtouch_damage: false,
@@ -1351,6 +1882,9 @@ impl GameObject {
             base_keywords: Vec::new(),
             base_abilities: Arc::new(Vec::new()),
             base_trigger_definitions: Default::default(),
+            trigger_base_set_instance: TriggerBaseSetInstanceRef::INITIAL,
+            next_trigger_base_set_instance: 2,
+            trigger_occurrence_state: TriggerOccurrenceState::default(),
             base_replacement_definitions: Default::default(),
             base_static_definitions: Default::default(),
             base_color: Vec::new(),
@@ -1366,10 +1900,12 @@ impl GameObject {
             entered_via_ability_source: None,
             cast_timing_permission: None,
             cost_x_paid: None,
+            fused_split_spell: false,
             kickers_paid: Vec::new(),
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
+            chosen_modes: Vec::new(),
             bestow_form: None,
             prototype_form: None,
             mutate_form: None,
@@ -1422,6 +1958,7 @@ impl GameObject {
             cast_controller: None,
             cast_spell_keywords: Vec::new(),
             exile_from_stack_linked_source: None,
+            exile_from_stack_rider: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
@@ -1436,20 +1973,25 @@ impl GameObject {
     pub fn snapshot_public_characteristics(&self) -> LKISnapshot {
         LKISnapshot {
             name: self.name.clone(),
+            token_image_ref: self.token_image_ref.clone(),
             power: self.power,
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Layer-7b base values, mirroring how
             // `power`/`toughness` capture the post-layer-7 current values.
             base_power: self.base_power,
             base_toughness: self.base_toughness,
-            mana_value: self.mana_cost.mana_value(),
+            // CR 202.3d + CR 709.4b: combined mana value / colors for a split card
+            // off the stack (no-op for single-face, on-stack, and battlefield
+            // Rooms, which gate out) so look-back queries read the CR-correct
+            // characteristics — mirrors `snapshot_for_zone_change`.
+            mana_value: self.effective_mana_value(),
             controller: self.controller,
             owner: self.owner,
             card_types: self.card_types.core_types.clone(),
             subtypes: self.card_types.subtypes.clone(),
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
-            colors: self.color.clone(),
+            colors: self.effective_colors(),
             chosen_attributes: self.chosen_attributes.clone(),
             counters: self.counters.clone(),
             // CR 110.5: Capture live tap status. This snapshot is taken while the
@@ -1460,6 +2002,15 @@ impl GameObject {
             // still on the battlefield (cost-paid snapshot precedes the sacrifice
             // zone-change that resets the flag), so `self.is_suspected` is authoritative.
             is_suspected: self.is_suspected,
+            // Empty by construction, NOT by choice: classifying an attachment as
+            // Aura/Equipment requires looking each attached object up in `GameState`
+            // (see `zones::capture_attachment_snapshot`), and this method has only
+            // `&self`. Callers that need the attachment look-back (the CR 608.2h
+            // battlefield-exit LKI) go through `apply_zone_exit_cleanup`, which does
+            // have `&GameState` and populates it. The damage-source and mana-spent
+            // snapshots that use this method never ask an attachment predicate, so an
+            // empty set here is the same fail-closed answer they got before.
+            attachments: Vec::new(),
         }
     }
 
@@ -1481,6 +2032,15 @@ impl GameObject {
         }
     }
 
+    /// CR 400.7: Advance this object's incarnation epoch by one. The single bump
+    /// primitive — every real zone change (battlefield entry via
+    /// `reset_for_battlefield_entry`, and every non-battlefield move in the zone
+    /// movers) routes through here so a self-reference captured for the previous
+    /// incarnation no longer matches the new object.
+    pub fn bump_incarnation(&mut self) {
+        self.incarnation += 1;
+    }
+
     /// CR 400.7: Reset transient battlefield state when a permanent enters the battlefield.
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
@@ -1488,7 +2048,7 @@ impl GameObject {
         // CR 400.7: This (re-)entry creates a new object at the same storage id.
         // Bump the incarnation so self-references captured by abilities created
         // for the previous incarnation no longer match this permanent.
-        self.incarnation += 1;
+        self.bump_incarnation();
         // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
         // stamps battlefield entries only; all-zone entry stamping (graveyard/exile-
         // functioning statics) is a deferred hook (see scope boundary).
@@ -1590,7 +2150,7 @@ impl GameObject {
         self.mana_cost = self.base_mana_cost.clone();
         self.keywords = self.base_keywords.clone();
         self.abilities = Arc::clone(&self.base_abilities);
-        self.trigger_definitions = Arc::clone(&self.base_trigger_definitions).into();
+        self.materialize_base_trigger_definitions();
         self.replacement_definitions = Arc::clone(&self.base_replacement_definitions).into();
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
         self.color = self.base_color.clone();
@@ -1860,6 +2420,11 @@ impl GameObject {
         !self.is_token && !self.is_copy
     }
 
+    /// CR 702.66a: Delve may exile only a card from its owner's graveyard.
+    pub fn is_delve_eligible(&self, player: PlayerId) -> bool {
+        self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
+    }
+
     /// CR 714.1: Returns the final chapter number for a Saga, or None if not a Saga.
     /// Derived at runtime from the maximum threshold in the trigger definitions' counter filters.
     pub fn final_chapter_number(&self) -> Option<u32> {
@@ -1870,7 +2435,13 @@ impl GameObject {
         // card, not subject to functioning gates. `iter_all` is pub(crate).
         self.trigger_definitions
             .iter_all()
-            .filter_map(|t| t.counter_filter.as_ref().and_then(|f| f.threshold))
+            .filter_map(|entry| {
+                entry
+                    .definition
+                    .counter_filter
+                    .as_ref()
+                    .and_then(|f| f.threshold)
+            })
             .max()
     }
 
@@ -1942,6 +2513,7 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 mod tests {
     use super::*;
     use crate::types::counter::parse_counter_type;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn game_object_has_all_rules_relevant_fields() {
@@ -2001,6 +2573,218 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn legacy_printed_trigger_payload_with_matching_base_slots_is_materialized() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        let definitions = vec![
+            TriggerDefinition::new(TriggerMode::Phase),
+            TriggerDefinition::new(TriggerMode::Attacks),
+        ];
+        object.base_trigger_definitions = Arc::new(definitions.clone());
+        object.trigger_definitions = definitions.into();
+
+        object
+            .migrate_legacy_trigger_definitions()
+            .expect("matching persisted base slots prove the legacy printed mapping");
+
+        assert!(object
+            .trigger_definitions
+            .iter_all()
+            .enumerate()
+            .all(|(printed_index, entry)| {
+                entry.occurrence
+                    == TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index,
+                    }
+            }));
+    }
+
+    #[test]
+    fn legacy_runtime_trigger_payload_without_a_printed_slot_is_rejected() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object
+            .trigger_definitions
+            .push(TriggerDefinition::new(TriggerMode::Attacks));
+
+        assert_eq!(
+            object.migrate_legacy_trigger_definitions(),
+            Err("legacy runtime trigger payload has no provable producer or base slot"),
+            "a payload-only runtime copied/granted trigger must not be guessed as printed"
+        );
+    }
+
+    fn trigger_test_object() -> GameObject {
+        GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Trigger Test".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    #[test]
+    fn printed_explicit_and_keyword_companion_map_to_stable_distinct_base_slots() {
+        let mut object = trigger_test_object();
+        let explicit = TriggerDefinition::new(TriggerMode::Phase);
+        let keyword_companion = TriggerDefinition::new(TriggerMode::Attacks);
+        object.base_trigger_definitions = Arc::new(vec![explicit.clone(), keyword_companion]);
+
+        object.materialize_base_trigger_definitions();
+
+        let occurrences = object
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.occurrence.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences,
+            vec![
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            object.trigger_definitions[0].definition, explicit,
+            "the first final slot preserves the explicit printed trigger payload"
+        );
+    }
+
+    #[test]
+    fn repeated_printed_companion_slots_stay_distinct() {
+        let mut object = trigger_test_object();
+        let companion = TriggerDefinition::new(TriggerMode::Attacks);
+        object.base_trigger_definitions = Arc::new(vec![companion.clone(), companion]);
+
+        object.materialize_base_trigger_definitions();
+
+        assert_ne!(
+            object.trigger_definitions[0].occurrence, object.trigger_definitions[1].occurrence,
+            "repeated final slots must not collapse because their payloads match"
+        );
+    }
+
+    #[test]
+    fn unchanged_base_reset_and_rehydrate_keep_trigger_refs() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object.materialize_base_trigger_definitions();
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_eq!(before, after);
+        assert_eq!(
+            object.next_trigger_base_set_instance, 2,
+            "rehydrating unchanged base slots must not allocate a new generation"
+        );
+    }
+
+    #[test]
+    fn reincarnation_changes_the_full_trigger_ref_without_reusing_a_base_slot() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object.bump_incarnation();
+        object.materialize_base_trigger_definitions();
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_ne!(
+            before, after,
+            "a new object incarnation is a new trigger source"
+        );
+        assert_eq!(
+            before.occurrence, after.occurrence,
+            "ordinary base rehydration does not fabricate a new base set"
+        );
+    }
+
+    #[test]
+    fn intentional_base_replacement_gets_fresh_base_set_ref() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object
+            .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+                TriggerMode::Attacks,
+            )]))
+            .expect("base-set allocator has capacity");
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_ne!(before, after);
+        assert_eq!(
+            object.trigger_base_set_instance,
+            TriggerBaseSetInstanceRef(2)
+        );
+        assert_eq!(object.next_trigger_base_set_instance, 3);
+    }
+
+    #[test]
+    fn serialized_base_slots_preserve_exact_refs() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions = Arc::new(vec![
+            TriggerDefinition::new(TriggerMode::Phase),
+            TriggerDefinition::new(TriggerMode::Attacks),
+        ]);
+        object.materialize_base_trigger_definitions();
+        let refs = object
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| object.trigger_definition_ref(entry))
+            .collect::<Vec<_>>();
+
+        let roundtrip: GameObject = serde_json::from_str(&serde_json::to_string(&object).unwrap())
+            .expect("identity-bearing trigger entries roundtrip");
+        let roundtrip_refs = roundtrip
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| roundtrip.trigger_definition_ref(entry))
+            .collect::<Vec<_>>();
+
+        assert_eq!(refs, roundtrip_refs);
+        assert_eq!(
+            object.trigger_base_set_instance,
+            roundtrip.trigger_base_set_instance
+        );
+        assert_eq!(
+            object.next_trigger_base_set_instance,
+            roundtrip.next_trigger_base_set_instance
+        );
+        assert_eq!(
+            object.trigger_occurrence_state,
+            roundtrip.trigger_occurrence_state
+        );
     }
 
     /// CR 702.26: `phase_status` must be exposed on the wire so the FE can
@@ -2161,5 +2945,272 @@ mod tests {
             Zone::Hand,
         );
         assert_eq!(obj.final_chapter_number(), None);
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 202.3d + CR 709.4/709.4b split-card off-stack mana value & colors.
+    //
+    // Assault // Battery (fixture): Assault {R} = MV 1 (Red), Battery {3}{G} =
+    // MV 4 (Green). Off the stack the combined characteristics are MV 5 and
+    // colors {Red, Green}. Each test drives `add_real_card` (which populates
+    // `back_face` via `populate_back_face_if_dfc`) so it exercises the real
+    // parsed card, then reads the fix's helpers / production seams. Every
+    // assertion FAILS on the pre-fix front-only read.
+    // ---------------------------------------------------------------------
+
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::test_support::shared_card_db;
+    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
+
+    /// (a) A split card in library/graveyard/hand reports the COMBINED mana value
+    /// of both halves (5), not the front half alone (1). Reverting the fix makes
+    /// `effective_mana_value()` return 1 and every assertion fails.
+    #[test]
+    fn split_card_effective_mana_value_is_combined_off_stack() {
+        let db = shared_card_db();
+        for zone in [Zone::Library, Zone::Graveyard, Zone::Hand, Zone::Exile] {
+            let mut sc = GameScenario::new();
+            let id = sc.add_real_card(P0, "Assault", zone, db);
+            let obj = sc.state.objects.get(&id).unwrap();
+            assert_eq!(
+                obj.back_face.as_ref().map(|b| b.name.as_str()),
+                Some("Battery"),
+                "back_face must hydrate the other split half off the stack in {zone:?}"
+            );
+            assert_eq!(
+                obj.effective_mana_value(),
+                5,
+                "Assault // Battery combined MV must be 5 in {zone:?} (front-only = 1)"
+            );
+        }
+    }
+
+    /// (b) A split card off the stack has the COMBINED colors of both halves.
+    /// Assault // Battery is {R} + {3}{G} → {Red, Green}. Front-only reports only
+    /// {Red}, so the Green assertion fails on revert.
+    #[test]
+    fn split_card_effective_colors_are_combined_off_stack() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        let id = sc.add_real_card(P0, "Assault", Zone::Hand, db);
+        let colors = sc.state.objects.get(&id).unwrap().effective_colors();
+        assert!(
+            colors.contains(&ManaColor::Red) && colors.contains(&ManaColor::Green),
+            "combined colors must include both Red and Green, got {colors:?}"
+        );
+        assert_eq!(
+            colors.len(),
+            2,
+            "exactly the two half colors, WUBRG-ordered"
+        );
+        // Canonical WUBRG order (ManaColor::ALL): Red precedes Green.
+        assert_eq!(colors, vec![ManaColor::Red, ManaColor::Green]);
+    }
+
+    /// (c) A production `FilterProp::Cmc { GE, 5 }` MATCHES a split card off the
+    /// stack (combined MV 5) and a `HasColor { Green }` filter matches its
+    /// combined colors; a plain {2}{R} MV-3 single-face card does NOT match
+    /// either. Reverting the fix drops the Cmc/color match on the split card.
+    #[test]
+    fn cmc_and_color_filters_see_combined_split_characteristics() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        let split = sc.add_real_card(P0, "Assault", Zone::Graveyard, db);
+        let ogre = sc.add_real_card(P0, "Gray Ogre", Zone::Graveyard, db);
+        let state = sc.state;
+
+        let cmc_ge_5 = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 5 },
+            }],
+            ..TypedFilter::card()
+        });
+        let has_green = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+            ..TypedFilter::card()
+        });
+
+        let ctx = crate::game::filter::FilterContext::from_source(&state, split);
+        assert!(
+            crate::game::filter::matches_target_filter(&state, split, &cmc_ge_5, &ctx),
+            "split card off the stack must match Cmc >= 5 (combined MV)"
+        );
+        assert!(
+            crate::game::filter::matches_target_filter(&state, split, &has_green, &ctx),
+            "split card off the stack must match HasColor(Green) (combined colors)"
+        );
+        // Negative: a plain {2}{R} MV-3 Red card matches neither.
+        assert!(
+            !crate::game::filter::matches_target_filter(&state, ogre, &cmc_ge_5, &ctx),
+            "a plain {{2}}{{R}} MV-3 card must NOT match Cmc >= 5"
+        );
+        assert!(
+            !crate::game::filter::matches_target_filter(&state, ogre, &has_green, &ctx),
+            "a mono-red card must NOT match HasColor(Green)"
+        );
+    }
+
+    /// (d) The zone-change LKI snapshot (`snapshot_for_zone_change`) captures the
+    /// COMBINED mana value for a dying split card, so an MV-gated look-back
+    /// trigger ("a card with MV 5 leaves") reads 5, not 1. A plain MV-3
+    /// single-face card snapshots 3. Reverting the fix snapshots 1.
+    #[test]
+    fn zone_change_snapshot_records_combined_split_mana_value() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        let split = sc.add_real_card(P0, "Assault", Zone::Battlefield, db);
+        let ogre = sc.add_real_card(P0, "Gray Ogre", Zone::Battlefield, db);
+        let state = &sc.state;
+
+        let split_record = state.objects.get(&split).unwrap().snapshot_for_zone_change(
+            split,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        assert_eq!(
+            split_record.mana_value, 5,
+            "dying split card's zone-change record must snapshot combined MV 5"
+        );
+
+        let ogre_record = state.objects.get(&ogre).unwrap().snapshot_for_zone_change(
+            ogre,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        assert_eq!(
+            ogre_record.mana_value, 3,
+            "a plain {{2}}{{R}} single-face card snapshots MV 3, unaffected by the fix"
+        );
+    }
+
+    /// (g) A non-split {2}{R} card reports MV 3 in every zone — the fix must not
+    /// perturb single-face cards (no `back_face`, so the gate returns None).
+    #[test]
+    fn single_face_card_mana_value_unchanged_in_all_zones() {
+        let db = shared_card_db();
+        for zone in [
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Library,
+            Zone::Battlefield,
+        ] {
+            let mut sc = GameScenario::new();
+            let id = sc.add_real_card(P0, "Gray Ogre", zone, db);
+            let obj = sc.state.objects.get(&id).unwrap();
+            assert_eq!(
+                obj.effective_mana_value(),
+                3,
+                "Gray Ogre {{2}}{{R}} must report MV 3 in {zone:?}"
+            );
+            assert_eq!(
+                obj.effective_colors(),
+                vec![ManaColor::Red],
+                "Gray Ogre is mono-red in {zone:?}"
+            );
+        }
+    }
+
+    /// OR-gate anchor for the pre-payment fuse projection (PR #5093). The
+    /// `spell_mana_value_for(fused)` / `spell_colors_for(fused)` helpers let a
+    /// pre-payment caller (option enumeration / cast preparation on an immutable
+    /// `&GameState`, before the `fused_split_spell` marker is set) request the
+    /// COMBINED characteristics a fused split spell would present to spell filters
+    /// (CR 202.3d + CR 702.102b). `fused = false` reports the front half; `true`
+    /// reports both halves combined — WITHOUT ever touching the marker. Reverting
+    /// the `_for` split (making the projection key only on the marker) makes the
+    /// `true` case still report the front half and fails these assertions.
+    #[test]
+    fn spell_mana_value_and_colors_for_fused_hint_combine_without_marker() {
+        let db = shared_card_db();
+        let mut sc = GameScenario::new();
+        // Breaking // Entering: Breaking {U}{B} (MV 2, {U,B}) front + Entering
+        // {4}{B}{R} (MV 6, {B,R}) back Split half. Combined MV 8, colors {U,B,R}.
+        let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+        let obj = sc.state.objects.get(&breaking).unwrap();
+
+        // Marker is NOT set — the object is a raw hand card mid-enumeration.
+        assert!(
+            !obj.fused_split_spell,
+            "fixture must exercise the marker-independent `_for` path"
+        );
+
+        // fused = false: front half only (MV 2, no red).
+        assert_eq!(
+            obj.spell_mana_value_for(false),
+            2,
+            "spell_mana_value_for(false) reports the front half MV (2)"
+        );
+        assert!(
+            !obj.spell_colors_for(false).contains(&ManaColor::Red),
+            "spell_colors_for(false) is the front half (no red)"
+        );
+
+        // fused = true: combined halves (MV 8, includes red) — no marker set.
+        assert_eq!(
+            obj.spell_mana_value_for(true),
+            8,
+            "spell_mana_value_for(true) reports the COMBINED MV (8) with no marker set"
+        );
+        assert!(
+            obj.spell_colors_for(true).contains(&ManaColor::Red),
+            "spell_colors_for(true) includes Entering's red with no marker set"
+        );
+
+        // The public marker-keyed accessors still report the front half (marker unset).
+        assert_eq!(
+            obj.spell_mana_value(),
+            2,
+            "public spell_mana_value() stays marker-keyed (front half while marker unset)"
+        );
+    }
+
+    /// (h) The Room gate (CR 709.5 / CR 709.5c): a Room card ON the battlefield is
+    /// characterized by its unlocked-half static abilities, so it is NOT
+    /// over-combined — `effective_mana_value` returns the single (front) half. The
+    /// SAME Room card in hand combines both halves per CR 709.4. This proves the
+    /// zone-aware battlefield-Room gate. Bottomless Pool // Locker Room:
+    /// {U} + {4}{U} → combined MV 6, front-only MV 1.
+    ///
+    /// Note: `room_unlocks` is populated on any Room card regardless of zone (by
+    /// `apply_card_face_to_object`), so the gate must key on the actual zone —
+    /// `room_unlocks.is_some()` alone would wrongly exclude off-battlefield Rooms.
+    #[test]
+    fn room_permanent_on_battlefield_is_not_over_combined() {
+        let db = shared_card_db();
+
+        // On the battlefield: gated out → single (front) half MV 1.
+        let mut sc_bf = GameScenario::new();
+        let bf_id = sc_bf.add_real_card(P0, "Bottomless Pool", Zone::Battlefield, db);
+        let bf_obj = sc_bf.state.objects.get(&bf_id).unwrap();
+        assert_eq!(
+            bf_obj.zone,
+            Zone::Battlefield,
+            "the Room entered the battlefield"
+        );
+        assert!(
+            bf_obj.room_unlocks.is_some(),
+            "a Room on the battlefield carries room_unlocks (CR 709.5c)"
+        );
+        assert_eq!(
+            bf_obj.effective_mana_value(),
+            1,
+            "a battlefield Room is gated out of the naive combine (front half MV 1)"
+        );
+
+        // In hand: off the battlefield → combines to MV 6 (CR 709.4), even though
+        // `room_unlocks` is populated at card creation.
+        let mut sc_hand = GameScenario::new();
+        let hand_id = sc_hand.add_real_card(P0, "Bottomless Pool", Zone::Hand, db);
+        let hand_obj = sc_hand.state.objects.get(&hand_id).unwrap();
+        assert_eq!(hand_obj.zone, Zone::Hand, "the Room card is in hand");
+        assert_eq!(
+            hand_obj.effective_mana_value(),
+            6,
+            "a Room card in hand combines both halves (CR 709.4b): {{U}} + {{4}}{{U}} = 6"
+        );
     }
 }

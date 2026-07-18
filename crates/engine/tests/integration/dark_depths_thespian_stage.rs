@@ -158,6 +158,7 @@ fn thespians_stage_copies_dark_depths_then_state_trigger_creates_marit_lage() {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::BecomeCopy {
+                    recipient: TargetFilter::SelfRef,
                     target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
                     duration: Some(Duration::Permanent),
                     mana_value_limit: None,
