@@ -1723,6 +1723,17 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 101.2 + CR 109.4 + CR 601.3a (Ward of Bones): "Each opponent who controls
+    // more <T0> than you can't cast <T0> spells. The same is true for <T1> and
+    // <T2>." — one INDEPENDENT relative-count cast prohibition per type, each gated
+    // on that type's own count. Must precede generic multi-sentence splitting,
+    // which would split the "the same is true for" continuation into a bogus
+    // standalone sentence and strand the count on the first type (the observed bug:
+    // every type gated on the single creature count).
+    if let Some(defs) = parse_relative_count_typed_cast_prohibitions(&stripped) {
+        return defs;
+    }
+
     // CR 613.1f + CR 105.2 (Scion of Draco): "<subject> has <K0> if it's <C0>, …, and
     // <Kn> if it's <Cn>." — the COLOR-qualified sibling of the exiled-object grant
     // above: one independent grant per listed pair, each color folded into its own

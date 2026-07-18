@@ -130,7 +130,7 @@ mod support {
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
-        strip_casting_prohibition_subject,
+        parse_relative_count_typed_cast_prohibitions, strip_casting_prohibition_subject,
     };
     pub(super) use super::shared::*;
     pub(super) use super::static_helpers::*;

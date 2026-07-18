@@ -11995,10 +11995,11 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
 /// Fail-closed at every step: non-matching text returns `None`, the input falls
 /// through to the normal pipeline, and an unrecognized cost surfaces as an honest
 /// `Unimplemented` rather than a cost-free (and thus illegal) escape grant.
-pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
+pub(crate) fn parse_grant_graveyard_keyword_to_target_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let stripped = super::oracle_util::strip_reminder_text(text);
     let lower = stripped.to_lowercase();
 
@@ -12074,7 +12075,14 @@ pub(crate) fn try_parse_grant_graveyard_keyword_to_target(
         duration: Some(Duration::UntilEndOfTurn),
         target: Some(target_filter),
     };
-    Some(AbilityDefinition::new(kind, effect))
+    Some(EffectChainIr::single_clause(
+        text,
+        kind,
+        parsed_clause(effect),
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: Whole-body, fail-closed recognizer
@@ -24761,17 +24769,20 @@ fn try_parse_repeat_process_directive(
 /// stripper peels the final clause's "if ..." and re-applies it across the whole
 /// grant. Each color keeps its own land condition, so no spurious outer condition
 /// is created.
-fn try_parse_conditional_protection_grant_ability(
+fn parse_conditional_protection_grant_ir(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> Option<EffectChainIr> {
     let clause = subject::try_parse_conditional_protection_grant_clause(text, ctx)?;
-    let mut def = AbilityDefinition::new(kind, clause.effect);
-    if let Some(duration) = clause.duration {
-        def = def.duration(duration);
-    }
-    Some(def)
+    Some(EffectChainIr::single_clause(
+        text,
+        kind,
+        clause,
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
+    ))
 }
 
 /// CR 101.4 + CR 707.2 + CR 122.1: Whole-body detector for the WHO phenomena
@@ -25158,26 +25169,18 @@ pub(crate) enum ChainLoweringMode {
     WithContext,
 }
 
-/// Run the whole-body recognizers that build a definition directly, in order.
+/// U3 migration seam: dispatch any remaining whole-body recognizers in order.
 ///
-/// Returns `None` when the text falls through to the ordinary clause pipeline.
+/// The shared list is intentionally retained until U6 removes this escape hatch.
+/// Returns `None` when the text falls through to the ordinary IR pipeline.
 fn try_parse_chain_bypass(
     text: &str,
     kind: AbilityKind,
     mode: ChainLoweringMode,
-    ctx: &mut ParseContext,
+    _ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    // The remaining shared bypasses, in their established order. Only the first
-    // consults `ctx`.
-    if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
-        return Some(def);
-    }
+    // The shared bypass list is empty after U3c's third conversion. The
+    // mode-exclusive cloak recognizer remains until its ordered conversion.
     match mode {
         ChainLoweringMode::Standalone => None,
         ChainLoweringMode::WithContext => try_parse_exile_pile_shuffle_cloak(text, kind),
@@ -25205,7 +25208,38 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     def
 }
 
-fn parse_ability_ir(text: &str, kind: AbilityKind, ctx: &mut ParseContext) -> AbilityIr {
+fn parse_ability_ir(
+    text: &str,
+    kind: AbilityKind,
+    mode: ChainLoweringMode,
+    ctx: &mut ParseContext,
+) -> AbilityIr {
+    // The conditional protection recognizer may mutate `ParseContext` before
+    // declining. Preserve the two legacy entry-point semantics exactly: the
+    // standalone bypass context was fresh and discarded on decline, while the
+    // with-context entry point passed its caller context through to the ordinary
+    // chain path after a decline.
+    let conditional_protection = match mode {
+        ChainLoweringMode::Standalone => {
+            let mut bypass_ctx = ParseContext::default();
+            parse_conditional_protection_grant_ir(text, kind, &mut bypass_ctx)
+        }
+        ChainLoweringMode::WithContext => parse_conditional_protection_grant_ir(text, kind, ctx),
+    };
+    if let Some(body) = conditional_protection {
+        return AbilityIr {
+            source_text: text.to_string(),
+            body,
+            shell: AbilityShellIr::default(),
+        };
+    }
+    if let Some(body) = parse_for_each_attacker_copy_blocker_ir(text, kind, ctx) {
+        return AbilityIr {
+            source_text: text.to_string(),
+            body,
+            shell: AbilityShellIr::default(),
+        };
+    }
     if let Some(body) = parse_balance_equalization_ir(text, kind, ctx) {
         return AbilityIr {
             source_text: text.to_string(),
@@ -25235,7 +25269,12 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     ) {
         return def;
     }
-    lower_ability_ir(&parse_ability_ir(text, kind, &mut ParseContext::default()))
+    lower_ability_ir(&parse_ability_ir(
+        text,
+        kind,
+        ChainLoweringMode::Standalone,
+        &mut ParseContext::default(),
+    ))
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
@@ -25249,7 +25288,12 @@ pub(crate) fn parse_effect_chain_with_context(
     if let Some(def) = try_parse_chain_bypass(text, kind, ChainLoweringMode::WithContext, ctx) {
         return def;
     }
-    lower_ability_ir(&parse_ability_ir(text, kind, ctx))
+    lower_ability_ir(&parse_ability_ir(
+        text,
+        kind,
+        ChainLoweringMode::WithContext,
+        ctx,
+    ))
 }
 
 /// CR 701.24a + CR 701.58a/e + CR 608.2c: Expose the Culprit mode 2 — "Exile any
@@ -25403,10 +25447,11 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
 /// player is the controller — which the engine records as the controller of an
 /// attacked planeswalker/battle too, so "attacking you" and "or a planeswalker
 /// you control" collapse onto the one predicate.
-fn try_parse_for_each_attacker_copy_blocker(
+fn parse_for_each_attacker_copy_blocker_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     // Optional leading casting-restriction sentence, if not pre-stripped.
     let i = opt(tag::<_, _, OracleError<'_>>(
@@ -25467,46 +25512,83 @@ fn try_parse_for_each_attacker_copy_blocker(
                 defender: Some(ControllerRef::You),
             }]),
         );
-    let mut def = AbilityDefinition::new(
+    let copy = Effect::CopyTokenBlockingAttacker {
+        source_filter,
+        owner: TargetFilter::Controller,
+    };
+    if !exiles_tokens {
+        return Some(EffectChainIr::single_clause(
+            text,
+            kind,
+            parsed_clause(copy),
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        ));
+    }
+
+    // CR 603.7c: "those tokens" → the tokens created above, snapshotted at
+    // delayed-trigger creation via `TargetFilter::LastCreated`.
+    let exile = AbilityDefinition::new(
         kind,
-        Effect::CopyTokenBlockingAttacker {
-            source_filter,
-            owner: TargetFilter::Controller,
+        Effect::ChangeZone {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target: TargetFilter::LastCreated,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
         },
     );
-    if exiles_tokens {
-        // CR 603.7c + CR 701.36a: "those tokens" → the tokens created above,
-        // snapshotted at delayed-trigger creation via `TargetFilter::LastCreated`.
-        let exile = AbilityDefinition::new(
-            kind,
-            Effect::ChangeZone {
-                origin: Some(Zone::Battlefield),
-                destination: Zone::Exile,
-                target: TargetFilter::LastCreated,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
+    let delayed_exile = Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::AtNextPhase {
+            phase: Phase::EndCombat,
+        },
+        effect: Box::new(exile),
+        uses_tracked_set: false,
+    };
+    let copy_source = text.get(..text.len().checked_sub(i.len())?)?;
+    let delayed_source = text.get(copy_source.len()..)?.trim_start();
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            copy_source,
+            parsed_clause(copy),
+            Some(ClauseBoundary::Then),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
             },
-        );
-        def.sub_ability = Some(Box::new(AbilityDefinition::new(
-            kind,
-            Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::AtNextPhase {
-                    phase: Phase::EndCombat,
-                },
-                effect: Box::new(exile),
-                uses_tracked_set: false,
+        )
+        .push();
+    builder
+        .clause(
+            delayed_source,
+            parsed_clause(delayed_exile),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
             },
-        )));
-    }
-    Some(def)
+        )
+        .push();
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 fn parse_return_target_and_same_name_from_your_graveyard_ir(
@@ -25825,6 +25907,9 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    if let Some(ir) = parse_grant_graveyard_keyword_to_target_ir(text, kind, ctx) {
+        return ir;
+    }
     if let Some(ir) = parse_catch_up_draw_ir(text, kind, ctx) {
         return ir;
     }
