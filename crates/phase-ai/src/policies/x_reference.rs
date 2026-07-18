@@ -42,7 +42,11 @@ pub(crate) fn spell_object_references_x(state: &GameState, object_id: ObjectId) 
         return false;
     };
     // Spell-cast triggers / dies / etc. on the stack object.
-    for trigger in obj.trigger_definitions.iter_unchecked() {
+    for trigger in obj
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+    {
         if let Some(exec) = &trigger.execute {
             if ability_definition_references_x(exec) {
                 return true;

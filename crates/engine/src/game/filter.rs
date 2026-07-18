@@ -97,8 +97,10 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         // SpecificObject before runtime) — never whole-board population.
         | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -218,6 +220,9 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation (reads only the
+        // object's own `goaded_by` set), so the board population is irrelevant.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::Modified
@@ -327,8 +332,10 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         // SpecificObject before runtime) — never whole-board population.
         | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -460,6 +467,9 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: an entering object cannot perturb a candidate-local goad
+        // designation (reads only the object's own `goaded_by` set).
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::Modified
@@ -984,7 +994,20 @@ pub(crate) fn matches_stack_target_filter(
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
-    let Some(entry) = state.stack.iter().find(|entry| entry.id == stack_obj_id) else {
+    let Some(entry) = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == stack_obj_id)
+        .or_else(|| {
+            state.resolving_stack_entry.as_ref().filter(|entry| {
+                entry.id == stack_obj_id
+                    && state
+                        .objects
+                        .get(&entry.id)
+                        .is_some_and(|obj| obj.zone == Zone::Stack)
+            })
+        })
+    else {
         return false;
     };
     match filter {
@@ -2115,8 +2138,15 @@ fn filter_inner_for_object(
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
+        // CR 615.5: an object-typed resolution-time ref (the prevented event's
+        // damage source) — resolved via `resolve_target_filter`, not by scanning
+        // objects here, exactly like `ParentTarget`.
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::PostReplacementDamageTargetOwner => false,
+        | TargetFilter::PostReplacementDamageTargetOwner
+        // CR 615: compound damage recipient, lowered to `DamageTargetFilter`
+        // before runtime — never object-matched here.
+        | TargetFilter::ControllerAndControlledPermanents { .. } => false,
         // CR 201.2 + CR 602.5: "card with the chosen name" — match against source's
         // ChosenAttribute::CardName. The chosen name comes from a player UI prompt;
         // the comparison must mirror the spell-cast prohibition path
@@ -2404,8 +2434,10 @@ fn zone_change_filter_inner(
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -2715,8 +2747,10 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -3027,8 +3061,10 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -3353,6 +3389,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: a spell on the stack carries no goad designation. Fail closed.
+        | FilterProp::Goaded
         // CR 700.9: Modified requires on-battlefield attachments/counters,
         // unavailable from a stack-snapshot record.
         | FilterProp::Modified
@@ -4298,6 +4336,8 @@ fn matches_filter_prop(
         FilterProp::Suspected => obj.is_suspected,
         // CR 702.112b: Match permanents with the renowned designation.
         FilterProp::Renowned => obj.is_renowned,
+        // CR 701.15b/c: a creature is goaded iff at least one player has goaded it.
+        FilterProp::Goaded => !obj.goaded_by.is_empty(),
         // CR 700.9: A permanent is modified if it has one or more counters on
         // it (CR 122), is equipped (CR 301.5), or is enchanted by an Aura
         // controlled by its controller (CR 303.4).
@@ -5039,6 +5079,9 @@ fn zone_change_record_matches_property(
         // evaluated on the live stack object, not the snapshot).
         | FilterProp::Modal
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is not snapshotted onto the zone-change record
+        // (unlike Suspected's `record.is_suspected`). Fail closed.
+        | FilterProp::Goaded
         // CR 700.9: Modified is a live-battlefield predicate (counters +
         // attachments) — a zone-change snapshot cannot represent it.
         | FilterProp::Modified
@@ -8058,10 +8101,10 @@ mod tests {
         };
 
         let trigger = &runner.state().objects[&mana_echoes].trigger_definitions[0];
-        let execute = trigger.execute.as_ref().expect("execute");
+        let execute = trigger.definition.execute.as_ref().expect("execute");
         let ability = crate::game::triggers::build_triggered_ability(
             runner.state(),
-            trigger,
+            &trigger.definition,
             mana_echoes,
             P0,
         );

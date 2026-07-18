@@ -1532,6 +1532,12 @@ pub(crate) fn handle_discard_for_cost(
                 });
         }
     }
+    // CR 601.2h + CR 602.2b (issue #4948): Record EVERY discarded card, not
+    // just `chosen.first()` above, so this SAME ability's own target
+    // selection excludes all of them — a multi-card non-self discard cost
+    // paid before targets are chosen can otherwise let a just-discarded card
+    // leak into the ability's own "target card in your graveyard" pool.
+    pending.ability.add_cost_paid_object_ids_recursive(chosen);
 
     // CR 601.2h + CR 616.1: Discard each chosen card through the replacement pipeline
     // so Madness (CR 702.35) etc. can intercept.
@@ -2589,6 +2595,13 @@ pub(crate) fn handle_sacrifice_for_cost(
             }
         }
     }
+    // CR 601.2h + CR 602.2b (issue #4948): Record EVERY sacrificed object,
+    // not just `chosen.first()` above, so this SAME ability's own target
+    // selection excludes all of them (`exclude_cost_paid_object_that_left_battlefield`)
+    // — a sacrifice cost paid before targets are chosen (this engine's
+    // documented ordering shortcut, see issue #1301) can otherwise let a
+    // just-sacrificed object leak into the ability's own candidate pool.
+    pending.ability.add_cost_paid_object_ids_recursive(chosen);
 
     // CR 702.48c / CR 702.119a: Offering and Emerge use different reduction
     // rules, but both must read the sacrificed permanent before it leaves.
@@ -2914,11 +2927,23 @@ pub(crate) fn handle_return_to_hand_for_cost(
     // Karoo lands, Cavern Harpy): `count` is almost always 1, so the stamp's
     // `len() < 2` guard would no-op. If a >=2-permanent return-to-hand cost ever
     // ships, mirror the A1 stamp from `handle_sacrifice_for_cost` here.
+    // A self-return component is paid by `pay_ability_cost` above. Moving
+    // that source a second time would emit a spurious Hand -> Hand event.
+    let to_return: Vec<_> = chosen
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone != Zone::Hand)
+        })
+        .collect();
     finish_cost_object_moves(
         state,
         player,
         pending,
-        chosen.to_vec(),
+        to_return,
         0,
         Zone::Hand,
         PendingCostMoveCompletion::FinishPending,
@@ -3722,6 +3747,14 @@ fn finish_exile_selection_for_cost(
                 });
         }
     }
+    // CR 601.2h + CR 602.2b (issue #4948): Record EVERY exiled object, not
+    // just `chosen.first()` above, so this SAME ability's own target
+    // selection excludes all of them. Covers both call sites that share this
+    // helper: non-self hand/graveyard exile costs and non-self
+    // battlefield-permanent exile costs (Food Chain class) — either can
+    // otherwise let a just-exiled object leak into an ability's own
+    // "target card/permanent in exile" pool.
+    pending.ability.add_cost_paid_object_ids_recursive(chosen);
 
     if pending.activation_ability_index.is_some() {
         pending.activation_cost = pending
@@ -4709,43 +4742,64 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
         .objects
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone());
-    let Some(AdditionalCost::Kicker {
-        costs,
-        repeatability,
-    }) = additional
-    else {
-        return pay_and_push(
-            state,
-            player,
-            object_id,
-            card_id,
-            ability,
-            &cost,
-            base_cost,
-            casting_variant,
-            casting_permission_index,
-            cast_timing_permission,
-            distribute,
-            origin_zone,
-            payment_mode,
-            events,
-        );
-    };
-
-    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
-    pending.base_cost = base_cost;
-    pending.casting_variant = casting_variant;
-    pending.casting_permission_index = casting_permission_index;
-    pending.cast_timing_permission = cast_timing_permission;
-    pending.distribute = distribute;
-    pending.origin_zone = origin_zone;
-    pending.payment_mode = payment_mode;
-    pending.deferred_target_selection = true;
-    pending.additional_cost_flow = Some(AdditionalCost::Kicker {
-        costs,
-        repeatability,
-    });
-    finish_pending_cost_or_cast(state, player, pending, events)
+    match additional {
+        // CR 601.2b + CR 702.33a: Kicker "instead" — VERBATIM prior behavior.
+        // The kicker decision (and any repeated payment) is tracked through
+        // `additional_cost_flow` and drained by the kicker-specific arms of
+        // `finish_pending_cost_or_cast`.
+        Some(AdditionalCost::Kicker {
+            costs,
+            repeatability,
+        }) => {
+            let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+            pending.base_cost = base_cost;
+            pending.casting_variant = casting_variant;
+            pending.casting_permission_index = casting_permission_index;
+            pending.cast_timing_permission = cast_timing_permission;
+            pending.distribute = distribute;
+            pending.origin_zone = origin_zone;
+            pending.payment_mode = payment_mode;
+            pending.deferred_target_selection = true;
+            pending.additional_cost_flow = Some(AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            });
+            finish_pending_cost_or_cast(state, player, pending, events)
+        }
+        // CR 601.2b/f + CR 702.194c + CR 113.2c: every other target-dependent
+        // "instead" additional cost (e.g. Teamwork) is queue-synthesized —
+        // charged via the deferred queue drain (`OptionalCostChoice` ->
+        // `record_additional_cost_instance_payment` sets `additional_cost_paid`
+        // and, once the queue empties, `additional_cost_decided`, which skips
+        // post-target re-detection at `finish_pending_cast_cost_or_pay`).
+        // `additional_cost_flow` is deliberately left `None` here (not
+        // `Some(other)`): the synthesized keyword (e.g. `synthesize_teamwork`)
+        // already stores the same instance in `obj.additional_cost`, so
+        // carrying it as a flow would double-prompt for the same cost, and
+        // `finish_pending_cost_or_cast` has no arm that drains a `Some(other)`
+        // flow anyway (only Kicker and `Optional{Repeatable}` are handled) —
+        // it would be silently dropped. This is byte-identical to the prior
+        // behavior for every card with a non-empty effective queue (their
+        // `obj.additional_cost` already equals the queue instance).
+        _other => {
+            // Sole caller (`casting.rs::continue_with_prepared`'s non-kicker
+            // else-if) only reaches this arm when the effective queue is
+            // already non-empty, so no empty-queue fallback is needed here.
+            let queue = build_effective_additional_cost_queue(state, player, object_id);
+            let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+            pending.base_cost = base_cost;
+            pending.casting_variant = casting_variant;
+            pending.casting_permission_index = casting_permission_index;
+            pending.cast_timing_permission = cast_timing_permission;
+            pending.distribute = distribute;
+            pending.origin_zone = origin_zone;
+            pending.payment_mode = payment_mode;
+            pending.deferred_target_selection = true;
+            pending.additional_cost_queue = queue;
+            pending.additional_cost_flow = None;
+            finish_pending_cost_or_cast(state, player, pending, events)
+        }
+    }
 }
 
 /// CR 601.2b: Present an optional additional cost (e.g. Casualty) to the player
@@ -5037,25 +5091,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // independently functioning instances are announced through a queue. This
     // preserves one payment record per Casualty/Offspring/Squad/Replicate/
     // Bargain/Teamwork instance while leaving Kicker on its existing `kickers_paid` path.
-    let mut additional_cost_queue = Vec::new();
-    additional_cost_queue.extend(effective_casualty_additional_cost_instances(
-        state, player, object_id,
-    ));
-    additional_cost_queue.extend(effective_offspring_additional_cost_instances(
-        state, player, object_id,
-    ));
-    additional_cost_queue.extend(effective_squad_additional_cost_instances(
-        state, player, object_id,
-    ));
-    additional_cost_queue.extend(effective_replicate_additional_cost_instances(
-        state, player, object_id,
-    ));
-    additional_cost_queue.extend(effective_bargain_additional_cost_instances(
-        state, player, object_id,
-    ));
-    additional_cost_queue.extend(effective_teamwork_additional_cost_instances(
-        state, player, object_id,
-    ));
+    let additional_cost_queue = build_effective_additional_cost_queue(state, player, object_id);
     let obj_additional_matches_instance = obj_additional.as_ref().is_some_and(|cost| {
         additional_cost_queue
             .iter()
@@ -6519,10 +6555,109 @@ fn pay_additional_cost_with_source(
                 },
             });
         }
+        AbilityCost::Reveal { count, filter } => {
+            let mut pending = pending;
+            // CR 701.20a: A filter-less reveal is the spell revealing itself —
+            // there is no choice to make, the object is already known.
+            let Some(filter) = filter else {
+                if let Some(obj) = state.objects.get(&pending.object_id) {
+                    pending
+                        .ability
+                        .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                            object_id: pending.object_id,
+                            lki: obj.snapshot_for_mana_spent(),
+                        });
+                    events.push(GameEvent::CardsRevealed {
+                        player,
+                        card_ids: vec![pending.object_id],
+                        card_names: vec![obj.name.clone()],
+                    });
+                }
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            };
+            // CR 701.20a + CR 601.2b: A filtered reveal requires interactive
+            // card selection — return a WaitingFor, mirroring Discard.
+            let eligible = super::casting::find_eligible_reveal_targets(
+                state,
+                player,
+                pending.object_id,
+                &filter,
+            );
+            // CR 601.2b: Defense-in-depth — payability already gated this.
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible cards in hand to reveal".to_string(),
+                ));
+            }
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Reveal,
+                choices: eligible,
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
+            });
+        }
         _ => {
             // Other cost types (Exile, etc.) — not yet interactive
         }
     }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 701.20a + CR 601.2b: Complete a filtered `AbilityCost::Reveal` payment
+/// after the player selects a matching card from hand. The card stays in
+/// hand — revealing doesn't move it (CR 701.20b) — and becomes the
+/// resolving ability's cost-paid-object referent (CR 608.2k), backing
+/// references like "the revealed card's mana value".
+pub(crate) fn handle_reveal_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    expected: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != expected {
+        return Err(EngineError::InvalidAction(format!(
+            "Must reveal exactly {} card(s), got {}",
+            expected,
+            chosen.len()
+        )));
+    }
+    for card_id in chosen {
+        if !legal_cards.contains(card_id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card not in hand".to_string(),
+            ));
+        }
+    }
+
+    let mut revealed_names = Vec::with_capacity(chosen.len());
+    for (index, &card_id) in chosen.iter().enumerate() {
+        let obj = state.objects.get(&card_id).ok_or_else(|| {
+            EngineError::InvalidAction("Selected card no longer exists".to_string())
+        })?;
+        revealed_names.push(obj.name.clone());
+        if index == 0 {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: card_id,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
+        }
+    }
+
+    events.push(GameEvent::CardsRevealed {
+        player,
+        card_ids: chosen.to_vec(),
+        card_names: revealed_names,
+    });
 
     finish_pending_cost_or_cast(state, player, pending, events)
 }
@@ -6797,6 +6932,40 @@ fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
     // CR 119.4a: in a team format the max X payable via life is bounded by the
     // team's shared total (off-team this is the player's own life).
     u32::try_from(super::players::team_life_total(state, player).max(0)).unwrap_or(0)
+}
+
+/// CR 601.2b/f + CR 113.2c: the effective queue of independently-functioning,
+/// non-Kicker additional-cost instances (Casualty/Offspring/Squad/Replicate/
+/// Bargain/Teamwork) available for `object_id` right now. Single authority for
+/// this extraction — both `check_additional_cost_or_pay_with_distribute` (the
+/// payment path) and the pre-target deferral gates in `casting.rs`/
+/// `ability_utils.rs` (which must defer to declare-before-targets iff this
+/// queue is non-empty) call this same function so they can never disagree.
+pub(super) fn build_effective_additional_cost_queue(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<AdditionalCostInstance> {
+    let mut additional_cost_queue = Vec::new();
+    additional_cost_queue.extend(effective_casualty_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_offspring_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_squad_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_replicate_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_bargain_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue.extend(effective_teamwork_additional_cost_instances(
+        state, player, object_id,
+    ));
+    additional_cost_queue
 }
 
 pub(super) fn effective_casualty_additional_cost(
@@ -7992,6 +8161,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // replacements on X-cost cards like Astral Cornucopia, Walking Ballista, etc.
     let cost_x_paid = ability.chosen_x;
     let kickers_paid = ability.context.kickers_paid.clone();
+    let chosen_modes = ability.context.chosen_modes.clone();
     let additional_cost_paid = ability.context.additional_cost_paid;
     let additional_cost_payment_count = ability.context.additional_cost_payment_count;
     let additional_cost_payments = ability.context.additional_cost_payments.clone();
@@ -8094,6 +8264,17 @@ fn finalize_cast_with_phyrexian_choices_inner(
     if !kickers_paid.is_empty() {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.kickers_paid.clone_from(&kickers_paid);
+        }
+    }
+    // CR 700.2a + CR 700.2d + CR 601.2b: Stamp chosen modal-mode indices onto the
+    // spell-on-stack object so cast-triggers (Riku: "the number of times you chose
+    // a mode for that spell") read the mode count. Cast-triggers resolve before the
+    // spell — see the kickers_paid stamp directly above for the CR-603 ordering
+    // rationale, which is why a permanent-entry stamp would be too late. Empty for
+    // non-modal spells.
+    if !chosen_modes.is_empty() {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.chosen_modes.clone_from(&chosen_modes);
         }
     }
     if additional_cost_payment_count > 0 {
@@ -8756,13 +8937,16 @@ fn handle_resolution_cast_success(
             if casts_left == 0 {
                 return None;
             }
-            let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
+            let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 controller,
                 &filter,
                 &zones,
                 budget_left,
             );
+            // CR 608.2g: Finalize runs before the chosen card is removed from
+            // its origin zone; it cannot be offered again while already cast.
+            candidates.retain(|&id| id != cast_object);
             if candidates.is_empty() {
                 return None;
             }

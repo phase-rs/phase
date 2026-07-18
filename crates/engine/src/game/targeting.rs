@@ -327,7 +327,7 @@ fn find_legal_targets_with_context(
                     }
                 }
                 Zone::Stack => {
-                    for entry in &state.stack {
+                    for entry in targetable_stack_spell_entries(state) {
                         let obj_id = entry.id;
                         if stack_entry_matches_filter_with_context(
                             state,
@@ -1176,6 +1176,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
+        // CR 615.5 + CR 120.1: "Comeuppance deals that much damage to that
+        // creature" — the reflection target is the prevented event's damage
+        // source object itself (the creature that would have dealt the damage).
+        // Returns the source as an object ref; `None` outside the
+        // post-replacement window. Sibling of `PostReplacementSourceController`
+        // (which projects the same source to its controller player).
+        TargetFilter::PostReplacementDamageSource => {
+            state.post_replacement_event_source().map(TargetRef::Object)
+        }
         TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target().cloned(),
         // CR 108.3 + CR 400.3 + CR 615.5: Owner of the prevented event's damage
         // recipient ("that creature's owner shuffles it into their library").
@@ -1842,7 +1851,7 @@ fn add_stack_spells(
     // enumeration and threaded into every `can_target` below.
     let source_ignores_hexproof =
         crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
-    for entry in &state.stack {
+    for entry in targetable_stack_spell_entries(state) {
         // CR 601.2c: A spell choosing stack targets during its own cast cannot
         // select itself — targeting the counterspell removes only the counter
         // from the stack and leaves the intended opponent spell to resolve
@@ -1868,6 +1877,22 @@ fn add_stack_spells(
             targets.push(TargetRef::Object(entry.id));
         }
     }
+}
+
+/// CR 608.2g: expose a parked resolving spell only while its object is still
+/// on the stack, without duplicating entries that are already live there.
+fn targetable_stack_spell_entries(state: &GameState) -> impl Iterator<Item = &StackEntry> {
+    state
+        .stack
+        .iter()
+        .chain(state.resolving_stack_entry.iter().filter(move |entry| {
+            matches!(entry.kind, StackEntryKind::Spell { .. })
+                && state
+                    .objects
+                    .get(&entry.id)
+                    .is_some_and(|obj| obj.zone == Zone::Stack)
+                && !state.stack.iter().any(|live| live.id == entry.id)
+        }))
 }
 
 fn stack_spell_entry_matches_filter(

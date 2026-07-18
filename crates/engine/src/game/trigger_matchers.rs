@@ -797,8 +797,10 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,
@@ -1032,7 +1034,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DebugPermissionRevoked { .. }
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::Foretold { .. }
-        | GameEvent::BecameForetold { .. } => 0,
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::HiddenSearchViewed { .. } => 0,
     }
 }
 

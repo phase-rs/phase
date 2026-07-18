@@ -141,6 +141,17 @@ fn can_activate_loyalty_ability_impl(
         return false;
     }
 
+    // CR 602.5 + CR 603.2a: A `CantBeActivated` prohibition scoped to loyalty
+    // abilities (The Immortal Sun — `kind = Some(Loyalty)`) blocks activation on
+    // the loyalty path too. The untaxed loyalty fast path in
+    // `handle_activate_loyalty` does NOT route through
+    // `casting::handle_activate_ability`, so the shared prohibition gate must be
+    // consulted here — this function is the single legality authority for both the
+    // available-actions enumeration and `handle_activate_loyalty` (CR 606.3).
+    if super::casting::is_blocked_by_cant_be_activated(state, player, planeswalker_id, ability) {
+        return false;
+    }
+
     match restriction_gates {
         Some(gates) => super::restrictions::check_activation_restrictions_with_static_gates(
             state,

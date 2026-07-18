@@ -253,8 +253,10 @@ pub(crate) fn has_prowess_parts(keywords: &[Keyword]) -> bool {
 /// 2. `valid_target` is `None` or `Some(Controller)` — caster-scoped only.
 ///    Opponent-scoped triggers (Esper Sentinel shape) are NOT your payoffs.
 /// 3. `valid_card` is `None` (any spell) OR matches Instant/Sorcery via filter walk.
-pub(crate) fn is_cast_payoff_parts(triggers: &[TriggerDefinition]) -> bool {
-    triggers.iter().any(trigger_is_cast_payoff)
+pub(crate) fn is_cast_payoff_parts<'a>(
+    triggers: impl IntoIterator<Item = &'a TriggerDefinition>,
+) -> bool {
+    triggers.into_iter().any(trigger_is_cast_payoff)
 }
 
 fn trigger_is_cast_payoff(t: &TriggerDefinition) -> bool {
@@ -284,8 +286,10 @@ fn trigger_is_cast_payoff(t: &TriggerDefinition) -> bool {
 
 /// True if the face has an Nth-spell-this-turn cast trigger.
 /// CR 603.4: intervening-if clause. CR 603.1.
-pub(crate) fn is_nth_spell_payoff_parts(triggers: &[TriggerDefinition]) -> bool {
-    triggers.iter().any(|t| {
+pub(crate) fn is_nth_spell_payoff_parts<'a>(
+    triggers: impl IntoIterator<Item = &'a TriggerDefinition>,
+) -> bool {
+    triggers.into_iter().any(|t| {
         matches!(
             t.mode,
             TriggerMode::SpellCast

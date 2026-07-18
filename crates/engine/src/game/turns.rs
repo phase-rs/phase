@@ -531,15 +531,14 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     // entry to any phase that is NOT a later step of it: a fresh BeginCombat (new
     // combat phase) or any non-combat phase (CR 511.3 → PostCombatMain, or
     // CR 724.1d → Cleanup on an ended turn).
-    if state.turn_decision_controller.is_some() && (next == Phase::BeginCombat || !next.is_combat())
-    {
+    if next == Phase::BeginCombat || !next.is_combat() {
         let active_key =
             super::topology::normalize_shared_turn_recipient(state, state.active_player);
-        if let Some(idx) = state.scheduled_turn_controls.iter().position(|scheduled| {
-            scheduled.window == ControlWindow::NextCombatPhase
-                && Some(scheduled.controller) == state.turn_decision_controller
-                && scheduled.target_player == active_key
-        }) {
+        if let Some(idx) = turn_control::active_scheduled_control_index(
+            state,
+            active_key,
+            ControlWindow::NextCombatPhase,
+        ) {
             turn_control::release_control_at(state, idx);
         }
     }
@@ -550,17 +549,7 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     if next == Phase::BeginCombat {
         let active_key =
             super::topology::normalize_shared_turn_recipient(state, state.active_player);
-        if let Some(scheduled) = state
-            .scheduled_turn_controls
-            .iter()
-            .rfind(|scheduled| {
-                scheduled.window == ControlWindow::NextCombatPhase
-                    && scheduled.target_player == active_key
-            })
-            .copied()
-        {
-            state.turn_decision_controller = Some(scheduled.controller);
-        }
+        turn_control::activate_scheduled_control(state, active_key, ControlWindow::NextCombatPhase);
     }
 
     // CR 117.3a: Active player receives priority at the beginning of most steps and phases.
@@ -569,6 +558,7 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.players_attacked_this_step.clear();
     // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
+    state.lki_by_incarnation.clear();
     // CR 607.2b + CR 603.10e: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
     state.linked_exile_lki.clear();
@@ -619,28 +609,29 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
         let completed_turn_key =
             super::topology::normalize_shared_turn_recipient(&scratch, completed_player);
         if scratch.turn_decision_controller.is_some() {
-            let completed_controller = scratch.turn_decision_controller;
-            let mut grant_extra_turn_after = false;
             // CR 614.10a + CR 723.1: "next turn" control releases when that
             // controlled turn is complete; any granted follow-up extra turn is
             // scheduled before the next turn is selected.
-            while let Some(idx) = scratch
-                .scheduled_turn_controls
-                .iter()
-                .position(|scheduled| {
-                    scheduled.window == ControlWindow::NextTurn
-                        && scheduled.target_player == completed_turn_key
-                })
-            {
-                let entry = scratch.scheduled_turn_controls.remove(idx);
-                if Some(entry.controller) == completed_controller {
-                    grant_extra_turn_after |= entry.grant_extra_turn_after;
-                }
+            if let Some(idx) = turn_control::active_scheduled_control_index(
+                &scratch,
+                completed_turn_key,
+                ControlWindow::NextCombatPhase,
+            ) {
+                turn_control::release_control_at(&mut scratch, idx);
             }
+            let grant_extra_turn_after = turn_control::active_scheduled_control_index(
+                &scratch,
+                completed_turn_key,
+                ControlWindow::NextTurn,
+            )
+            .map(|idx| turn_control::release_control_at(&mut scratch, idx).grant_extra_turn_after)
+            .unwrap_or(false);
             if grant_extra_turn_after {
                 scratch.extra_turns.push(completed_player);
             }
-            scratch.turn_decision_controller = None;
+            scratch.active_full_turn_control = None;
+            scratch.active_combat_phase_control = None;
+            turn_control::recompute_active_player_control(&mut scratch);
         }
 
         scratch.turn_number += 1;
@@ -684,14 +675,13 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
         // actually begins. Newest matching scheduled control wins.
         let active_turn_key =
             super::topology::normalize_shared_turn_recipient(&scratch, scratch.active_player);
-        scratch.turn_decision_controller = scratch
-            .scheduled_turn_controls
-            .iter()
-            .rfind(|scheduled| {
-                scheduled.window == ControlWindow::NextTurn
-                    && scheduled.target_player == active_turn_key
-            })
-            .map(|scheduled| scheduled.controller);
+        turn_control::activate_scheduled_control(
+            &mut scratch,
+            active_turn_key,
+            ControlWindow::NextTurn,
+        );
+        scratch.active_combat_phase_control = None;
+        turn_control::recompute_active_player_control(&mut scratch);
     }
 
     slots
@@ -711,30 +701,36 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let completed_turn_key =
         super::topology::normalize_shared_turn_recipient(state, completed_player);
     if state.turn_decision_controller.is_some() {
-        let completed_controller = state.turn_decision_controller;
-        let mut grant_extra_turn_after = false;
         // CR 723.1: A full-turn (NextTurn) control ends at the boundary of the
         // turn it governed — route every removal through the single release
         // authority. CR 723.1b: a NextCombatPhase entry for this player is LEFT
         // IN PLACE (it binds to a combat phase, not a turn, and carries until the
-        // player actually takes a combat phase). The resolver dedups to ≤1 entry
-        // per target (CR 723.1a); the loop preserves the legacy retain semantics.
-        while let Some(idx) = state.scheduled_turn_controls.iter().position(|scheduled| {
-            scheduled.window == ControlWindow::NextTurn
-                && scheduled.target_player == completed_turn_key
-        }) {
-            let entry = turn_control::release_control_at(state, idx);
-            if Some(entry.controller) == completed_controller {
-                grant_extra_turn_after |= entry.grant_extra_turn_after;
-            }
+        // player actually takes a combat phase). Match the active effect's
+        // controller+timestamp identity so a future control for the same target
+        // remains scheduled (CR 723.1a).
+        if let Some(idx) = turn_control::active_scheduled_control_index(
+            state,
+            completed_turn_key,
+            ControlWindow::NextCombatPhase,
+        ) {
+            turn_control::release_control_at(state, idx);
         }
+        let grant_extra_turn_after = turn_control::active_scheduled_control_index(
+            state,
+            completed_turn_key,
+            ControlWindow::NextTurn,
+        )
+        .map(|idx| turn_control::release_control_at(state, idx).grant_extra_turn_after)
+        .unwrap_or(false);
         if grant_extra_turn_after {
             state.extra_turns.push(completed_player);
         }
-        // CR 723.1: the completed controlled turn's controller is done. A carried
-        // NextCombatPhase control never reaches here (its controller is None until
-        // its own BeginCombat), so clearing unconditionally is safe.
-        state.turn_decision_controller = None;
+        // CR 723.1 + CR 723.2: every active window on the completed turn is done.
+        // This also covers an effect that ended the turn during combat; an
+        // inactive carried NextCombatPhase schedule remains untouched.
+        state.active_full_turn_control = None;
+        state.active_combat_phase_control = None;
+        turn_control::recompute_active_player_control(state);
     }
 
     state.turn_number += 1;
@@ -809,18 +805,11 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 723.1: activate a full-turn control when its target begins their turn.
     // A NextCombatPhase entry is NOT activated here — it binds at the target's
     // next BeginCombat (CR 723.2), handled in `finish_enter_phase`.
-    if let Some(scheduled) = state
-        .scheduled_turn_controls
-        .iter()
-        .rfind(|scheduled| {
-            scheduled.window == ControlWindow::NextTurn
-                && scheduled.target_player
-                    == super::topology::normalize_shared_turn_recipient(state, state.active_player)
-        })
-        .copied()
-    {
-        state.turn_decision_controller = Some(scheduled.controller);
-    }
+    let active_turn_key =
+        super::topology::normalize_shared_turn_recipient(state, state.active_player);
+    turn_control::activate_scheduled_control(state, active_turn_key, ControlWindow::NextTurn);
+    state.active_combat_phase_control = None;
+    turn_control::recompute_active_player_control(state);
 
     // Reset priority
     state.priority_player = turn_control::turn_decision_maker(state);
@@ -1785,6 +1774,10 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     };
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions.retain(|r| !expires_at_eot(r));
+        // CR 514.2: Clean up turn-bound replacement definitions from the base
+        // definitions during the cleanup step so they do not persist.
+        std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
+            .retain(|r| !expires_at_eot(r));
     }
     state
         .pending_damage_replacements
@@ -2419,18 +2412,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::DeclareAttackers => {
                 // CR 508.1: Active player declares attackers as a turn-based action.
-                let valid_attacker_ids = super::combat::get_valid_attacker_ids(state);
-                let valid_attack_targets = super::combat::get_valid_attack_targets(state);
-                let attacker_constraints = super::combat::attacker_constraints_for_active_player(
-                    state,
-                    &valid_attacker_ids,
-                );
-                return WaitingFor::DeclareAttackers {
-                    player: state.active_player,
-                    valid_attacker_ids,
-                    valid_attack_targets,
-                    attacker_constraints,
-                };
+                // Built from the single engine constraints authority (per-attacker
+                // legal map + aggregate compat + display badges).
+                return super::combat::build_declare_attackers_waiting_for(state);
             }
             Phase::DeclareBlockers => {
                 // CR 509.1: Defending player declares blockers as a turn-based action.
@@ -7677,6 +7661,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(0),
+                timestamp: 0,
                 grant_extra_turn_after: true,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7686,6 +7671,7 @@ mod tests {
 
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.turn_decision_controller, Some(PlayerId(0)));
+        assert_eq!(state.turn_decision_control_timestamp, Some(0));
         assert_eq!(state.priority_player, PlayerId(0));
         assert_eq!(state.scheduled_turn_controls.len(), 1);
 
@@ -7693,6 +7679,7 @@ mod tests {
 
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.turn_decision_controller, None);
+        assert_eq!(state.turn_decision_control_timestamp, None);
         assert_eq!(state.priority_player, PlayerId(1));
         assert!(state.scheduled_turn_controls.is_empty());
     }
@@ -7777,6 +7764,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(2),
+                timestamp: 0,
                 grant_extra_turn_after: true,
                 window: ControlWindow::NextTurn,
             });
@@ -7802,6 +7790,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(2),
+                timestamp: 0,
                 grant_extra_turn_after: true,
                 window: ControlWindow::NextTurn,
             });
@@ -7835,6 +7824,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(0),
                 controller: PlayerId(2),
+                timestamp: 0,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7863,6 +7853,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(0),
+                timestamp: 1,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7871,6 +7862,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: PlayerId(1),
                 controller: PlayerId(1),
+                timestamp: 2,
                 grant_extra_turn_after: false,
                 window: crate::types::ability::ControlWindow::NextTurn,
             });
@@ -7880,11 +7872,13 @@ mod tests {
 
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.turn_decision_controller, Some(PlayerId(1)));
+        assert_eq!(state.turn_decision_control_timestamp, Some(2));
 
         start_next_turn(&mut state, &mut events);
 
         assert_eq!(state.active_player, PlayerId(0));
         assert_eq!(state.turn_decision_controller, None);
+        assert_eq!(state.turn_decision_control_timestamp, None);
         assert!(state.scheduled_turn_controls.is_empty());
     }
 
@@ -7900,6 +7894,7 @@ mod tests {
             .push(crate::types::game_state::ScheduledTurnControl {
                 target_player: target,
                 controller,
+                timestamp: 0,
                 grant_extra_turn_after: false,
                 window: ControlWindow::NextCombatPhase,
             });
@@ -7951,10 +7946,114 @@ mod tests {
                 "{phase:?}: released — owner decides after combat"
             );
         }
+        assert_eq!(state.turn_decision_control_timestamp, None);
         assert!(
             state.scheduled_turn_controls.is_empty(),
             "entry consumed by the phase-boundary release"
         );
+    }
+
+    fn assert_full_turn_and_combat_controls_compose(
+        full_turn_timestamp: u64,
+        combat_timestamp: u64,
+        expected_combat_controller: PlayerId,
+    ) {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 1;
+        let target = PlayerId(1);
+        let full_turn_controller = PlayerId(0);
+        let combat_controller = PlayerId(2);
+        state.active_player = PlayerId(0);
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: target,
+                controller: full_turn_controller,
+                timestamp: full_turn_timestamp,
+                grant_extra_turn_after: false,
+                window: ControlWindow::NextTurn,
+            });
+        state
+            .scheduled_turn_controls
+            .push(crate::types::game_state::ScheduledTurnControl {
+                target_player: target,
+                controller: combat_controller,
+                timestamp: combat_timestamp,
+                grant_extra_turn_after: false,
+                window: ControlWindow::NextCombatPhase,
+            });
+        let mut events = Vec::new();
+
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, target);
+        assert_eq!(
+            turn_control::turn_decision_maker(&state),
+            full_turn_controller,
+            "the full-turn control applies before combat"
+        );
+
+        enter_phase(&mut state, Phase::BeginCombat, &mut events);
+        assert_eq!(
+            turn_control::turn_decision_maker(&state),
+            expected_combat_controller,
+            "the newest currently applicable effect controls combat"
+        );
+
+        enter_phase(&mut state, Phase::PostCombatMain, &mut events);
+        assert_eq!(
+            turn_control::turn_decision_maker(&state),
+            full_turn_controller,
+            "the full-turn control resumes when combat-only control ends"
+        );
+        assert_eq!(state.scheduled_turn_controls.len(), 1);
+        assert_eq!(
+            state.scheduled_turn_controls[0].window,
+            ControlWindow::NextTurn
+        );
+    }
+
+    // CR 723.1a + CR 723.2: independently applicable full-turn and combat-only
+    // effects coexist. During combat the newest applicable effect wins; after
+    // combat, the still-applicable full-turn effect resumes.
+    #[test]
+    fn newer_combat_control_temporarily_overrides_full_turn_control() {
+        assert_full_turn_and_combat_controls_compose(10, 20, PlayerId(2));
+    }
+
+    // CR 723.1a + CR 723.2: timestamp precedence applies only among effects
+    // currently applicable, so an older combat-only effect never displaces a
+    // newer full-turn effect even while both windows overlap.
+    #[test]
+    fn newer_full_turn_control_remains_authoritative_during_combat() {
+        assert_full_turn_and_combat_controls_compose(20, 10, PlayerId(0));
+    }
+
+    // CR 723.1a: once the newest effect takes control of the matching combat
+    // phase, older effects it overwrote do not survive to control later phases.
+    #[test]
+    fn newest_combat_control_discards_older_same_window_effects() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(1);
+        for (controller, timestamp) in [(PlayerId(0), 10), (PlayerId(2), 20)] {
+            state
+                .scheduled_turn_controls
+                .push(crate::types::game_state::ScheduledTurnControl {
+                    target_player: PlayerId(1),
+                    controller,
+                    timestamp,
+                    grant_extra_turn_after: false,
+                    window: ControlWindow::NextCombatPhase,
+                });
+        }
+        let mut events = Vec::new();
+
+        enter_phase(&mut state, Phase::BeginCombat, &mut events);
+        assert_eq!(turn_control::turn_decision_maker(&state), PlayerId(2));
+        assert_eq!(state.scheduled_turn_controls.len(), 1);
+
+        enter_phase(&mut state, Phase::PostCombatMain, &mut events);
+        assert!(state.scheduled_turn_controls.is_empty());
+        assert_eq!(turn_control::turn_decision_maker(&state), PlayerId(1));
     }
 
     // CR 506.7d (by analogy) + CR 500.8 (test 7.2 — first-only latch): with two

@@ -53,6 +53,41 @@ fn parse_bare_supertype_spell_filter(base: &str) -> Option<TargetFilter> {
     ])))
 }
 
+/// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: Resolve a BARE-word spell-subject
+/// filter for a cost modifier — a color or color-CATEGORY ("white", "colorless",
+/// "monocolored", "multicolored"), "historic", or a supertype ("legendary").
+/// `parse_type_phrase` declines all of these because they carry no trailing type
+/// noun (it needs "white creature", not a lone "white"), so without this the
+/// whole restriction dropped and the cost modifier (mis)applied to EVERY spell.
+///
+/// The color word routes through the single [`nom_filter::parse_color_property`]
+/// authority, so the color-CATEGORY axis resolves identically to the noun-bearing
+/// path: colorless → `ColorCount { EQ, 0 }`, monocolored → `{ EQ, 1 }`,
+/// multicolored → `{ GE, 2 }`, a named color → `HasColor`. The prior fallback
+/// hand-rolled only the five named colors via `parse_named_color`, so it dropped
+/// the category axis (Herald of Kozilek, Ugin, Urza's Filter, It That Heralds the
+/// End) and "historic" (Jhoira's Familiar) — all of which then cheapened every spell.
+fn parse_bare_spell_subject_filter(base: &str) -> Option<TargetFilter> {
+    let lower = base.trim().to_ascii_lowercase();
+    // CR 105.2: color / color-category, via the single color-property authority.
+    if let Ok((_, prop)) = all_consuming(nom_filter::parse_color_property).parse(lower.as_str()) {
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![prop]),
+        ));
+    }
+    // CR 700.6: "historic" = legendary supertype, artifact card type, or Saga subtype.
+    if all_consuming(tag::<_, _, OracleError<'_>>("historic"))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::Historic]),
+        ));
+    }
+    // CR 205.4a: a lone supertype word ("legendary", "snow", ...).
+    parse_bare_supertype_spell_filter(&lower)
+}
+
 /// CR 202.3: Nom parse of a trailing "with/of mana value N or greater/less"
 /// (also "or more"/"or fewer") qualifier — returns the prefix BEFORE the
 /// qualifier plus the `FilterProp::Cmc` it selects. Fails (nom `Err`) when no
@@ -197,17 +232,14 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             TargetFilter::Or { filters } if !filters.is_empty() && remainder.is_empty() => {
                 Some(filter)
             }
-            // Bare color words ("white", "red") and bare supertype words
-            // ("legendary") are not consumed by parse_type_phrase, which requires
-            // a trailing type noun ("white creature", "legendary permanent").
+            // Bare color/color-category words ("white", "colorless",
+            // "multicolored"), "historic", and bare supertype words ("legendary")
+            // are not consumed by parse_type_phrase, which requires a trailing type
+            // noun ("white creature", "legendary permanent"). Route them through
+            // the single bare-subject authority so the color-category axis is not
+            // dropped (CR 105.2 + CR 700.6 + CR 205.4a).
             _ if remainder.is_empty() || remainder.eq_ignore_ascii_case(base_part) => {
-                parse_named_color(base_part)
-                    .map(|color| {
-                        TargetFilter::Typed(
-                            TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
-                        )
-                    })
-                    .or_else(|| parse_bare_supertype_spell_filter(base_part))
+                parse_bare_spell_subject_filter(base_part)
             }
             _ => None,
         }

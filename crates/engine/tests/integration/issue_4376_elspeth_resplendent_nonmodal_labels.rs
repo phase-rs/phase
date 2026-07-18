@@ -22,8 +22,12 @@ const ELSPETH_MINUS_SEVEN_DESCRIPTION: &str =
 
 fn client_state(runner: &GameRunner) -> ClientGameState {
     let filtered = filter_state_for_viewer(runner.state(), P0);
-    let json = serde_json::to_string(&ClientGameStateRef::wrap(&filtered, Some(P0)))
-        .expect("serialize Elspeth stack display");
+    let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+        runner.state(),
+        &filtered,
+        Some(P0),
+    ))
+    .expect("serialize Elspeth stack display");
     serde_json::from_str(&json).expect("deserialize Elspeth stack display")
 }
 

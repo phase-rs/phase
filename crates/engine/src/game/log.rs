@@ -25,6 +25,7 @@ pub fn resolve_log_entries(events: &[GameEvent], state: &GameState) -> Vec<GameL
 /// Covers hidden-information leaks and low-signal stack bookkeeping.
 fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
     match event {
+        GameEvent::HiddenSearchViewed { .. } => true,
         // Library-origin moves and mulligan/tuck moves from hand to library
         // expose hidden card identity. Public discard/moves remain loggable.
         GameEvent::ZoneChanged {
@@ -104,6 +105,7 @@ fn num(n: i32) -> LogSegment {
 fn categorize(event: &GameEvent) -> LogCategory {
     match event {
         GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::GameOver { .. }
         // CR 732.2: a halted runaway resolution is game-flow control, grouped
         // with GameOver under `Game` rather than object-state `State`.
@@ -264,6 +266,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
     match event {
         GameEvent::GameStarted => vec![text("Game started")],
+        GameEvent::HiddenSearchViewed { .. } => vec![],
 
         GameEvent::TurnStarted {
             player_id,

@@ -99,7 +99,18 @@ pub fn resolve(
         hand.truncate(n);
     }
 
+    let needs_reveal_choice = choice_optional || !matches!(card_filter, TargetFilter::None);
+
     if hand.is_empty() {
+        if choice_optional && ability.sub_ability.is_some() {
+            state.waiting_for = WaitingFor::RevealChoice {
+                player: ability.controller,
+                cards: vec![],
+                filter: card_filter,
+                optional: true,
+                decline_runs_continuation: false,
+            };
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
@@ -130,7 +141,6 @@ pub fn resolve(
         state.private_look_player = Some(ability.controller);
     }
 
-    let needs_reveal_choice = choice_optional || !matches!(card_filter, TargetFilter::None);
     if !needs_reveal_choice {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
@@ -165,6 +175,15 @@ pub fn resolve(
         // `apply_parent_chain_context` at the very next parent->child
         // hand-off — see `GameState::last_parent_target_missing_reason`.
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::RevealHandChoice);
+        if choice_optional && ability.sub_ability.is_some() {
+            state.waiting_for = WaitingFor::RevealChoice {
+                player: ability.controller,
+                cards: vec![],
+                filter: card_filter,
+                optional: true,
+                decline_runs_continuation: false,
+            };
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id: ability.source_id,
@@ -198,6 +217,165 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn deep_cavern_bat_reveal_choice_excludes_lands() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let bat = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Deep-Cavern Bat".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Plains".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let spell = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Deduce".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let parsed = parse_oracle_text(
+            "Flying, lifelink\nWhen this creature enters, look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield.",
+            "Deep-Cavern Bat",
+            &[],
+            &["Creature".to_string()],
+            &["Bat".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Bat ETB execute");
+        let mut ability = build_resolved_from_def(execute, bat, PlayerId(0));
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+        resolve(&mut state, &ability, &mut Vec::new()).expect("Bat hand look resolves");
+
+        match &state.waiting_for {
+            WaitingFor::RevealChoice {
+                cards, optional, ..
+            } => {
+                assert!(*optional);
+                assert_eq!(cards, &vec![spell]);
+                assert!(!cards.contains(&land));
+            }
+            other => panic!("expected Bat RevealChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deep_cavern_bat_empty_or_land_only_hand_does_not_exile_itself() {
+        use crate::ai_support::candidate_actions;
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply_as_current;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+
+        for land_count in [0, 2] {
+            let mut state = GameState::new_two_player(42);
+            let bat = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Deep-Cavern Bat".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&bat)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+
+            for index in 0..land_count {
+                let land = create_object(
+                    &mut state,
+                    CardId(11 + index),
+                    PlayerId(1),
+                    format!("Plains {index}"),
+                    Zone::Hand,
+                );
+                state
+                    .objects
+                    .get_mut(&land)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Land);
+            }
+
+            let parsed = parse_oracle_text(
+                "Flying, lifelink\nWhen this creature enters, look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield.",
+                "Deep-Cavern Bat",
+                &[],
+                &["Creature".to_string()],
+                &["Bat".to_string()],
+            );
+            let execute = parsed.triggers[0]
+                .execute
+                .as_deref()
+                .expect("Bat ETB execute");
+            let mut ability = build_resolved_from_def(execute, bat, PlayerId(0));
+            ability.targets = vec![TargetRef::Player(PlayerId(1))];
+
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &ability, &mut events, 0).expect("Bat ETB resolves");
+
+            assert!(matches!(
+                &state.waiting_for,
+                WaitingFor::RevealChoice {
+                    cards,
+                    optional: true,
+                    decline_runs_continuation: false,
+                    ..
+                } if cards.is_empty()
+            ));
+            assert!(state.pending_continuation.is_some());
+            assert_eq!(
+                candidate_actions(&state).len(),
+                1,
+                "an empty hand choice must be a forced decline"
+            );
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] })
+                .expect("forced decline resolves");
+
+            assert_eq!(state.objects[&bat].zone, Zone::Battlefield);
+            assert!(state.battlefield.contains(&bat));
+            assert!(state.pending_continuation.is_none());
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == bat
+            )));
+        }
+    }
 
     fn make_reveal_ability(controller: PlayerId, target_player: PlayerId) -> ResolvedAbility {
         ResolvedAbility::new(

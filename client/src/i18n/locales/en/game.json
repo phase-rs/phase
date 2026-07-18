@@ -353,7 +353,7 @@
     "assignRemaining_other": "Assign {{count}} more",
     "confirmDistribute_one": "Declare {{count}} Attacker",
     "confirmDistribute_other": "Declare {{count}} Attackers",
-    "mustAttackPlayer": "{{creature}} must attack {{player}}"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Control",
@@ -665,8 +665,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Assign {{amount}} Combat Damage",

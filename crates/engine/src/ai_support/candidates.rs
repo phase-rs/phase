@@ -842,8 +842,15 @@ pub fn candidate_actions_broad_with_probe(
             player,
             valid_attacker_ids,
             valid_attack_targets,
+            valid_attack_targets_by_attacker,
             ..
-        } => attacker_actions(state, *player, valid_attacker_ids, valid_attack_targets),
+        } => attacker_actions(
+            state,
+            *player,
+            valid_attacker_ids,
+            valid_attack_targets,
+            valid_attack_targets_by_attacker.as_ref(),
+        ),
         WaitingFor::DeclareBlockers {
             player,
             valid_blocker_ids,
@@ -4060,146 +4067,60 @@ fn target_step_actions(
 fn attacker_actions(
     state: &GameState,
     player: PlayerId,
-    valid_attacker_ids: &[crate::types::identifiers::ObjectId],
+    valid_attacker_ids: &[ObjectId],
     valid_attack_targets: &[AttackTarget],
+    targets_by_attacker: Option<&std::collections::HashMap<ObjectId, Vec<AttackTarget>>>,
 ) -> Vec<CandidateAction> {
-    // CR 508.1a: declaring no attackers is a structurally legal submission. The
-    // engine's combat-requirement check rejects it at apply time only when a
-    // creature *must* attack (goad, CR 701.15b), and the simulation filter then
-    // drops it — so it is always safe to offer here.
-    let mut actions = vec![candidate(
-        GameAction::DeclareAttackers {
-            attacks: Vec::new(),
-            // CR 702.22c: AI does not form attacking bands in v1.
-            bands: vec![],
-        },
-        TacticalClass::Attack,
-        Some(player),
-    )];
+    // CR 508.1a–d: build heuristic proposals from the engine's PER-ATTACKER legal
+    // map (falling back to the aggregate list only when the map is legacy-absent),
+    // then run each proposal through the single engine completion authority
+    // (`complete_attacker_proposal`). Completion returns a legal proposal unchanged
+    // and repairs an illegal / under-max / taxed one into the deterministic tax-free
+    // maximum witness — so every emitted candidate is engine-legal by construction,
+    // no aggregate-only-illegal (target,attacker) pairing escapes, and the empty and
+    // forced-multi cases are covered without a bespoke forced-legal builder.
+    let legal_for = |id: ObjectId| -> Vec<AttackTarget> {
+        match targets_by_attacker {
+            Some(map) => map.get(&id).cloned().unwrap_or_default(),
+            None => valid_attack_targets.to_vec(),
+        }
+    };
 
-    if valid_attack_targets.is_empty() {
-        return actions;
-    }
-
-    // CR 508.1: each attacker independently chooses any one defending player,
-    // planeswalker, or battle. Enumerate every (attacker, target) pairing rather
-    // than only the first target — a goaded creature (CR 701.15b) must attack a
-    // player *other than* the goader if able, so pairing solely against the
-    // first target makes the only non-empty candidate illegal whenever that
-    // target is the goader, collapsing the legal-action set to empty and
-    // hanging the game.
+    // Proposal set: empty, each (attacker → its own legal target) single, and an
+    // alpha-strike per shared target (only attackers that legally reach it).
+    let mut proposals: Vec<Vec<(ObjectId, AttackTarget)>> = vec![Vec::new()];
     for &id in valid_attacker_ids {
-        for &target in valid_attack_targets {
-            actions.push(candidate(
-                GameAction::DeclareAttackers {
-                    attacks: vec![(id, target)],
-                    bands: vec![],
-                },
-                TacticalClass::Attack,
-                Some(player),
-            ));
+        for target in legal_for(id) {
+            proposals.push(vec![(id, target)]);
         }
     }
-
-    // Alpha-strike: all eligible attackers swing at a single shared target.
-    // Offer one per target so goad on a lone attacker doesn't make the only
-    // all-in candidate illegal.
     if valid_attacker_ids.len() > 1 {
         for &target in valid_attack_targets {
-            actions.push(candidate(
-                GameAction::DeclareAttackers {
-                    attacks: valid_attacker_ids
-                        .iter()
-                        .copied()
-                        .map(|id| (id, target))
-                        .collect(),
-                    bands: vec![],
-                },
-                TacticalClass::Attack,
-                Some(player),
-            ));
+            let attacks: Vec<(ObjectId, AttackTarget)> = valid_attacker_ids
+                .iter()
+                .copied()
+                .filter(|&id| legal_for(id).contains(&target))
+                .map(|id| (id, target))
+                .collect();
+            if attacks.len() > 1 {
+                proposals.push(attacks);
+            }
         }
     }
 
-    // CR 508.1d: a declaration must include *every* creature that must attack
-    // (goad CR 701.15b, MustAttack/MustAttackPlayer statics CR 508.1b). When
-    // those per-creature requirements force different targets — two creatures
-    // goaded by *different* players, or a MustAttackPlayer creature alongside a
-    // goaded one — the only legal declaration assigns them to *different* targets,
-    // a mixed-target combination none of the candidates above ever emit (singles
-    // omit the other must-attacker; alpha-strike forces one shared target that is
-    // illegal for whichever creature is goaded by / not directed at it). Add one
-    // greedy forced-legal assignment so a legal candidate survives filtering.
-    // Each must-attack requirement is per-creature and independent (creatures may
-    // share a defender), so choosing each creature's target independently yields a
-    // jointly legal declaration. Target priority mirrors the validator's
-    // enforcement order: CR 508.1b MustAttackPlayer (strict — attack the directed
-    // player when attackable) first, then CR 701.15b goad redirect (avoid this
-    // creature's goader if able), then any valid target ("if able"). Reuses the
-    // engine's single authorities (`creature_must_attack`,
-    // `must_attack_players_for_creature`, `goading_players_for_creature`). Only
-    // needed for 2+ must-attack creatures — the single case is covered above.
-    // Scope: this steers by must-attack *requirements* (CR 508.1d) only. It does
-    // not consult scoped CR 508.1c can't-attack *restrictions*
-    // (CantAttack/CantAttackOrBlock with an attack_target scope, e.g. Eriette),
-    // so a must-attacker that also can't attack the chosen target could still
-    // yield an illegal forced candidate. That over-constraint axis is a
-    // pre-existing gap (independent of goad) and is not addressed here.
-    // Likewise, a *requirements conflict* — a creature with MustAttackPlayer{P}
-    // that is also goaded by P — has no legal declaration at all: the CR 508.1b
-    // gate demands attacking P while the CR 701.15b redirect forbids it (a
-    // non-goading target exists). The engine validator enforces both
-    // requirements independently rather than obeying the CR 508.1d maximum, so
-    // no target this builder picks can survive filtering. Fixing that is a
-    // validator concern (CR 508.1d max-satisfaction), not a generator one.
-    // Loop-invariant hoist: `attackable_player_targets` depends only on `state`
-    // (immutable during this filter), so compute it once instead of per creature
-    // inside `creature_must_attack`. Mirrors `declare_attackers_with_bands`.
-    let attackable = crate::game::combat::attackable_player_targets(state);
-    let forced: Vec<(ObjectId, AttackTarget)> = valid_attacker_ids
-        .iter()
-        .copied()
-        .filter(|&id| {
-            crate::game::combat::creature_must_attack_with_attackable_players(
-                state,
-                id,
-                &attackable,
-            )
-        })
-        .filter_map(|id| {
-            let obj = state.objects.get(&id)?;
-            let must_attack_players =
-                crate::game::combat::must_attack_players_for_creature(state, obj);
-            let goaders = crate::game::combat::goading_players_for_creature(state, id);
-            valid_attack_targets
-                .iter()
-                .copied()
-                // CR 508.1b: honor a directed MustAttackPlayer requirement first.
-                .find(|target| {
-                    matches!(target, AttackTarget::Player(pid) if must_attack_players.contains(pid))
-                })
-                // CR 701.15b "if able": otherwise steer away from this creature's
-                // goader.
-                .or_else(|| {
-                    valid_attack_targets.iter().copied().find(|target| match target {
-                        AttackTarget::Player(pid) => !goaders.contains(pid),
-                        _ => true,
-                    })
-                })
-                // Fall back to any valid target when no constraint can be honored.
-                .or_else(|| valid_attack_targets.first().copied())
-                .map(|target| (id, target))
-        })
-        .collect();
-    if forced.len() > 1 {
-        actions.push(candidate(
-            GameAction::DeclareAttackers {
-                attacks: forced,
-                bands: vec![],
-            },
-            TacticalClass::Attack,
-            Some(player),
-        ));
+    // Complete every proposal through the engine in ONE pass (shared constraints
+    // model + single CR 508.1d solver run) and dedup on the resulting attack
+    // assignment (completion collapses many illegal proposals to the same witness).
+    let mut seen: HashSet<Vec<(ObjectId, AttackTarget)>> = HashSet::new();
+    let mut actions = Vec::new();
+    for action in crate::game::combat::complete_attacker_proposals(state, &proposals) {
+        if let GameAction::DeclareAttackers { attacks, .. } = &action {
+            let mut key = attacks.clone();
+            key.sort_unstable();
+            if seen.insert(key) {
+                actions.push(candidate(action, TacticalClass::Attack, Some(player)));
+            }
+        }
     }
 
     actions
@@ -5507,7 +5428,7 @@ mod tests {
         let targets = vec![AttackTarget::Player(PlayerId(1))];
 
         crate::game::perf_counters::reset();
-        let _ = attacker_actions(&state, PlayerId(0), &ids, &targets);
+        let _ = attacker_actions(&state, PlayerId(0), &ids, &targets, None);
         let snap = crate::game::perf_counters::snapshot();
 
         assert_eq!(
@@ -5767,17 +5688,38 @@ mod tests {
 
     #[test]
     fn declare_attackers_includes_pass_and_all_attack() {
-        let state = GameState {
-            waiting_for: WaitingFor::DeclareAttackers {
-                player: PlayerId(0),
-                valid_attacker_ids: vec![
-                    crate::types::identifiers::ObjectId(1),
-                    crate::types::identifiers::ObjectId(2),
-                ],
-                valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
-                attacker_constraints: Default::default(),
-            },
-            ..GameState::new_two_player(42)
+        // PLAN-v3 completion contract: candidate generation routes each proposal
+        // through the engine completion authority (`complete_attacker_proposals`),
+        // which validates against LIVE objects — so this needs REAL creatures on the
+        // battlefield (the pre-completion generator built candidates blindly from the
+        // payload's synthetic ids). Two unblocked attackers that can both reach P1
+        // yield both a "pass" (empty) and an "all attack" (both → P1) candidate.
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.phase = Phase::DeclareAttackers;
+        let make_attacker = |state: &mut GameState, card: u64| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Attacker {card}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.summoning_sick = false;
+            id
+        };
+        let a1 = make_attacker(&mut state, 1);
+        let a2 = make_attacker(&mut state, 2);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![a1, a2],
+            valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);
@@ -5797,20 +5739,40 @@ mod tests {
     /// non-goading opponent always survives filtering.
     #[test]
     fn declare_attackers_offers_every_target_for_each_attacker() {
-        let attacker = crate::types::identifiers::ObjectId(1);
-        let goader = AttackTarget::Player(PlayerId(1));
+        // PLAN-v3 completion contract: candidate generation now routes each proposal
+        // through the engine completion authority (`complete_attacker_proposals`),
+        // which validates against LIVE objects. So this uses a REAL attacker in a
+        // 4-player game where all three opponents (P1/P2/P3) are existing, legal
+        // targets — the pre-completion generator offered raw target pairs blindly
+        // (and its first-target-only bug is what this guards); the completion
+        // generator must still offer EVERY legal target for the attacker.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.phase = Phase::DeclareAttackers;
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.summoning_sick = false;
+        }
+        let first = AttackTarget::Player(PlayerId(1));
         let other_a = AttackTarget::Player(PlayerId(2));
         let other_b = AttackTarget::Player(PlayerId(3));
-        let state = GameState {
-            waiting_for: WaitingFor::DeclareAttackers {
-                player: PlayerId(0),
-                valid_attacker_ids: vec![attacker],
-                // The goading player is deliberately first: the pre-fix generator
-                // would only ever offer this single (illegal-under-goad) pairing.
-                valid_attack_targets: vec![goader, other_a, other_b],
-                attacker_constraints: Default::default(),
-            },
-            ..GameState::new_two_player(42)
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![attacker],
+            // First target deliberately first, to catch a first-target-only generator.
+            valid_attack_targets: vec![first, other_a, other_b],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);
@@ -5823,15 +5785,11 @@ mod tests {
                 )
             })
         };
-        // Every target must be offered for the attacker — including the
-        // non-goading opponents a goaded creature is actually allowed to attack.
-        assert!(
-            attacks_against(goader),
-            "goader target must still be offered"
-        );
+        // Every legal target must be offered for the attacker — not just the first.
+        assert!(attacks_against(first), "the first target must be offered");
         assert!(
             attacks_against(other_a) && attacks_against(other_b),
-            "non-goading opponents must be offered so goad has a legal redirect"
+            "the completion generator must offer EVERY legal target, not just the first"
         );
     }
 
@@ -5877,6 +5835,7 @@ mod tests {
                 AttackTarget::Player(PlayerId(1)),
                 AttackTarget::Player(PlayerId(2)),
             ],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -5953,6 +5912,7 @@ mod tests {
                 AttackTarget::Player(PlayerId(2)),
                 AttackTarget::Player(PlayerId(1)),
             ],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 

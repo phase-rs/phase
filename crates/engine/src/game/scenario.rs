@@ -187,11 +187,24 @@ impl GameScenario {
         }
     }
 
+    /// Create a scenario with an explicit `FormatConfig` (the format axis), a
+    /// player count, and a seed. This is the general constructor; `new_n_player`
+    /// is its standard-format specialization. Enables team formats — e.g.
+    /// `FormatConfig::two_headed_giant()` — in scenario-driven tests so team
+    /// combat (CR 805.10) can be exercised through the production apply pipeline.
+    pub fn new_with_format(
+        format_config: crate::types::format::FormatConfig,
+        player_count: u8,
+        seed: u64,
+    ) -> Self {
+        GameScenario {
+            state: GameState::new(format_config, player_count, seed),
+        }
+    }
+
     /// Create a scenario with N players using the default format config (20 life each).
     pub fn new_n_player(count: u8, seed: u64) -> Self {
-        GameScenario {
-            state: GameState::new(crate::types::format::FormatConfig::standard(), count, seed),
-        }
+        Self::new_with_format(crate::types::format::FormatConfig::standard(), count, seed)
     }
 
     /// Set the game phase. Also sets `waiting_for`, `priority_player`, `active_player`,
@@ -929,18 +942,18 @@ impl<'a> CardBuilder<'a> {
 
     /// Attach a trigger definition (mode only, no execute).
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
-        let trigger = TriggerDefinition::new(mode);
-        let obj = self.obj();
-        obj.trigger_definitions.push(trigger.clone());
-        Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
-        self
+        self.with_trigger_definition(TriggerDefinition::new(mode))
     }
 
     /// Attach a fully constructed trigger definition (with execute, zones, etc.).
+    ///
+    /// Appends to the printed base set and re-materializes so the live entry
+    /// carries a real `Printed` occurrence ref — never the `Unmaterialized`
+    /// fixture sentinel, which is unserializable by design.
     pub fn with_trigger_definition(&mut self, trigger: TriggerDefinition) -> &mut Self {
         let obj = self.obj();
-        obj.trigger_definitions.push(trigger.clone());
         Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        obj.materialize_base_trigger_definitions();
         self
     }
 
@@ -4427,7 +4440,10 @@ mod tests {
         let obj = &runner.state().objects[&id];
 
         assert!(!obj.trigger_definitions.is_empty());
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(
+            obj.trigger_definitions[0].definition.mode,
+            TriggerMode::ChangesZone
+        );
     }
 
     #[test]
@@ -4492,12 +4508,13 @@ mod tests {
             .trigger_definitions
             .iter_all()
             .find(|t| {
-                t.description
+                t.definition
+                    .description
                     .as_deref()
                     .is_some_and(|d| d.contains("poison counters"))
             })
             .expect("ixhel end-step trigger");
-        let execute = trigger.execute.as_ref().expect("execute");
+        let execute = trigger.definition.execute.as_ref().expect("execute");
         assert!(
             matches!(
                 &*execute.effect,

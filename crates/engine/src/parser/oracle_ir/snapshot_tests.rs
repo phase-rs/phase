@@ -883,6 +883,18 @@ fn young_pyromancer() {
 }
 
 #[test]
+fn jaws_of_defeat() {
+    let (ir, lowered) = parse_two_layer(
+        "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+        "Jaws of Defeat",
+        &["Enchantment"],
+        &[],
+    );
+    insta::assert_json_snapshot!("jaws_of_defeat_ir", &ir);
+    insta::assert_json_snapshot!("jaws_of_defeat_lowered", &lowered);
+}
+
+#[test]
 fn dark_confidant() {
     let (ir, lowered) = parse_two_layer(
         "At the beginning of your upkeep, reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.",

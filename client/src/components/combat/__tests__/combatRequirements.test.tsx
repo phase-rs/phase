@@ -19,7 +19,7 @@ describe("useAttackRequirements", () => {
 
   it("does not throw on an empty or undefined constraint map", () => {
     setWaitingFor(undefined);
-    expect(renderHook(() => useAttackRequirements()).result.current.unsatisfiedMustAttackCount).toBe(0);
+    expect(renderHook(() => useAttackRequirements()).result.current.byObject.size).toBe(0);
 
     setWaitingFor({
       type: "DeclareAttackers",
@@ -28,7 +28,7 @@ describe("useAttackRequirements", () => {
     expect(renderHook(() => useAttackRequirements()).result.current.byObject.size).toBe(0);
   });
 
-  it("satisfies the must-attack gate when the required creature is selected (1 -> 0)", () => {
+  it("flips a must-attack badge pending -> satisfied on selection (display only)", () => {
     setWaitingFor({
       type: "DeclareAttackers",
       data: {
@@ -38,20 +38,20 @@ describe("useAttackRequirements", () => {
       },
     });
 
-    // Unselected: one unsatisfied must-attack, status pending.
+    // Unselected: the must-attack creature shows a pending badge. Crucially the
+    // hook no longer exposes any confirm-gate counter — badges are display only.
     useUiStore.setState({ selectedAttackers: [] });
     let r = renderHook(() => useAttackRequirements());
-    expect(r.result.current.unsatisfiedMustAttackCount).toBe(1);
     expect(r.result.current.byObject.get(100)?.status).toBe("pending");
+    expect("unsatisfiedMustAttackCount" in r.result.current).toBe(false);
 
-    // Selected: gate satisfied.
+    // Selected: badge satisfied.
     useUiStore.setState({ selectedAttackers: [100] });
     r = renderHook(() => useAttackRequirements());
-    expect(r.result.current.unsatisfiedMustAttackCount).toBe(0);
     expect(r.result.current.byObject.get(100)?.status).toBe("satisfied");
   });
 
-  it("surfaces can't-attack as info without counting against the gate", () => {
+  it("surfaces can't-attack as an info badge", () => {
     setWaitingFor({
       type: "DeclareAttackers",
       data: {
@@ -62,7 +62,6 @@ describe("useAttackRequirements", () => {
     });
     const r = renderHook(() => useAttackRequirements());
     expect(r.result.current.byObject.get(200)?.status).toBe("info");
-    expect(r.result.current.unsatisfiedMustAttackCount).toBe(0);
   });
 });
 

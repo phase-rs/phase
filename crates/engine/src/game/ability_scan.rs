@@ -195,6 +195,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         distribution: _,          // concrete pre-assigned (TargetRef, u32) portions
         chosen_x: _,              // concrete cast-time X
         cost_paid_object: _,      // concrete captured-object snapshot
+        cost_paid_object_ids: _,  // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _,   // concrete captured-object snapshot
         ability_index: _,         // usize provenance
@@ -1888,6 +1889,13 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 700.2: reads the triggering-spell object (same event axis as
+        // EventContextSourceCostX and TimesCostPaidThisResolution).
+        QuantityRef::EventContextSourceModesChosen => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         QuantityRef::SpellsCastThisTurn { scope, filter } => {
             let mut acc = Axes {
                 event: false,
@@ -2291,6 +2299,16 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
+        // CR 615.5: gates on the prevented event's damage source — an event read.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_target_filter(filter));
+            acc
+        }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             filter,
             origin: _,
@@ -2542,6 +2560,12 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 615.5: resolves the prevented event's damage source — an event read.
+        TargetFilter::PostReplacementDamageSource => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TargetFilter::PostReplacementDamageTarget => Axes {
             event: true,
             sibling: false,
@@ -2568,6 +2592,8 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         TargetFilter::Named { name: _ } => Axes::NONE,
         TargetFilter::Owner => Axes::NONE,
         TargetFilter::AllPlayers => Axes::NONE,
+        // CR 615: controller-relative compound recipient — no event/sibling axes.
+        TargetFilter::ControllerAndControlledPermanents { .. } => Axes::NONE,
     }
 }
 
@@ -3156,6 +3182,9 @@ fn scan_filter_prop(x: &FilterProp) -> Axes {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation read; it scans no
+        // board/object axis.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -4736,6 +4765,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         forward_result: _, // bool
         chosen_x: _,  // concrete cast-time X (chosen at announcement, not resolution)
         cost_paid_object: _, // concrete captured-object snapshot
+        cost_paid_object_ids: _, // concrete captured-object ids (issue #4948)
         effect_context_object: _, // concrete captured-object snapshot
         amassed_army_object: _, // concrete captured-object snapshot
         ability_index: _, // usize provenance

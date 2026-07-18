@@ -493,6 +493,287 @@ fn add_activation_only_colorless_source(
 }
 
 #[test]
+fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
+    fn land(state: &mut GameState, card: u64, owner: PlayerId, name: &str, zone: Zone) -> ObjectId {
+        let id = create_object(state, CardId(card), owner, name.to_string(), zone);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        id
+    }
+
+    for (has_hand_land, has_graveyard_land) in
+        [(true, false), (false, true), (true, true), (false, false)]
+    {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 2);
+
+        let hand_land =
+            has_hand_land.then(|| land(&mut state, 9_021, PlayerId(0), "Hand Land", Zone::Hand));
+        let graveyard_land = has_graveyard_land.then(|| {
+            land(
+                &mut state,
+                9_022,
+                PlayerId(0),
+                "Graveyard Land",
+                Zone::Graveyard,
+            )
+        });
+        let opposing_land = land(
+            &mut state,
+            9_023,
+            PlayerId(1),
+            "Opposing Land",
+            Zone::Graveyard,
+        );
+        let nonland = create_object(
+            &mut state,
+            CardId(9_024),
+            PlayerId(0),
+            "Nonland Decoy".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&nonland)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let spell = create_object(
+            &mut state,
+            CardId(9_025),
+            PlayerId(0),
+            "Worldsoul's Rage".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Green],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(parse_effect_chain(
+                "~ deals X damage to any target. Put up to X land cards from your hand and/or graveyard onto the battlefield tapped.",
+                AbilityKind::Spell,
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(9_025),
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            },
+        )
+        .expect("Rage should begin casting");
+        assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+            .expect("X=2 should be payable");
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        )
+        .expect("the opposing player is a legal damage target");
+
+        let expected: Vec<_> = hand_land.into_iter().chain(graveyard_land).collect();
+        let mut saw_choice = false;
+        for _ in 0..8 {
+            match state.waiting_for.clone() {
+                WaitingFor::Priority { .. } if !state.stack.is_empty() => {
+                    apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("priority should pass");
+                }
+                WaitingFor::EffectZoneChoice {
+                    player,
+                    cards,
+                    count,
+                    min_count,
+                    up_to,
+                    ..
+                } => {
+                    saw_choice = true;
+                    assert_eq!(
+                        player,
+                        PlayerId(0),
+                        "the damage target must not become the land chooser"
+                    );
+                    assert_eq!(count, expected.len().min(2));
+                    assert_eq!(min_count, 0);
+                    assert!(up_to);
+                    assert_eq!(cards.len(), expected.len());
+                    assert!(expected.iter().all(|id| cards.contains(id)));
+                    assert!(!cards.contains(&opposing_land));
+                    assert!(!cards.contains(&nonland));
+                    apply_as_current(
+                        &mut state,
+                        GameAction::SelectCards {
+                            cards: expected.clone(),
+                        },
+                    )
+                    .expect("every eligible hand/graveyard land should be selectable");
+                }
+                WaitingFor::Priority { .. } => break,
+                other => panic!("unexpected Rage resolution boundary: {other:?}"),
+            }
+        }
+
+        assert_eq!(state.players[1].life, 18, "Rage must deal its X damage");
+        assert!(state.stack.is_empty(), "Rage should fully resolve");
+        assert_eq!(saw_choice, !expected.is_empty());
+        for id in expected {
+            assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+            assert!(state.objects[&id].tapped);
+        }
+        assert_eq!(state.objects[&opposing_land].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&nonland].zone, Zone::Graveyard);
+    }
+}
+
+#[test]
+fn worldsouls_rage_object_target_and_x_one_allow_a_land_subset() {
+    let mut state = setup_game_at_main_phase();
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+    add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+    let hand_land = create_object(
+        &mut state,
+        CardId(9_026),
+        PlayerId(0),
+        "Hand Land".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&hand_land)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let graveyard_land = create_object(
+        &mut state,
+        CardId(9_027),
+        PlayerId(0),
+        "Graveyard Land".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&graveyard_land)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let damage_target = create_object(
+        &mut state,
+        CardId(9_028),
+        PlayerId(1),
+        "Damage Target".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&damage_target).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(4);
+    }
+
+    let spell = create_object(
+        &mut state,
+        CardId(9_029),
+        PlayerId(0),
+        "Worldsoul's Rage".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Green],
+            generic: 0,
+        };
+        Arc::make_mut(&mut obj.abilities).push(parse_effect_chain(
+            "~ deals X damage to any target. Put up to X land cards from your hand and/or graveyard onto the battlefield tapped.",
+            AbilityKind::Spell,
+        ));
+    }
+
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(9_029),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Rage should begin casting");
+    apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).expect("X=1 should be payable");
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(damage_target)),
+        },
+    )
+    .expect("the opposing creature is a legal damage target");
+
+    let mut saw_choice = false;
+    for _ in 0..8 {
+        match state.waiting_for.clone() {
+            WaitingFor::Priority { .. } if !state.stack.is_empty() => {
+                apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority should pass");
+            }
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                up_to,
+                ..
+            } => {
+                saw_choice = true;
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 1);
+                assert_eq!(min_count, 0);
+                assert!(up_to);
+                assert_eq!(cards.len(), 2);
+                assert!(cards.contains(&hand_land));
+                assert!(cards.contains(&graveyard_land));
+                apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards {
+                        cards: vec![graveyard_land],
+                    },
+                )
+                .expect("one eligible land should be selectable");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected Rage resolution boundary: {other:?}"),
+        }
+    }
+
+    assert!(saw_choice);
+    assert!(state.stack.is_empty());
+    assert_eq!(state.objects[&damage_target].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&damage_target].damage_marked, 1);
+    assert_eq!(state.objects[&graveyard_land].zone, Zone::Battlefield);
+    assert!(state.objects[&graveyard_land].tapped);
+    assert_eq!(state.objects[&hand_land].zone, Zone::Hand);
+}
+
+#[test]
 fn x_spell_cap_excludes_mana_restricted_to_activated_abilities() {
     let mut state = setup_game_at_main_phase();
     let spell = create_instant_in_hand(&mut state, PlayerId(0));
@@ -14598,7 +14879,7 @@ fn ashling_granted_evoke_offered_and_installs_etb_sac() {
         let trig = obj.trigger_definitions.get(0).unwrap();
         assert!(
             matches!(
-                trig.condition,
+                trig.definition.condition,
                 Some(crate::types::ability::TriggerCondition::CastVariantPaid {
                     variant: crate::types::ability::CastVariantPaid::Evoke,
                 })
@@ -23361,6 +23642,66 @@ fn kozileks_command_modes_scry_draw_and_exile_graveyard_end_to_end() {
 
 const DEADLY_ORACLE: &str = "As an additional cost to cast this spell, you may collect evidence 6.\nDestroy all creatures. If evidence was collected, exile a card from an opponent's graveyard. Then search its owner's graveyard, hand, and library for any number of cards with that name and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.";
 
+#[test]
+fn optional_instead_damage_spells_require_a_legal_target_to_be_castable() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    const VOLTAGE_ORACLE: &str = "As an additional cost to cast this spell, you may sacrifice an artifact.\nVoltage Surge deals 2 damage to target creature or planeswalker. If this spell's additional cost was paid, Voltage Surge deals 4 damage instead.";
+    const TORCH_ORACLE: &str = "Bargain (You may sacrifice an artifact, enchantment, or token as you cast this spell.)\nTorch the Tower deals 2 damage to target creature or planeswalker. If this spell was bargained, instead it deals 3 damage to that permanent and you scry 1.\nIf a permanent dealt damage by Torch the Tower would die this turn, exile it instead.";
+
+    for (name, oracle, keywords) in [
+        ("Voltage Surge", VOLTAGE_ORACLE, &[][..]),
+        ("Torch the Tower", TORCH_ORACLE, &["bargain"][..]),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        let spell_id = {
+            let mut spell = scenario.add_spell_to_hand(P0, name, true);
+            spell
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                })
+                .from_oracle_text_with_keywords(keywords, oracle);
+            spell.id()
+        };
+
+        assert!(
+            !can_cast_object_now(&scenario.state, P0, spell_id),
+            "{name} must not be castable with no creature or planeswalker target"
+        );
+        assert!(
+            !crate::ai_support::legal_actions(&scenario.state)
+                .iter()
+                .any(|action| {
+                    matches!(
+                        action,
+                        GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+                    )
+                }),
+            "{name} must not be advertised with no legal target"
+        );
+
+        scenario.add_creature(P1, "Legal target", 2, 2);
+        assert!(
+            can_cast_object_now(&scenario.state, P0, spell_id),
+            "{name} must become castable when a creature target exists"
+        );
+        assert!(
+            crate::ai_support::legal_actions(&scenario.state)
+                .iter()
+                .any(|action| {
+                    matches!(
+                        action,
+                        GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+                    )
+                }),
+            "{name} must be advertised when a legal target exists"
+        );
+    }
+}
+
 fn resolve_voltage_surge(
     sacrifice_artifact: bool,
 ) -> (
@@ -29557,6 +29898,8 @@ fn add_cant_be_activated_source(
             // CR 605.1a: Existing test helpers cover the Karn/Clarion family which
             // has no exemption suffix.
             exemption: ActivationExemption::None,
+            // CR 606.2: Karn/Clarion family is not kind-narrowed.
+            kind: None,
         }));
     id
 }
@@ -29701,6 +30044,7 @@ fn cant_be_activated_selfref_blocks_only_this_permanent() {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
                 exemption: ActivationExemption::None,
+                kind: None,
             }));
         Arc::make_mut(&mut obj.abilities).push(
             crate::types::ability::AbilityDefinition::new(
@@ -29859,6 +30203,7 @@ fn pithing_needle_blocks_named_non_mana_ability_but_not_mana_ability() {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::HasChosenName,
                 exemption: ActivationExemption::ManaAbilities,
+                kind: None,
             }));
     }
 
@@ -38638,6 +38983,554 @@ fn necromancy_etb_trigger_fizzles_when_target_creature_leaves_graveyard() {
     crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
 }
 
+/// Verbatim Worldgorger Dragon Oracle text (modern simplified errata, verified
+/// against `data/card-data.json` 2026-07). No "same arrangement" clause. Its ETB
+/// mass-exiles every OTHER permanent its controller owns; its LTB returns "the
+/// exiled cards" — the crux of the Immortal Worldgorger Dragon self-loop.
+const WORLDGORGER_DRAGON_ORACLE_FULL: &str = "Flying, trample\nWhen this creature enters, exile all other permanents you control.\nWhen this creature leaves the battlefield, return the exiled cards to the battlefield under their owners' control.";
+
+/// Verbatim Piranha Marsh Oracle text (verified against `data/card-data.json`
+/// 2026-07). Enters tapped; its ETB is "target player loses 1 life" — the
+/// repeatable-damage payoff that makes the WGD self-loop a kill, not just a
+/// value engine.
+const PIRANHA_MARSH_ORACLE_FULL: &str =
+    "This land enters tapped.\nWhen this land enters, target player loses 1 life.\n{T}: Add {B}.";
+
+/// The classic "Immortal Worldgorger Dragon" self-loop with Animate Dead —
+/// now closing ONE full cycle end-to-end (single-cycle only; see SCOPE).
+///
+/// P0 casts Animate Dead on Worldgorger Dragon in P0's OWN graveyard:
+///   1. Animate Dead resolves, attaches to WGD-in-graveyard; its ETB reanimates
+///      WGD to the battlefield under P0 and re-attaches (CR 303.4f + CR 608.2c).
+///   2. WGD's ETB exiles every OTHER permanent P0 controls — the Aura, a plain
+///      tapped land, and Piranha Marsh — leaving WGD itself on the battlefield.
+///   3. The Aura leaving the battlefield fires its delayed "that creature's
+///      controller sacrifices it" trigger; WGD's controller (P0) sacrifices WGD.
+///   4. WGD is put into the graveyard by the sacrifice (a genuinely SEPARATE,
+///      earlier event — NOT a simultaneous re-entry, so the 2022-12-08 WotC
+///      "can't attach to a permanent entering at the same time" ruling does not
+///      apply here). WGD leaving fires its LTB: "return the exiled cards to the
+///      battlefield" (CR 610.3).
+///   5. The Aura, the plain land, and Piranha Marsh return as NEW objects
+///      (CR 400.7). The Aura's Enchant reset to its printed "creature card in a
+///      graveyard" and legally attaches to WGD-in-graveyard (CR 303.4f). The
+///      plain land returns UNTAPPED (fresh object, no enters-tapped clause) and
+///      Piranha Marsh's ETB refires, costing P1 1 life (CR 119.3).
+///   6. The re-attached Aura's ETB reanimates WGD once more, completing one cycle.
+///
+/// ROOT CAUSE + FIX (2026-07): the failure was a single missing effect-variant
+/// arm in the parser's two-trigger exile-return synthesis, NOT a test-only or
+/// out-of-scope gap. The engine already models "exile X, return X when the source
+/// leaves" generally (Journey to Nowhere / Oblivion Ring, CR 607.1 + CR 607.2a +
+/// CR 406.6, via a CR 610.3 "until"-duration vehicle): the parser pass
+/// `detect_etb_exile_ltb_return` / `apply_etb_exile_ltb_return` stamps
+/// `Duration::UntilHostLeavesPlay` onto the ETB exile at parse time, which makes
+/// `zone_pipeline` create a persistent `ExileLinkKind::UntilSourceLeaves` link for
+/// every exiled object, and `check_exile_returns` (run every priority pass) then
+/// performs the automatic return when the source leaves the battlefield —
+/// independent of whether the card's own printed LTB trigger ever resolves.
+///
+/// The bug: `trigger_is_etb_exile_pending_duration` only matched the single-target
+/// `Effect::ChangeZone`→Exile, not the mass `Effect::ChangeZoneAll`→Exile that
+/// WGD's "exile all other permanents you control" parses to. So WGD's ETB never
+/// got the duration stamp and the entire downstream machinery stayed dormant.
+/// WGD's own printed LTB `ChangeZone{TrackedSet}` return is vestigial for this
+/// class (`TrackedSet(0)` resolves to an empty set — a no-op), exactly like the
+/// Fiend Hunter → Wall of Omens precedent (issue #3673) where the automatic
+/// `check_exile_returns` path, not the printed trigger, is what returns the
+/// cards. (Realm Razer shares WGD's mass-exile ETB shape but its LTB return
+/// carries a "tapped" entry modifier the automatic return path can't apply —
+/// `trigger_is_ltb_return` correctly excludes it from this synthesis rather
+/// than silently dropping that modifier; see `parser/oracle_tests.rs`'s
+/// `mass_exile_ltb_return_with_entry_modifier_is_not_paired`.)
+///
+/// This test drives the real return path: it fires WGD's (now-vestigial) LTB
+/// trigger, then calls `check_exile_returns` over the SAME events vec that carries
+/// WGD's sacrifice `ZoneChanged` event (mirroring `engine_priority.rs:177-210`),
+/// then scans the appended return events so the returned non-Aura permanents' own
+/// ETBs (Piranha Marsh's life loss) fire.
+///
+/// SCOPE: two independent fixes now compose to close a full cycle. (1) The
+/// mass-exile-return parser fix (this branch): the exiled permanents (the plain
+/// land, Piranha Marsh, and the Aura) now return, the land returns untapped, and
+/// Piranha Marsh's ETB refires costing P1 1 life. (2) PR #6072 (merged from
+/// origin/main): the final leg that CLOSES the loop — the returning Animate Dead
+/// Aura re-attaching to WGD-in-graveyard and re-reanimating it — used to be denied
+/// because the as-enters aura-host scan (`legal_aura_attachment_targets`) was
+/// battlefield-only and could not find a graveyard-resident host (CR 303.4f/g).
+/// PR #6072 made that scan enumerate hosts across whatever zone(s) the Aura's own
+/// enchant filter implies (`TargetFilter::extract_zones()` + `zone_object_ids`), so
+/// the graveyard host WGD is now found and the Aura re-enters attached to it. This
+/// test drives that Aura ETB to resolution, reanimating WGD a second time, and
+/// asserts the loop returns to its step-2 configuration — ONE full cycle. It does
+/// NOT attempt to detect or drive an actual infinite loop (no loop-detection
+/// infrastructure exists, and the harness halts the loop at exactly one cycle by
+/// not re-collecting WGD's mass-exile ETB after the closing reanimation).
+#[test]
+fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
+    use crate::game::game_object::AttachTarget;
+    use crate::parser::oracle::parse_oracle_text;
+    use std::str::FromStr;
+
+    let mut state = setup_game_at_main_phase();
+
+    // --- Animate Dead in hand (mirrors reanimate_grizzly_via_animate_dead) ---
+    let aura_id = create_object(
+        &mut state,
+        CardId(801),
+        PlayerId(0),
+        "Animate Dead".to_string(),
+        Zone::Hand,
+    );
+    let parsed_aura = parse_oracle_text(
+        ANIMATE_DEAD_ORACLE_FULL,
+        "Animate Dead",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    assert!(
+        !parsed_aura.triggers.is_empty(),
+        "parser must produce Animate Dead's reanimator ETB trigger"
+    );
+    {
+        let obj = state.objects.get_mut(&aura_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        let enchant = Keyword::from_str("Enchant:creature card in a graveyard").unwrap();
+        obj.base_keywords.push(enchant.clone());
+        obj.keywords.push(enchant);
+        obj.base_abilities = Arc::new(parsed_aura.abilities.clone());
+        obj.abilities = Arc::new(parsed_aura.abilities.clone());
+        obj.base_trigger_definitions = Arc::new(parsed_aura.triggers.clone());
+        obj.trigger_definitions = parsed_aura.triggers.clone().into();
+        obj.base_static_definitions = Arc::new(parsed_aura.statics.clone());
+        obj.static_definitions = parsed_aura.statics.clone().into();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+
+    // --- Worldgorger Dragon in P0's own graveyard, with its parsed triggers ---
+    let wgd_id = create_object(
+        &mut state,
+        CardId(802),
+        PlayerId(0),
+        "Worldgorger Dragon".to_string(),
+        Zone::Graveyard,
+    );
+    let parsed_wgd = parse_oracle_text(
+        WORLDGORGER_DRAGON_ORACLE_FULL,
+        "Worldgorger Dragon",
+        &["Flying".to_string(), "Trample".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed_wgd.triggers.len(),
+        2,
+        "WGD must parse to exactly its ETB (mass-exile) and LTB (mass-return) triggers"
+    );
+    {
+        let obj = state.objects.get_mut(&wgd_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(7);
+        obj.toughness = Some(7);
+        obj.base_power = Some(7);
+        obj.base_toughness = Some(7);
+        obj.base_trigger_definitions = Arc::new(parsed_wgd.triggers.clone());
+        obj.trigger_definitions = parsed_wgd.triggers.clone().into();
+    }
+
+    // --- Plain tapped land on P0's battlefield (NO enters-tapped clause). Tapped
+    // explicitly so the post-cycle "returns untapped" assertion discriminates. ---
+    let plain_land = create_object(
+        &mut state,
+        CardId(803),
+        PlayerId(0),
+        "Bog Land".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&plain_land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        obj.tapped = true;
+    }
+
+    // --- Piranha Marsh on P0's battlefield, with its parsed ETB trigger ---
+    let piranha = create_object(
+        &mut state,
+        CardId(804),
+        PlayerId(0),
+        "Piranha Marsh".to_string(),
+        Zone::Battlefield,
+    );
+    let parsed_pm = parse_oracle_text(
+        PIRANHA_MARSH_ORACLE_FULL,
+        "Piranha Marsh",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    assert!(
+        !parsed_pm.triggers.is_empty(),
+        "Piranha Marsh must parse to its 'target player loses 1 life' ETB trigger"
+    );
+    {
+        let obj = state.objects.get_mut(&piranha).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_trigger_definitions = Arc::new(parsed_pm.triggers.clone());
+        obj.trigger_definitions = parsed_pm.triggers.clone().into();
+        obj.base_static_definitions = Arc::new(parsed_pm.statics.clone());
+        obj.static_definitions = parsed_pm.statics.clone().into();
+        obj.tapped = true;
+    }
+
+    // Cast Animate Dead — auto-targets WGD (the only creature card in a graveyard).
+    let mut events = Vec::new();
+    handle_cast_spell(&mut state, PlayerId(0), aura_id, CardId(801), &mut events).unwrap();
+    assert_eq!(state.stack.len(), 1, "Animate Dead must be on the stack");
+
+    // (1) Resolve Animate Dead onto the battlefield, attached to WGD-in-graveyard.
+    let mut ev = Vec::new();
+    stack::resolve_top(&mut state, &mut ev);
+    assert!(
+        state.battlefield.contains(&aura_id),
+        "Aura must resolve onto the battlefield"
+    );
+
+    // (2) Fire + resolve the Aura's ETB reanimation chain (reanimates WGD).
+    crate::game::triggers::process_triggers(&mut state, &ev);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "Aura ETB reanimation trigger must be on the stack"
+    );
+    let mut etb_ev = Vec::new();
+    stack::resolve_top(&mut state, &mut etb_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+    // Reach-guard: WGD is reanimated to the battlefield with the Aura attached.
+    assert_eq!(
+        state.objects[&wgd_id].zone,
+        Zone::Battlefield,
+        "WGD must be reanimated onto the battlefield"
+    );
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(AttachTarget::Object(wgd_id)),
+        "Aura must be attached to the reanimated WGD"
+    );
+
+    // (3) WGD entered → fire + resolve its ETB (exile all other permanents you
+    // control). CR 400.7: the Aura, the plain land, and Piranha Marsh are exiled;
+    // WGD itself is exempt ("all OTHER permanents").
+    crate::game::triggers::process_triggers(&mut state, &etb_ev);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "WGD ETB mass-exile trigger must be on the stack"
+    );
+    let mut wgd_etb_ev = Vec::new();
+    stack::resolve_top(&mut state, &mut wgd_etb_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+    // Intermediate reach-guard (coordinator's "after step 2" checkpoint): the Aura
+    // and both lands are in exile together; WGD stays on the battlefield.
+    assert_eq!(
+        state.objects[&aura_id].zone,
+        Zone::Exile,
+        "the Aura must be exiled by WGD's ETB"
+    );
+    assert_eq!(
+        state.objects[&plain_land].zone,
+        Zone::Exile,
+        "the plain land must be exiled by WGD's ETB"
+    );
+    assert_eq!(
+        state.objects[&piranha].zone,
+        Zone::Exile,
+        "Piranha Marsh must be exiled by WGD's ETB"
+    );
+    assert_eq!(
+        state.objects[&wgd_id].zone,
+        Zone::Battlefield,
+        "WGD is exempt from its own mass-exile ('all OTHER permanents')"
+    );
+    // The exiled Aura's Enchant correctly RESET to its printed restriction on the
+    // exile round-trip (CR 400.7) — refutes the keyword-reset-bug hypothesis.
+    // Off-zone object (Exile), so the existence check must go through the
+    // state-scoped authority rather than a raw `obj.keywords` read.
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            aura_id,
+            crate::types::keywords::KeywordKind::Enchant,
+        ),
+        "exiled Aura must still carry an Enchant keyword"
+    );
+    // Existence (off-zone-aware) already confirmed above via
+    // object_has_effective_keyword_kind; this only inspects which Enchant
+    // variant it is, which no public authority exposes as a value.
+    assert!(
+        // allow-raw-authority: structural inspection of the matched Keyword's inner TargetFilter, not a keyword-presence query
+        state.objects[&aura_id].keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Enchant(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Graveyard }))
+        )),
+        "exiled Aura must carry its PRINTED 'creature card in a graveyard' Enchant"
+    );
+
+    // (4) Aura left the battlefield → its delayed sacrifice trigger fires; WGD's
+    // controller sacrifices WGD (CR 701.21a). WGD goes to the graveyard — a
+    // separate, earlier event than any re-entry.
+    crate::game::triggers::check_delayed_triggers(&mut state, &wgd_etb_ev);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "the Aura's delayed 'sacrifice that creature' trigger must be on the stack"
+    );
+    let mut sac_ev = Vec::new();
+    stack::resolve_top(&mut state, &mut sac_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+    // Reach-guard (coordinator's "after steps 3-4" checkpoint): WGD is sacrificed.
+    assert_eq!(
+        state.objects[&wgd_id].zone,
+        Zone::Graveyard,
+        "WGD must be sacrificed to the graveyard"
+    );
+
+    // Reach-guard (proves the fix's upstream fired): the widened parser predicate
+    // stamped `Duration::UntilHostLeavesPlay` on WGD's mass-exile ETB, so resolving
+    // it in step 3 created a persistent `UntilSourceLeaves` link for every exiled
+    // object. If the `matches!` widening is reverted, no links exist and the
+    // return below is a no-op — this guard flips to zero and the crux fails.
+    let until_source_leaves_links = state
+        .exile_links
+        .iter()
+        .filter(|link| {
+            link.source_id == wgd_id
+                && matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+                )
+        })
+        .count();
+    assert_eq!(
+        until_source_leaves_links, 3,
+        "WGD's mass-exile ETB must create an UntilSourceLeaves link for each of the \
+         3 exiled objects (Aura, plain land, Piranha Marsh) — this is the duration \
+         stamp from the widened parser predicate taking effect"
+    );
+
+    // (5) WGD left the battlefield. First fire + resolve WGD's own printed LTB
+    // trigger, which for this mass-exile class is vestigial: its return effect is
+    // `ChangeZone { target: TrackedSet }` and `TrackedSet` resolves to an empty set,
+    // so it no-ops (the Fiend Hunter → Wall of Omens precedent, issue #3673).
+    crate::game::triggers::process_triggers(&mut state, &sac_ev);
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "WGD LTB mass-return trigger must be on the stack"
+    );
+    let mut ltb_ev = Vec::new();
+    stack::resolve_top(&mut state, &mut ltb_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+    // The vestigial LTB trigger returned nothing on its own — the exiled objects
+    // are still in exile at this point. This confirms the printed trigger is NOT
+    // the mechanism; `check_exile_returns` below is.
+    assert_eq!(
+        state.objects[&aura_id].zone,
+        Zone::Exile,
+        "WGD's own printed LTB trigger (empty TrackedSet) must NOT return the cards"
+    );
+
+    // THE FIX'S RUNTIME PATH: `check_exile_returns` reads WGD's sacrifice
+    // `ZoneChanged { from: Battlefield }` event out of `sac_ev` and appends the
+    // return events INTO THE SAME vec (mirroring `engine_priority.rs:177-210`). It
+    // must be passed the vec that actually contains WGD's leave event — a fresh vec
+    // would silently no-op. CR 610.3: the exiled cards return.
+    let events_before_returns = sac_ev.len();
+    crate::game::engine::check_exile_returns(&mut state, &mut sac_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // *** CRUX: the exiled non-Aura permanents must return via the automatic
+    // exile-link mechanism. Before the parser predicate was widened, WGD's ETB
+    // never carried `Duration::UntilHostLeavesPlay`, no `UntilSourceLeaves` links
+    // existed, and this returned NOTHING. Reverting the `matches!` widening drops
+    // the reach-guard above to zero links and flips both of these to `Exile`. ***
+    assert_eq!(
+        state.objects[&plain_land].zone,
+        Zone::Battlefield,
+        "the plain land must return to the battlefield via check_exile_returns (CR 610.3)"
+    );
+    assert_eq!(
+        state.objects[&piranha].zone,
+        Zone::Battlefield,
+        "Piranha Marsh must return to the battlefield via check_exile_returns (CR 610.3)"
+    );
+
+    // THE AURA RE-ENTRY LEG — now CLOSED by PR #6072 (merged from origin/main).
+    // CR 303.4f + CR 704.5m: the returning Animate Dead Aura enchants "creature
+    // card in a graveyard"; WGD is now in the graveyard, so it re-enters attached
+    // to WGD-in-graveyard. Previously `legal_aura_attachment_targets`
+    // (zone_pipeline.rs) scanned ONLY `state.battlefield`, so the returning Aura
+    // found zero legal hosts and the entry was denied (`[] => ZoneMoveResult::Done`)
+    // — it stayed in exile and the loop could not close. PR #6072 made that scan
+    // enumerate candidate hosts across whatever zone(s) the Aura's own enchant
+    // filter implies, via `TargetFilter::extract_zones()` + `zone_object_ids`
+    // (Animate Dead / Dance of the Dead / Necromancy class), so the graveyard host
+    // WGD is now found. The `check_exile_returns` group return above therefore
+    // brought the Aura back onto the battlefield with a single legal host, and the
+    // in-pipeline single-host branch auto-attached it (CR 303.4f — controller's
+    // choice, resolved with no prompt when exactly one legal host exists).
+    assert_eq!(
+        state.objects[&aura_id].zone,
+        Zone::Battlefield,
+        "the returning Animate Dead Aura must re-enter the battlefield (PR #6072: \
+         the as-enters aura-host scan now covers graveyard hosts per the Aura's \
+         own enchant filter)"
+    );
+    // At this instant the Aura has re-attached to WGD-in-graveyard (CR 303.4f) —
+    // WGD has NOT been reanimated yet; that is the Aura's ETB, driven below.
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(AttachTarget::Object(wgd_id)),
+        "the returned Aura must re-attach to WGD in the graveyard (CR 303.4f)"
+    );
+    assert_eq!(
+        state.objects[&wgd_id].zone,
+        Zone::Graveyard,
+        "WGD is still in the graveyard when the Aura re-attaches — reanimation is \
+         the Aura's ETB, which fires next"
+    );
+
+    // Discriminator A: the plain land returned UNTAPPED (fresh object, no
+    // enters-tapped clause) — the "infinite mana" payoff that made this a combo.
+    // Reverting the parser widening leaves it stranded (tapped) in exile, so this
+    // cannot pass vacuously.
+    assert!(
+        !state.objects[&plain_land].tapped,
+        "the plain land must return UNTAPPED (it was tapped before the cycle)"
+    );
+
+    // (6) The returned permanents are new objects (CR 400.7) whose own ETBs re-fire
+    // on re-entry. Scan the return events that `check_exile_returns` appended into
+    // `sac_ev` (mirroring the second trigger-detection pass at
+    // engine_priority.rs:195-210). Now that the Aura re-enters too, TWO of P0's
+    // permanents produce an ETB simultaneously — Piranha Marsh's "target player
+    // loses 1 life" and the returned Aura's reanimation ETB — so P0 must order them
+    // (CR 603.3b) before either reaches the stack.
+    let return_events: Vec<_> = sac_ev[events_before_returns..].to_vec();
+    let p1_life_before = state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(1))
+        .unwrap()
+        .life;
+    crate::game::triggers::process_triggers(&mut state, &return_events);
+    // Reach-guard: the co-triggered ETBs surface as a CR 603.3b ordering prompt.
+    // If PR #6072 were reverted, the Aura would stay in exile and only Piranha's
+    // single ETB would fire — no ordering prompt, so this `matches!` would flip.
+    assert!(
+        matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::OrderTriggers { .. }
+        ),
+        "the returned Aura's ETB and Piranha Marsh's ETB must co-trigger for P0, \
+         producing a CR 603.3b ordering prompt"
+    );
+    // P0 orders their two simultaneous triggers (identity order). Both are placed on
+    // the stack; Piranha's ETB pauses on its target choice as it is placed (CR 603.3d).
+    crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+
+    // Discriminator B (reach-guard): Piranha Marsh's ETB re-triggered on its return,
+    // proving the returned Piranha is a fully live new object (CR 400.7). It is now
+    // on the stack awaiting its target choice. Reverting the parser widening leaves
+    // Piranha stranded in exile, so no re-entry event exists and this trigger is
+    // never collected — the assertion flips.
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == piranha)
+            || state
+                .pending_trigger
+                .as_ref()
+                .is_some_and(|t| t.source_id == piranha),
+        "Piranha Marsh's 'target player loses 1 life' ETB must re-trigger on its \
+         return from exile (CR 400.7 fresh object)"
+    );
+
+    // Drive Piranha's target choice (P1, the opponent) so its ETB finishes
+    // construction (CR 603.3d) and the stack can resolve. This is the low-level
+    // equivalent of the apply-pipeline `TriggerTargetSelection` prompt.
+    crate::game::engine::apply_as_current(
+        &mut state,
+        crate::types::actions::GameAction::SelectTargets {
+            targets: vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
+        },
+    )
+    .expect("choosing Piranha Marsh's target player must succeed");
+
+    // Resolve Piranha's ETB first (it was ordered on top): P1 loses 1 life — the
+    // repeatable-damage payoff (CR 119.3) that makes this loop a kill. This flips if
+    // the parser widening is reverted (Piranha never returns to re-trigger).
+    let mut piranha_ev = Vec::new();
+    stack::resolve_top(&mut state, &mut piranha_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+    let p1_life_after = state
+        .players
+        .iter()
+        .find(|p| p.id == PlayerId(1))
+        .unwrap()
+        .life;
+    assert_eq!(
+        p1_life_after,
+        p1_life_before - 1,
+        "Piranha Marsh's returned ETB must cost the opponent 1 life (CR 119.3)"
+    );
+
+    // (7) Resolve the returned Aura's ETB — the SAME 4-node reanimation chain
+    // (RemoveKeyword/AddKeyword swap, ChangeZone graveyard→battlefield, Attach,
+    // CreateDelayedTrigger) that step 2 drove when Animate Dead FIRST reanimated
+    // WGD. WGD returns to the battlefield under P0 and the Aura re-attaches
+    // (CR 303.4f + CR 608.2c), CLOSING one full cycle of the immortal loop. We stop
+    // here deliberately: `resolve_top` emits WGD's re-entry event but does not
+    // itself re-collect WGD's mass-exile ETB (that needs an explicit
+    // `process_triggers`, as step 3 shows), so the loop halts at exactly one cycle —
+    // no loop-detection infrastructure is exercised or required.
+    let mut aura_etb_ev = Vec::new();
+    stack::resolve_top(&mut state, &mut aura_etb_ev);
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // Loop-closed assertions. CR 400.7: WGD is conceptually a new object on this
+    // second reanimation, but the engine preserves its `ObjectId` across the
+    // graveyard→battlefield move (exactly as step 2's first reanimation asserts on
+    // `wgd_id` after the same zone change), so `wgd_id` still names the live WGD.
+    assert_eq!(
+        state.objects[&wgd_id].zone,
+        Zone::Battlefield,
+        "WGD must be reanimated a SECOND time, closing one full cycle of the loop"
+    );
+    assert_eq!(
+        state.objects[&aura_id].attached_to,
+        Some(AttachTarget::Object(wgd_id)),
+        "the Aura must re-attach to the reanimated WGD (CR 303.4f), completing the \
+         cycle back to the step-2 configuration"
+    );
+    assert_eq!(
+        state.objects[&aura_id].zone,
+        Zone::Battlefield,
+        "the Aura remains on the battlefield attached to the reanimated WGD"
+    );
+}
+
 /// CR 702.103b regression: drives the full cast pipeline end-to-end —
 /// `handle_cast_spell` → `AlternativeCastChoice(Bestow)` →
 /// `handle_bestow_cost_choice` (Alternative) — and asserts the spell on the stack still has the
@@ -43380,6 +44273,7 @@ fn plot_special_action_bypasses_activated_ability_prohibitions() {
                     who: ProhibitionScope::AllPlayers,
                     source_filter: TargetFilter::HasChosenName,
                     exemption: ActivationExemption::ManaAbilities,
+                    kind: None,
                 }));
         }
         let plot_def = state.objects[&plot_card].abilities[0].clone();

@@ -2773,21 +2773,13 @@ fn validated_declare_attackers(
         engine::game::combat::AttackTarget,
     )>,
 ) -> GameAction {
-    let candidate = GameAction::DeclareAttackers {
-        attacks,
-        bands: vec![],
-    };
-    let mut sim = state.clone();
-    if engine::game::engine::apply_as_current_for_simulation(&mut sim, candidate.clone()).is_ok() {
-        return candidate;
-    }
-    engine::ai_support::legal_actions(state)
-        .into_iter()
-        .find(|action| matches!(action, GameAction::DeclareAttackers { .. }))
-        .unwrap_or(GameAction::DeclareAttackers {
-            attacks: Vec::new(),
-            bands: vec![],
-        })
+    // CR 508.1d: the AI's heuristic assignment is a PROPOSAL. The engine-owned
+    // completion returns it unchanged when it is hard-legal, meets the maximum
+    // requirement score, and incurs no tax; otherwise it returns the deterministic
+    // tax-free maximum-legal witness. This replaces the old clone-apply +
+    // first-generic-legal-action fallback with the single engine legality authority
+    // (no second combat validator, no repeat-tax loop).
+    engine::game::combat::complete_attacker_proposal(state, &attacks, &[])
 }
 
 fn prefer_land_drop(
@@ -4952,6 +4944,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -4985,6 +4978,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![creature],
             valid_attack_targets: vec![target],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 

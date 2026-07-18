@@ -1488,6 +1488,51 @@ pub fn resolve_multiply(
     Ok(())
 }
 
+/// CR 608.2d + CR 118.12 + CR 122.1: True when a `RemoveCounter` effect used as
+/// an optional "you may" gate cannot be performed — none of its resolved target
+/// object(s) hold a matching counter that is *permitted to be removed*. "You may
+/// remove a charge counter from this artifact" with zero charge counters (Sun
+/// Droplet), or with the counter present but frozen by a `CountersCantBeRemoved`
+/// static (Fear of Sleep Paralysis class).
+///
+/// CR 608.2d: a player can't choose an impossible option. Removing a counter that
+/// isn't there — or one an effect forbids removing — does nothing, so the
+/// up-front "you may" must not be offered. CR 118.12: the `EffectOutcome::
+/// OptionalEffectPerformed` rider ("If you do, gain 1 life") checks whether the
+/// player chose to perform the action; if the action is impossible the choice is
+/// never offered, so the rider must not fire.
+///
+/// Both the presence check and the removal-prohibition check use the resolver's
+/// own authorities (`resolve_defined_or_targets`, `counter_removal_blocked`), so
+/// feasibility and resolution can never diverge. A `count > 1` request is still
+/// feasible whenever ≥1 permitted counter exists — the resolver removes as many
+/// as available (CR 122.1 "as much as possible"), a nonzero action. Returns
+/// `false` (feasible) for any non-`RemoveCounter` effect so the caller's other
+/// arms are unaffected.
+pub(crate) fn remove_counter_optional_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Effect::RemoveCounter { counter_type, .. } = &ability.effect else {
+        return false;
+    };
+    let targets = resolve_defined_or_targets(state, ability);
+    // Feasible iff SOME resolved target holds a matching counter that is not
+    // removal-blocked. `counter_type` is `Option<CounterType>`: `Some(ct)`
+    // matches that specific kind ("a charge counter"), `None` means any kind
+    // ("a counter"). An empty target set is infeasible (nothing to remove from).
+    let feasible = targets.iter().any(|obj_id| {
+        state.objects.get(obj_id).is_some_and(|obj| {
+            obj.counters.iter().any(|(ct, &n)| {
+                n > 0
+                    && counter_type.as_ref().is_none_or(|expected| expected == ct)
+                    && !counter_removal_blocked(state, *obj_id, ct)
+            })
+        })
+    });
+    !feasible
+}
+
 /// Resolve targeting to object IDs using the typed TargetFilter.
 fn resolve_defined_or_targets(
     state: &GameState,

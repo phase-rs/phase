@@ -5,18 +5,19 @@ use engine::game::mana_abilities::activate_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle_cost::parse_oracle_cost;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, CastingPermission,
-    CategoryChooserScope, ChoiceType, Chooser, DigSource, DiscardSelfScope, Effect, EffectKind,
-    FilterProp, ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction,
-    ModalChoice, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, SacrificeCost, SpellCastingOption, TargetFilter, TargetRef,
-    TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardPlayMode, CardSelectionMode,
+    CastFromZoneDriver, CastingPermission, CategoryChooserScope, ChoiceType, Chooser,
+    ContinuousModification, DigSource, DiscardSelfScope, Effect, EffectKind, FilterProp,
+    ForEachCategoryAction, IterationCategory, ManaContribution, ManaProduction, ModalChoice,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+    SacrificeCost, SpellCastingOption, TargetFilter, TargetRef, TargetSelectionMode,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     BatchCompletion, CastPaymentMode, CollectEvidenceResume, GameState,
     ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, PayCostKind,
@@ -7387,6 +7388,164 @@ fn cascade_exile_loop_stays_synchronous_without_replacements() {
     );
 }
 
+/// W-167 (red first): a cast-from-zone exile delivery must park before it grants
+/// the lingering permission or emits its resolution event when CR 616.1 requires
+/// the affected card's controller to choose a replacement.
+#[test]
+fn cast_from_zone_exile_redirect_pauses_before_lingering_permission_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Cast-From-Zone Redirect Source", 1, 1)
+        .id();
+    let card = scenario
+        .add_spell_to_library_top(P0, "Cast-From-Zone Redirect Card", true)
+        .id();
+    scenario
+        .add_creature(P0, "Cast-From-Zone Exile To Hand", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    scenario
+        .add_creature(P0, "Cast-From-Zone Exile To Graveyard", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Graveyard));
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![card];
+    let ability = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        },
+        vec![TargetRef::Object(card)],
+        source,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("CastFromZone reaches its replacement-safe exile delivery");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&card].zone, Zone::Library);
+    assert!(runner.state().objects[&card].casting_permissions.is_empty());
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::CastFromZone,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "the lingering-permission tail must not precede the replacement choice"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected exile redirect settles the CastFromZone delivery");
+    assert!(matches!(
+        resumed.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
+    assert!(
+        runner.state().objects[&card].casting_permissions.is_empty(),
+        "an exile permission must not attach when the card did not reach exile"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(resumed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CastFromZone,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the settled CastFromZone tail resolves exactly once"
+    );
+}
+
+/// W-167-REG: an unredirected CastFromZone exile delivery remains synchronous
+/// and grants exactly the same permission as the prior raw mover.
+#[test]
+fn cast_from_zone_exile_delivery_stays_synchronous_and_grants_permission() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Synchronous Cast-From-Zone Source", 1, 1)
+        .id();
+    let card = scenario
+        .add_spell_to_library_top(P0, "Synchronous Cast-From-Zone Card", true)
+        .id();
+    let second_card = scenario
+        .add_spell_to_library_top(P0, "Second Synchronous Cast-From-Zone Card", true)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![card, second_card];
+    let ability = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        },
+        vec![TargetRef::Object(card), TargetRef::Object(second_card)],
+        source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("unredirected CastFromZone resolves synchronously");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    for card in [card, second_card] {
+        assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+        assert!(runner.state().objects[&card]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(permission, CastingPermission::ExileWithAltCost { .. })));
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CastFromZone,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the synchronous CastFromZone path resolves exactly once"
+    );
+}
+
 /// W-L3 (red first): PutAtLibraryPosition must keep its requested top ordering
 /// while routing every placement through the Library replacement consult.
 #[test]
@@ -9568,4 +9727,1270 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             "the split delivery matches the prior raw selection-order placement"
         );
     }
+}
+
+/// W-168 (red first): a tracked-pile cloak must park before its detach/manifest
+/// tail or `EffectResolved` when CR 616.1 requires an exile-redirect choice.
+/// After the selected redirect settles, only the member that actually reached
+/// exile may enter face down under the CR 701.58a cloak profile.
+#[test]
+fn cloak_tracked_exile_redirect_pauses_before_manifest_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Cloak Redirect Source", 1, 1)
+        .id();
+    let redirected = scenario
+        .add_creature(P0, "Redirected Cloak Member", 2, 2)
+        .id();
+    let exiled = scenario.add_creature(P0, "Exiled Cloak Member", 3, 3).id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Cloak Exile To Hand", 0, 0)
+            .as_enchantment()
+            .id(),
+        scenario
+            .add_creature(P0, "Cloak Exile To Graveyard", 0, 0)
+            .as_enchantment()
+            .id(),
+    ];
+
+    let mut runner = scenario.build();
+    for (redirect_source, redirected_to) in [
+        (redirect_sources[0], Zone::Hand),
+        (redirect_sources[1], Zone::Graveyard),
+    ] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield")
+            .replacement_definitions = vec![redirect_moved_to(Zone::Exile, redirected_to)
+            .valid_card(TargetFilter::SpecificObject { id: redirected })]
+        .into();
+    }
+    let tracked_set = engine::types::identifiers::TrackedSetId(0);
+    runner
+        .state_mut()
+        .tracked_object_sets
+        .insert(tracked_set, vec![redirected, exiled]);
+    runner.state_mut().chain_tracked_set_id = Some(tracked_set);
+    let ability = ResolvedAbility::new(
+        Effect::Cloak {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 0 },
+            object_source: Some(TargetFilter::TrackedSet { id: tracked_set }),
+        },
+        vec![],
+        source,
+        P0,
+    );
+
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("cloak reaches its replacement-safe exile batch");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&redirected].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&exiled].zone, Zone::Battlefield);
+    assert!(
+        !runner.state().objects[&redirected].face_down
+            && !runner.state().objects[&exiled].face_down,
+        "the manifest tail must not run before the redirect choice"
+    );
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Cloak,
+                source_id,
+                ..
+            } if *source_id == source
+        )),
+        "Cloak must not resolve before the exile batch settles"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected exile redirect settles the tracked cloak batch");
+    assert!(matches!(resumed.waiting_for, WaitingFor::Priority { .. }));
+    assert!(matches!(
+        runner.state().objects[&redirected].zone,
+        Zone::Hand | Zone::Graveyard
+    ));
+    assert!(
+        !runner.state().objects[&redirected].face_down,
+        "a card redirected away from exile must not be re-manifested"
+    );
+    assert_eq!(runner.state().objects[&exiled].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&exiled].face_down,
+        "the unredirected member must cloak from exile"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(resumed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Cloak,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the settled cloak tail resolves exactly once"
+    );
+}
+
+/// W-168-REG: an unredirected tracked-pile cloak remains synchronous and keeps
+/// the prior two zone changes per member plus the face-down ward-{2} outcome.
+#[test]
+fn cloak_tracked_exile_delivery_stays_synchronous_and_cloaks_every_member() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Synchronous Cloak Source", 1, 1)
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Synchronous Cloak Member", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Synchronous Cloak Member", 3, 3)
+        .id();
+
+    let mut runner = scenario.build();
+    let tracked_set = engine::types::identifiers::TrackedSetId(0);
+    runner
+        .state_mut()
+        .tracked_object_sets
+        .insert(tracked_set, vec![first, second]);
+    runner.state_mut().chain_tracked_set_id = Some(tracked_set);
+    let ability = ResolvedAbility::new(
+        Effect::Cloak {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 0 },
+            object_source: Some(TargetFilter::TrackedSet { id: tracked_set }),
+        },
+        vec![],
+        source,
+        P0,
+    );
+
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("unredirected tracked cloak resolves synchronously");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    for member in [first, second] {
+        let object = &runner.state().objects[&member];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert!(object.face_down);
+        assert_eq!(object.power, Some(2));
+        assert_eq!(object.toughness, Some(2));
+        assert!(object.keywords.iter().any(|keyword| matches!(
+            keyword,
+            Keyword::Ward(cost) if *cost == engine::types::keywords::WardCost::Mana(ManaCost::generic(2))
+        )));
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Exile,
+                    ..
+                } if [first, second].contains(object_id)
+            ))
+            .count(),
+        2,
+        "every tracked member has one battlefield-to-exile event"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if [first, second].contains(object_id)
+            ))
+            .count(),
+        2,
+        "every settled exile member has one face-down battlefield entry"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Cloak,
+                    source_id,
+                    ..
+                } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the synchronous cloak tail resolves exactly once"
+    );
+}
+
+/// W-169 (red first): a revealed explore land's replaceable Library→Hand move
+/// must settle before the Explore trigger event or a chained continuation runs.
+#[test]
+fn explore_land_redirect_pauses_before_explore_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let explorer = scenario
+        .add_creature(P0, "Explore Redirect Source", 1, 1)
+        .id();
+    let land = scenario.add_card_to_library_top(P0, "Explore Redirect Land");
+    for (name, destination) in [
+        ("Explore Hand To Graveyard", Zone::Graveyard),
+        ("Explore Hand To Exile", Zone::Exile),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, destination));
+    }
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&land)
+        .expect("revealed land exists")
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let mut ability = ResolvedAbility::new(Effect::Explore, vec![], explorer, P0);
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        explorer,
+        P0,
+    )));
+    let mut initial_events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("explore reaches its replacement-safe land delivery");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&land].zone, Zone::Library);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Explore,
+                source_id,
+                ..
+            } if *source_id == explorer
+        )),
+        "the explore tail must not precede the replacement choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected redirect settles the explore land delivery");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&land].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 21);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Explore,
+                    source_id,
+                    ..
+                } if *source_id == explorer
+            ))
+            .count(),
+        1,
+        "a redirected land still completes exactly one explore"
+    );
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::GainLife,
+                    source_id,
+                    ..
+                } if *source_id == explorer
+            ))
+            .count(),
+        1,
+        "the chained continuation runs exactly once after the explore tail"
+    );
+}
+
+/// W-169-REG: without a redirect, an explore land remains synchronous while the
+/// nonland branch keeps its existing counter-then-choice behavior.
+#[test]
+fn explore_land_delivery_stays_synchronous_and_nonland_path_is_unchanged() {
+    let mut land_scenario = GameScenario::new();
+    land_scenario.at_phase(Phase::PreCombatMain);
+    let land_explorer = land_scenario
+        .add_creature(P0, "Synchronous Explore Land Source", 1, 1)
+        .id();
+    let land = land_scenario.add_card_to_library_top(P0, "Synchronous Explore Land");
+    let mut land_runner = land_scenario.build();
+    land_runner
+        .state_mut()
+        .objects
+        .get_mut(&land)
+        .expect("revealed land exists")
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let land_ability = ResolvedAbility::new(Effect::Explore, vec![], land_explorer, P0);
+    let mut land_events = Vec::new();
+    resolve_ability_chain(land_runner.state_mut(), &land_ability, &mut land_events, 0)
+        .expect("unredirected land explore resolves synchronously");
+
+    assert!(matches!(
+        land_runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(land_runner.state().objects[&land].zone, Zone::Hand);
+    assert!(
+        !land_runner.state().objects[&land_explorer]
+            .counters
+            .contains_key(&CounterType::Plus1Plus1),
+        "a land explore does not add a +1/+1 counter"
+    );
+
+    let mut nonland_scenario = GameScenario::new();
+    nonland_scenario.at_phase(Phase::PreCombatMain);
+    let nonland_explorer = nonland_scenario
+        .add_creature(P0, "Synchronous Explore Nonland Source", 1, 1)
+        .id();
+    let nonland = nonland_scenario
+        .add_spell_to_library_top(P0, "Synchronous Explore Nonland", true)
+        .id();
+    let mut nonland_runner = nonland_scenario.build();
+    let nonland_ability = ResolvedAbility::new(Effect::Explore, vec![], nonland_explorer, P0);
+    let mut nonland_events = Vec::new();
+    resolve_ability_chain(
+        nonland_runner.state_mut(),
+        &nonland_ability,
+        &mut nonland_events,
+        0,
+    )
+    .expect("nonland explore keeps its counter-then-choice path");
+
+    assert_eq!(
+        nonland_runner.state().objects[&nonland_explorer].counters[&CounterType::Plus1Plus1],
+        1
+    );
+    assert!(matches!(
+        nonland_runner.state().waiting_for,
+        WaitingFor::DigChoice { ref cards, .. } if cards == &vec![nonland]
+    ));
+}
+
+/// W-170 (red first): the no-host ReturnAsAura graveyard instruction must park
+/// its resolution tail until CR 616.1 chooses and settles the replacement.
+#[test]
+fn return_as_aura_no_target_redirect_pauses_before_resolution_tail() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario
+        .add_creature(P0, "Return-As-Aura Redirect Host", 2, 2)
+        .id();
+    for name in [
+        "Return-As-Aura Graveyard To Exile A",
+        "Return-As-Aura Graveyard To Exile B",
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().last_zone_changed_ids.push(host);
+    let ability = ResolvedAbility::new(
+        Effect::ReturnAsAura {
+            enchant_filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            grants: vec![ContinuousModification::RemoveAllAbilities],
+        },
+        vec![],
+        host,
+        P0,
+    );
+    let mut initial_events = Vec::new();
+    engine::game::effects::return_as_aura::resolve(
+        runner.state_mut(),
+        &ability,
+        &mut initial_events,
+    )
+    .expect("return-as-Aura reaches its replacement-safe no-host delivery");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+    assert!(
+        !initial_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ReturnAsAura,
+                source_id,
+                ..
+            } if *source_id == host
+        )),
+        "the ReturnAsAura tail must not precede the replacement choice"
+    );
+
+    let completed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the selected replacement settles the ReturnAsAura zone change");
+    assert!(matches!(
+        completed.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&host].zone, Zone::Exile);
+    assert_eq!(
+        initial_events
+            .iter()
+            .chain(completed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ReturnAsAura,
+                    source_id,
+                    ..
+                } if *source_id == host
+            ))
+            .count(),
+        1,
+        "the settled replacement delivery runs the ReturnAsAura tail exactly once"
+    );
+}
+
+/// W-170-REG: the unredirected no-host path stays synchronous, strips the
+/// returned host's live trigger snapshot, and the one-host attachment path is
+/// unchanged.
+#[test]
+fn return_as_aura_no_target_stays_synchronous_and_attach_path_is_unchanged() {
+    let mut no_target_scenario = GameScenario::new();
+    no_target_scenario.at_phase(Phase::PreCombatMain);
+    let no_target_host = no_target_scenario
+        .add_creature(P0, "Return-As-Aura No-Target Host", 2, 2)
+        .id();
+    let mut no_target_runner = no_target_scenario.build();
+    no_target_runner
+        .state_mut()
+        .objects
+        .get_mut(&no_target_host)
+        .expect("returned host exists")
+        .trigger_definitions
+        .push(TriggerDefinition::new(TriggerMode::ChangesZone));
+    no_target_runner
+        .state_mut()
+        .last_zone_changed_ids
+        .push(no_target_host);
+    let no_target_ability = ResolvedAbility::new(
+        Effect::ReturnAsAura {
+            enchant_filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            grants: vec![ContinuousModification::RemoveAllAbilities],
+        },
+        vec![],
+        no_target_host,
+        P0,
+    );
+    let mut no_target_events = Vec::new();
+    engine::game::effects::return_as_aura::resolve(
+        no_target_runner.state_mut(),
+        &no_target_ability,
+        &mut no_target_events,
+    )
+    .expect("unredirected no-host ReturnAsAura resolves synchronously");
+
+    assert!(matches!(
+        no_target_runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        no_target_runner.state().objects[&no_target_host].zone,
+        Zone::Graveyard
+    );
+    let GameEvent::ZoneChanged { record, .. } = no_target_events
+        .iter()
+        .find(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == no_target_host))
+        .expect("the no-host move emits its zone-change record")
+    else {
+        panic!("expected a no-host ZoneChanged event");
+    };
+    assert!(
+        record.trigger_definitions.is_empty(),
+        "the no-host move snapshots the aura-stripped live trigger definitions"
+    );
+    assert_eq!(
+        no_target_events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ReturnAsAura,
+                    source_id,
+                    ..
+                } if *source_id == no_target_host
+            ))
+            .count(),
+        1,
+        "the synchronous no-host path resolves exactly once"
+    );
+
+    let mut attach_scenario = GameScenario::new();
+    attach_scenario.at_phase(Phase::PreCombatMain);
+    let attach_host = attach_scenario
+        .add_creature(P0, "Return-As-Aura Attach Host", 2, 2)
+        .id();
+    let target = attach_scenario
+        .add_creature(P0, "Return-As-Aura Attach Target", 1, 1)
+        .id();
+    let mut attach_runner = attach_scenario.build();
+    attach_runner
+        .state_mut()
+        .last_zone_changed_ids
+        .push(attach_host);
+    let attach_ability = ResolvedAbility::new(
+        Effect::ReturnAsAura {
+            enchant_filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            grants: vec![],
+        },
+        vec![],
+        attach_host,
+        P0,
+    );
+    let mut attach_events = Vec::new();
+    engine::game::effects::return_as_aura::resolve(
+        attach_runner.state_mut(),
+        &attach_ability,
+        &mut attach_events,
+    )
+    .expect("one-host ReturnAsAura attaches synchronously");
+
+    assert_eq!(
+        attach_runner.state().objects[&attach_host].attached_to,
+        Some(AttachTarget::Object(target))
+    );
+    assert_eq!(
+        attach_runner.state().objects[&attach_host].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(
+        attach_events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ReturnAsAura,
+                    source_id,
+                    ..
+                } if *source_id == attach_host
+            ))
+            .count(),
+        1,
+        "the unchanged attach path resolves exactly once"
+    );
+}
+
+/// W-171 (red first): accepting the CR 903.9a commander return must let competing
+/// Command-destination redirects park their CR 616.1 ordering prompt. The selected
+/// redirect genuinely puts the commander into exile, so the next SBA check correctly
+/// offers one fresh return choice; declining that fresh choice proves the ledger stops
+/// a duplicate prompt for the same exile stay.
+#[test]
+fn commander_zone_return_redirect_pauses_and_reoffers_only_for_fresh_exile_arrival() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature_to_graveyard(P0, "Commander Return Redirect Witness", 2, 2)
+        .id();
+    scenario.with_commander(commander);
+    for name in [
+        "Commander Command To Exile Redirect A",
+        "Commander Command To Exile Redirect B",
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Command, Zone::Exile));
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        commander,
+        Zone::Graveyard,
+        &mut setup_events,
+    );
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut setup_events);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CommanderZoneChoice {
+            commander_id,
+            current_zone: Zone::Graveyard,
+            ..
+        } if commander_id == commander
+    ));
+
+    let paused = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting the commander return is valid");
+    assert!(matches!(
+        paused.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Graveyard,
+        "the commander must remain in its source zone while CR 616.1 is parked"
+    );
+
+    let settled = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the chosen redirect settles the commander return");
+    assert_eq!(runner.state().objects[&commander].zone, Zone::Exile);
+    assert!(matches!(
+        settled.waiting_for,
+        WaitingFor::CommanderZoneChoice {
+            commander_id,
+            current_zone: Zone::Exile,
+            ..
+        } if commander_id == commander
+    ));
+
+    let declined = runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the fresh exile return is valid");
+    assert!(matches!(
+        declined.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().objects[&commander].zone, Zone::Exile);
+    assert!(
+        runner
+            .state()
+            .commander_declined_zone_return
+            .contains(&commander),
+        "declining suppresses a duplicate offer while the commander stays in exile"
+    );
+}
+
+/// W-171-REG: the ordinary accept path remains synchronous, and declining keeps
+/// the commander in its zone with the existing same-stay ledger behavior.
+#[test]
+fn commander_zone_return_stays_synchronous_and_decline_is_unchanged() {
+    let mut accept_scenario = GameScenario::new();
+    accept_scenario.at_phase(Phase::PreCombatMain);
+    let accepted_commander = accept_scenario
+        .add_creature_to_graveyard(P0, "Synchronous Commander Return", 2, 2)
+        .id();
+    accept_scenario.with_commander(accepted_commander);
+    let mut accept_runner = accept_scenario.build();
+    accept_runner.state_mut().format_config.command_zone = true;
+    let mut accept_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        accept_runner.state_mut(),
+        accepted_commander,
+        Zone::Graveyard,
+        &mut accept_setup_events,
+    );
+    engine::game::sba::check_state_based_actions(
+        accept_runner.state_mut(),
+        &mut accept_setup_events,
+    );
+
+    let accepted = accept_runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("unredirected commander return is valid");
+    assert!(matches!(
+        accepted.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        accept_runner.state().objects[&accepted_commander].zone,
+        Zone::Command
+    );
+    assert!(accepted.events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Graveyard),
+            to: Zone::Command,
+            ..
+        } if *object_id == accepted_commander
+    )));
+    let mut recheck_events = Vec::new();
+    engine::game::sba::check_state_based_actions(accept_runner.state_mut(), &mut recheck_events);
+    assert!(matches!(
+        accept_runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+
+    let mut decline_scenario = GameScenario::new();
+    decline_scenario.at_phase(Phase::PreCombatMain);
+    let declined_commander = decline_scenario
+        .add_creature_to_graveyard(P0, "Declined Commander Return", 2, 2)
+        .id();
+    decline_scenario.with_commander(declined_commander);
+    let mut decline_runner = decline_scenario.build();
+    decline_runner.state_mut().format_config.command_zone = true;
+    let mut decline_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        decline_runner.state_mut(),
+        declined_commander,
+        Zone::Graveyard,
+        &mut decline_setup_events,
+    );
+    engine::game::sba::check_state_based_actions(
+        decline_runner.state_mut(),
+        &mut decline_setup_events,
+    );
+
+    let declined = decline_runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the commander return is valid");
+    assert!(matches!(
+        declined.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        decline_runner.state().objects[&declined_commander].zone,
+        Zone::Graveyard
+    );
+    assert!(
+        decline_runner
+            .state()
+            .commander_declined_zone_return
+            .contains(&declined_commander),
+        "declining preserves the existing same-stay ledger behavior"
+    );
+}
+
+/// W-173 (red first): CR 903.9b replaces a commander bounce before the Hand
+/// arrival event. A Warped Devotion-shaped observer therefore cannot trigger
+/// when the owner chooses the command zone, but does trigger after a decline.
+#[test]
+fn commander_hand_return_replaces_bounce_before_warped_devotion_can_observe_it() {
+    let mut accept_scenario = GameScenario::new();
+    accept_scenario.at_phase(Phase::PreCombatMain);
+    let accepted_commander = accept_scenario
+        .add_creature(P0, "Commander Hand Replacement Accept", 2, 2)
+        .id();
+    accept_scenario.with_commander(accepted_commander);
+    let accepted_observer = accept_scenario
+        .add_creature(P0, "Warped Devotion Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::Typed(TypedFilter::permanent()))
+                .origin(Zone::Battlefield)
+                .destination(Zone::Hand)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    let mut accept_runner = accept_scenario.build();
+    accept_runner.state_mut().format_config.command_zone = true;
+    let mut accept_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        accept_runner.state_mut(),
+        accepted_commander,
+        Zone::Battlefield,
+        &mut accept_setup_events,
+    );
+    let accept_bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(accepted_commander)],
+        accepted_observer,
+        P0,
+    );
+    let mut accept_events = Vec::new();
+    resolve_ability_chain(
+        accept_runner.state_mut(),
+        &accept_bounce,
+        &mut accept_events,
+        0,
+    )
+    .expect("the bounce reaches the command-zone replacement choice");
+    assert!(matches!(
+        accept_runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(
+        accept_runner.state().objects[&accepted_commander].zone,
+        Zone::Battlefield,
+        "the original Hand move stays proposed until CR 903.9b is chosen"
+    );
+
+    let accepted = accept_runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the CR 903.9b replacement is valid");
+    assert_eq!(
+        accept_runner.state().objects[&accepted_commander].zone,
+        Zone::Command
+    );
+    assert!(
+        !accepted.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Hand,
+                ..
+            } if *object_id == accepted_commander
+        )),
+        "accepting CR 903.9b emits no battlefield-to-Hand event"
+    );
+    assert!(
+        !accept_runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == accepted_observer),
+        "Warped Devotion cannot trigger when the commander never reaches Hand"
+    );
+
+    let mut decline_scenario = GameScenario::new();
+    decline_scenario.at_phase(Phase::PreCombatMain);
+    let declined_commander = decline_scenario
+        .add_creature(P0, "Commander Hand Replacement Decline", 2, 2)
+        .id();
+    decline_scenario.with_commander(declined_commander);
+    let declined_observer = decline_scenario
+        .add_creature(P0, "Warped Devotion Decline Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::Typed(TypedFilter::permanent()))
+                .origin(Zone::Battlefield)
+                .destination(Zone::Hand)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    let mut decline_runner = decline_scenario.build();
+    decline_runner.state_mut().format_config.command_zone = true;
+    let mut decline_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        decline_runner.state_mut(),
+        declined_commander,
+        Zone::Battlefield,
+        &mut decline_setup_events,
+    );
+    let decline_bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(declined_commander)],
+        declined_observer,
+        P0,
+    );
+    let mut decline_events = Vec::new();
+    resolve_ability_chain(
+        decline_runner.state_mut(),
+        &decline_bounce,
+        &mut decline_events,
+        0,
+    )
+    .expect("the bounce reaches the command-zone replacement choice");
+    let declined = decline_runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the CR 903.9b replacement is valid");
+    assert_eq!(
+        decline_runner.state().objects[&declined_commander].zone,
+        Zone::Hand
+    );
+    assert!(declined.events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Hand,
+            ..
+        } if *object_id == declined_commander
+    )));
+    assert!(
+        decline_runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == declined_observer),
+        "Warped Devotion triggers after a declined Hand replacement"
+    );
+}
+
+/// W-173: CR 903.9b also replaces a library return before both the library
+/// arrival observer (Wan Shi Tong-shaped) and the normal library shuffle tail.
+#[test]
+fn commander_library_return_skips_library_arrival_and_shuffle_when_replaced() {
+    let mut accept_scenario = GameScenario::new();
+    accept_scenario.at_phase(Phase::PreCombatMain);
+    let accepted_commander = accept_scenario
+        .add_creature(P0, "Commander Library Replacement Accept", 2, 2)
+        .id();
+    accept_scenario.with_commander(accepted_commander);
+    let accepted_observer = accept_scenario
+        .add_creature(P0, "Wan Shi Tong Library Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZoneAll)
+                .destination(Zone::Library)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    let mut accept_runner = accept_scenario.build();
+    accept_runner.state_mut().format_config.command_zone = true;
+    let mut accept_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        accept_runner.state_mut(),
+        accepted_commander,
+        Zone::Battlefield,
+        &mut accept_setup_events,
+    );
+    let accept_library_return = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: Some(Zone::Library),
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(accepted_commander)],
+        accepted_observer,
+        P0,
+    );
+    let mut accept_events = Vec::new();
+    resolve_ability_chain(
+        accept_runner.state_mut(),
+        &accept_library_return,
+        &mut accept_events,
+        0,
+    )
+    .expect("the library return reaches the command-zone replacement choice");
+    let accepted = accept_runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the command-zone replacement is valid");
+    assert_eq!(
+        accept_runner.state().objects[&accepted_commander].zone,
+        Zone::Command
+    );
+    assert!(
+        !accepted.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Library,
+                ..
+            } if *object_id == accepted_commander
+        )),
+        "accepting CR 903.9b emits no library-arrival event"
+    );
+    assert!(
+        !accepted.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "a replaced library move must not run the delivery shuffle tail"
+    );
+    assert!(
+        !accept_runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == accepted_observer),
+        "a Wan Shi Tong-shaped observer cannot trigger without a library arrival"
+    );
+
+    let mut decline_scenario = GameScenario::new();
+    decline_scenario.at_phase(Phase::PreCombatMain);
+    let declined_commander = decline_scenario
+        .add_creature(P0, "Commander Library Replacement Decline", 2, 2)
+        .id();
+    decline_scenario.with_commander(declined_commander);
+    let declined_observer = decline_scenario
+        .add_creature(P0, "Wan Shi Tong Decline Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZoneAll)
+                .destination(Zone::Library)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        )
+        .id();
+    let mut decline_runner = decline_scenario.build();
+    decline_runner.state_mut().format_config.command_zone = true;
+    let mut decline_setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        decline_runner.state_mut(),
+        declined_commander,
+        Zone::Battlefield,
+        &mut decline_setup_events,
+    );
+    let decline_library_return = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: Some(Zone::Library),
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(declined_commander)],
+        declined_observer,
+        P0,
+    );
+    let mut decline_events = Vec::new();
+    resolve_ability_chain(
+        decline_runner.state_mut(),
+        &decline_library_return,
+        &mut decline_events,
+        0,
+    )
+    .expect("the library return reaches the command-zone replacement choice");
+    let declined = decline_runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the command-zone replacement is valid");
+    assert_eq!(
+        decline_runner.state().objects[&declined_commander].zone,
+        Zone::Library
+    );
+    assert!(declined.events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Library,
+            ..
+        } if *object_id == declined_commander
+    )));
+    assert!(declined.events.iter().any(|event| matches!(
+        event,
+        GameEvent::PlayerPerformedAction {
+            action: PlayerActionKind::ShuffledLibrary,
+            ..
+        }
+    )));
+    assert!(
+        decline_runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == declined_observer),
+        "the observer triggers after a real library arrival"
+    );
+}
+
+/// W-173: CR 903.9b is the CR 614.5 exception. After it changes a Hand move
+/// to Command, a competing Command-to-Hand redirect modifies the same event
+/// and legally offers the commander replacement again.
+#[test]
+fn commander_hand_return_rearms_after_a_competing_redirect_recreates_hand() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature(P0, "Commander Repeat-Replacement Witness", 2, 2)
+        .id();
+    scenario.with_commander(commander);
+    let redirect_source = scenario
+        .add_creature(P0, "Command To Hand Redirect Witness", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Command, Zone::Hand))
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        commander,
+        Zone::Battlefield,
+        &mut setup_events,
+    );
+    let bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(commander)],
+        redirect_source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &bounce, &mut events, 0)
+        .expect("the initial commander replacement choice is available");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice {
+            candidate_count: 2,
+            ..
+        }
+    ));
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        unreachable!("the optional prompt was asserted above");
+    };
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.source_id)
+            .collect::<Vec<_>>(),
+        vec![commander, commander],
+        "the lone initial candidate is the commander's accept/decline choice: {candidates:?}"
+    );
+
+    let reapplied = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the initial commander replacement is valid");
+    assert!(
+        matches!(
+            reapplied.waiting_for,
+            WaitingFor::ReplacementChoice {
+                candidate_count: 2,
+                ..
+            }
+        ),
+        "the modified event must re-offer the commander replacement"
+    );
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Battlefield,
+        "the re-armed replacement parks before the modified event is delivered"
+    );
+
+    let settled = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the re-armed commander replacement is valid");
+    assert!(matches!(
+        settled.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Hand,
+        "the competing redirect's recreated Hand destination is delivered after the second decline"
+    );
+}
+
+/// W-173: In a material CR 616.1 ordering prompt, selecting the commander
+/// rule chooses its turn to apply; its CR 903.9b "may" choice remains separate.
+#[test]
+fn commander_hand_return_keeps_its_may_choice_inside_cr_616_ordering() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let commander = scenario
+        .add_creature(P0, "Commander Ordering Witness", 2, 2)
+        .id();
+    scenario.with_commander(commander);
+    let redirect_source = scenario
+        .add_creature(P0, "Hand To Command Redirect Witness", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Command))
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let mut setup_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        commander,
+        Zone::Battlefield,
+        &mut setup_events,
+    );
+    let bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(commander)],
+        redirect_source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &bounce, &mut events, 0)
+        .expect("the material replacement ordering choice is available");
+    let WaitingFor::ReplacementChoice {
+        candidate_count,
+        candidates,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("CR 616.1 must present a replacement ordering prompt");
+    };
+    assert_eq!(*candidate_count, 2);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.source_id)
+            .collect::<Vec<_>>(),
+        vec![commander, redirect_source]
+    );
+
+    let selected = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("selecting the commander rule's place in the ordering is valid");
+    assert!(matches!(
+        selected.waiting_for,
+        WaitingFor::ReplacementChoice {
+            candidate_count: 2,
+            ..
+        }
+    ));
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Battlefield,
+        "ordering selection must not silently accept the optional commander replacement"
+    );
+
+    let declined = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining the commander rule after ordering it is valid");
+    assert!(matches!(
+        declined.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Command,
+        "the still-applicable Hand-to-Command redirect resolves after the decline"
+    );
 }

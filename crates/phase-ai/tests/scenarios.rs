@@ -145,6 +145,7 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
             player: P0,
             valid_attacker_ids: vec![attacker_a, attacker_b],
             valid_attack_targets: vec![AttackTarget::Player(P1), AttackTarget::Player(PlayerId(2))],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
     }
@@ -1269,5 +1270,90 @@ fn scenario_master_transmuter_witness_board_is_legal() {
     assert!(
         activation_legal_for(runner.state(), transmuter),
         "the Island keeps {{U}} available after the return → activation must be legal"
+    );
+}
+
+/// AI-route reach-guard (Decision 3): the engine-owned completion seam that ALL AI
+/// declare-attackers routes funnel through (`complete_attacker_proposal[s]`) returns
+/// an `apply`-accepted, hard-legal declaration that obeys the CR 508.1d maximum
+/// requirement bar. Exercised through the direct-choice route (`choose_action`) and
+/// the host loop (`run_ai_actions`); routes 1/3/4 (candidate generation, fallback,
+/// scoring) are internal to `choose_action` and reached transitively, and route 7
+/// (Resolve All) shares the `run_ai_actions` seam. A lured attacker forces a
+/// non-empty completion, so the returned action is not the vacuous empty declaration.
+///
+/// Revert guard: if the AI route bypassed engine completion and fell back to the
+/// first generic legal action (an empty/illegal declaration), `runner.act(action)`
+/// would either reject it or fail to commit combat obeying the lure.
+#[test]
+fn ai_declare_attackers_completion_returns_apply_accepted_legal_action() {
+    use engine::types::ability::StaticDefinition;
+    use engine::types::statics::StaticMode;
+
+    fn parked_lured() -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        let attacker = {
+            let mut b = scenario.add_creature(P0, "Lured Bear", 2, 2);
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
+                player: P1,
+            }));
+            b.id()
+        };
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.phase = Phase::DeclareAttackers;
+        state.turn_number = 2;
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        (runner, attacker)
+    }
+
+    // Route 2 (direct choice): `choose_action` returns a DeclareAttackers the real
+    // reducer accepts, obeying the lure (CR 508.1d max requirement = 1).
+    let (mut runner, attacker) = parked_lured();
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let action = choose_action(runner.state(), P0, &config, &mut rng)
+        .expect("AI must choose a declare-attackers action");
+    assert!(
+        matches!(action, GameAction::DeclareAttackers { .. }),
+        "expected DeclareAttackers, got {action:?}"
+    );
+    runner
+        .act(action)
+        .expect("the AI's declaration must be reducer-legal (apply-accepted)");
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == attacker)),
+        "the completed declaration obeys the lure and commits combat"
+    );
+
+    // Route 8 (host loop): `run_ai_actions` drives the same seam to a terminal state
+    // without panicking or looping on the declare step.
+    let (mut host, _attacker) = parked_lured();
+    let ai_players = HashSet::from([P0]);
+    let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
+    let mut host_rng = SmallRng::seed_from_u64(7);
+    let session = phase_ai::session::AiSession::arc_from_game(host.state());
+    let results = run_ai_actions(
+        host.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut host_rng,
+        &session,
+    );
+    assert!(
+        !results.is_empty(),
+        "the host AI loop must take at least one action for the declare step"
     );
 }

@@ -1136,7 +1136,7 @@ fn sacrifice_for_mana_enables_followup(state: &GameState, player: PlayerId) -> b
         let case3 = obj
             .trigger_definitions
             .iter_all()
-            .any(trigger_fires_on_leaving_battlefield);
+            .any(|entry| trigger_fires_on_leaving_battlefield(entry.definition()));
         case2 || case3
     })
 }
@@ -1221,6 +1221,7 @@ fn beneficial_mana_tap_trigger_hold(
                 return false;
             };
             obj.trigger_definitions.iter_all().any(|trigger| {
+                let trigger = trigger.definition();
                 if !mana_sources::is_non_mana_tap_trigger(trigger)
                     || !mana_sources::trigger_chain_benefits_controller(trigger)
                 {
@@ -1389,9 +1390,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // `activatable_object_mana_actions` proxy while dropping the false HOLD.
     // Meaningful non-mana activated abilities, grouped mana that would queue
     // non-mana triggers, and issue #544 sac-for-mana on an opponent's turn are
-    // still held below by the meaningful-action/sac gates; a dedicated
-    // `has_feasibly_activatable_ability` opponent-turn seam (the ability
-    // analogue of this predicate) is deferred as future work.
+    // held below by the same engine-authoritative legality predicates.
     if state.active_player != player {
         let probe: &_ = cast_probe.get_or_insert_with(|| {
             crate::game::casting::PriorityCastProbe::from_flushed_state(state.clone(), player)
@@ -2250,6 +2249,7 @@ mod tests {
             player: PlayerId(1),
             valid_attacker_ids: Vec::new(),
             valid_attack_targets: Vec::new(),
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
         // Acting player gets the full result (matches `legal_actions_full`).
@@ -3375,6 +3375,104 @@ mod tests {
                 &super::flat_priority_actions(runner.state())
             ),
             "castable instant on your own turn → hold via own-turn castability rung"
+        );
+    }
+
+    /// Issue #4387: The Unbeatable Squirrel Girl's controller-owned,
+    /// mana-costed non-mana activated ability is a meaningful opponent-turn
+    /// priority action. The production action surfaces must expose it, auto-pass
+    /// must hold from that exposed action, and the submitted activation must
+    /// resolve through the public pipeline.
+    #[test]
+    fn squirrel_girl_activation_submits_and_resolves_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        const SQUIRREL_GIRL_ORACLE: &str = "Do You Like Squirrels? — Whenever The Unbeatable Squirrel Girl enters or attacks, create a 1/1 green Squirrel creature token.\nI LOVE Squirrels! — {1}{G}{G}{G}: Create X 1/1 green Squirrel creature tokens, where X is the number of Squirrels you control.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+        let source = scenario
+            .add_creature(P0, "The Unbeatable Squirrel Girl", 4, 4)
+            .as_legendary()
+            .with_subtypes(vec!["Squirrel", "Human", "Hero"])
+            .from_oracle_text(SQUIRREL_GIRL_ORACLE)
+            .id();
+
+        let mut runner = scenario.build();
+        let ability_index = runner.state().objects[&source]
+            .abilities
+            .iter()
+            .position(|ability| ability.kind == AbilityKind::Activated)
+            .expect("Squirrel Girl must parse its activated ability");
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+
+        let action = GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        };
+        let flat = super::flat_priority_actions(runner.state());
+        assert!(
+            flat.contains(&action),
+            "controller-owned Squirrel Girl activation must appear in the flat action list"
+        );
+        assert!(
+            bucket_has(&legal_actions_full(runner.state()).2, source, &action),
+            "controller-owned Squirrel Girl activation must appear in legal_actions_by_object"
+        );
+        assert!(
+            !super::auto_pass_recommended(runner.state(), &flat),
+            "mana-costed non-mana activation on opponent's turn -> hold"
+        );
+
+        let before = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Squirrel")
+            })
+            .count();
+        let outcome = runner.activate(source, ability_index).resolve();
+        let after = outcome
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Squirrel")
+            })
+            .count();
+        assert_eq!(
+            after,
+            before + 1,
+            "submitted opponent-turn activation must resolve and create one Squirrel token"
         );
     }
 

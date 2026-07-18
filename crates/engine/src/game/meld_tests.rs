@@ -838,100 +838,38 @@ fn meld_entry_consults_enters_with_replacement() {
     );
 }
 
-/// Drive a meld whose battlefield entry is redirected to hand while both
-/// physical components are commanders, then make the requested independent
-/// commander-zone decisions for the source and partner.
+/// Drive a melded permanent to Hand while both physical components are
+/// commanders, then make the requested independent CR 903.9b decisions for
+/// the source and partner components.
 fn run_redirected_meld_commander_choices(source_accepts: bool) {
     use std::collections::HashSet;
 
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::scenario::GameRunner;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect as AbilEffect, FilterProp, ReplacementDefinition,
-        TargetFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, Effect as AbilEffect, TargetFilter,
+        TargetRef, TriggerDefinition,
     };
     use crate::types::actions::GameAction;
-    use crate::types::replacements::ReplacementEvent;
+    use crate::types::triggers::TriggerMode;
 
     let mut sc = GameScenario::new();
     let source = sc.add_creature(P0, "Gisela, the Broken Blade", 4, 3).id();
     let partner = sc.add_creature(P0, "Bruna, the Fading Light", 5, 4).id();
-    let redirector = sc.add_creature(P1, "Entry Redirector", 2, 2).id();
+    let hand_arrival_observer = sc
+        .add_creature(P0, "Meld Hand Arrival Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZoneAll)
+                .destination(Zone::Hand)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, AbilEffect::NoOp)),
+        )
+        .id();
     seed_result_face(&mut sc.state);
     sc.state.format_config.command_zone = true;
     sc.state.objects.get_mut(&source).unwrap().is_commander = true;
     sc.state.objects.get_mut(&partner).unwrap().is_commander = true;
-
-    // CR 614.5: the same replacement effect gets only one opportunity to
-    // modify the result-entry event. The partner delivery inherits that
-    // applied-effect set, so this battlefield-to-hand redirect cannot loop or
-    // pause between the two physical components.
-    let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::Any)
-        .destination_zone(Zone::Battlefield)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            AbilEffect::ChangeZone {
-                destination: Zone::Hand,
-                origin: None,
-                target: TargetFilter::SelfRef,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
-            },
-        ))
-        .description("If a permanent would enter, put it into its owner's hand instead.".into());
-    sc.state
-        .objects
-        .get_mut(&redirector)
-        .unwrap()
-        .replacement_definitions
-        .push(redirect);
-
-    // CR 400.6 + CR 614.5: the physical partner's derived Exile→Hand move is a
-    // separately replaceable event, seeded with the result redirect's applied
-    // set. The original Battlefield→Hand redirect cannot recur, while this
-    // partner-specific Hand→Graveyard replacement still gets one opportunity.
-    let split_partner = ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::Typed(TypedFilter::default().properties(
-            vec![FilterProp::Named {
-                name: "Bruna, the Fading Light".to_string(),
-            }],
-        )))
-        .destination_zone(Zone::Hand)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            AbilEffect::ChangeZone {
-                destination: Zone::Graveyard,
-                origin: None,
-                target: TargetFilter::SelfRef,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
-            },
-        ))
-        .description(
-            "If Bruna would move to hand, put it into its owner's graveyard instead.".into(),
-        );
-    sc.state
-        .objects
-        .get_mut(&redirector)
-        .unwrap()
-        .replacement_definitions
-        .push(split_partner);
 
     let mut meld_events = Vec::new();
     perform_meld(
@@ -941,8 +879,6 @@ fn run_redirected_meld_commander_choices(source_accepts: bool) {
     )
     .unwrap();
 
-    assert_eq!(sc.state.objects[&source].zone, Zone::Hand);
-    assert_eq!(sc.state.objects[&partner].zone, Zone::Graveyard);
     assert_eq!(
         meld_events
             .iter()
@@ -955,36 +891,53 @@ fn run_redirected_meld_commander_choices(source_accepts: bool) {
             ))
             .count(),
         1,
-        "the redirected meld finishes exactly once after both component deliveries"
+        "the meld finishes exactly once before its later component deliveries"
     );
 
-    // CR 903.9a / CR 903.9b: each commander component receives its own choice
-    // from its independently replaced destination. Choice order is engine-
-    // defined, so decide by component identity while proving neither is
-    // prompted twice and the second prompt follows the first decision.
-    crate::game::sba::check_state_based_actions(&mut sc.state, &mut meld_events);
     let mut runner = GameRunner::from_state(sc.state);
+    let bounce = ResolvedAbility::new(
+        AbilEffect::Bounce {
+            target: TargetFilter::Any,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(source)],
+        hand_arrival_observer,
+        P0,
+    );
+    resolve_ability_chain(runner.state_mut(), &bounce, &mut meld_events, 0)
+        .expect("the merged commander components reach CR 903.9b choices");
+
+    // CR 903.9b + CR 903.9c: each commander component independently chooses
+    // Command or its normal Hand destination. Choice order is engine-defined,
+    // so decide by component identity while proving the raw split bypass cannot
+    // silently omit either prompt.
     let mut prompted = HashSet::new();
     let mut choice_events = Vec::new();
     for _ in 0..2 {
-        let WaitingFor::CommanderZoneChoice {
-            commander_id,
-            current_zone,
+        let WaitingFor::ReplacementChoice {
+            candidate_count,
+            candidates,
             ..
-        } = runner.state().waiting_for
+        } = &runner.state().waiting_for
         else {
             panic!(
-                "expected one commander prompt per meld component, got {:?}",
+                "expected one CR 903.9b prompt per meld component; a raw split bypassed the pipeline: {:?}",
                 runner.state().waiting_for
             );
         };
+        assert_eq!(*candidate_count, 2);
+        let commander_id = candidates
+            .first()
+            .map(|candidate| candidate.source_id)
+            .expect("the CR 903.9b accept candidate identifies its commander component");
         assert_eq!(
-            current_zone,
-            if commander_id == source {
-                Zone::Hand
-            } else {
-                Zone::Graveyard
-            }
+            candidates
+                .iter()
+                .map(|candidate| candidate.source_id)
+                .collect::<Vec<_>>(),
+            vec![commander_id, commander_id],
+            "CR 903.9b owns its ordinary accept/decline replacement prompt"
         );
         assert!(
             prompted.insert(commander_id),
@@ -997,8 +950,10 @@ fn run_redirected_meld_commander_choices(source_accepts: bool) {
             !source_accepts
         };
         let result = runner
-            .act(GameAction::DecideOptionalEffect { accept })
-            .expect("commander-zone decision resolves");
+            .act(GameAction::ChooseReplacement {
+                index: usize::from(!accept),
+            })
+            .expect("commander replacement decision resolves");
         choice_events.extend(result.events);
     }
 
@@ -1008,15 +963,24 @@ fn run_redirected_meld_commander_choices(source_accepts: bool) {
         WaitingFor::Priority { .. }
     ));
     assert!(
-        choice_events.iter().all(|event| !matches!(
+        !choice_events.iter().any(|event| matches!(
             event,
-            GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::Meld,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Hand,
                 ..
-            }
+            } if *object_id == if source_accepts { source } else { partner }
         )),
-        "commander choices must not resume the already-finished meld"
+        "an accepted CR 903.9b component must never produce a Hand-arrival event"
     );
+    assert!(choice_events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Hand,
+            ..
+        } if *object_id == if source_accepts { partner } else { source }
+    )));
 
     let expected_source_zone = if source_accepts {
         Zone::Command
@@ -1024,12 +988,22 @@ fn run_redirected_meld_commander_choices(source_accepts: bool) {
         Zone::Hand
     };
     let expected_partner_zone = if source_accepts {
-        Zone::Graveyard
+        Zone::Hand
     } else {
         Zone::Command
     };
     assert_eq!(runner.state().objects[&source].zone, expected_source_zone);
     assert_eq!(runner.state().objects[&partner].zone, expected_partner_zone);
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == hand_arrival_observer)
+            .count(),
+        1,
+        "the Hand-arrival observer sees only the component that declined CR 903.9b"
+    );
 }
 
 #[test]
@@ -1040,6 +1014,155 @@ fn redirected_meld_source_commander_accepts_partner_declines() {
 #[test]
 fn redirected_meld_source_commander_declines_partner_accepts() {
     run_redirected_meld_commander_choices(false);
+}
+
+/// CR 903.9b-c: a commander component redirected from a merged permanent's
+/// Library destination reaches Command before either the Library-arrival event
+/// or its shuffle/observer tails. The noncommander component's independent
+/// Library→graveyard replacement proves this is the component batch, not a
+/// commander-only shortcut.
+#[test]
+fn merged_commander_library_component_replacement_skips_arrival_shuffle_and_observer() {
+    use crate::game::effects::resolve_ability_chain;
+    use crate::game::scenario::GameRunner;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, BounceSelection, Effect as AbilEffect, FilterProp,
+        ReplacementDefinition, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::events::PlayerActionKind;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::triggers::TriggerMode;
+
+    let mut sc = GameScenario::new();
+    let source = sc.add_creature(P0, "Gisela, the Broken Blade", 4, 3).id();
+    let partner = sc.add_creature(P0, "Bruna, the Fading Light", 5, 4).id();
+    let observer = sc
+        .add_creature(P0, "Wan Shi Tong Component Witness", 0, 0)
+        .as_enchantment()
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZoneAll)
+                .destination(Zone::Library)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, AbilEffect::NoOp)),
+        )
+        .id();
+    seed_result_face(&mut sc.state);
+    sc.state.format_config.command_zone = true;
+    sc.state.objects.get_mut(&source).unwrap().is_commander = true;
+
+    // A component-specific card replacement has no opportunity against the
+    // merged object's result-face characteristics, but must apply to Bruna's
+    // own routed component. This leaves no genuine Library arrival to mask the
+    // commander's CR 903.9b replacement observability.
+    sc.state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Named {
+                        name: "Bruna, the Fading Light".to_string(),
+                    },
+                ])))
+                .destination_zone(Zone::Library)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    AbilEffect::ChangeZone {
+                        destination: Zone::Graveyard,
+                        origin: None,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                ))
+                .description(
+                    "If Bruna would be put into a library, put it into its owner's graveyard instead."
+                        .to_string(),
+                ),
+        );
+
+    let mut events = Vec::new();
+    perform_meld(
+        &mut sc.state,
+        &meld_ability(source, P0, "Bruna, the Fading Light"),
+        &mut events,
+    )
+    .unwrap();
+
+    let mut runner = GameRunner::from_state(sc.state);
+    let bounce_to_library = ResolvedAbility::new(
+        AbilEffect::Bounce {
+            target: TargetFilter::Any,
+            destination: Some(Zone::Library),
+            selection: BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(source)],
+        observer,
+        P0,
+    );
+    resolve_ability_chain(runner.state_mut(), &bounce_to_library, &mut events, 0)
+        .expect("the commander component reaches its CR 903.9b choice");
+
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the merged commander component's Library replacement choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.first().map(|candidate| candidate.source_id),
+        Some(source)
+    );
+    let accepted = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the component's command-zone replacement is valid");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&source].zone, Zone::Command);
+    assert_eq!(runner.state().objects[&partner].zone, Zone::Graveyard);
+    assert!(
+        !accepted.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Library,
+                ..
+            } if *object_id == source || *object_id == partner
+        )),
+        "accepting CR 903.9b and the partner redirect leave no Library arrival"
+    );
+    assert!(
+        !accepted.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "without a Library arrival, the delivery tail cannot shuffle"
+    );
+    assert!(
+        !runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == observer),
+        "a Wan Shi Tong-shaped observer cannot trigger without a Library arrival"
+    );
 }
 
 /// CR 614.12 + CR 701.42: while an as-enters replacement choice is pending,

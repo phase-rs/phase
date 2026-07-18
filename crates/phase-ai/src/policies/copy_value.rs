@@ -381,9 +381,14 @@ fn legal_copy_targets(
 }
 
 fn target_has_etb_value(object: &engine::game::game_object::GameObject) -> bool {
-    object.trigger_definitions.iter_unchecked().any(|trigger| {
-        trigger.mode == TriggerMode::ChangesZone && trigger.destination == Some(Zone::Battlefield)
-    })
+    object
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+        .any(|trigger| {
+            trigger.mode == TriggerMode::ChangesZone
+                && trigger.destination == Some(Zone::Battlefield)
+        })
 }
 
 fn strengthens_supported_plan(

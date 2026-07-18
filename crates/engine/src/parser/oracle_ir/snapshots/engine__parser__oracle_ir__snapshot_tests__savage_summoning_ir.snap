@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 152
 expression: "&ir"
 ---
 {
@@ -55,40 +56,44 @@ expression: "&ir"
         "fragment": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it."
       },
       "node": {
-        "PreLoweredReplacement": {
-          "event": "Moved",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PutCounter",
-              "counter_type": "P1P1",
-              "count": {
-                "type": "Fixed",
-                "value": 1
+        "Replacement": {
+          "definition": {
+            "event": "Moved",
+            "execute": {
+              "kind": "Spell",
+              "effect": {
+                "type": "PutCounter",
+                "counter_type": "P1P1",
+                "count": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "target": {
+                  "type": "SelfRef"
+                }
               },
-              "target": {
-                "type": "SelfRef"
-              }
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": {
+              "type": "SelfRef"
+            },
+            "description": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
             "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            "destination_zone": "Battlefield"
           },
-          "mode": {
-            "type": "Mandatory"
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "description": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
-          "condition": null,
-          "destination_zone": "Battlefield"
+          "source_text": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
+          "execute_ir": null
         }
       }
     }

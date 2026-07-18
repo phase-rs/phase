@@ -52,8 +52,8 @@ pub fn grant_emblem(
     obj.base_static_definitions = Arc::new(statics);
     // CR 113.1c + CR 114.4: install triggered abilities so
     // `active_trigger_definitions` yields them during command-zone scans.
-    obj.trigger_definitions = triggers.clone().into();
-    obj.base_trigger_definitions = Arc::new(triggers);
+    obj.install_trigger_base_definitions(Arc::new(triggers))
+        .expect("trigger base-set generation must not overflow");
     // CR 113.1b + CR 114.4: install activated abilities so they can be activated
     // from the command zone (e.g. the Momir Basic emblem ability).
     obj.abilities = Arc::new(abilities.clone());

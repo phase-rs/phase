@@ -508,7 +508,8 @@ fn has_fixed_magecraft_observer(state: &GameState, controller: PlayerId) -> bool
         state.objects.get(id).is_some_and(|object| {
             object.controller == controller
                 && object.name == "Witherbloom Apprentice"
-                && object.trigger_definitions.iter_all().any(|trigger| {
+                && object.trigger_definitions.iter_all().any(|entry| {
+                    let trigger = entry.definition();
                     trigger.mode == TriggerMode::SpellCastOrCopy
                         && trigger
                             .execute
