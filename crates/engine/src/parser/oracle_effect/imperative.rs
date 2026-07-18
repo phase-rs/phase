@@ -502,9 +502,11 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
 ///
 /// Dispatch order:
 /// 1. Literal N (`parse_number` succeeds) → `QuantityExpr::Fixed`.
-/// 2. `"x, where X is the number of <kind> counters <possessor>"` →
-///    `QuantityExpr::Ref { qty: QuantityRef::PlayerCounter { … } }`.
-/// 3. Bare `"x"` (no tail) → `QuantityExpr::Ref { qty: Variable { "X" } }`,
+/// 2. Recognized `"x, where X is <dynamic quantity>"` clauses →
+///    `QuantityExpr::Ref { … }` (player counters, object counts, and event
+///    context quantities). An unrecognized present where-clause returns `None`
+///    so the caller can emit an honest `Effect::unimplemented` gap.
+/// 3. Bare `"x"` (no where-clause) → `QuantityExpr::Ref { qty: Variable { "X" } }`,
 ///    matching the spell-cost X resolution path.
 /// 4. None of the above → `Fixed { value: 0 }` with the default target,
 ///    preserving the prior behaviour for unsupported text shapes.
