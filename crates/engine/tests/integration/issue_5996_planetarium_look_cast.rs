@@ -1,0 +1,245 @@
+//! Issue #5996: Planetarium of Wan Shi Tong's private look must bind its
+//! immediate optional cast to the exact looked-at library card.
+
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::visibility::filter_state_for_viewer;
+use engine::types::ability::TargetRef;
+use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+
+const PLANETARIUM_TRIGGER: &str = "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn.";
+
+fn reach_planetarium_cast_offer() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Planetarium of Wan Shi Tong", 1, 1, PLANETARIUM_TRIGGER)
+        .as_artifact();
+
+    let sibling = scenario.add_card_to_library_top(P0, "Unlooked Library Sibling");
+    let looked = scenario
+        .add_spell_to_library_top(P0, "Planetarium Looked Spell", true)
+        .from_oracle_text("Draw a card.")
+        .id();
+    let scry_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Planetarium Scry Enabler", false, "Scry 1.")
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&scry_spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: scry_spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the scry enabler must cast");
+    runner.advance_until_stack_empty();
+
+    let WaitingFor::ScryChoice { player, cards } = runner.state().waiting_for.clone() else {
+        panic!(
+            "the enabler must reach its real scry choice, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(
+        cards,
+        vec![looked],
+        "Scry 1 must inspect the staged top card"
+    );
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("keeping the looked card on top must complete scry");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "Planetarium's parsed trigger must reach the optional cast decision; got {}",
+        runner.waiting_for_kind()
+    );
+    assert_eq!(runner.state().last_revealed_ids, vec![looked]);
+    assert_eq!(
+        runner
+            .state()
+            .pending_optional_effect
+            .as_ref()
+            .expect("the optional cast ability must be live")
+            .targets,
+        vec![TargetRef::Object(looked)],
+        "the offer must bind the exact privately looked-at top card"
+    );
+
+    (runner, looked, sibling)
+}
+
+/// CR 701.20e + CR 608.2c + CR 608.2g: the look is private while the optional
+/// decision is pending, and accepting casts the exact looked-at card during
+/// the trigger's resolution.
+#[test]
+fn planetarium_accept_offers_private_top_identity_and_casts_it() {
+    let (mut runner, looked, sibling) = reach_planetarium_cast_offer();
+
+    let controller_view = filter_state_for_viewer(runner.state(), P0);
+    assert_eq!(
+        controller_view.objects[&looked].name, "Planetarium Looked Spell",
+        "the looking player must see the exact card offered for casting"
+    );
+    let opponent_view = filter_state_for_viewer(runner.state(), P1);
+    assert_eq!(
+        opponent_view.objects[&looked].name, "Hidden Card",
+        "the private look and pending offer must not reveal the card to an opponent"
+    );
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting Planetarium's optional cast must succeed");
+
+    assert_eq!(
+        runner.state().objects[&looked].zone,
+        Zone::Stack,
+        "the exact looked card must enter the casting path during resolution"
+    );
+    assert_eq!(runner.state().objects[&sibling].zone, Zone::Library);
+}
+
+/// CR 701.20e + CR 608.2c: declining the positive cast offer leaves the looked
+/// card and its library sibling in place.
+#[test]
+fn planetarium_decline_leaves_looked_card_in_library() {
+    let (mut runner, looked, sibling) = reach_planetarium_cast_offer();
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining Planetarium's optional cast must succeed");
+
+    assert_eq!(runner.state().objects[&looked].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&sibling].zone, Zone::Library);
+    assert_eq!(
+        runner.state().players[0]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![looked, sibling],
+        "declining must preserve the exact top-of-library order"
+    );
+}
+
+/// CR 608.2d + CR 305.1: a land can't be chosen for Planetarium's optional
+/// cast, so the trigger resolves without surfacing an action that casting must
+/// reject.
+#[test]
+fn planetarium_land_top_does_not_offer_an_impossible_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Planetarium of Wan Shi Tong", 1, 1, PLANETARIUM_TRIGGER)
+        .as_artifact();
+
+    let looked = scenario.add_card_to_library_top(P0, "Planetarium Looked Land");
+    let scry_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Planetarium Scry Enabler", false, "Scry 1.")
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let land = runner.state_mut().objects.get_mut(&looked).unwrap();
+        land.card_types.core_types = vec![CoreType::Land];
+        land.base_card_types = land.card_types.clone();
+    }
+    let card_id = runner.state().objects[&scry_spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: scry_spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the scry enabler must cast");
+    runner.advance_until_stack_empty();
+
+    let WaitingFor::ScryChoice { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "the enabler must reach its real scry choice, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert_eq!(cards, vec![looked]);
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("keeping the land on top must complete scry");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Planetarium's land-top trigger must finish without a cast action; got {}",
+        runner.waiting_for_kind()
+    );
+    assert!(
+        runner.state().pending_optional_effect.is_none(),
+        "no declined or failing cast action should remain pending"
+    );
+    assert_eq!(runner.state().last_revealed_ids, vec![looked]);
+    assert_eq!(runner.state().objects[&looked].zone, Zone::Library);
+}
+
+/// CR 701.25a + CR 401.5 + CR 608.2d: surveilling the only library card into
+/// the graveyard leaves Planetarium's subsequent look with no "that card"
+/// referent, so no optional cast action can be offered.
+#[test]
+fn planetarium_empty_post_surveil_library_does_not_offer_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Planetarium of Wan Shi Tong", 1, 1, PLANETARIUM_TRIGGER)
+        .as_artifact();
+
+    let surveilled = scenario.add_card_to_library_top(P0, "Only Library Card");
+    let surveil_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Planetarium Surveil Enabler", false, "Surveil 1.")
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&surveil_spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: surveil_spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the surveil enabler must cast");
+    runner.advance_until_stack_empty();
+
+    let WaitingFor::SurveilChoice { player, cards } = runner.state().waiting_for.clone() else {
+        panic!(
+            "the enabler must reach its real surveil choice, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(cards, vec![surveilled]);
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("surveilling the only card into the graveyard must succeed");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Planetarium's empty-library look must finish without a cast action; got {}",
+        runner.waiting_for_kind()
+    );
+    assert!(runner.state().pending_optional_effect.is_none());
+    assert!(runner.state().players[0].library.is_empty());
+    assert_eq!(runner.state().objects[&surveilled].zone, Zone::Graveyard);
+    assert!(runner.state().last_revealed_ids.is_empty());
+}

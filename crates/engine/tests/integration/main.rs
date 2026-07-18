@@ -527,6 +527,7 @@ mod issue_581_mystic_remora_cumulative_upkeep;
 mod issue_5820_susan_foreman;
 mod issue_5821_psychic_paper_attach_choice;
 mod issue_583_vivi_ornitier_mana_source;
+mod issue_5996_planetarium_look_cast;
 mod issue_5999_aura_exile_host;
 mod issue_6002_neera_wild_mage_bottom_of_library;
 mod issue_6006_aminatou_veil_piercer_own_turn_miracle;
