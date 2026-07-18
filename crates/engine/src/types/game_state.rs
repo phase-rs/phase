@@ -8517,6 +8517,16 @@ pub struct GameState {
     /// future scheduled effects that may replace the consumed schedule entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_decision_control_timestamp: Option<u64>,
+    /// CR 723.1a: Identity of the full-turn player-control effect that is
+    /// currently applicable. Kept separately from the winning decision latch
+    /// so a newer phase-scoped effect can temporarily override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_full_turn_control: Option<ActivePlayerControl>,
+    /// CR 723.1a + CR 723.2: Identity of the combat-phase player-control effect
+    /// that is currently applicable. The newest applicable identity wins, and
+    /// the full-turn identity resumes after this window ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_combat_phase_control: Option<ActivePlayerControl>,
     #[serde(default, skip_serializing_if = "ActiveLibrarySearches::is_empty")]
     pub active_library_searches: ActiveLibrarySearches,
     #[serde(
@@ -11264,6 +11274,15 @@ pub struct ScheduledTurnControl {
     pub window: ControlWindow,
 }
 
+/// CR 723.1a: Stable identity of one currently applicable player-control
+/// effect. Controller alone is insufficient when the same player creates
+/// multiple effects; creation timestamp distinguishes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivePlayerControl {
+    pub controller: PlayerId,
+    pub timestamp: u64,
+}
+
 /// CR 500.8: An extra phase added to a turn by an effect, anchored to the
 /// phase it occurs *directly after*. Stored on `GameState.extra_phases` and
 /// consumed by `advance_phase` only when the current phase matches `anchor`.
@@ -11552,6 +11571,8 @@ impl GameState {
             priority_player: starting_player,
             turn_decision_controller: None,
             turn_decision_control_timestamp: None,
+            active_full_turn_control: None,
+            active_combat_phase_control: None,
             active_library_searches: ActiveLibrarySearches::default(),
             active_search_decision_controls: ActiveSearchDecisionControls::default(),
             objects: im::HashMap::default(),
@@ -12558,6 +12579,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         priority_player: _,
         turn_decision_controller: _,
         turn_decision_control_timestamp: _,
+        active_full_turn_control: _,
+        active_combat_phase_control: _,
         active_library_searches: _,
         active_search_decision_controls: _,
         objects: _,
@@ -12890,6 +12913,8 @@ impl PartialEq for GameState {
             && self.priority_player == other.priority_player
             && self.turn_decision_controller == other.turn_decision_controller
             && self.turn_decision_control_timestamp == other.turn_decision_control_timestamp
+            && self.active_full_turn_control == other.active_full_turn_control
+            && self.active_combat_phase_control == other.active_combat_phase_control
             && self.active_library_searches == other.active_library_searches
             && self.active_search_decision_controls == other.active_search_decision_controls
             && self.objects.len() == other.objects.len()

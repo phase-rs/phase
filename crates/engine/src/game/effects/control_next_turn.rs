@@ -38,30 +38,37 @@ pub fn resolve(
     // and must not erase the active effect's release identity.
     let active_target =
         crate::game::topology::normalize_shared_turn_recipient(state, state.active_player);
-    let active_identity = (active_target == target_player)
-        .then(|| {
-            state.turn_decision_controller.map(|controller| {
-                (
-                    controller,
-                    state.turn_decision_control_timestamp.unwrap_or(0),
-                )
-            })
-        })
-        .flatten();
+    let active_identities = if active_target == target_player {
+        [
+            crate::game::turn_control::active_control_identity(
+                state,
+                target_player,
+                crate::types::ability::ControlWindow::NextTurn,
+            ),
+            crate::game::turn_control::active_control_identity(
+                state,
+                target_player,
+                crate::types::ability::ControlWindow::NextCombatPhase,
+            ),
+        ]
+    } else {
+        [None, None]
+    };
     state.scheduled_turn_controls.retain(|scheduled| {
         scheduled.target_player != target_player
-            || active_identity.is_some_and(|(controller, active_timestamp)| {
-                scheduled.controller == controller && scheduled.timestamp == active_timestamp
-            })
+            || scheduled.window != *window
+            || active_identities
+                .into_iter()
+                .flatten()
+                .any(|identity| crate::game::turn_control::control_identity(*scheduled) == identity)
     });
     state.scheduled_turn_controls.push(ScheduledTurnControl {
         target_player,
         controller: ability.controller,
         timestamp,
         grant_extra_turn_after: *grant_extra_turn_after,
-        // CR 723.1 / CR 723.2: schedule under the parsed window regardless of
-        // window — the dedup above keeps the active identity plus the newest
-        // future entry for a target (CR 723.1a).
+        // CR 723.1 / CR 723.2: schedule under the parsed window. Deduplication
+        // is window-scoped so full-turn and combat-phase controls can coexist.
         window: *window,
     });
 
@@ -124,6 +131,40 @@ mod tests {
         );
         assert_eq!(state.turn_decision_controller, Some(PlayerId(0)));
         assert_eq!(state.turn_decision_control_timestamp, Some(0));
+    }
+
+    #[test]
+    fn resolve_deduplicates_only_within_the_same_control_window() {
+        let mut state = GameState::new_two_player(42);
+        state.scheduled_turn_controls.push(ScheduledTurnControl {
+            target_player: PlayerId(1),
+            controller: PlayerId(0),
+            timestamp: 7,
+            grant_extra_turn_after: false,
+            window: ControlWindow::NextTurn,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ControlNextTurn {
+                target: crate::types::ability::TargetFilter::Player,
+                grant_extra_turn_after: false,
+                window: ControlWindow::NextCombatPhase,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert_eq!(state.scheduled_turn_controls.len(), 2);
+        assert!(state
+            .scheduled_turn_controls
+            .iter()
+            .any(|control| control.window == ControlWindow::NextTurn));
+        assert!(state
+            .scheduled_turn_controls
+            .iter()
+            .any(|control| control.window == ControlWindow::NextCombatPhase));
     }
 
     #[test]

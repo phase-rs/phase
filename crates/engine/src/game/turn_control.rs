@@ -1,27 +1,145 @@
 use crate::types::ability::ControlWindow;
 use crate::types::game_state::{
-    ActiveSearchDecisionAuthority, GameState, ScheduledTurnControl, WaitingFor,
+    ActivePlayerControl, ActiveSearchDecisionAuthority, GameState, ScheduledTurnControl, WaitingFor,
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 
 /// CR 723.1 / CR 723.2 / CR 800.4a: the single authority that ENDS a
-/// player-control effect. Removes the consumed schedule entry and clears
-/// `turn_decision_controller` iff it currently points at that exact effect
-/// identity. Returns the removed entry so the caller can apply
+/// player-control effect. Removes the consumed schedule entry, clears its typed
+/// active-window identity iff it is that exact effect, then recomputes the
+/// current decision controller from the effects that remain applicable. Returns
+/// the removed entry so the caller can apply
 /// window-specific post-processing (CR 723.1 extra-turn grant; CR 723.2 no-op).
 /// All three release sites — turn boundary (`start_next_turn`), combat-phase
 /// boundary (`finish_enter_phase`), and leave-game cleanup (`do_eliminate`) —
 /// route through here so control ends in exactly one place.
 pub(super) fn release_control_at(state: &mut GameState, idx: usize) -> ScheduledTurnControl {
-    let entry = state.scheduled_turn_controls.remove(idx);
-    if state.turn_decision_controller == Some(entry.controller)
-        && state.turn_decision_control_timestamp.unwrap_or(0) == entry.timestamp
-    {
-        state.turn_decision_controller = None;
-        state.turn_decision_control_timestamp = None;
+    let entry = state.scheduled_turn_controls[idx];
+    let identity = control_identity(entry);
+    let legacy_latch = (state.active_full_turn_control.is_none()
+        && state.active_combat_phase_control.is_none())
+    .then_some((
+        state.turn_decision_controller,
+        state.turn_decision_control_timestamp,
+    ));
+    let was_active =
+        active_control_identity(state, entry.target_player, entry.window) == Some(identity);
+    state.scheduled_turn_controls.remove(idx);
+    match entry.window {
+        ControlWindow::NextTurn if state.active_full_turn_control == Some(identity) => {
+            state.active_full_turn_control = None;
+        }
+        ControlWindow::NextCombatPhase if state.active_combat_phase_control == Some(identity) => {
+            state.active_combat_phase_control = None;
+        }
+        ControlWindow::NextTurn | ControlWindow::NextCombatPhase => {}
+    }
+    recompute_active_player_control(state);
+    if !was_active {
+        if let Some((controller, timestamp)) = legacy_latch {
+            state.turn_decision_controller = controller;
+            state.turn_decision_control_timestamp = timestamp;
+        }
     }
     entry
+}
+
+pub(super) fn control_identity(scheduled: ScheduledTurnControl) -> ActivePlayerControl {
+    ActivePlayerControl {
+        controller: scheduled.controller,
+        timestamp: scheduled.timestamp,
+    }
+}
+
+/// CR 723.1a: Recompute the controlling player from every currently applicable
+/// player-control effect. A combat-only effect may temporarily win by timestamp;
+/// when it ends, the still-applicable full-turn effect automatically resumes.
+pub(super) fn recompute_active_player_control(state: &mut GameState) {
+    let active = [
+        state.active_full_turn_control,
+        state.active_combat_phase_control,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|control| control.timestamp);
+    state.turn_decision_controller = active.map(|control| control.controller);
+    state.turn_decision_control_timestamp = active.map(|control| control.timestamp);
+}
+
+/// CR 723.1a: Activate the newest pending effect for one player-control window
+/// and discard older effects it overwrote. Entries created after activation are
+/// retained by the scheduler until the next matching window begins.
+pub(super) fn activate_scheduled_control(
+    state: &mut GameState,
+    target_player: PlayerId,
+    window: ControlWindow,
+) -> Option<ScheduledTurnControl> {
+    let selected_idx = state
+        .scheduled_turn_controls
+        .iter()
+        .enumerate()
+        .filter(|(_, scheduled)| {
+            scheduled.target_player == target_player && scheduled.window == window
+        })
+        .max_by_key(|(_, scheduled)| scheduled.timestamp)
+        .map(|(idx, _)| idx)?;
+    let selected = state.scheduled_turn_controls[selected_idx];
+
+    for idx in (0..state.scheduled_turn_controls.len()).rev() {
+        if idx != selected_idx {
+            let scheduled = state.scheduled_turn_controls[idx];
+            if scheduled.target_player == target_player && scheduled.window == window {
+                state.scheduled_turn_controls.remove(idx);
+            }
+        }
+    }
+
+    match window {
+        ControlWindow::NextTurn => {
+            state.active_full_turn_control = Some(control_identity(selected));
+        }
+        ControlWindow::NextCombatPhase => {
+            state.active_combat_phase_control = Some(control_identity(selected));
+        }
+    }
+    recompute_active_player_control(state);
+    Some(selected)
+}
+
+fn explicit_active_control(
+    state: &GameState,
+    window: ControlWindow,
+) -> Option<ActivePlayerControl> {
+    match window {
+        ControlWindow::NextTurn => state.active_full_turn_control,
+        ControlWindow::NextCombatPhase => state.active_combat_phase_control,
+    }
+}
+
+/// CR 723.1a: Return the identity applicable in one typed control window. The
+/// latch fallback preserves compatibility with legacy saves and direct test
+/// fixtures created before active-window identities were serialized.
+pub(super) fn active_control_identity(
+    state: &GameState,
+    target_player: PlayerId,
+    window: ControlWindow,
+) -> Option<ActivePlayerControl> {
+    explicit_active_control(state, window).or_else(|| {
+        let identity = ActivePlayerControl {
+            controller: state.turn_decision_controller?,
+            timestamp: state.turn_decision_control_timestamp.unwrap_or(0),
+        };
+        state
+            .scheduled_turn_controls
+            .iter()
+            .any(|scheduled| {
+                scheduled.target_player == target_player
+                    && scheduled.window == window
+                    && control_identity(*scheduled) == identity
+            })
+            .then_some(identity)
+    })
 }
 
 /// CR 723.1a: Locate the scheduled entry that created the currently active
@@ -32,13 +150,11 @@ pub(super) fn active_scheduled_control_index(
     target_player: PlayerId,
     window: ControlWindow,
 ) -> Option<usize> {
-    let controller = state.turn_decision_controller?;
-    let timestamp = state.turn_decision_control_timestamp.unwrap_or(0);
+    let identity = active_control_identity(state, target_player, window)?;
     state.scheduled_turn_controls.iter().position(|scheduled| {
         scheduled.target_player == target_player
             && scheduled.window == window
-            && scheduled.controller == controller
-            && scheduled.timestamp == timestamp
+            && control_identity(*scheduled) == identity
     })
 }
 

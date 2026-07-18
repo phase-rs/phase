@@ -511,8 +511,9 @@ fn do_eliminate(
     if state.turn_decision_controller.is_some()
         && super::topology::normalize_shared_turn_recipient(state, state.active_player) == leaving
     {
-        state.turn_decision_controller = None;
-        state.turn_decision_control_timestamp = None;
+        state.active_full_turn_control = None;
+        state.active_combat_phase_control = None;
+        super::turn_control::recompute_active_player_control(state);
     }
 
     // CR 800.4a + CR 800.4b: a departing searcher/zone owner invalidates its
