@@ -242,11 +242,12 @@ fn creature_card_in_graveyard_is_not_a_legal_target() {
 /// plain card, so it is a graveyard card (not a permanent) for targeting tests.
 fn move_to_graveyard(runner: &mut GameRunner, id: ObjectId) {
     let state = runner.state_mut();
-    if let Some(obj) = state.objects.get_mut(&id) {
-        obj.zone = Zone::Graveyard;
-    }
+    let Some(obj) = state.objects.get_mut(&id) else {
+        panic!("move_to_graveyard: object {id:?} not found");
+    };
+    obj.zone = Zone::Graveyard;
+    let owner = obj.owner;
     state.battlefield.retain(|&o| o != id);
-    let owner = state.objects[&id].owner;
     if let Some(p) = state.players.iter_mut().find(|p| p.id == owner) {
         if !p.graveyard.contains(&id) {
             p.graveyard.push_back(id);
