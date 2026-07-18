@@ -1,4 +1,4 @@
-//! CR 611.3a + CR 400.7: Urborg Scavengers — "~ has flying as long as a card
+//! CR 611.3a + CR 607.2a: Urborg Scavengers — "This creature has flying as long as a card
 //! exiled with it has flying. The same is true for first strike, double strike,
 //! deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample,
 //! and vigilance."
@@ -23,7 +23,7 @@ use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-const URBORG_SCAVENGERS: &str = "~ has flying as long as a card exiled with it has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.";
+const URBORG_SCAVENGERS: &str = "This creature has flying as long as a card exiled with it has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.";
 
 #[test]
 fn urborg_scavengers_source_exiled_grant_is_conditional_and_per_item() {

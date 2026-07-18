@@ -1468,6 +1468,7 @@ fn per_keyword_conditional_grants(
         .collect()
 }
 
+/// CR 607.2a: linked abilities identify cards exiled with this permanent.
 /// nom: the source-linked exile-pool object phrase — "a card exiled with ~|it"
 /// (the pool of cards exiled *with* this permanent, not the whole exile zone).
 fn parse_source_exiled_object_nom(input: &str) -> OracleResult<'_, ()> {
@@ -1546,7 +1547,7 @@ fn parse_source_exiled_grant_postfix(input: &str) -> OracleResult<'_, (TargetFil
     Ok((input, (subject, k0a)))
 }
 
-/// CR 611.3a + CR 400.7 (Eater of Virtue, Death-Mask Duplicant, Urborg
+/// CR 611.3a + CR 607.2a (Eater of Virtue, Death-Mask Duplicant, Urborg
 /// Scavengers): the source-linked sibling of
 /// [`parse_keyword_grant_from_exiled_object_static`]. The condition object is "a
 /// card exiled WITH this permanent" ([`TargetFilter::ExiledBySource`] — the linked
@@ -1581,7 +1582,7 @@ fn parse_keyword_grant_from_source_exiled_object_static(
         );
     }
 
-    // CR 400.7 / CR 610.3: the presence check is a card in the source-linked exile
+    // CR 607.2a + CR 611.3a: the presence check is a card in the source-linked exile
     // pool ([`TargetFilter::ExiledBySource`] — cards exiled *with* this permanent,
     // not every card in the exile zone) that HAS the keyword. `ExiledBySource` is
     // a whole-object ref, so it is AND-composed with the exile-zone keyword filter
@@ -1884,7 +1885,7 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
-    // CR 611.3a + CR 400.7 (Eater of Virtue, Death-Mask Duplicant, Urborg
+    // CR 611.3a + CR 607.2a (Eater of Virtue, Death-Mask Duplicant, Urborg
     // Scavengers): the source-linked exile-pool sibling of the handler above —
     // "a card exiled WITH ~" in either clause order, granting to "~" or the
     // equipped/enchanted creature. Same precedence rationale: it must run before
