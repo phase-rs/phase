@@ -1,5 +1,5 @@
 use crate::parser::oracle_nom::quantity::parse_quantity_ref;
-use crate::types::ability::AbilityCondition;
+use crate::types::ability::{AbilityCondition, Duration};
 use crate::types::events::ClashResult;
 
 use super::*;
@@ -597,6 +597,36 @@ fn trigger_becomes_attached_to_a_permanent() {
         "Expected valid_target = permanent, got {:?}",
         def.valid_target
     );
+}
+
+#[test]
+fn assimilation_aegis_attached_trigger_copies_the_host_only_while_attached() {
+    let def = parse_trigger_line(
+        "Whenever ~ becomes attached to a creature, for as long as ~ remains attached to it, that creature becomes a copy of a creature card exiled with ~.",
+        "Assimilation Aegis",
+    );
+    let execute = def.execute.as_ref().expect("attached trigger must execute");
+    let expected_duration = Some(Duration::ForAsLongAs {
+        condition: StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::AttachedTo,
+        },
+    });
+    match &*execute.effect {
+        Effect::BecomeCopy {
+            target,
+            recipient,
+            duration,
+            ..
+        } => {
+            assert_eq!(*recipient, TargetFilter::AttachedTo);
+            assert_eq!(*duration, expected_duration);
+            assert!(
+                matches!(target, TargetFilter::And { filters } if filters.iter().any(|f| matches!(f, TargetFilter::ExiledBySource)))
+            );
+        }
+        other => panic!("expected BecomeCopy, got {other:?}"),
+    }
+    assert_eq!(execute.duration, expected_duration);
 }
 
 // Regression: "Whenever ~ becomes attached to a creature" should NOT be TriggerMode::Unknown.

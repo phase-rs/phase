@@ -1009,8 +1009,12 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
         for trigger in face.triggers.clone() {
             obj.trigger_definitions.push(trigger);
         }
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
         // CR 702.30a: the next controller-upkeep echo payment is due.
         obj.echo_due = true;
     }
@@ -1138,8 +1142,12 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
         for trigger in face.triggers.clone() {
             obj.trigger_definitions.push(trigger);
         }
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
         // CR 702.30a: the next controller-upkeep echo payment is due.
         obj.echo_due = true;
     }
@@ -1422,8 +1430,12 @@ fn lifelink_replacement_does_not_double_fire_life_gain_triggers() {
                     },
                 )),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
 
     // Leyline of Hope analog: "If you would gain life, gain that much + 1 instead"
@@ -1914,8 +1926,12 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
                     },
                 )),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
 
     let mut primary = ResolvedAbility::new(
@@ -2016,8 +2032,12 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
             TriggerDefinition::new(TriggerMode::Scry)
                 .execute(AbilityDefinition::new(AbilityKind::Database, effect)),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
     for (card_id, name) in [
         (CardId(919), "Library One"),
@@ -3321,6 +3341,255 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
     assert_eq!(copied.toughness, Some(5));
 }
 
+#[test]
+fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
+    let mut state = setup_game_at_main_phase();
+    let citadel = zones::create_object(
+        &mut state,
+        CardId(9_021),
+        PlayerId(1),
+        "Sunken Citadel".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&citadel)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        citadel,
+        "Sunken Citadel",
+        "This land enters tapped. As it enters, choose a color.\n{T}: Add one mana of the chosen color.\n{T}: Add two mana of the chosen color. Spend this mana only to activate abilities of land sources.",
+    );
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_022),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+    state.waiting_for = WaitingFor::CopyTargetChoice {
+        player: PlayerId(0),
+        source_id: deeps,
+        valid_targets: vec![citadel],
+        max_mana_value: None,
+    };
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(citadel)),
+        },
+    )
+    .expect("Echoing Deeps should copy Sunken Citadel");
+    let WaitingFor::NamedChoice {
+        player,
+        source_id,
+        options,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "the copied as-enters choice must be offered, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(source_id, Some(deeps));
+    assert!(options
+        .iter()
+        .any(|option| option.eq_ignore_ascii_case("blue")));
+
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseOption {
+            choice: options
+                .into_iter()
+                .find(|option| option.eq_ignore_ascii_case("blue"))
+                .unwrap(),
+        },
+    )
+    .expect("the copied land must accept its as-enters color choice");
+    let copy = &state.objects[&deeps];
+    assert_eq!(copy.name, "Sunken Citadel");
+    assert_eq!(copy.chosen_color(), Some(ManaColor::Blue));
+}
+
+/// CR 614.1c + CR 707.9: Echoing Deeps can enter tapped as a copy only when
+/// a land card exists in a graveyard. With no copy source, it enters untapped
+/// and must not expose an invalid accept-replacement action to the AI.
+#[test]
+fn echoing_deeps_with_empty_graveyards_enters_untapped_without_copy_offer() {
+    let mut state = setup_game_at_main_phase();
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_023),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+    assert!(state
+        .players
+        .iter()
+        .all(|player| player.graveyard.is_empty()));
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: deeps,
+            card_id: CardId(9_023),
+        },
+    )
+    .expect("Echoing Deeps should be playable with empty graveyards");
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "an impossible copy must not offer an accept-replacement action, got {:?}",
+        result.waiting_for
+    );
+    let entered = &state.objects[&deeps];
+    assert_eq!(entered.zone, Zone::Battlefield);
+    assert!(
+        !entered.tapped,
+        "an un-copied Echoing Deeps enters untapped"
+    );
+}
+
+/// CR 614.1c + CR 707.9: the impossible-copy guard must not suppress a real
+/// Echoing Deeps choice. A land card in either graveyard makes the optional
+/// replacement applicable; accepting it prompts for that land and the Deeps
+/// enters tapped as its copy with the additional Cave subtype.
+#[test]
+fn echoing_deeps_with_graveyard_land_offers_and_applies_copy() {
+    let mut state = setup_game_at_main_phase();
+    let forest = zones::create_object(
+        &mut state,
+        CardId(9_024),
+        PlayerId(1),
+        "Forest".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&forest)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_025),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: deeps,
+            card_id: CardId(9_025),
+        },
+    )
+    .expect("Echoing Deeps should be playable with a graveyard land");
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "a valid graveyard land must expose the optional copy replacement, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(
+        candidate_count, 2,
+        "the player may accept or decline the copy"
+    );
+
+    let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting Echoing Deeps' replacement should prompt for a copy target");
+    let WaitingFor::CopyTargetChoice {
+        player,
+        source_id,
+        valid_targets,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "accepting the copy replacement must expose the graveyard land, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(source_id, deeps);
+    assert_eq!(valid_targets, vec![forest]);
+
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(forest)),
+        },
+    )
+    .expect("Echoing Deeps should enter as a copy of the chosen graveyard land");
+    let entered = &state.objects[&deeps];
+    assert_eq!(entered.zone, Zone::Battlefield);
+    assert_eq!(entered.name, "Forest");
+    assert!(entered.tapped, "a copied Echoing Deeps enters tapped");
+    assert!(
+        entered
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Cave"),
+        "the copy must be a Cave in addition to its other types"
+    );
+}
+
 /// CR 614.12a + CR 707.9: Callidus Assassin grants its copy a "When this
 /// creature enters" trigger as part of the entering-as-copy bundle. The
 /// ETB event for the copy must fire *after* the player chooses a target
@@ -3441,7 +3710,10 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
     // must be on the copy's trigger_definitions...
     let copied = state.objects.get(&assassin).unwrap();
     assert!(
-        copied.trigger_definitions.iter_all().any(|t| t == &granted),
+        copied
+            .trigger_definitions
+            .iter_all()
+            .any(|t| t.definition == granted),
         "BecomeCopy's GrantTrigger modification must be present on the copy"
     );
 

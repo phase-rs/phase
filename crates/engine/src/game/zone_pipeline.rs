@@ -2363,6 +2363,19 @@ fn execute_zone_move_with_applied(
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
+    // CR 712.14a: A single-faced object instructed to enter transformed
+    // cannot enter the battlefield. A single-faced copy of a transforming
+    // Saga therefore remains in exile after its final chapter resolves.
+    if dest_zone == Zone::Battlefield
+        && enter_transformed
+        && state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|obj| obj.back_face.is_none())
+    {
+        return ZoneMoveResult::Done;
+    }
+
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
         *applied = replacement_applied;

@@ -377,6 +377,9 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
                             who: ProhibitionScope::AllPlayers,
                             source_filter,
                             exemption,
+                            // CR 606.2: "activated abilities of X" prohibitions are
+                            // not kind-narrowed — they block any activated ability.
+                            kind: None,
                         })
                         .description(text.to_string()),
                     );
@@ -419,6 +422,71 @@ pub(crate) fn parse_filter_scoped_cant_be_activated(
             who: ProhibitionScope::AllPlayers,
             source_filter,
             exemption,
+            // CR 606.2: "activated abilities of X" prohibitions are not
+            // kind-narrowed — they block any activated ability.
+            kind: None,
+        })
+        .description(text.to_string()),
+    )
+}
+
+/// CR 602.5 + CR 606.2: Parse the subject-first loyalty-activation prohibition
+/// `"<subject> can't activate <type>s' loyalty abilities"` — The Immortal Sun:
+/// "Players can't activate planeswalkers' loyalty abilities."
+///
+/// The subject axis routes through the shared `strip_casting_prohibition_subject`
+/// (players → `AllPlayers`, you → `Controller`, your opponents → `Opponents`), so
+/// this combinator covers the whole scope class, not just this one card. The
+/// possessive type phrase ("planeswalkers'") is parsed generically via the shared
+/// `nom_target::parse_type_phrase`, so `source_filter = Typed(Planeswalker)` for
+/// this card and the same combinator would emit any other possessive type. That
+/// permanent axis is belt-and-suspenders: paired with `kind = Some(Loyalty)` it
+/// also declines to block a theoretical non-planeswalker granted a loyalty
+/// ability. `kind = Some(Loyalty)` narrows to loyalty abilities only (CR 606.2:
+/// an activated ability with a loyalty symbol in its cost); runtime
+/// classification routes through the single-authority `is_loyalty_ability_cost`
+/// in `casting.rs::is_blocked_by_cant_be_activated`.
+///
+/// Dual-apostrophe on both the `can't` verb and the possessive `'`, since there
+/// is no global apostrophe normalization in the parser pipeline (mirrors every
+/// other activation-prohibition predicate).
+pub(crate) fn parse_subject_cant_activate_loyalty(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // 1. Subject → scope via the shared building block (single authority for
+    //    subject→`ProhibitionScope` mapping).
+    let (who, predicate) = strip_casting_prohibition_subject(tp.lower)?;
+    // 2. "can't activate " — dual apostrophe.
+    let (after_verb, _) = alt((
+        tag::<_, _, OracleError<'_>>("can't activate "),
+        tag("can\u{2019}t activate "),
+    ))
+    .parse(predicate)
+    .ok()?;
+    // 3. Possessive plural type phrase → `Typed(...)` generically.
+    let (after_type, source_filter) = nom_target::parse_type_phrase(after_verb).ok()?;
+    // 4. Possessive apostrophe + " loyalty abilities" (dual apostrophe); only a
+    //    trailing period may follow.
+    let (tail, _) = alt((
+        tag::<_, _, OracleError<'_>>("' loyalty abilities"),
+        tag("\u{2019} loyalty abilities"),
+        tag("'s loyalty abilities"),
+        tag("\u{2019}s loyalty abilities"),
+    ))
+    .parse(after_type)
+    .ok()?;
+    if !tail.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            // CR 605.1a: no mana-ability carve-out on this class.
+            exemption: ActivationExemption::None,
+            // CR 606.2: narrow the prohibition to loyalty abilities only.
+            kind: Some(ActivatedAbilityKind::Loyalty),
         })
         .description(text.to_string()),
     )

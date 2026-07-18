@@ -141,6 +141,32 @@ pub(crate) fn run_post_action_pipeline_from(
         }
     }
 
+    // CR 610.3a: "until this leaves" returns are immediate one-shot effects.
+    // A resolving effect can remove the source and then pause for a later
+    // SearchChoice (Boseiju) or other resolution choice. Process the return
+    // before that choice is surfaced; otherwise the source's ZoneChanged
+    // event is lost with this pipeline pass and its exiled card never returns.
+    let events_before_exile_returns = events.len();
+    check_exile_returns(state, events);
+    if events.len() > events_before_exile_returns {
+        let exile_return_events: Vec<_> = events[events_before_exile_returns..].to_vec();
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            triggers::collect_triggers_into_deferred(state, &exile_return_events);
+        } else {
+            let outcome = triggers::process_triggers_with_delayed_events(
+                state,
+                &exile_return_events,
+                &exile_return_events,
+                events,
+            );
+            if let Some(waiting_for) = outcome.prompt {
+                state.waiting_for = waiting_for.clone();
+                state.consumed_before_priority_trigger_events.clear();
+                return Ok(waiting_for);
+            }
+        }
+    }
+
     // CR 603.3b: Triggered abilities parked while a resolution choice was open
     // (e.g. "whenever you scry, ..." deferred above so it couldn't clobber the
     // choice's WaitingFor) go on the stack once resolution truly settles. The
@@ -171,41 +197,6 @@ pub(crate) fn run_post_action_pipeline_from(
         if !players::is_alive(state, player) {
             state.consumed_before_priority_trigger_events.clear();
             return Ok(state.waiting_for.clone());
-        }
-    }
-
-    let events_before_returns = events.len();
-    check_exile_returns(state, events);
-
-    // CR 603.2 + CR 603.3: A card returning from exile enters the battlefield,
-    // which is a game event that can trigger abilities — most commonly the
-    // returned permanent's OWN enters-the-battlefield trigger (Wall of Omens
-    // returned by Fiend Hunter's leaves-the-battlefield trigger draws a card,
-    // issue #3673). `check_exile_returns` appends those enter events but,
-    // unlike the SBA loop above, does not scan them; scan here so the ETB
-    // reaches the stack. Combine normal ETBs with delayed triggers matching
-    // the same return event before ordering, so simultaneous triggers controlled
-    // by the same player share one CR 603.3b ordering prompt. Any state-based
-    // actions the return implicates (CR 704.3) are checked on the next pipeline
-    // pass once the ETB resolves.
-    //
-    // Gate on Priority so a return that paused on an as-enters
-    // replacement/aura choice (`BatchMoveResult::NeedsChoice`) is not
-    // clobbered — that resume path owns its own trigger scan.
-    if events.len() > events_before_returns
-        && matches!(state.waiting_for, WaitingFor::Priority { .. })
-    {
-        let return_events: Vec<_> = events[events_before_returns..].to_vec();
-        let outcome = triggers::process_triggers_with_delayed_events(
-            state,
-            &return_events,
-            &return_events,
-            events,
-        );
-        if let Some(waiting_for) = outcome.prompt {
-            state.waiting_for = waiting_for.clone();
-            state.consumed_before_priority_trigger_events.clear();
-            return Ok(waiting_for);
         }
     }
 

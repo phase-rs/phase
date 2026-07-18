@@ -315,8 +315,8 @@ mod tests {
     use crate::types::game_state::{ActionResult, WaitingFor};
     use crate::types::phase::Phase;
 
-    // Verbatim Oracle text so the runtime tests exercise the real parser branch
-    // (`try_parse_exile_pile_shuffle_cloak`) plus the whole
+    // Verbatim Oracle text so the runtime tests exercise the real WithContext
+    // parser branch (`parse_exile_pile_shuffle_cloak_ir`) plus the whole
     // ChooseObjectsIntoTrackedSet → Shuffle{TrackedSet} → Cloak{TrackedSet} chain.
     const EXPOSE_ORACLE: &str = "Choose one or both —\n\
         • Turn target face-down creature face up.\n\

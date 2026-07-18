@@ -9,7 +9,7 @@ use crate::types::ability::{
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
-use crate::types::events::GameEvent;
+use crate::types::events::{ActivatedAbilityKind, GameEvent};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
@@ -33,13 +33,12 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::ability_utils::{
-    ability_target_legality_needs_chosen_x, assign_targets_in_chain, auto_select_targets,
-    auto_select_targets_for_ability, begin_target_selection, begin_target_selection_for_ability,
-    build_resolved_from_def, build_target_slots, compute_unavailable_modes,
-    filter_references_target_player, flatten_targets_in_chain,
-    has_legal_target_assignment_for_ability, kicker_instead_spell_has_legal_targets,
-    modal_choice_for_player, simple_legal_target_assignment_exists_for_ability,
-    target_constraints_from_modal,
+    ability_target_legality_needs_chosen_x, additional_cost_instead_spell_has_legal_targets,
+    assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
+    begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
+    build_target_slots, compute_unavailable_modes, filter_references_target_player,
+    flatten_targets_in_chain, has_legal_target_assignment_for_ability, modal_choice_for_player,
+    simple_legal_target_assignment_exists_for_ability, target_constraints_from_modal,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
@@ -8496,6 +8495,8 @@ fn apply_cleave_text_change(obj: &mut crate::game::game_object::GameObject) -> b
         replacements: obj.replacement_definitions.clone(),
         base_abilities: std::sync::Arc::clone(&obj.base_abilities),
         base_triggers: std::sync::Arc::clone(&obj.base_trigger_definitions),
+        trigger_base_set_instance: obj.trigger_base_set_instance,
+        next_trigger_base_set_instance: obj.next_trigger_base_set_instance,
         base_statics: std::sync::Arc::clone(&obj.base_static_definitions),
         base_replacements: std::sync::Arc::clone(&obj.base_replacement_definitions),
     });
@@ -8503,11 +8504,11 @@ fn apply_cleave_text_change(obj: &mut crate::game::game_object::GameObject) -> b
     // four ability classes — only `abilities` differs for the published cleave
     // cards, but projecting the full set is defensive and future-proof.
     obj.abilities = std::sync::Arc::new(variant.abilities.clone());
-    obj.trigger_definitions = variant.triggers.clone().into();
     obj.static_definitions = variant.static_abilities.clone().into();
     obj.replacement_definitions = variant.replacements.clone().into();
     obj.base_abilities = std::sync::Arc::new(variant.abilities);
-    obj.base_trigger_definitions = std::sync::Arc::new(variant.triggers);
+    obj.install_trigger_base_definitions(std::sync::Arc::new(variant.triggers))
+        .expect("trigger base-set generation must not overflow");
     obj.base_static_definitions = std::sync::Arc::new(variant.static_abilities);
     obj.base_replacement_definitions = std::sync::Arc::new(variant.replacements);
     true
@@ -8528,6 +8529,8 @@ pub(crate) fn revert_cleave_text_change(obj: &mut crate::game::game_object::Game
     obj.replacement_definitions = snapshot.replacements;
     obj.base_abilities = snapshot.base_abilities;
     obj.base_trigger_definitions = snapshot.base_triggers;
+    obj.trigger_base_set_instance = snapshot.trigger_base_set_instance;
+    obj.next_trigger_base_set_instance = snapshot.next_trigger_base_set_instance;
     obj.base_static_definitions = snapshot.base_statics;
     obj.base_replacement_definitions = snapshot.base_replacements;
 }
@@ -11562,6 +11565,36 @@ fn continue_with_prepared(
             prepared.payment_mode,
             events,
         );
+    } else if requires_additional_cost_declaration_before_targets(&resolved)
+        && !casting_costs::build_effective_additional_cost_queue(state, player, prepared.object_id)
+            .is_empty()
+    {
+        // CR 601.2b + CR 702.194c: generalizes the kicker-only gate above to
+        // every OTHER target-dependent "instead" additional cost with a
+        // non-empty effective queue (currently Teamwork/Bargain; Too Evil to
+        // Stay Dead, Cruel Alliance). Bounded by the queue-emptiness check so
+        // non-kicker `AdditionalCostPaidInstead` cards with an empty queue
+        // (no queue-synthesized cost to declare pre-target) fall through to
+        // the ordinary target-slot path below, unchanged.
+        return casting_costs::begin_target_dependent_additional_cost_declaration(
+            state,
+            player,
+            prepared.object_id,
+            prepared.card_id,
+            resolved,
+            prepared.mana_cost,
+            Some(prepared.base_mana_cost.clone()),
+            prepared.casting_variant,
+            prepared.casting_permission_index,
+            prepared.cast_timing_permission,
+            prepared
+                .ability_def
+                .as_ref()
+                .and_then(|a| a.distribute.clone()),
+            prepared.origin_zone,
+            prepared.payment_mode,
+            events,
+        );
     }
 
     let mut target_slots = build_target_slots(state, &resolved)?;
@@ -11860,7 +11893,9 @@ fn modal_requires_additional_cost_declaration(modal: &crate::types::ability::Mod
     })
 }
 
-fn requires_additional_cost_declaration_before_targets(ability: &ResolvedAbility) -> bool {
+pub(crate) fn requires_additional_cost_declaration_before_targets(
+    ability: &ResolvedAbility,
+) -> bool {
     let Some(sub_ability) = ability.sub_ability.as_deref() else {
         return false;
     };
@@ -12145,6 +12180,24 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
     if has_kicker_cost && requires_additional_cost_declaration_before_targets(&resolved) {
         return Ok(Vec::new());
+    } else if requires_additional_cost_declaration_before_targets(&resolved)
+        && !casting_costs::build_effective_additional_cost_queue(state, player, prepared.object_id)
+            .is_empty()
+    {
+        // CR 601.2c: parity with the live-cast gate above — the preview must
+        // defer EXACTLY the cards the live path defers. The queue-emptiness
+        // guard is load-bearing (NOT merely a Gift exclusion — Gift's
+        // `AdditionalCostPaidInstead` sits at sub_ability level 2 under
+        // `GiftDelivery`, so `requires_additional_cost_declaration_before_
+        // targets`, which inspects only the first level, already returns
+        // `false` for Gift and it never reaches this check either way). Its
+        // real protected class is non-kicker LEVEL-1 `AdditionalCostPaidInstead`
+        // cards with a PRINTED additional cost (empty effective queue, e.g.
+        // `obj.additional_cost = Optional`/`Required`/`Choice`): those have
+        // `requires_ == true` but must NOT defer here (there is no
+        // queue-synthesized cost to declare pre-target), so a bare `requires_`
+        // gate would wrongly return `Ok(Vec::new())` for them.
+        return Ok(Vec::new());
     }
 
     // CR 601.2c: Once all earlier casting choices are known, enumerate the
@@ -12244,7 +12297,7 @@ fn spell_has_legal_targets_in_flushed_state(
     if base_ok {
         return true;
     }
-    if kicker_instead_spell_has_legal_targets(state, &ability_def, obj.id, player) {
+    if additional_cost_instead_spell_has_legal_targets(state, &ability_def, obj.id, player) {
         return true;
     }
     ability_target_legality_needs_chosen_x(&resolved, ability_def.distribute.as_ref())
@@ -18007,6 +18060,7 @@ pub(super) fn is_blocked_by_cant_be_activated(
             ref who,
             ref source_filter,
             ref exemption,
+            ref kind,
         } = def.mode
         else {
             continue;
@@ -18014,6 +18068,26 @@ pub(super) fn is_blocked_by_cant_be_activated(
         // CR 109.5: The "who" axis — is the caster within the scope?
         if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
             continue;
+        }
+        // CR 606.1 + CR 606.2: The ability-KIND axis. A loyalty-only prohibition
+        // (The Immortal Sun) blocks only loyalty abilities — activated abilities
+        // with a loyalty symbol in their cost (CR 606.2) — classified through the
+        // single-authority `is_loyalty_ability_cost` the activation path itself
+        // uses. `Some(Normal)` blocks only ordinary activated abilities; `None`
+        // blocks any activated ability (Chalice/Karn/Pithing Needle class).
+        if let Some(required_kind) = kind {
+            let is_loyalty = activating_ability
+                .cost
+                .as_ref()
+                .is_some_and(crate::types::ability::is_loyalty_ability_cost);
+            let ability_kind = if is_loyalty {
+                ActivatedAbilityKind::Loyalty
+            } else {
+                ActivatedAbilityKind::Normal
+            };
+            if *required_kind != ability_kind {
+                continue;
+            }
         }
         // CR 602.5: The permanent-axis — does the object whose ability is being
         // activated match the static's filter? `ControllerRef` is resolved against

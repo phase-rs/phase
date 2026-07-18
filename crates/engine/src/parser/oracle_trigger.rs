@@ -9,12 +9,14 @@ use nom::Parser;
 
 use super::oracle_effect::{
     condition_text_is_rehomeable, lower_effect_chain_ir, parse_effect_chain_ir,
-    try_parse_reanimator_aura_etb_effect, try_parse_reanimator_aura_grant_etb_effect,
+    try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
+use super::oracle_ir::effect_chain::EffectChainIr;
 use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
-use super::oracle_modal::try_parse_inline_modal;
+use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
 use super::oracle_nom::error::{oracle_err, OracleResult};
@@ -1389,55 +1391,43 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // Parse the effect body
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
-    // CR 115.1d: Pre-lowered vote blocks do not flow through clause-level
-    // multi-target extraction, so keep their legacy optional-targeting marker
-    // local to that PreLowered path. Normal effect chains carry this metadata on
-    // the specific parsed clause.
+    // CR 115.1d: Record root-level optional-target phrasing for the shared
+    // trigger-chain lowerer. Clause-level multi-target extraction carries the
+    // richer per-clause form when a chain has one.
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one")
         || scan_contains(&effect_for_parse_lower, "any number of target");
     let body = if !effect_for_parse.is_empty() {
         if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
-            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
+            Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
+                &effect_for_parse,
                 AbilityKind::Spell,
-                Effect::Unimplemented {
-                    name: "Unsupported monarch turn-began condition".to_string(),
-                    description: Some(effect_for_parse.clone()),
-                },
-            ))))
-        // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
-        } else if let Some(vote_def) =
-            crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
-        {
-            let mut ability = vote_def;
-            if has_up_to {
-                ability.optional_targeting = true;
-            }
-            if effect_adds_mana_to_triggering_player(&effect_lower)
-                && matches!(
-                    ability.effect.as_ref(),
-                    crate::types::ability::Effect::Mana { .. }
-                )
-            {
-                ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
-            }
-            if optional {
-                ability.optional = true;
-            }
-            Some(TriggerBody::PreLowered(Box::new(ability)))
+                parsed_clause(Effect::unimplemented(
+                    "Unsupported monarch turn-began condition",
+                    &effect_for_parse,
+                )),
+                None,
+                effect_ctx.actor.clone(),
+                effect_ctx.in_trigger,
+            )))
+        // CR 701.38 + CR 207.2c: Whole vote blocks retain the ballot as typed
+        // IR and use the ordinary trigger-chain lowerer for root transforms.
+        } else if let Some(vote) = crate::parser::oracle_vote::parse_vote_block_ir(
+            &effect_for_parse,
+            AbilityKind::Spell,
+            &effect_ctx,
+        ) {
+            Some(TriggerBody::Vote(Box::new(vote)))
         // CR 700.3 + CR 701.20a: Pile-separation (Fact or Fiction / Sphinx of
         // Uthuun family). The multi-sentence block must be consumed as a single
         // unit — chain parsing would fragment it into Unimplemented chunks.
-        } else if let Some(pile_def) =
-            crate::parser::oracle_separate_piles::parse_separate_into_piles(
+        } else if let Some(pile) =
+            crate::parser::oracle_separate_piles::parse_separate_into_piles_ir(
                 &effect_for_parse,
                 AbilityKind::Spell,
+                &effect_ctx,
             )
         {
-            let mut ability = pile_def;
-            if optional {
-                ability.optional = true;
-            }
-            Some(TriggerBody::PreLowered(Box::new(ability)))
+            Some(TriggerBody::Pile(Box::new(pile)))
         } else {
             // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
             // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
@@ -1446,47 +1436,46 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             // it, and register the leaves-battlefield sacrifice. Fail-closed:
             // declines unless the entire body matches, so a deviating card
             // stays an honest Unimplemented rather than misparsing.
-            try_parse_reanimator_aura_etb_effect(&effect_for_parse, AbilityKind::Spell)
-                .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-                .or_else(|| {
-                    // CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a + CR 701.21a:
-                    // whole-body reanimator-Aura GRANT-shape ETB effect (Necromancy) — a plain
-                    // (non-Aura) enchantment whose ETB ability becomes an Aura AND targets the
-                    // graveyard creature to reanimate itself (unlike the swap shape above,
-                    // which targets at CAST time via its printed Enchant restriction and
-                    // refers back to `TargetFilter::AttachedTo` here). Fail-closed: declines
-                    // unless the entire body matches, so a deviating card stays an honest
-                    // Unimplemented rather than misparsing.
-                    try_parse_reanimator_aura_grant_etb_effect(
-                        &effect_for_parse,
-                        AbilityKind::Spell,
-                    )
-                    .map(|ability| TriggerBody::PreLowered(Box::new(ability)))
-                })
-                .or_else(|| {
-                    // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
-                    // mode1; or mode2" on a single line (no bullet-line modes). No
-                    // printed card currently reaches this branch: it needs an em-dash
-                    // *and* "; or " inside one trigger effect body. (Grenzo, Havoc
-                    // Raiser — long named here as the canonical case — uses bullet-line
-                    // modes, so `raw_modes.len() == 1` and it never arrives.) Route
-                    // through the modal parser so each mode body is independently
-                    // parsed with the trigger's established relative_player_scope (e.g.
-                    // TriggeringPlayer for DamageDone triggers) so "that player" in mode
-                    // bodies resolves to the damaged player (CR 603.7c).
-                    if let Some(modal_ability) = try_parse_inline_modal(
-                        &effect_for_parse,
-                        effect_ctx.relative_player_scope.clone(),
-                    ) {
-                        return Some(TriggerBody::PreLowered(Box::new(modal_ability)));
-                    }
-                    let ir = parse_effect_chain_ir(
-                        &effect_for_parse,
-                        AbilityKind::Spell,
-                        &mut effect_ctx,
-                    );
-                    Some(TriggerBody::EffectChain(ir))
-                })
+            try_parse_reanimator_aura_etb_effect_ir(
+                &effect_for_parse,
+                AbilityKind::Spell,
+                &effect_ctx,
+            )
+            .map(TriggerBody::EffectChain)
+            .or_else(|| {
+                // CR 603.3d + CR 608.2c + CR 613.1d + CR 613.1f + CR 701.3a + CR 701.21a:
+                // whole-body reanimator-Aura GRANT-shape ETB effect (Necromancy) — a plain
+                // (non-Aura) enchantment whose ETB ability becomes an Aura AND targets the
+                // graveyard creature to reanimate itself (unlike the swap shape above,
+                // which targets at CAST time via its printed Enchant restriction and
+                // refers back to `TargetFilter::AttachedTo` here). Fail-closed: declines
+                // unless the entire body matches, so a deviating card stays an honest
+                // Unimplemented rather than misparsing.
+                try_parse_reanimator_aura_grant_etb_effect_ir(
+                    &effect_for_parse,
+                    AbilityKind::Spell,
+                    &effect_ctx,
+                )
+                .map(TriggerBody::EffectChain)
+            })
+            .or_else(|| {
+                // CR 700.2 + CR 608.2d: Inline modal trigger body — "choose one —
+                // mode1; or mode2" on a single line (no bullet-line modes). No
+                // printed card currently reaches this branch: it needs an em-dash
+                // *and* "; or " inside one trigger effect body. (Grenzo, Havoc
+                // Raiser — long named here as the canonical case — uses bullet-line
+                // modes, so `raw_modes.len() == 1` and it never arrives.) Route
+                // through the modal parser so each mode body is independently
+                // parsed with the trigger's established relative_player_scope (e.g.
+                // TriggeringPlayer for DamageDone triggers) so "that player" in mode
+                // bodies resolves to the damaged player (CR 603.7c).
+                if let Some(modal) = try_parse_inline_modal_ir(&effect_for_parse, &effect_ctx) {
+                    return Some(TriggerBody::Modal(Box::new(modal)));
+                }
+                let ir =
+                    parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
+                Some(TriggerBody::EffectChain(ir))
+            })
         }
     } else {
         None
@@ -1566,6 +1555,48 @@ fn mode_exposes_subject_batch(mode: &TriggerMode) -> bool {
     )
 }
 
+/// Lower a trigger body through the ordinary effect-chain transforms.
+///
+/// CR 603.5 + CR 115.1d: Typed trigger bodies with root metadata (such as an
+/// inline modal) use this same path before attaching that metadata, so the
+/// trigger's optionality and target semantics cannot diverge from a plain
+/// `EffectChain` body.
+fn lower_trigger_effect_chain(
+    chain_ir: &EffectChainIr,
+    modifiers: &TriggerModifiers,
+) -> AbilityDefinition {
+    let mut ability = lower_effect_chain_ir(chain_ir);
+    crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
+    if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
+        && matches!(
+            ability.effect.as_ref(),
+            crate::types::ability::Effect::Mana { .. }
+        )
+    {
+        ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+    }
+    // CR 115.1d: Singleton "up to one target ..." effects that lower
+    // without a `multi_target` spec still permit choosing zero targets.
+    // Do not stamp this onto non-target head clauses in chains like
+    // "draw a card. Attach any number of target Equipment ..."
+    if modifiers.has_up_to
+        && ability.multi_target.is_none()
+        && ability
+            .effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref())
+    {
+        ability.optional_targeting = true;
+    }
+    // CR 603.5: A triggered ability whose effect is optional ("may") goes
+    // on the stack regardless; the choice is made when it resolves. Carry
+    // that optionality onto the execute ability, which is what resolves.
+    if modifiers.optional {
+        ability.optional = true;
+    }
+    ability
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -1573,41 +1604,25 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // Lower the body
     let execute = match &ir.body {
         Some(TriggerBody::EffectChain(chain_ir)) => {
-            let mut ability = lower_effect_chain_ir(chain_ir);
-            crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
-            if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
-                && matches!(
-                    ability.effect.as_ref(),
-                    crate::types::ability::Effect::Mana { .. }
-                )
-            {
-                ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
-            }
-            // CR 115.1d: Singleton "up to one target ..." effects that lower
-            // without a `multi_target` spec still permit choosing zero targets.
-            // Do not stamp this onto non-target head clauses in chains like
-            // "draw a card. Attach any number of target Equipment ..."
-            if modifiers.has_up_to
-                && ability.multi_target.is_none()
-                && ability
-                    .effect
-                    .target_filter()
-                    .is_some_and(|filter| !filter.is_context_ref())
-            {
-                ability.optional_targeting = true;
-            }
-            // CR 603.5: A triggered ability whose effect is optional ("may") goes
-            // on the stack regardless; the choice is made when it resolves. Carry
-            // that optionality onto the execute ability, which is what resolves.
-            if modifiers.optional {
-                ability.optional = true;
-            }
-            Some(Box::new(ability))
+            Some(Box::new(lower_trigger_effect_chain(chain_ir, modifiers)))
         }
+        Some(TriggerBody::Modal(modal)) => Some(Box::new(
+            lower_trigger_effect_chain(&modal.marker, modifiers)
+                .with_modal(modal.choice.clone(), modal.mode_abilities.clone()),
+        )),
+        Some(TriggerBody::Vote(vote)) => Some(Box::new(lower_trigger_effect_chain(
+            &vote.effect_chain(AbilityKind::Spell),
+            modifiers,
+        ))),
+        Some(TriggerBody::Pile(pile)) => Some(Box::new(lower_trigger_effect_chain(
+            &pile.effect_chain(AbilityKind::Spell),
+            modifiers,
+        ))),
         Some(TriggerBody::PreLowered(ability)) => {
-            // CR 603.5: Pre-lowered bodies (inline modals, vote blocks, etc.)
-            // may not have stamped `optional` during extraction even when the
-            // trigger effect began with "you may".
+            // P05-U4 completion: no producers remain. U6 removes this legacy
+            // arm after the enum variant is deleted.
+            // CR 603.5: Pre-lowered bodies may not have stamped `optional`
+            // during extraction even when the trigger effect began with "you may".
             let mut ability = ability.clone();
             if modifiers.optional {
                 ability.optional = true;

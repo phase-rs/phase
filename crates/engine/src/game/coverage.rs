@@ -5115,7 +5115,8 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     let trigger_registry = trigger_registry();
     // Classification scan: iterate every printed trigger/static regardless
     // of functioning state — we're computing coverage, not game behavior.
-    for trig in obj.trigger_definitions.iter_all() {
+    for entry in obj.trigger_definitions.iter_all() {
+        let trig = entry.definition();
         if matches!(&trig.mode, TriggerMode::Unknown(_))
             || (!trigger_registry.contains_key(&trig.mode)
                 && !matches!(&trig.mode, TriggerMode::StateCondition))

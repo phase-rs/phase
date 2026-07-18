@@ -630,6 +630,111 @@ fn exile_return_after_destroy_resolution_via_apply() {
     assert!(state.exile_links.is_empty());
 }
 
+/// CR 610.3a: an exile-until-source-leaves return happens immediately even if
+/// the effect that removed the source pauses on a later resolution choice.
+#[test]
+fn exile_return_occurs_before_a_pending_resolution_choice() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::zones::move_to_zone;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source_id = scenario
+        .add_creature(P0, "Leyline Binding", 0, 1)
+        .as_enchantment()
+        .id();
+    let returned_id = scenario
+        .add_creature(P1, "Resolute Reinforcements", 1, 1)
+        .from_oracle_text("When this creature enters, create a 1/1 white Soldier creature token.")
+        .id();
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    let mut setup_events = Vec::new();
+    move_to_zone(state, returned_id, Zone::Exile, &mut setup_events);
+    state.exile_links.push(ExileLink {
+        exiled_id: returned_id,
+        source_id,
+        kind: ExileLinkKind::UntilSourceLeaves {
+            return_zone: Zone::Battlefield,
+        },
+    });
+
+    let mut events = Vec::new();
+    move_to_zone(state, source_id, Zone::Graveyard, &mut events);
+    state.waiting_for = WaitingFor::OptionalEffectChoice {
+        player: PlayerId(0),
+        source_id,
+        description: Some("Search your library for a land card".to_string()),
+        may_trigger_key: None,
+    };
+    let default_wf = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    let waiting_for = crate::game::engine_priority::run_post_action_pipeline(
+        state,
+        &mut events,
+        &default_wf,
+        false,
+        false,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        waiting_for,
+        WaitingFor::OptionalEffectChoice { .. }
+    ));
+    assert!(state.battlefield.contains(&returned_id));
+    assert!(!state.exile.contains(&returned_id));
+    assert!(state.exile_links.is_empty());
+    assert_eq!(state.deferred_triggers.len(), 1);
+
+    state.waiting_for = WaitingFor::SearchChoice {
+        player: PlayerId(0),
+        library_owner: None,
+        cards: Vec::new(),
+        count: 1,
+        reveal: false,
+        up_to: true,
+        allows_partial_find: true,
+        constraint: Default::default(),
+        split: None,
+    };
+    let mut search_events = Vec::new();
+    let waiting_for = crate::game::engine_priority::run_post_action_pipeline(
+        state,
+        &mut search_events,
+        &default_wf,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(matches!(waiting_for, WaitingFor::SearchChoice { .. }));
+    assert_eq!(state.deferred_triggers.len(), 1);
+
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    let mut settle_events = Vec::new();
+    crate::game::engine_priority::run_post_action_pipeline(
+        state,
+        &mut settle_events,
+        &default_wf,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(state
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == returned_id));
+    let mut trigger_events = Vec::new();
+    crate::game::stack::resolve_top(state, &mut trigger_events);
+    assert!(state
+        .battlefield
+        .iter()
+        .any(|id| state.objects[id].name == "Soldier"));
+}
+
 /// CR 400.7 + CR 610.3a + CR 611.2: Full integration test using the real
 /// parsed Oracle text for White Auracite. Exercises the complete pipeline:
 /// parser → trigger.execute (with Duration::UntilHostLeavesPlay) →
@@ -682,11 +787,15 @@ fn white_auracite_real_oracle_text_returns_exiled_card() {
         .trigger_definitions
         .iter_all()
         .find(|t| {
-            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
-                && t.destination == Some(Zone::Battlefield)
+            matches!(t.definition.mode, crate::types::TriggerMode::ChangesZone)
+                && t.definition.destination == Some(Zone::Battlefield)
         })
         .expect("WA must have an ETB (ChangesZone to Battlefield) trigger");
-    let execute_def = etb_trigger.execute.as_deref().expect("trigger.execute");
+    let execute_def = etb_trigger
+        .definition
+        .execute
+        .as_deref()
+        .expect("trigger.execute");
     assert_eq!(
         execute_def.duration,
         Some(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -843,11 +952,15 @@ fn haytham_kenway_per_opponent_exile_returns_when_source_leaves() {
         .trigger_definitions
         .iter_all()
         .find(|t| {
-            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
-                && t.destination == Some(Zone::Battlefield)
+            matches!(t.definition.mode, crate::types::TriggerMode::ChangesZone)
+                && t.definition.destination == Some(Zone::Battlefield)
         })
         .expect("Haytham must have ETB trigger");
-    let execute_def = etb.execute.as_deref().expect("ETB must have execute");
+    let execute_def = etb
+        .definition
+        .execute
+        .as_deref()
+        .expect("ETB must have execute");
     assert_eq!(
         execute_def.duration,
         Some(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -964,11 +1077,15 @@ fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
         .trigger_definitions
         .iter_all()
         .find(|t| {
-            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
-                && t.destination == Some(Zone::Battlefield)
+            matches!(t.definition.mode, crate::types::TriggerMode::ChangesZone)
+                && t.definition.destination == Some(Zone::Battlefield)
         })
         .expect("Journey must have ETB trigger");
-    let execute_def = etb_trigger.execute.as_deref().expect("trigger.execute");
+    let execute_def = etb_trigger
+        .definition
+        .execute
+        .as_deref()
+        .expect("trigger.execute");
     assert_eq!(
         execute_def.duration,
         Some(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -1072,8 +1189,8 @@ fn exile_return_fires_returned_creatures_etb_trigger() {
     let wall = state.objects.get(&wall_id).expect("Wall on battlefield");
     assert!(
         wall.trigger_definitions.iter_all().any(|t| {
-            matches!(t.mode, crate::types::TriggerMode::ChangesZone)
-                && t.destination == Some(Zone::Battlefield)
+            matches!(t.definition.mode, crate::types::TriggerMode::ChangesZone)
+                && t.definition.destination == Some(Zone::Battlefield)
         }),
         "Wall of Omens must have an ETB trigger for this regression to be meaningful"
     );

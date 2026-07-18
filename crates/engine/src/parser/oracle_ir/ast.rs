@@ -1710,8 +1710,25 @@ pub(crate) fn with_clause_duration(
         }
         Effect::BecomeCopy {
             duration: ref mut effect_duration,
+            recipient,
             ..
         } => {
+            // CR 611.2b + CR 301.5: a leading "for as long as ~ remains
+            // attached to it" binds a singular become-copy to the attachment
+            // host. The duration is stripped before the body is parsed, so
+            // this is the first point where both the copy and its final
+            // duration are available.
+            if matches!(
+                &duration,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientMatchesFilter {
+                        filter: TargetFilter::AttachedTo,
+                    },
+                }
+            ) && *recipient == TargetFilter::SelfRef
+            {
+                *recipient = TargetFilter::AttachedTo;
+            }
             *effect_duration = Some(duration);
         }
         _ => {}

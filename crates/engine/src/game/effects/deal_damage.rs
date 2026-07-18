@@ -700,6 +700,15 @@ pub(crate) fn apply_damage_after_replacement(
                 .map(|object| object.controller)
                 .unwrap_or(ctx.controller),
         };
+        // CR 400.7: Snapshot the target's incarnation at damage time so
+        // subsequent zone-change look-backs do not match a new incarnation.
+        let target_incarnation = match t {
+            TargetRef::Object(object_id) => state
+                .objects
+                .get(object_id)
+                .map(|object| object.incarnation),
+            TargetRef::Player(_) => None,
+        };
         // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
         // damage time so look-back source-filter queries ("opponents who were
         // dealt combat damage by ~ or a Dragon this turn") evaluate against the
@@ -711,6 +720,7 @@ pub(crate) fn apply_damage_after_replacement(
             source_controller: ctx.controller,
             target: t.clone(),
             target_controller,
+            target_incarnation,
             // CR 120.4a: the permanent was dealt only the lethal portion; the
             // excess is recorded against the controller by the redirect below.
             amount: primary_amount,
@@ -3566,6 +3576,10 @@ mod tests {
         assert_eq!(
             state.damage_dealt_this_turn[0].target_controller,
             PlayerId(1)
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn[0].target_incarnation,
+            Some(state.objects[&target].incarnation)
         );
     }
 

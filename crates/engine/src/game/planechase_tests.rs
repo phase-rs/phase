@@ -1060,11 +1060,11 @@ fn start_next_turn_syncs_planar_controller() {
     // The active plane's "you"-scoped (Controller) trigger now matches p1, not p0.
     let trig = &state.objects.get(&active_id).unwrap().trigger_definitions[0];
     assert!(
-        super::trigger_matchers::valid_player_matches(trig, &state, p1, active_id),
+        super::trigger_matchers::valid_player_matches(&trig.definition, &state, p1, active_id),
         "Controller-scoped trigger must now match the NEW controller p1"
     );
     assert!(
-        !super::trigger_matchers::valid_player_matches(trig, &state, p0, active_id),
+        !super::trigger_matchers::valid_player_matches(&trig.definition, &state, p0, active_id),
         "Controller-scoped trigger must no longer match the OLD controller p0"
     );
 }

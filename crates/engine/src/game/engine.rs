@@ -3012,7 +3012,7 @@ fn apply_action(
             MayTriggerAutoChoiceOp::Remove { key } => {
                 let actor_key = MayTriggerAutoChoiceKey {
                     player: actor,
-                    ..*key
+                    ..key.clone()
                 };
                 state.remove_may_trigger_auto_choice(&actor_key);
             }
@@ -7335,7 +7335,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             // Clone optional-gate fields before any `&mut state` borrow so the
             // `pending_trigger` imm borrow from `trigger` does not overlap.
             let ability_optional = trigger.ability.optional;
-            let may_trigger_origin = trigger.may_trigger_origin;
+            let may_trigger_origin = trigger.may_trigger_origin.clone();
             let trigger_description = trigger.description.clone();
             let trigger_events = if state.pending_trigger_event_batch.is_empty() {
                 trigger_event.iter().cloned().collect::<Vec<_>>()

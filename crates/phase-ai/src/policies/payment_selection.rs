@@ -189,6 +189,7 @@ fn next_station_threshold_remaining(state: &GameState, spacecraft_id: ObjectId) 
         .trigger_definitions
         .as_slice()
         .iter()
+        .map(|entry| &entry.definition)
         .filter_map(|def| {
             def.condition
                 .as_ref()

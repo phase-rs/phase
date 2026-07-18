@@ -159,9 +159,9 @@ fn palisade_giant_redirect_fires_dealt_damage_trigger_on_recipient() {
     let trigger = runner.state().objects[&giant]
         .trigger_definitions
         .iter_unchecked()
-        .find(|t| t.mode == TriggerMode::DamageReceived)
+        .find(|t| t.definition.mode == TriggerMode::DamageReceived)
         .expect("Palisade Giant must carry a DamageReceived trigger for this fixture");
-    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(trigger.definition.valid_card, Some(TargetFilter::SelfRef));
 
     let mut events = Vec::new();
     deal_damage::resolve(

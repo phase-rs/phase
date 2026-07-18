@@ -19,6 +19,8 @@ use super::oracle::{find_activated_colon, strip_activated_constraints};
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::{parse_effect_chain_with_context, try_parse_named_choice};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::effect_chain::EffectChainIr;
+use super::oracle_ir::trigger::ModalIr;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
@@ -26,7 +28,9 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_static::{parse_pt_mod, parse_static_line};
 use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
-use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst};
+use crate::parser::oracle_ir::ast::{
+    parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst,
+};
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());
@@ -1043,7 +1047,7 @@ pub(crate) fn lower_oracle_block(
             // the single-authority scope resolver expects. Without this, bullet-
             // line modes hit the `unwrap_or(ControllerRef::You)` fallback in
             // `oracle_target.rs` while the inline `"; or"` form (which threads the
-            // same scope via `try_parse_inline_modal`) resolved correctly — the
+            // same scope via `try_parse_inline_modal_ir`) resolved correctly — the
             // two modal surface forms of Grenzo, Havoc Raiser disagreed (#2346).
             let relative_player_scope = super::oracle_trigger::relative_player_scope_for_condition(
                 &trigger_line.to_lowercase(),
@@ -1298,7 +1302,7 @@ pub(crate) fn build_modal_ability(
 /// controls"` / `"that player's library"` anaphor resolves to the player the
 /// condition introduced (the damaged player) rather than falling back to the
 /// caster (`ControllerRef::You`). This mirrors the inline `"; or"` modal path
-/// (`try_parse_inline_modal`); both must thread the same scope so bullet-line
+/// (`try_parse_inline_modal_ir`); both must thread the same scope so bullet-line
 /// and inline modal forms of the same trigger agree (issue #2346).
 fn build_modal_ability_with_subject(
     kind: AbilityKind,
@@ -1511,10 +1515,7 @@ pub(crate) fn lower_mode_abilities_with_scope(
 /// The `relative_player_scope` from the trigger condition (e.g.
 /// `TriggeringPlayer` for DamageDone triggers) is propagated into every mode
 /// body so "that player" anaphora resolve to the correct player.
-pub(crate) fn try_parse_inline_modal(
-    effect_body: &str,
-    relative_player_scope: Option<crate::types::ability::ControllerRef>,
-) -> Option<AbilityDefinition> {
+pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -> Option<ModalIr> {
     let em_dash_pos = effect_body.find('\u{2014}')?;
     let header_text = effect_body[..em_dash_pos].trim();
     let modes_text = effect_body[em_dash_pos + '\u{2014}'.len_utf8()..].trim();
@@ -1548,13 +1549,21 @@ pub(crate) fn try_parse_inline_modal(
         &modes,
         AbilityKind::Spell,
         None,
-        relative_player_scope,
+        ctx.relative_player_scope.clone(),
         None,
     );
-    Some(
-        AbilityDefinition::new(AbilityKind::Spell, modal_marker_effect(&header))
-            .with_modal(build_modal_choice(&header, &modes), mode_abilities),
-    )
+    Some(ModalIr {
+        marker: EffectChainIr::single_clause(
+            effect_body,
+            AbilityKind::Spell,
+            parsed_clause(modal_marker_effect(&header)),
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        ),
+        choice: build_modal_choice(&header, &modes),
+        mode_abilities,
+    })
 }
 
 /// Replace a parsed mode ability with `Effect::Unimplemented` when the mode body
@@ -2004,6 +2013,27 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_modal_ir_keeps_marker_and_modes_typed() {
+        let modal = try_parse_inline_modal_ir(
+            "Choose one — Draw a card; or Create a Treasure token.",
+            &ParseContext::default(),
+        )
+        .expect("inline modal should parse into typed trigger IR");
+
+        assert_eq!(modal.marker.clauses.len(), 1);
+        assert!(matches!(
+            modal.marker.clauses[0].parsed.effect,
+            Effect::GenericEffect { .. }
+        ));
+        assert_eq!(modal.choice.mode_count, 2);
+        assert_eq!(modal.mode_abilities.len(), 2);
+        assert!(modal
+            .mode_abilities
+            .iter()
+            .all(|mode| { !matches!(mode.effect.as_ref(), Effect::Unimplemented { .. }) }));
+    }
 
     #[test]
     fn extract_ability_word_reminder_body_increment() {

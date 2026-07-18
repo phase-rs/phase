@@ -33,7 +33,7 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
         player: PlayerId(0),
         source_id,
         description: None,
-        may_trigger_key: Some(key),
+        may_trigger_key: Some(key.clone()),
     };
     let mut ability = ResolvedAbility::new(
         Effect::GainLife {

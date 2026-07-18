@@ -8081,10 +8081,10 @@ mod tests {
         };
 
         let trigger = &runner.state().objects[&mana_echoes].trigger_definitions[0];
-        let execute = trigger.execute.as_ref().expect("execute");
+        let execute = trigger.definition.execute.as_ref().expect("execute");
         let ability = crate::game::triggers::build_triggered_ability(
             runner.state(),
-            trigger,
+            &trigger.definition,
             mana_echoes,
             P0,
         );

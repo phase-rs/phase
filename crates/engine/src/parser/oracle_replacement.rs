@@ -282,12 +282,20 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If ~ would die, {effect}" ---
-    if nom_primitives::scan_contains(&norm_lower, "~ would die")
-        || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
-    {
-        let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
-            .valid_card(TargetFilter::SelfRef)
-            .description(text.to_string());
+    let self_would_die = nom_primitives::scan_contains(&norm_lower, "~ would die")
+        && !nom_primitives::scan_contains(&norm_lower, "dealt damage by ~ would die this turn");
+    if self_would_die || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed") {
+        // CR 700.4: Dying is a battlefield-to-graveyard move, not the
+        // narrower destroy action. A self-die replacement must also catch
+        // sacrifice and zero-toughness SBAs; "would be destroyed" remains a
+        // Destroy replacement.
+        let mut def = if self_would_die {
+            ReplacementDefinition::new(ReplacementEvent::Moved).destination_zone(Zone::Graveyard)
+        } else {
+            ReplacementDefinition::new(ReplacementEvent::Destroy)
+        }
+        .valid_card(TargetFilter::SelfRef)
+        .description(text.to_string());
         // CR 614.1a + CR 122.1: Try the shared exile-anaphor recognizer first
         // so the self-die branch sees the same prefix/suffix word-order
         // handling and `with N <type> counter(s) on it` lift as the non-self
@@ -5035,6 +5043,11 @@ fn parse_creature_die_exile_replacement(
     if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
         return None;
     }
+    // CR 700.4: A creature only dies when it moves from the battlefield to a
+    // graveyard. Destination alone would also match a milled, discarded, or
+    // countered creature card, so keep the origin on the affected-object
+    // filter.
+    let filter = attach_zone_to_filter(filter, Zone::Battlefield);
 
     // Extract the replacement effect after "would die, " via a nom combinator.
     // CR 614.1a: Replacement effects use "instead" — both word orders are equivalent:
@@ -5116,7 +5129,11 @@ fn parse_creature_die_exile_replacement(
         parse_effect_chain(orig_effect, AbilityKind::Spell)
     };
 
-    let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
+    // CR 700.4 + CR 614.1a: Dying is any battlefield-to-graveyard move,
+    // including sacrifice and lethal-damage or zero-toughness SBAs. A
+    // die-exile replacement must intercept that move, not only Destroy.
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
         .execute(execute)
         .valid_card(filter)
         .description(original_text.to_string());
@@ -15181,7 +15198,8 @@ mod tests {
             "Kalitas, Traitor of Ghet",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -15194,6 +15212,9 @@ mod tests {
         match &def.valid_card {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }));
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
@@ -15298,8 +15319,14 @@ mod tests {
             "Frostwielder",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
-        assert_eq!(def.destination_zone, None);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        assert!(matches!(
+            &def.valid_card,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Battlefield,
+            })
+        ));
         assert_eq!(
             def.condition,
             Some(ReplacementCondition::DealtDamageThisTurnBySource {
@@ -15323,6 +15350,8 @@ mod tests {
             "Kumano's Blessing",
         )
         .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         assert_eq!(
             def.condition,
             Some(ReplacementCondition::DealtDamageThisTurnBySource {
@@ -15356,7 +15385,8 @@ mod tests {
             "The Darkness Crystal",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -15394,7 +15424,8 @@ mod tests {
             "Kalitas, Traitor of Ghet",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -15421,7 +15452,8 @@ mod tests {
             "Hypothetical Card",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -15445,7 +15477,8 @@ mod tests {
             "Hypothetical Card",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -15468,7 +15501,8 @@ mod tests {
             "Draugr Necromancer",
         )
         .expect("expected non-empty ReplacementDefinition for Draugr-shape die-replacement");
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         match &def.valid_card {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -15509,7 +15543,8 @@ mod tests {
             "Darigaaz Reincarnated",
         )
         .expect("expected non-empty ReplacementDefinition for Darigaaz self-die");
-        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
         assert!(
             matches!(def.valid_card, Some(TargetFilter::SelfRef)),
             "self-die replacement must target the source via SelfRef"

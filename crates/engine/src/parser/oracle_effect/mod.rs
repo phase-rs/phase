@@ -1602,6 +1602,8 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         tag("that creature"),
         tag("that planeswalker"),
         tag("that token"),
+        tag("a permanent dealt damage by ~"),
+        tag("a creature dealt damage by ~"),
         tag("a permanent dealt damage this way"),
         tag("a creature dealt damage this way"),
         tag("it"),
@@ -12110,16 +12112,18 @@ pub(crate) fn parse_grant_graveyard_keyword_to_target_ir(
 /// checked ("both present, both open with `enchant`") — never semantically parsed —
 /// and a fixed `RemoveKeyword`/`AddKeyword` pair is always emitted.
 ///
-/// Returns the fully-constructed 4-node effect chain directly, bypassing the
-/// per-clause chunker. Declines (returns `None`) unless the ENTIRE body matches,
-/// so any card whose text deviates stays an honest `Effect::Unimplemented`.
+/// Returns one typed root clause whose nested continuation chain preserves the
+/// class's source-rebind structure. Declines (returns `None`) unless the ENTIRE
+/// body matches, so any card whose text deviates stays an honest
+/// `Effect::Unimplemented`.
 ///
-/// See `build_aura_attach_chain` for why each node uses the anaphor it
+/// See `build_aura_attach_clause` for why each node uses the anaphor it
 /// does (source-rebind interplay with `ChangeZone { forward_result: true }`).
-pub(crate) fn try_parse_reanimator_aura_etb_effect(
+pub(crate) fn try_parse_reanimator_aura_etb_effect_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let stripped = super::oracle_util::strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tap_state =
@@ -12127,11 +12131,18 @@ pub(crate) fn try_parse_reanimator_aura_etb_effect(
     // CR 613.1f: Animate Dead / Dance of the Dead are printed as Auras, so the
     // ETB swaps the printed Enchant restriction (Swap) and refers back to the
     // already-established attachment via `TargetFilter::AttachedTo`.
-    Some(build_aura_attach_chain(
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        tap_state,
-        EnchantGrantShape::Swap,
-        TargetFilter::AttachedTo,
+        build_aura_attach_clause(
+            tap_state,
+            EnchantGrantShape::Swap,
+            TargetFilter::AttachedTo,
+            kind,
+        ),
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
     ))
 }
 
@@ -12204,23 +12215,26 @@ fn parse_reanimator_aura_etb_body(i: &str) -> OracleResult<'_, crate::types::zon
 /// only via the shared `parse_quoted_enchant_clause` (never semantically
 /// parsed), matching the swap shape.
 ///
-/// Returns the fully-constructed 4-node chain via `build_aura_attach_chain`
-/// with `EnchantGrantShape::GrantOnly` and the genuinely-parsed target.
+/// Returns one typed root clause with `EnchantGrantShape::GrantOnly` and the
+/// genuinely-parsed target.
 /// Declines (returns `None`) unless the ENTIRE body matches, so any card whose
 /// text deviates stays an honest `Effect::Unimplemented`.
-pub(crate) fn try_parse_reanimator_aura_grant_etb_effect(
+pub(crate) fn try_parse_reanimator_aura_grant_etb_effect_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let stripped = super::oracle_util::strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let (target, tap_state) =
         super::oracle_nom::bridge::nom_parse_lower(&lower, parse_reanimator_aura_grant_etb_shape)?;
-    Some(build_aura_attach_chain(
+    Some(EffectChainIr::single_clause(
+        text,
         kind,
-        tap_state,
-        EnchantGrantShape::GrantOnly,
-        target,
+        build_aura_attach_clause(tap_state, EnchantGrantShape::GrantOnly, target, kind),
+        None,
+        ctx.actor.clone(),
+        ctx.in_trigger,
     ))
 }
 
@@ -12285,9 +12299,10 @@ enum EnchantGrantShape {
     GrantOnly,
 }
 
-/// Build the reanimator-Aura attach chain shared by the two ETB shapes:
-/// `try_parse_reanimator_aura_etb_effect` (swap; Animate Dead / Dance of the
-/// Dead) and `try_parse_reanimator_aura_grant_etb_effect` (grant; Necromancy).
+/// Build the reanimator-Aura root clause shared by the two ETB shapes:
+/// `try_parse_reanimator_aura_etb_effect_ir` (swap; Animate Dead / Dance of
+/// the Dead) and `try_parse_reanimator_aura_grant_etb_effect_ir` (grant;
+/// Necromancy).
 /// Two documented parameters vary across call sites: the producer target of the
 /// root `ChangeZone` (`root_target` — `AttachedTo` for the swap shape, whose
 /// creature was chosen at cast time via the printed Enchant restriction; a
@@ -12316,12 +12331,12 @@ enum EnchantGrantShape {
 ///   leaves-battlefield condition watches the Aura, and its `Sacrifice { ParentTarget }`
 ///   snapshots the creature at delayed-trigger creation time (CR 701.21a /
 ///   CR 603.7c: "that creature's controller sacrifices it").
-fn build_aura_attach_chain(
-    kind: AbilityKind,
+fn build_aura_attach_clause(
     tap_state: crate::types::zones::EtbTapState,
     shape: EnchantGrantShape,
     root_target: TargetFilter,
-) -> AbilityDefinition {
+    kind: AbilityKind,
+) -> ParsedEffectClause {
     // CR 701.21a + CR 603.7c: "When ~ leaves the battlefield, that creature's
     // controller sacrifices it." — delayed leaves-battlefield sacrifice of the
     // reanimated creature (ParentTarget, snapshotted at creation).
@@ -12390,28 +12405,25 @@ fn build_aura_attach_chain(
     // CR 608.2c + CR 400.7: ROOT — return/put the enchanted creature card to the
     // battlefield under the caster's control (follow the instruction, CR 608.2c).
     // The card becomes a NEW object on arrival (CR 400.7), which is why
-    // `forward_result` rebinds the sub-chain source to the reanimated creature;
-    // set explicitly (not by auto-detection).
-    let mut root = AbilityDefinition::new(
-        kind,
-        Effect::ChangeZone {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
-            target: root_target,
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: Some(ControllerRef::You),
-            enter_tapped: tap_state,
-            enters_attacking: false,
-            up_to: false,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
-            face_down_profile: None,
-            enters_modified_if: None,
-        },
-    )
-    .sub_ability(generic);
-    root.forward_result = true;
+    // `forward_result` rebinds the sub-chain source to the reanimated creature.
+    // The effect-chain assembler recognizes the typed nested anaphora and sets
+    // that flag during ordinary lowering.
+    let mut root = parsed_clause(Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: root_target,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: Some(ControllerRef::You),
+        enter_tapped: tap_state,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        face_down_profile: None,
+        enters_modified_if: None,
+    });
+    root.sub_ability = Some(Box::new(generic));
     root
 }
 
@@ -25245,16 +25257,17 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
     }
 }
 
-/// Which whole-body bypass set a chain-lowering entry point runs.
+/// Which whole-body entry-point mode a chain-lowering call runs.
 ///
-/// The two entry points do **not** run the same set, and the difference is
-/// carried here as typed data rather than duplicated as two hand-maintained
+/// `try_parse_chain_bypass` is intentionally empty after U3c, but the two entry
+/// points still do **not** run the same whole-body recognizer set. The difference
+/// is carried here as typed data rather than duplicated as two hand-maintained
 /// `if let` stacks:
 ///
-/// | mode | bypasses | bypass #1's `ParseContext` |
+/// | mode | whole-body recognizers | context |
 /// |---|---|---|
-/// | `Standalone` | remaining shared recognizers | a fresh `default()`, discarded |
-/// | `WithContext` | the same recognizers as a strict prefix, plus `try_parse_exile_pile_shuffle_cloak` | the caller's real `ctx` |
+/// | `Standalone` | U3-complete shared list (empty); cloak is unavailable | a fresh `default()`, discarded |
+/// | `WithContext` | the same shared list, plus `parse_exile_pile_shuffle_cloak_ir` in `parse_ability_ir` | the caller's real `ctx` |
 ///
 /// Callers split cleanly: die-result branch bodies (`oracle_special.rs`) take
 /// `Standalone`; spell/activated dispatch takes `WithContext`.
@@ -25274,21 +25287,24 @@ pub(crate) enum ChainLoweringMode {
     WithContext,
 }
 
-/// U3 migration seam: dispatch any remaining whole-body recognizers in order.
+/// U3 completion seam: retain the now-empty bypass dispatcher until U6 deletes
+/// this escape hatch.
 ///
-/// The shared list is intentionally retained until U6 removes this escape hatch.
-/// Returns `None` when the text falls through to the ordinary IR pipeline.
+/// `ChainLoweringMode` remains the typed mode gate for the WithContext-only cloak
+/// IR producer in `parse_ability_ir`; removing either here would silently absorb
+/// the documented mode-asymmetry bug fix into this parity migration.
+/// Returns `None` so every recognizer lowers through ordinary ability IR.
 fn try_parse_chain_bypass(
-    text: &str,
-    kind: AbilityKind,
+    _text: &str,
+    _kind: AbilityKind,
     mode: ChainLoweringMode,
     _ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    // The shared bypass list is empty after U3c's third conversion. The
-    // mode-exclusive cloak recognizer remains until its ordered conversion.
+    // U3c completed the shared list and the formerly mode-exclusive cloak
+    // recognizer. Keep explicit arms: a future entry point must choose its mode.
     match mode {
         ChainLoweringMode::Standalone => None,
-        ChainLoweringMode::WithContext => try_parse_exile_pile_shuffle_cloak(text, kind),
+        ChainLoweringMode::WithContext => None,
     }
 }
 
@@ -25344,6 +25360,15 @@ fn parse_ability_ir(
             body,
             shell: AbilityShellIr::default(),
         };
+    }
+    if let ChainLoweringMode::WithContext = mode {
+        if let Some(body) = parse_exile_pile_shuffle_cloak_ir(text, kind, ctx) {
+            return AbilityIr {
+                source_text: text.to_string(),
+                body,
+                shell: AbilityShellIr::default(),
+            };
+        }
     }
     if let Some(body) = parse_balance_equalization_ir(text, kind, ctx) {
         return AbilityIr {
@@ -25421,7 +25446,11 @@ pub(crate) fn parse_effect_chain_with_context(
 ///
 /// The recognizer is deliberately narrow (the full pile/shuffle/cloak sentence
 /// is unique to this card) so it cannot swallow clauses on any other card.
-fn try_parse_exile_pile_shuffle_cloak(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+fn parse_exile_pile_shuffle_cloak_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
 
     // Head: "exile any number of face-up " — nom dispatch (the "any number of"
@@ -25454,37 +25483,82 @@ fn try_parse_exile_pile_shuffle_cloak(text: &str, kind: AbilityKind) -> Option<A
         id: crate::types::identifiers::TrackedSetId(0),
     };
 
-    // CR 701.58a/e: cloak them — exile-and-return each pile member face down.
-    let cloak = AbilityDefinition::new(
-        kind,
-        Effect::Cloak {
-            target: TargetFilter::Controller,
-            count: QuantityExpr::Fixed { value: 1 },
-            object_source: Some(tracked_sentinel.clone()),
-        },
-    );
-    // CR 701.24a: shuffle that pile — reorder the tracked set; the resolver emits
-    // no `ShuffledLibrary` action, so library-shuffle triggers do not fire.
-    let mut shuffle = AbilityDefinition::new(
-        kind,
-        Effect::Shuffle {
-            target: tracked_sentinel,
-        },
-    );
-    shuffle.sub_ability = Some(Box::new(cloak));
+    // CR 608.2c: retain the three nested legacy definitions as ordered ordinary
+    // clauses. The textual commas/then all stamp `ContinuationStep`, and the
+    // explicit continuation kind preserves the enclosing kind on every link.
+    let choose_source_len = text
+        .len()
+        .checked_sub(rest.len())?
+        .checked_add(filter_tp.original.len())?
+        .checked_add(" in a face-down pile".len())?;
+    let choose_source = text.get(..choose_source_len)?;
+    let shuffle_start = choose_source_len.checked_add(", ".len())?;
+    let shuffle_end = shuffle_start.checked_add("shuffle that pile".len())?;
+    let shuffle_source = text.get(shuffle_start..shuffle_end)?;
+    let cloak_start = shuffle_end.checked_add(", then ".len())?;
+    let cloak_end = cloak_start.checked_add("cloak them".len())?;
+    let cloak_source = text.get(cloak_start..cloak_end)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
     // CR 608.2c: head — interactive selection of the eligible creatures into the
     // chain's tracked set (the "face-down pile").
-    let mut head = AbilityDefinition::new(
+    builder
+        .clause(
+            choose_source,
+            parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter,
+                min: 0,
+                max: None,
+            }),
+            Some(ClauseBoundary::Comma),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    // CR 701.24a: shuffle that pile — reorder the tracked set; the resolver emits
+    // no `ShuffledLibrary` action, so library-shuffle triggers do not fire.
+    builder
+        .clause(
+            shuffle_source,
+            parsed_clause(Effect::Shuffle {
+                target: tracked_sentinel.clone(),
+            }),
+            Some(ClauseBoundary::Then),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    // CR 701.58a/e: cloak them — exile-and-return each pile member face down.
+    builder
+        .clause(
+            cloak_source,
+            parsed_clause(Effect::Cloak {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                object_source: Some(tracked_sentinel),
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    Some(EffectChainIr {
+        clauses: builder.finish(),
         kind,
-        Effect::ChooseObjectsIntoTrackedSet {
-            chooser: TargetFilter::Controller,
-            filter,
-            min: 0,
-            max: None,
-        },
-    );
-    head.sub_ability = Some(Box::new(shuffle));
-    Some(head)
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {

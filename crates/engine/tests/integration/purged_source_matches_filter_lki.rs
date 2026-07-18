@@ -315,6 +315,7 @@ fn purged_token_source_that_was_not_enchanted_answers_false() {
             .trigger_definitions
             .first()
             .expect("PREMISE: Dreampod Druid must parse to exactly one triggered ability")
+            .definition
             .condition
             .as_ref()
             .expect("PREMISE: that trigger must carry an intervening-if");
@@ -496,6 +497,7 @@ fn lki_attachment_ids_are_identity_only_and_survive_a_purged_aura() {
         .trigger_definitions
         .first()
         .expect("PREMISE: one trigger")
+        .definition
         .condition
         .as_ref()
         .expect("PREMISE: intervening-if")
