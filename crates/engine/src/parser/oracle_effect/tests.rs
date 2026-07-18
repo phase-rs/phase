@@ -46334,6 +46334,7 @@ fn drawn_this_turn_followup_overwrites_prior_life_payment() {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
         continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: false,

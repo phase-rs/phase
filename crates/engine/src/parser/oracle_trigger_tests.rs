@@ -4,6 +4,7 @@ use crate::parser::oracle::parse_oracle_text;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
+use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
@@ -17558,6 +17559,7 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
         continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,
@@ -17638,6 +17640,7 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
         continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,
@@ -17732,6 +17735,7 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
         continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,

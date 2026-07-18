@@ -40,6 +40,8 @@ pub(crate) struct EffectChainIr {
     /// with the enclosing kind can opt into preserving that serialized shape
     /// while still routing through the shared chain assembly.
     pub(crate) continuation_kind: Option<AbilityKind>,
+    /// Whether assembly applies the ordinary player-scope reference rewrites.
+    pub(crate) player_scope_rewrite: PlayerScopeRewrite,
     /// CR 107.1a: Chain-level rounding annotation ("Round down/up each time").
     pub(crate) chain_rounding: Option<RoundingMode>,
     /// CR 701.21a: Actor context threaded from ParseContext (per D-07).
@@ -59,6 +61,16 @@ pub(crate) struct EffectChainIr {
     /// this process" directive is recognized. Lowering applies it to the root
     /// `AbilityDefinition` so the resolver re-follows the whole chain.
     pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
+}
+
+/// Whether `lower_effect_chain_ir` rewrites player-scoped references after
+/// assembling a chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum PlayerScopeRewrite {
+    /// Apply the shared player-scope rewrites used by ordinary parsed clauses.
+    Apply,
+    /// Preserve the recognizer's explicit scoped fields as parsed.
+    Preserve,
 }
 
 impl EffectChainIr {
@@ -94,6 +106,7 @@ impl EffectChainIr {
             clauses: builder.finish(),
             kind,
             continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
             chain_rounding: None,
             actor,
             in_trigger,
@@ -124,7 +137,7 @@ pub(crate) struct AbilityShellIr {
     /// it, which is required because the root clause has no *previous* boundary:
     /// `lower.rs` derives `sub_link` from `prev_boundary`, and `None` maps
     /// unconditionally to `ContinuationStep`. A recognizer whose root is three
-    /// independent steps (`try_parse_balance_equalization`) therefore cannot say so
+    /// independent steps (`parse_balance_equalization_ir`) therefore cannot say so
     /// through the chain, only through the shell.
     ///
     /// `Option<SubAbilityLink>` rather than a bare `SubAbilityLink`: the latter's
@@ -815,6 +828,7 @@ mod tests {
             clauses: vec![],
             kind: AbilityKind::Spell,
             continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
             chain_rounding: None,
             actor: None,
             in_trigger: false,
@@ -931,6 +945,7 @@ mod tests {
             clauses: b.finish(),
             kind: AbilityKind::Spell,
             continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
             chain_rounding: None,
             actor: None,
             in_trigger: false,

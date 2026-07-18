@@ -11,8 +11,8 @@
 
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind,
+    ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier,
+    ReplaceMeaningKind, ReplicateKind,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
@@ -2350,12 +2350,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         })
     };
 
-    // CR 608.2 + CR 107.2: Wherever an ability in the chain carries
-    // `player_scope` (outermost OR a nested sub-ability), rewrite target-scoped
-    // refs ("their life", "their hand") to their per-iterating-player
-    // equivalents. Walks the whole tree so a scoped clause buried under earlier
-    // non-scoped clauses (Betor, Kin to All) is still rewritten.
-    apply_player_scope_rewrites(&mut result);
+    // CR 608.2 + CR 107.2: Ordinary parsed clauses rewrite target-scoped refs
+    // ("their life", "their hand") to their per-iterating-player equivalents.
+    // Whole-body recognizers can preserve explicitly constructed scoped fields;
+    // the walk still covers a scoped clause buried under earlier non-scoped
+    // clauses (Betor, Kin to All).
+    if matches!(ir.player_scope_rewrite, PlayerScopeRewrite::Apply) {
+        apply_player_scope_rewrites(&mut result);
+    }
 
     // CR 107.1a: Apply the chain-level rounding annotation (captured above)
     // to every DivideRounded in the built tree. No-op when the sentence was

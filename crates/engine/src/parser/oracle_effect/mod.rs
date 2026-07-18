@@ -154,7 +154,8 @@ use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr, ClauseIrBuilder,
-    EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind, ReplicateKind,
+    EffectChainIr, OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind,
+    ReplicateKind,
 };
 use crate::types::mana::ManaExpiry;
 
@@ -12593,7 +12594,7 @@ fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, Targe
     Ok((input, pairs))
 }
 
-/// CR 107.1 + CR 608.2e: Whole-line interceptor for the Balance equalization
+/// CR 107.1 + CR 608.2e: Whole-chain recognizer for the Balance equalization
 /// class (Balance, Restore Balance, Balancing Act).
 ///
 /// Arm B parses the first sentence and Arm C parses the "the same way"
@@ -12602,10 +12603,11 @@ fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, Targe
 /// count; the clauses are chained via `sub_ability` as three independent steps
 /// (CR 608.2e — each clause computes its own minimum at its own resolution
 /// time, guaranteed by the §8 per-link clause-minimum snapshot).
-pub(crate) fn try_parse_balance_equalization(
+fn parse_balance_equalization_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
 
     let parsed = nom_on_lower(text, &lower, |input| {
@@ -12623,26 +12625,66 @@ pub(crate) fn try_parse_balance_equalization(
     clauses.push(first);
     clauses.extend(rest);
 
-    // Lower each (verb, filter) into a `player_scope: All` link, chained via
-    // `sub_ability` (CR 608.2e — three independent steps).
-    let mut links: Vec<AbilityDefinition> = clauses
-        .into_iter()
-        .map(|(verb, filter)| {
-            let filter = balance_filter_you_control(filter);
-            let mut def = AbilityDefinition::new(kind, balance_clause_effect(verb, filter));
-            def.player_scope = Some(PlayerFilter::All);
-            def.sub_link = SubAbilityLink::SequentialSibling;
-            def
-        })
-        .collect();
-
-    // Fold the chain back-to-front so each link's `sub_ability` is the next.
-    let mut chain = links.pop()?;
-    while let Some(mut prev) = links.pop() {
-        prev.sub_ability = Some(Box::new(chain));
-        chain = prev;
+    // Provenance bookkeeping only: the grammar above has already validated
+    // both sentences. Split the continuation's explicit "and" list into the
+    // source fragments for the corresponding parsed arms.
+    let (first_source, continuation_source) =
+        super::oracle_nom::bridge::split_once_on_lower(text, &lower, ". ")?;
+    let continuation_lower = &lower[lower.len() - continuation_source.len()..];
+    let continuation = TextPair::new(continuation_source, continuation_lower);
+    // allow-noncombinator: structural punctuation cleanup on a clause already parsed by nom
+    let continuation = continuation.strip_suffix(".").unwrap_or(continuation);
+    let (continuation, _) = continuation.rsplit_around(" the same way")?;
+    let mut continuation_sources = Vec::with_capacity(clauses.len().saturating_sub(1));
+    let mut remaining = continuation;
+    while let Some((source, rest)) = remaining.split_around(" and ") {
+        continuation_sources.push(source.original);
+        remaining = rest;
     }
-    Some(chain)
+    continuation_sources.push(remaining.original);
+    if continuation_sources.len() != clauses.len().saturating_sub(1) {
+        return None;
+    }
+
+    let mut builder = ClauseIrBuilder::new(text);
+    let clause_count = clauses.len();
+    for (index, (verb, filter)) in clauses.into_iter().enumerate() {
+        let source_text = if index == 0 {
+            first_source
+        } else {
+            continuation_sources[index - 1]
+        };
+        // CR 608.2c: the boundary after each nonterminal clause makes the
+        // FOLLOWING lowered definition a SequentialSibling. The root has no
+        // previous boundary and is stamped by the AbilityShellIr below.
+        let boundary = (index + 1 < clause_count).then_some(ClauseBoundary::Sentence);
+        builder
+            .clause(
+                source_text,
+                parsed_clause(balance_clause_effect(
+                    verb,
+                    balance_filter_you_control(filter),
+                )),
+                boundary,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .player_scope(Some(PlayerFilter::All))
+            .push();
+    }
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Preserve,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 /// CR 101.4 + CR 701.21a + CR 701.23i: Whole-line parser for the generic
@@ -12801,7 +12843,7 @@ pub(crate) fn try_parse_threshold_land_balance(
 
 /// CR 121.1 + CR 402.1 + CR 608.2e: Whole-line interceptor for the "catch up to
 /// the player with the most cards in hand" equalize-upward draw (Tales of the
-/// Ancestors). Structured like [`try_parse_balance_equalization`]: the
+/// Ancestors). Structured like [`parse_balance_equalization_ir`]: the
 /// cross-player extremum operand is PRODUCED by the typed
 /// [`nom_quantity::parse_player_with_extremum_cards_in_hand`] combinator (not a
 /// literal tag), and a `Verify`-style structural guard (mirroring
@@ -25047,16 +25089,16 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
 ///
 /// | mode | bypasses | bypass #1's `ParseContext` |
 /// |---|---|---|
-/// | `Standalone` | 8 | a fresh `default()`, discarded |
-/// | `WithContext` | the same 8 as a strict prefix, plus `try_parse_exile_pile_shuffle_cloak` | the caller's real `ctx` |
+/// | `Standalone` | remaining shared recognizers | a fresh `default()`, discarded |
+/// | `WithContext` | the same recognizers as a strict prefix, plus `try_parse_exile_pile_shuffle_cloak` | the caller's real `ctx` |
 ///
 /// Callers split cleanly: die-result branch bodies (`oracle_special.rs`) take
 /// `Standalone`; spell/activated dispatch takes `WithContext`.
 ///
 /// **The asymmetry is suspected-accidental and is preserved byte-for-byte on
 /// purpose.** Nothing about a die-roll branch body should exclude the cloak
-/// recognizer, but unifying to 9 makes die branches newly take it and unifying
-/// to 8 makes spells lose it — either is silent lowered drift across the
+/// recognizer, but unifying the two sets makes die branches newly take it or
+/// makes spells lose it — either is silent lowered drift across the
 /// die-result cards. Fixing it is a separate, reviewed change with its own
 /// discriminating card; a parity migration never absorbs a bug fix.
 ///
@@ -25077,15 +25119,12 @@ fn try_parse_chain_bypass(
     mode: ChainLoweringMode,
     ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
-    // The eight shared bypasses, in their established order. Only the first
+    // The remaining shared bypasses, in their established order. Only the first
     // consults `ctx`.
     if let Some(def) = try_parse_conditional_protection_grant_ability(text, kind, ctx) {
         return Some(def);
     }
     if let Some(def) = try_parse_grant_graveyard_keyword_to_target(text, kind) {
-        return Some(def);
-    }
-    if let Some(def) = try_parse_balance_equalization(text, kind) {
         return Some(def);
     }
     if let Some(def) = try_parse_threshold_land_balance(text, kind) {
@@ -25121,6 +25160,25 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
     def
 }
 
+fn parse_ability_ir(text: &str, kind: AbilityKind, ctx: &mut ParseContext) -> AbilityIr {
+    if let Some(body) = parse_balance_equalization_ir(text, kind, ctx) {
+        return AbilityIr {
+            source_text: text.to_string(),
+            body,
+            // CR 608.2c: Balance's root is an independent equalization step;
+            // no preceding ClauseBoundary can stamp its link.
+            shell: AbilityShellIr {
+                sub_link: Some(SubAbilityLink::SequentialSibling),
+            },
+        };
+    }
+    AbilityIr {
+        source_text: text.to_string(),
+        body: parse_effect_chain_ir(text, kind, ctx),
+        shell: AbilityShellIr::default(),
+    }
+}
+
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     // A fresh context per call, exactly as before: the bypasses may mutate `ctx`
     // before declining, and those mutations must not reach `parse_effect_chain_ir`.
@@ -25132,11 +25190,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     ) {
         return def;
     }
-    lower_ability_ir(&AbilityIr {
-        source_text: text.to_string(),
-        body: parse_effect_chain_ir(text, kind, &mut ParseContext::default()),
-        shell: AbilityShellIr::default(),
-    })
+    lower_ability_ir(&parse_ability_ir(text, kind, &mut ParseContext::default()))
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
@@ -25150,11 +25204,7 @@ pub(crate) fn parse_effect_chain_with_context(
     if let Some(def) = try_parse_chain_bypass(text, kind, ChainLoweringMode::WithContext, ctx) {
         return def;
     }
-    lower_ability_ir(&AbilityIr {
-        source_text: text.to_string(),
-        body: parse_effect_chain_ir(text, kind, ctx),
-        shell: AbilityShellIr::default(),
-    })
+    lower_ability_ir(&parse_ability_ir(text, kind, ctx))
 }
 
 /// CR 701.24a + CR 701.58a/e + CR 608.2c: Expose the Culprit mode 2 — "Exile any
@@ -25505,6 +25555,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
         clauses: builder.finish(),
         kind,
         continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: ctx.actor.clone(),
         in_trigger: ctx.in_trigger,
@@ -25738,6 +25789,9 @@ pub(crate) fn parse_effect_chain_ir(
     if let Some(ir) = parse_exile_top_each_library_with_collection_counter_ir(text, kind, ctx) {
         return ir;
     }
+    if let Some(ir) = parse_balance_equalization_ir(text, kind, ctx) {
+        return ir;
+    }
     if let Some(ir) = parse_return_target_and_same_name_from_your_graveyard_ir(text, kind, ctx) {
         return ir;
     }
@@ -25832,6 +25886,7 @@ pub(crate) fn parse_effect_chain_ir(
                 clauses: meld_builder.finish(),
                 kind,
                 continuation_kind: None,
+                player_scope_rewrite: PlayerScopeRewrite::Apply,
                 chain_rounding,
                 actor: ctx.actor.clone(),
                 in_trigger: ctx.in_trigger,
@@ -29081,6 +29136,7 @@ pub(crate) fn parse_effect_chain_ir(
         clauses,
         kind,
         continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding,
         actor: ctx.actor.clone(),
         in_trigger: ctx.in_trigger,
