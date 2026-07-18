@@ -1635,10 +1635,16 @@ mod tests {
         );
     }
 
-    /// CR 508.1d + CR 701.15b: Declining a tax removes only the taxed goaded
-    /// creature. Untaxed attackers still complete the same declaration.
+    /// CR 508.1d + Decision 2: Declining an attack tax discards the WHOLE proposal —
+    /// including any untaxed attacker declared alongside the taxed one — and rebuilds
+    /// a fresh `DeclareAttackers` prompt. A player is never required to pay, and the
+    /// engine never silently keeps a subset of the abandoned declaration.
+    ///
+    /// Revert guard: the old decline path filtered only the taxed creature and
+    /// committed the untaxed remainder (resuming to `Priority` with one attacker).
+    /// Restoring that flips `resumed` back to `Priority` and re-commits `untaxed`.
     #[test]
-    fn declining_combat_tax_keeps_untaxed_attackers() {
+    fn declining_combat_tax_discards_whole_proposal_including_untaxed() {
         let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
         state.turn_number = 2;
         state.active_player = PlayerId(0);
@@ -1660,6 +1666,8 @@ mod tests {
         let mut events = Vec::new();
         let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &[], &mut events)
             .expect("attack declaration reaches the combat-tax choice");
+        // Reach-guard: only the goaded creature is taxed (proves the proposal really
+        // mixes a taxed and an untaxed attacker before the decline).
         let WaitingFor::CombatTaxPayment { per_creature, .. } = &waiting else {
             panic!("expected CombatTaxPayment, got {waiting:?}");
         };
@@ -1668,14 +1676,24 @@ mod tests {
 
         let mut events = Vec::new();
         let resumed = handle_pay_combat_tax(&mut state, waiting, false, &mut events)
-            .expect("declining a tax must preserve untaxed attackers");
+            .expect("declining a tax must succeed without forcing payment");
 
-        assert!(matches!(resumed, WaitingFor::Priority { .. }));
-        let combat = state
-            .combat
-            .as_ref()
-            .expect("untaxed attacker remains in combat");
-        assert_eq!(combat.attackers.len(), 1);
-        assert_eq!(combat.attackers[0].object_id, untaxed);
+        // New contract: fresh DeclareAttackers prompt, nothing committed, nothing tapped.
+        assert!(
+            matches!(resumed, WaitingFor::DeclareAttackers { .. }),
+            "declining must rebuild a fresh DeclareAttackers prompt, got {resumed:?}"
+        );
+        assert!(
+            state.combat.as_ref().is_none_or(|c| c.attackers.is_empty()),
+            "no attacker — taxed OR untaxed — may remain committed after decline"
+        );
+        assert!(
+            !state.objects[&taxed_goaded].tapped,
+            "the taxed attacker stays untapped"
+        );
+        assert!(
+            !state.objects[&untaxed].tapped,
+            "the untaxed attacker is also discarded and stays untapped"
+        );
     }
 }

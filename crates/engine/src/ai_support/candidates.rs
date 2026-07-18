@@ -5688,18 +5688,38 @@ mod tests {
 
     #[test]
     fn declare_attackers_includes_pass_and_all_attack() {
-        let state = GameState {
-            waiting_for: WaitingFor::DeclareAttackers {
-                player: PlayerId(0),
-                valid_attacker_ids: vec![
-                    crate::types::identifiers::ObjectId(1),
-                    crate::types::identifiers::ObjectId(2),
-                ],
-                valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
-                valid_attack_targets_by_attacker: None,
-                attacker_constraints: Default::default(),
-            },
-            ..GameState::new_two_player(42)
+        // PLAN-v3 completion contract: candidate generation routes each proposal
+        // through the engine completion authority (`complete_attacker_proposals`),
+        // which validates against LIVE objects — so this needs REAL creatures on the
+        // battlefield (the pre-completion generator built candidates blindly from the
+        // payload's synthetic ids). Two unblocked attackers that can both reach P1
+        // yield both a "pass" (empty) and an "all attack" (both → P1) candidate.
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.phase = Phase::DeclareAttackers;
+        let make_attacker = |state: &mut GameState, card: u64| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Attacker {card}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.summoning_sick = false;
+            id
+        };
+        let a1 = make_attacker(&mut state, 1);
+        let a2 = make_attacker(&mut state, 2);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![a1, a2],
+            valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
         };
 
         let actions = candidate_actions(&state);

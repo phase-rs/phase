@@ -1602,16 +1602,27 @@ fn global_attacker_cap_rejects_over_cap_accepts_at_cap() {
         (runner, a1, a2)
     }
 
-    // Positive reach-guard: one attacker is within the cap → legal.
+    // Positive reach-guard: one attacker is within the cap → legal and committed.
+    // `combat` is already `Some` at the DeclareAttackers step (set at BeginCombat),
+    // so committal is proven by an attacker landing in `combat.attackers`, not by
+    // `combat.is_some()` (which would be vacuously true here).
     let (mut ok, a1, _a2) = setup();
     ok.act(GameAction::DeclareAttackers {
         attacks: vec![(a1, AttackTarget::Player(P1))],
         bands: vec![],
     })
     .expect("one attacker is within the global cap");
-    assert!(ok.state().combat.is_some());
+    assert_eq!(
+        ok.state()
+            .combat
+            .as_ref()
+            .map(|c| c.attackers.len())
+            .unwrap_or(0),
+        1,
+        "the within-cap attacker must commit"
+    );
 
-    // Negative: two attackers exceed the global cap of 1 → rejected.
+    // Negative: two attackers exceed the global cap of 1 → rejected, nothing commits.
     let (mut bad, a1, a2) = setup();
     let res = bad.act(GameAction::DeclareAttackers {
         attacks: vec![
@@ -1622,8 +1633,11 @@ fn global_attacker_cap_rejects_over_cap_accepts_at_cap() {
     });
     assert!(res.is_err(), "two attackers exceed a global cap of 1");
     assert!(
-        bad.state().combat.is_none(),
-        "a rejected over-cap declaration commits no combat"
+        bad.state()
+            .combat
+            .as_ref()
+            .is_none_or(|c| c.attackers.is_empty()),
+        "a rejected over-cap declaration commits no attackers"
     );
 }
 
@@ -1902,9 +1916,11 @@ fn decline_attack_tax_returns_fresh_declare_attackers_prompt() {
         "declining must rebuild a fresh DeclareAttackers prompt, got {:?}",
         state.waiting_for
     );
+    // `combat` remains `Some` (set at BeginCombat, and the fresh prompt is still in
+    // the combat phase); the contract is that NO attacker was committed on decline.
     assert!(
-        state.combat.is_none(),
-        "no combat may be committed when the tax is declined"
+        state.combat.as_ref().is_none_or(|c| c.attackers.is_empty()),
+        "no attacker may be committed when the tax is declined"
     );
     assert!(
         !state.objects[&attacker].tapped,

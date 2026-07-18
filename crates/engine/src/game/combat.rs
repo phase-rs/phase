@@ -7070,7 +7070,9 @@ mod tests {
             &mut events2,
         )
         .unwrap_err();
-        assert!(err.contains("cannot attack player"), "err={err}");
+        // CR 805.10a: attacking your own team is a hard target-validity restriction,
+        // now surfaced through the unified per-pairing restriction message.
+        assert!(err.contains("can't attack"), "err={err}");
     }
 
     #[test]
@@ -11067,14 +11069,15 @@ mod tests {
     fn must_attack_enforcement_omitted_creature_fails() {
         let mut state = setup_combat_phase();
         let must_attacker = create_must_attack_creature(&mut state, PlayerId(0));
-        // Declare no attackers — should fail because must_attacker can legally attack
+        // Declare no attackers — should fail because must_attacker can legally attack.
+        // New contract (CR 508.1d): the per-requirement validators are replaced by a
+        // single maximum-requirement bar, so the rejection now surfaces the unified
+        // "obeys N ... but M are obtainable" message rather than a per-requirement one.
         let result = declare_attackers(&mut state, &[], &mut vec![]);
         assert!(result.is_err());
         assert!(
-            result
-                .unwrap_err()
-                .contains("must attack this combat if able"),
-            "Error should mention must-attack requirement"
+            result.unwrap_err().contains("CR 508.1d"),
+            "Error should cite the CR 508.1d maximum-requirement bar"
         );
         // Suppress unused variable warning
         let _ = must_attacker;
@@ -11229,12 +11232,14 @@ mod tests {
     fn goad_enforcement_omitted_creature_fails() {
         let mut state = setup_combat_phase();
         let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
-        // Declare no attackers — goaded creature must attack if able.
+        // Declare no attackers — goaded creature must attack if able. New contract
+        // (CR 508.1d): the goad requirement is scored by the maximum-requirement bar,
+        // so the rejection cites CR 508.1d rather than a per-goad message.
         let result = declare_attackers(&mut state, &[], &mut vec![]);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("goaded"),
-            "Error should mention goaded"
+            result.unwrap_err().contains("CR 508.1d"),
+            "Error should cite the CR 508.1d maximum-requirement bar"
         );
         let _ = goaded;
     }
@@ -11274,9 +11279,12 @@ mod tests {
                 ),
             );
 
+        // New contract (CR 508.1d): both the omitted-attacker and attack-the-goader
+        // cases now fail the unified maximum-requirement bar (goad is a requirement,
+        // not a hard restriction), so both cite CR 508.1d.
         let omitted = declare_attackers(&mut state, &[], &mut vec![]);
         assert!(omitted.is_err());
-        assert!(omitted.unwrap_err().contains("goaded"));
+        assert!(omitted.unwrap_err().contains("CR 508.1d"));
 
         let attacks_goading_player = declare_attackers(
             &mut state,
@@ -11284,9 +11292,7 @@ mod tests {
             &mut vec![],
         );
         assert!(attacks_goading_player.is_err());
-        assert!(attacks_goading_player
-            .unwrap_err()
-            .contains("must attack a different player"));
+        assert!(attacks_goading_player.unwrap_err().contains("CR 508.1d"));
 
         let attacks_other_player = declare_attackers(
             &mut state,
@@ -11314,14 +11320,16 @@ mod tests {
                 player: PlayerId(2),
             }));
 
-        // Attacking the wrong player (P1) while P2 is a legal target: illegal.
+        // Attacking the wrong player (P1) while P2 is a legal target: illegal. New
+        // contract (CR 508.1d): MustAttackPlayer is scored by the maximum-requirement
+        // bar, so the rejection cites CR 508.1d.
         let wrong = declare_attackers(
             &mut state,
             &[(attacker, AttackTarget::Player(PlayerId(1)))],
             &mut vec![],
         );
         assert!(wrong.is_err());
-        assert!(wrong.unwrap_err().contains("must attack"));
+        assert!(wrong.unwrap_err().contains("CR 508.1d"));
 
         // Attacking the required player (P2): legal.
         let right = declare_attackers(
@@ -11421,9 +11429,11 @@ mod tests {
                 player: PlayerId(1),
             }));
 
+        // New contract (CR 508.1d): the MustAttackPlayer requirement is scored by the
+        // maximum-requirement bar, so an omitted required attacker cites CR 508.1d.
         let result = declare_attackers(&mut state, &[], &mut vec![]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must attack"));
+        assert!(result.unwrap_err().contains("CR 508.1d"));
     }
 
     #[test]
@@ -11446,8 +11456,11 @@ mod tests {
             &mut vec![],
         );
 
+        // New contract (CR 508.1d): attacking the required player's planeswalker does
+        // not obey "attack player P1 directly", so the declaration falls below the
+        // maximum-requirement bar and the rejection cites CR 508.1d.
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must attack"));
+        assert!(result.unwrap_err().contains("CR 508.1d"));
     }
 
     #[test]
@@ -11551,11 +11564,13 @@ mod tests {
             &[(goaded, AttackTarget::Player(PlayerId(1)))],
             &mut vec![],
         );
+        // New contract (CR 508.1d): the goad redirect is scored by the maximum-
+        // requirement bar (attacking non-goading P2 obeys the goad requirement,
+        // attacking goader P1 does not), so declaring against P1 falls below the bar
+        // and the rejection cites CR 508.1d.
         assert!(result.is_err());
         assert!(
-            result
-                .unwrap_err()
-                .contains("must attack a different player if able"),
+            result.unwrap_err().contains("CR 508.1d"),
             "an attackable non-goading opponent (P2) must still force the redirect"
         );
     }
