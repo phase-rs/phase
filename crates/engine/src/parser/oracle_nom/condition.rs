@@ -7786,7 +7786,7 @@ fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, Stat
     Ok((rest, make_quantity_ge(QuantityRef::CardsExiledBySource, 1)))
 }
 
-/// CR 201.2 + CR 603.10a + CR 607.2a: Parse
+/// CR 202.3 + CR 607.2a: Parse
 /// "cards with N or more different <quality> are exiled with [source]" →
 /// `QuantityComparison { ObjectCountDistinct[quality](ExiledBySource) >= N }`.
 ///
@@ -10997,7 +10997,7 @@ mod tests {
         }
     }
 
-    /// CR 201.2 + CR 603.10a + CR 607.2a: Azor's Gateway — "cards with five or
+    /// CR 202.3 + CR 607.2a: Azor's Gateway — "cards with five or
     /// more different mana values are exiled with ~" reads as an
     /// `ObjectCountDistinct[ManaValue]` threshold over the exiled-with-source
     /// pool, the `ExiledBySource` mirror of the "you control N or more with

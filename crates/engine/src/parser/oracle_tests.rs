@@ -22007,7 +22007,7 @@ fn t123_advance_on_partial_intercepts_no_longer_eat_their_tails() {
 /// life, untap Azor's Gateway, and transform it" — was entirely swallowed
 /// (the "cards with N or more different <quality>" noun phrase had no
 /// `ExiledBySource` variant of the "you control N or more with different
-/// <quality>" family, CR 201.2 + CR 603.10a + CR 607.2a). The whole `If`
+/// <quality>" family, CR 202.3 + CR 607.2a). The whole `If`
 /// clause dropped, leaving an unconditional `GainLife` and losing the untap /
 /// transform effects outright. Now parses with zero swallowed clauses, and
 /// the condition (an `ObjectCountDistinct[ManaValue]` threshold over the
