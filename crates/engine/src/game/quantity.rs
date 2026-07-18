@@ -326,6 +326,24 @@ fn resolution_only_scope_referent_present(
             let own = ability.effect_context_object.as_ref().map(|s| s.object_id);
             state.last_revealed_ids.iter().any(|id| Some(*id) != own)
         }
+        // CR 607.2a + CR 608.2c: source-linked exile reads may be narrowed to the
+        // current materialized candidate set, then fall back to persistent linked
+        // exile history for the source.
+        ObjectScope::OwnedLinkedExileCard => {
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let linked =
+                crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+            ability.targets.iter().any(|target| {
+                let TargetRef::Object(id) = target else {
+                    return false;
+                };
+                linked.iter().any(|link| link.exiled_id == *id)
+                    && state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.zone == Zone::Exile && obj.owner == controller)
+            }) || linked.iter().any(|link| link.owner == controller)
+        }
         ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
     }
 }
