@@ -49,7 +49,11 @@ pub(crate) enum TriggerBody {
     /// CR 701.38: A vote block with its typed ballot effect and optional
     /// pre-ballot random choice.
     Vote(Box<VoteIr>),
-    /// Pre-lowered ability (vote blocks produce `AbilityDefinition` directly).
+    /// CR 700.3: A pile-separation block retains its semantic root effect.
+    Pile(Box<PileIr>),
+    #[allow(dead_code)]
+    /// P05-U4 completion: no construction sites remain. U6 owns removal of
+    /// this transitional variant and its lowering arm.
     PreLowered(Box<AbilityDefinition>),
 }
 
@@ -146,6 +150,61 @@ impl VoteIr {
             .sub_ability(vote),
             None => vote,
         }
+    }
+}
+
+/// CR 700.3: Typed pile-separation trigger body.
+///
+/// The root `Effect::SeparateIntoPiles` is an ordinary one-clause chain at
+/// trigger lowering, preserving every root-level transform applied to a normal
+/// trigger effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PileIr {
+    source_text: String,
+    effect: Effect,
+    actor: Option<ControllerRef>,
+    in_trigger: bool,
+}
+
+impl PileIr {
+    pub(crate) fn new(effect: Effect) -> Self {
+        debug_assert!(matches!(effect, Effect::SeparateIntoPiles { .. }));
+        Self {
+            source_text: String::new(),
+            effect,
+            actor: None,
+            in_trigger: false,
+        }
+    }
+
+    pub(crate) fn with_source(mut self, source_text: &str) -> Self {
+        self.source_text = source_text.to_string();
+        self
+    }
+
+    pub(crate) fn with_context(mut self, ctx: &ParseContext) -> Self {
+        self.actor = ctx.actor.clone();
+        self.in_trigger = ctx.in_trigger;
+        self
+    }
+
+    /// Construct the trigger-context chain without lowering the root outside
+    /// ordinary trigger lowering.
+    pub(crate) fn effect_chain(&self, kind: AbilityKind) -> EffectChainIr {
+        EffectChainIr::single_clause(
+            &self.source_text,
+            kind,
+            parsed_clause(self.effect.clone()),
+            None,
+            self.actor.clone(),
+            self.in_trigger,
+        )
+    }
+
+    /// Compatibility lowering for non-trigger callers that still consume a
+    /// lowered definition. Trigger parsing uses [`Self::effect_chain`] instead.
+    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
+        AbilityDefinition::new(kind, self.effect)
     }
 }
 

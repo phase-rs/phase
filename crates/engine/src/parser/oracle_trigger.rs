@@ -1420,17 +1420,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // CR 700.3 + CR 701.20a: Pile-separation (Fact or Fiction / Sphinx of
         // Uthuun family). The multi-sentence block must be consumed as a single
         // unit — chain parsing would fragment it into Unimplemented chunks.
-        } else if let Some(pile_def) =
-            crate::parser::oracle_separate_piles::parse_separate_into_piles(
+        } else if let Some(pile) =
+            crate::parser::oracle_separate_piles::parse_separate_into_piles_ir(
                 &effect_for_parse,
                 AbilityKind::Spell,
+                &effect_ctx,
             )
         {
-            let mut ability = pile_def;
-            if optional {
-                ability.optional = true;
-            }
-            Some(TriggerBody::PreLowered(Box::new(ability)))
+            Some(TriggerBody::Pile(Box::new(pile)))
         } else {
             // CR 608.2c + CR 613.1f + CR 701.3a + CR 701.21a: whole-body
             // reanimator-Aura ETB effect (Animate Dead / Dance of the Dead) —
@@ -1617,10 +1614,15 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             &vote.effect_chain(AbilityKind::Spell),
             modifiers,
         ))),
+        Some(TriggerBody::Pile(pile)) => Some(Box::new(lower_trigger_effect_chain(
+            &pile.effect_chain(AbilityKind::Spell),
+            modifiers,
+        ))),
         Some(TriggerBody::PreLowered(ability)) => {
-            // CR 603.5: Remaining pre-lowered bodies may not have stamped
-            // `optional` during extraction even when the trigger effect began
-            // with "you may".
+            // P05-U4 completion: no producers remain. U6 removes this legacy
+            // arm after the enum variant is deleted.
+            // CR 603.5: Pre-lowered bodies may not have stamped `optional`
+            // during extraction even when the trigger effect began with "you may".
             let mut ability = ability.clone();
             if modifiers.optional {
                 ability.optional = true;
