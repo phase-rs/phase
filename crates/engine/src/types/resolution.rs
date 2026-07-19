@@ -1082,14 +1082,16 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        DrainStatus, GameState, PendingCoinFlipKind, PendingCounterAdditionQueue,
-        PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingMutateMerge,
-        PendingProliferateActions, PendingRepeatIteration, PendingRepeatUntil,
-        PendingRepeatedOptionalPayment, PostReplacementDrain, ResidentDrainPolicy,
+        DrainStatus, GameState, PendingBatchDeliveries, PendingCoinFlipKind,
+        PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
+        PendingCounterRemovalQueue, PendingMutateMerge, PendingProliferateActions,
+        PendingRepeatIteration, PendingRepeatUntil, PendingRepeatedOptionalPayment,
+        PostReplacementDrain, ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
     use crate::types::zones::{EtbTapState, Zone};
+    use std::collections::VecDeque;
 
     fn resolved_draw(source_id: u64) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -1782,5 +1784,49 @@ mod tests {
         let counter_additions = resume_priority_fixture(restore_v1_fixture(counter_additions));
         assert!(counter_additions.pending_counter_additions.is_none());
         assert_reserializes_v2_only(counter_additions);
+    }
+
+    #[test]
+    fn v1_batch_and_copy_token_fixtures_resume_via_their_production_drains() {
+        let mut batch = GameState::new_two_player(120);
+        let mut logical_zone_change_group = batch.allocate_logical_zone_change_group(&[]);
+        logical_zone_change_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("empty batch group retains its pre-delivery latch");
+        batch.pending_batch_deliveries = Some(PendingBatchDeliveries {
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: batch.zone_changes_this_turn.len(),
+            deferred_events: Vec::new(),
+        });
+        let mut batch = restore_v1_fixture(batch);
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut batch, &mut Vec::new());
+        assert!(batch.pending_batch_deliveries.is_none());
+        assert_reserializes_v2_only(batch);
+
+        let mut copy_token = GameState::new_two_player(121);
+        copy_token.pending_copy_token_resolution = Some(PendingCopyTokenResolution {
+            created_ids: Vec::new(),
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: ObjectId(121),
+        });
+        let mut copy_token = restore_v1_fixture(copy_token);
+        crate::game::effects::token_copy::drain_pending_copy_token_resolution(
+            &mut copy_token,
+            &mut Vec::new(),
+        );
+        assert!(copy_token.pending_copy_token_resolution.is_none());
+        assert_reserializes_v2_only(copy_token);
     }
 }
