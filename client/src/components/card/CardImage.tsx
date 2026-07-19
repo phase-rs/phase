@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
@@ -42,6 +43,43 @@ interface CardImageProps {
   oracleText?: string;
 }
 
+interface CardArtFallbackProps {
+  /** Card/token name, shown as the tile heading and `aria-label`. */
+  name: string;
+  /** Oracle text rendered below the name when the engine knows it. */
+  oracleText?: string;
+  /** Sizing/border/tap-rotation classes shared with the loaded `<img>`. */
+  className: string;
+  /** Color-derived bevel border (or the neutral default). */
+  style?: CSSProperties;
+}
+
+/**
+ * Deliberate text tile shown when a card/token has no renderable art — either
+ * because art resolution produced no src (issue #6156: tokens with no official
+ * paper printing) or because the resolved image failed to load. Naming both
+ * failure modes in one place keeps the "no art" and "broken art" renders
+ * identical, and guarantees an artless token is still identifiable by name
+ * rather than showing as a blank/black square.
+ */
+function CardArtFallback({ name, oracleText, className, style }: CardArtFallbackProps) {
+  return (
+    <div
+      className={`${className} bg-gray-800 shadow-md overflow-hidden flex flex-col p-2`}
+      style={style}
+      role="img"
+      aria-label={name}
+    >
+      <div className="text-xs font-semibold text-gray-100 mb-1 truncate">{name}</div>
+      {oracleText && (
+        <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
+          <RichLabel text={oracleText} size="xs" />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CardImage({
   cardName,
   size = "normal",
@@ -80,7 +118,8 @@ export function CardImage({
     ? getBevelBorderStyle(colors)
     : undefined;
 
-  if (!faceDown && (isLoading || !src)) {
+  // Genuinely still resolving art — pulse until the async lookup settles.
+  if (!faceDown && isLoading) {
     return (
       <div
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
@@ -90,21 +129,22 @@ export function CardImage({
     );
   }
 
-  if (!faceDown && imageError) {
+  // Two distinct art failures collapse to the same deliberate text tile:
+  //   - `!src`: art resolution finished with no image (issue #6156 — tokens with
+  //     no official paper printing, e.g. Kibo, Uktabi Prince's Banana, resolve to
+  //     a null token-image src). Previously these fell into the pulse branch and
+  //     animated forever as a featureless dark square.
+  //   - `imageError`: the resolved `<img>` failed to load.
+  // Both render the card/token name (and Oracle text when known) so every artless
+  // card or token — not just one hard-coded name — stays identifiable.
+  if (!faceDown && (imageError || !src)) {
     return (
-      <div
-        className={`${baseClasses} bg-gray-800 shadow-md overflow-hidden flex flex-col p-2`}
+      <CardArtFallback
+        name={cardName}
+        oracleText={resolvedOracleText}
+        className={baseClasses}
         style={borderStyle ?? { border: "1px solid #4b5563" }}
-        role="img"
-        aria-label={cardName}
-      >
-        <div className="text-xs font-semibold text-gray-100 mb-1 truncate">{cardName}</div>
-        {resolvedOracleText && (
-          <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
-            <RichLabel text={resolvedOracleText} size="xs" />
-          </div>
-        )}
-      </div>
+      />
     );
   }
 
