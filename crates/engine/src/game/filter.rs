@@ -4958,7 +4958,7 @@ fn stack_entry_targets_satisfy(
     }
 }
 
-fn object_has_no_abilities(obj: &GameObject) -> bool {
+pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
     obj.keywords.is_empty()
         && obj.abilities.is_empty()
         && obj.trigger_definitions.is_empty()

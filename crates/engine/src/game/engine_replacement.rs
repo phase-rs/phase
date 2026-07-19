@@ -528,9 +528,11 @@ pub(super) fn handle_replacement_choice(
                 ProposedEvent::Connive {
                     object_id, count, ..
                 } => {
-                    let _ = crate::game::effects::connive::resolve_connive_effect(
-                        state, object_id, count, events,
-                    );
+                    if let Some(conniver) = state.capture_connive_subject(object_id) {
+                        let _ = crate::game::effects::connive::resolve_connive_effect(
+                            state, conniver, count, events,
+                        );
+                    }
                 }
                 // CR 701.34a: Proliferate accepted after replacement choice.
                 proliferate @ ProposedEvent::Proliferate { .. } => {

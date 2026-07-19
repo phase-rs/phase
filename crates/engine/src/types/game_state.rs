@@ -21,7 +21,10 @@ use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
-use super::events::{GameEvent, PlayerActionKind};
+use super::events::{
+    EventAttachmentSnapshot, EventCombatSnapshot, EventObjectHistorySnapshot,
+    EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind,
+};
 use super::format::FormatConfig;
 use super::identifiers::{
     CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
@@ -1803,6 +1806,7 @@ pub struct CommanderDamageEntry {
 /// cannot go out of sync; two parallel `Option`s would let one be set
 /// without the other and break the "pause emits the same event as
 /// non-pause" invariant.
+///
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -7470,7 +7474,7 @@ pub enum WaitingFor {
     /// After discarding, nonland discards add +1/+1 counters to the conniving creature.
     ConniveDiscard {
         player: PlayerId,
-        conniver_id: ObjectId,
+        conniver: ConniveSubject,
         source_id: ObjectId,
         cards: Vec<ObjectId>,
         count: usize,
@@ -12573,9 +12577,33 @@ pub struct TransientContinuousEffect {
 /// (CR 614.5) so the CR 616.1f repeat covers the remaining connive replacements
 /// without self-invoking. (CR 614.11a — completing a replacement's actions before
 /// resuming a draw — is the analogous supporting principle.)
+/// CR 400.7 + CR 701.50b/f: The exact permanent that began a connive action.
+///
+/// This deliberately carries the full event snapshot rather than a bare
+/// [`ObjectId`]. Connive's draw/discard tail can pause and the original permanent
+/// can leave and return before that tail adds counters. The embedded
+/// [`ObjectIncarnationRef`] keeps that returned object from becoming the old
+/// conniver. There is intentionally no serde default or raw-ID compatibility:
+/// an old save cannot reconstruct the original incarnation or LKI, so accepting
+/// it would silently authorize a different object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConniveSubject {
+    pub snapshot: EventObjectSnapshot,
+}
+
+impl ConniveSubject {
+    pub fn identity(&self) -> ObjectIncarnationRef {
+        self.snapshot.identity
+    }
+
+    pub fn object_id(&self) -> ObjectId {
+        self.identity().object_id
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingConniveReentry {
-    pub conniver: ObjectId,
+    pub conniver: ConniveSubject,
     pub count: u32,
     pub applied: HashSet<AppliedReplacementKey>,
 }
@@ -12905,7 +12933,10 @@ pub enum DrawSequenceOrigin {
     Plain,
     /// CR 701.50a/701.50d: after the connive draws settle, discard `count` cards and
     /// put +1/+1 counters equal to nonland cards discarded on `conniver`.
-    ConniveTail { conniver: ObjectId, count: u32 },
+    ConniveTail {
+        conniver: ConniveSubject,
+        count: u32,
+    },
     /// CR 701.22d-adjacent bookkeeping: a scry replaced into a draw completes by
     /// emitting EffectResolved{Scry} for `source_id` once the draws settle.
     ScryCompletion { source_id: ObjectId },
@@ -13336,6 +13367,146 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
+    /// replacement-driven draw can pause its tail. The resulting subject is the
+    /// authority for the later discard/counter step; it is never rebound through
+    /// the stable storage id.
+    pub fn capture_connive_subject(&self, object_id: ObjectId) -> Option<ConniveSubject> {
+        let object = self.objects.get(&object_id)?;
+        let identity = ObjectIncarnationRef::from_object(object);
+        let combat = self.combat.as_ref();
+        let attacker = combat.and_then(|combat| {
+            combat
+                .attackers
+                .iter()
+                .find(|attacker| attacker.object_id == object_id)
+        });
+        let blocking =
+            combat.is_some_and(|combat| combat.blocker_to_attacker.contains_key(&object_id));
+        let related_objects = attacker
+            .into_iter()
+            .flat_map(|attacker| {
+                combat
+                    .and_then(|combat| combat.blocker_assignments.get(&attacker.object_id))
+                    .into_iter()
+                    .flatten()
+            })
+            .chain(
+                combat
+                    .and_then(|combat| combat.blocker_to_attacker.get(&object_id))
+                    .into_iter()
+                    .flatten(),
+            )
+            .filter_map(|related_id| {
+                self.objects
+                    .get(related_id)
+                    .map(ObjectIncarnationRef::from_object)
+            })
+            .collect();
+        let attachments = crate::game::zones::capture_attachment_snapshot(self, object)
+            .into_iter()
+            .filter_map(|attachment| {
+                Some(EventAttachmentSnapshot {
+                    identity: attachment.identity?,
+                    controller: attachment.controller,
+                    kind: attachment.kind,
+                })
+            })
+            .collect();
+        let zone_changes_this_turn = self
+            .zone_changes_this_turn
+            .iter()
+            .filter(|record| {
+                record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity)
+            })
+            .map(|record| (record.from_zone, record.to_zone))
+            .collect();
+
+        Some(ConniveSubject {
+            snapshot: EventObjectSnapshot {
+                identity,
+                controller: object.controller,
+                owner: object.owner,
+                zone: object.zone,
+                name: object.name.clone(),
+                core_types: object.card_types.core_types.clone(),
+                subtypes: object.card_types.subtypes.clone(),
+                supertypes: object.card_types.supertypes.clone(),
+                colors: object.effective_colors(),
+                keywords: object.keywords.clone(),
+                power: object.power,
+                toughness: object.toughness,
+                base_power: object.base_power,
+                base_toughness: object.base_toughness,
+                mana_value: object.effective_mana_value(),
+                counters: object.counters.clone(),
+                is_token: object.is_token,
+                is_commander: object.is_commander,
+                tapped: object.tapped,
+                face_down: object.face_down,
+                transformed: object.transformed,
+                is_suspected: object.is_suspected,
+                is_renowned: object.is_renowned,
+                is_saddled: object.is_saddled,
+                has_no_abilities: crate::game::filter::object_has_no_abilities(object),
+                attachments,
+                protector: object.protector(),
+                combat: EventCombatSnapshot {
+                    attacking: attacker.is_some(),
+                    blocking,
+                    blocked: attacker.is_some_and(|attacker| attacker.blocked),
+                    attacking_alone: attacker
+                        .is_some_and(|_| combat.is_some_and(|combat| combat.attackers.len() == 1)),
+                    blocking_alone: blocking
+                        && combat.is_some_and(|combat| combat.blocker_to_attacker.len() == 1),
+                    defending_player: attacker.map(|attacker| attacker.defending_player),
+                    related_objects,
+                },
+                history: EventObjectHistorySnapshot {
+                    was_dealt_damage_this_turn: self.damage_dealt_this_turn.iter().any(|damage| {
+                        matches!(damage.target, TargetRef::Object(target) if target == object_id)
+                            && damage.target_incarnation == Some(identity.incarnation)
+                    }),
+                    entered_this_turn: object.entered_battlefield_turn == Some(self.turn_number),
+                    attacked_defenders_this_turn: self
+                        .creature_attacked_defenders_this_turn
+                        .get(&object_id)
+                        .map(|players| players.iter().copied().collect())
+                        .unwrap_or_default(),
+                    blocked_this_turn: self.creatures_blocked_this_turn.contains(&object_id),
+                    zone_changes_this_turn,
+                    // Counter records predating exact-incarnation support carry
+                    // only an ObjectId. Do not turn that ambiguous history into
+                    // evidence about this subject.
+                    counters_put_on_this_turn: Vec::new(),
+                },
+                relations: EventObjectRelationSnapshot {
+                    saddled_sources: object
+                        .saddled_by
+                        .iter()
+                        .filter_map(|id| {
+                            self.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        })
+                        .collect(),
+                    convoked_sources: object
+                        .convoked_creatures
+                        .iter()
+                        .filter_map(|id| {
+                            self.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        })
+                        .collect(),
+                    // Tracked-set membership is currently raw-ID-only. As with
+                    // counter history above, fail closed until it carries exact
+                    // membership identity.
+                    tracked_sets: Vec::new(),
+                },
+            },
+        })
+    }
+
     /// Builds the exact paused-delivery key from the replacement record before
     /// that record is consumed. Only a `ZoneChange` can belong to either
     /// logical zone-change owner.
@@ -17105,9 +17276,23 @@ mod tests {
         // Leader-style "draw, then connive" carries its tail separately. The
         // connive tail is outer work and the draw remains the active inner work.
         let mut draw_then_connive = GameState::new_two_player(42);
+        let conniver_id = ObjectId(99);
+        draw_then_connive.objects.insert(
+            conniver_id,
+            GameObject::new(
+                conniver_id,
+                CardId(99),
+                PlayerId(0),
+                "Conniver".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        draw_then_connive.battlefield.push_back(conniver_id);
         draw(&mut draw_then_connive);
         draw_then_connive.pending_connive_reentry = Some(PendingConniveReentry {
-            conniver: ObjectId(99),
+            conniver: draw_then_connive
+                .capture_connive_subject(conniver_id)
+                .expect("fixture conniver exists"),
             count: 1,
             applied: HashSet::new(),
         });
@@ -17316,6 +17501,25 @@ mod tests {
                 alt_cost_grant_source: None,
             })
         }
+
+        let conniver = {
+            let mut state = GameState::new_two_player(42);
+            let id = ObjectId(1);
+            state.objects.insert(
+                id,
+                GameObject::new(
+                    id,
+                    CardId(1),
+                    PlayerId(0),
+                    "Conniver".to_string(),
+                    Zone::Battlefield,
+                ),
+            );
+            state.battlefield.push_back(id);
+            state
+                .capture_connive_subject(id)
+                .expect("fixture conniver exists")
+        };
 
         // Use push to avoid large stack frame from vec! macro expansion.
         let mut variants: Vec<Box<WaitingFor>> = Vec::new();
@@ -17592,7 +17796,7 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::ConniveDiscard {
             player: PlayerId(0),
-            conniver_id: ObjectId(1),
+            conniver,
             source_id: ObjectId(1),
             cards: vec![ObjectId(2)],
             count: 1,

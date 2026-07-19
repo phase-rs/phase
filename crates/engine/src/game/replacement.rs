@@ -2608,13 +2608,15 @@ fn connive_applier(
                 // (Fixed(1)/N) still seeds the re-proposed event, preserving the
                 // count fix. The chain loop may drive multiple links, so clone the
                 // (small) `applied` set per re-entry.
-                let _ = crate::game::effects::connive::propose_connive(
-                    state,
-                    object_id,
-                    connive_count,
-                    applied.clone(),
-                    events,
-                );
+                if let Some(conniver) = state.capture_connive_subject(object_id) {
+                    let _ = crate::game::effects::connive::propose_connive(
+                        state,
+                        conniver,
+                        connive_count,
+                        applied.clone(),
+                        events,
+                    );
+                }
             }
             // CR 701.50a: "you draw a card" and any other modeled effect in the
             // chain resolve against the replacement source / conniving permanent.
@@ -2678,7 +2680,9 @@ fn connive_applier(
                             if state.pending_connive_reentry.is_none() {
                                 state.pending_connive_reentry =
                                     Some(crate::types::game_state::PendingConniveReentry {
-                                        conniver: object_id,
+                                        conniver: state.capture_connive_subject(object_id).expect(
+                                            "connive replacement must preserve its live subject",
+                                        ),
                                         count: connive_count,
                                         applied: applied.clone(),
                                     });
