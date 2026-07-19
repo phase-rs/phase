@@ -19,6 +19,7 @@ use engine::types::zones::Zone;
 const PLANETARIUM_TRIGGER: &str = "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn.";
 const LOOK_CAST_WITH_INDEPENDENT_TAIL: &str = "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. You gain 1 life.";
 const BESEECH_THE_MIRROR: &str = "Bargain (You may sacrifice an artifact, enchantment, or token as you cast this spell.)\nSearch your library for a card, exile it face down, then shuffle. If this spell was bargained, you may cast the exiled card without paying its mana cost if that spell's mana value is 4 or less. Put the exiled card into your hand if it wasn't cast this way.";
+const KIORA_SOVEREIGN_OF_THE_DEEP: &str = "Vigilance, ward {3}\nWhenever you cast a Kraken, Leviathan, Octopus, or Serpent spell from your hand, look at the top X cards of your library, where X is that spell's mana value. You may cast a spell with mana value less than X from among them without paying its mana cost. Put the rest on the bottom of your library in a random order.";
 
 fn reach_planetarium_cast_offer() -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
@@ -329,6 +330,74 @@ fn beseech_bargained_mana_value_five_skips_cast_offer_and_runs_hand_fallback() {
             .is_empty(),
         "auto-declining the constrained cast must not leak an exile-cast permission"
     );
+}
+
+/// CR 202.3 + CR 305.1 + CR 601.2e + CR 608.2d: one land among Kiora's looked
+/// cards does not make its optional cast impossible when another looked card is
+/// an eligible spell. The real optional boundary must remain live with both
+/// looked cards still untouched and the eligible spell bound to the offer.
+#[test]
+fn kiora_mixed_land_and_spell_keeps_eligible_cast_offer() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Kiora, Sovereign of the Deep", 4, 5)
+        .from_oracle_text_with_keywords(&["vigilance", "ward {3}"], KIORA_SOVEREIGN_OF_THE_DEEP);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
+    }
+    let eligible_spell = scenario
+        .add_spell_to_library_top(P0, "Kiora Eligible Spell", false)
+        .with_mana_cost(ManaCost::generic(1))
+        .from_oracle_text("You gain 1 life.")
+        .id();
+    let looked_land = scenario
+        .add_spell_to_library_top(P0, "Kiora Looked Land", false)
+        .as_land()
+        .id();
+    let kraken = scenario
+        .add_creature_to_hand(P0, "Triggering Kraken", 2, 2)
+        .with_subtypes(vec!["Kraken"])
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+
+    let mut runner = scenario.build();
+    let commit = runner.cast(kraken).commit();
+    assert_eq!(commit.state().objects[&kraken].zone, Zone::Stack);
+    runner.resolve_top();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "the mixed looked set must retain Kiora's optional cast prompt; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().last_revealed_ids,
+        vec![looked_land, eligible_spell],
+        "Kiora must inspect the staged land-first mixed set"
+    );
+    assert!(
+        runner
+            .state()
+            .pending_optional_effect
+            .as_ref()
+            .expect("Kiora's optional CastFromZone must be live")
+            .targets
+            .contains(&TargetRef::Object(eligible_spell)),
+        "the eligible spell must remain bound to Kiora's offer despite the land-first looked set"
+    );
+    for candidate in [looked_land, eligible_spell] {
+        assert_eq!(runner.state().objects[&candidate].zone, Zone::Library);
+        assert!(
+            runner.state().objects[&candidate]
+                .casting_permissions
+                .is_empty(),
+            "Kiora must not grant a casting permission before the optional decision"
+        );
+    }
 }
 
 /// CR 701.25a + CR 401.5 + CR 608.2d: surveilling the only library card into

@@ -4810,44 +4810,51 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 return true;
             }
 
-            // CR 608.2d + CR 305.1: A player can't choose the impossible option
-            // to cast a land. Dry-run the existing CastFromZone resolver on a
-            // clone so cast offers use the same CR 601 authority as acceptance.
-            // `Play` also permits lands, so this cast-only feasibility probe does
-            // not apply to that mode.
+            // CR 202.3 + CR 305.1 + CR 601.2e + CR 608.2d: A CastFromZone
+            // option with bound objects is feasible when at least one of those
+            // objects can currently be cast. Probe each object independently:
+            // lands never enter the cast path, fixed permission constraints use
+            // the casting pipeline's typed offer-time authority, and the cloned
+            // resolver retains all other CR 601 legality checks. Dynamic/X
+            // constraints remain deferred by that shared authority. `Play`
+            // permits lands, so this probe is Cast-only. An empty bound set
+            // retains the original whole-ability dry-run, which keeps successful
+            // zone-selection fallbacks feasible while preserving other errors.
             if matches!(mode, CardPlayMode::Cast) {
-                if first_object_target(&ability.targets)
-                    .and_then(|id| state.objects.get(&id))
-                    .is_some_and(|object| {
-                        object
-                            .card_types
-                            .core_types
-                            .contains(&crate::types::card_type::CoreType::Land)
+                let bound_objects: Vec<_> = ability
+                    .targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
                     })
-                {
-                    return true;
+                    .collect();
+                if bound_objects.is_empty() {
+                    let mut simulated = state.clone();
+                    return cast_from_zone::resolve(&mut simulated, ability, &mut Vec::new())
+                        .is_err();
                 }
 
-                // CR 202.3 + CR 601.2e + CR 608.2d: A bound card that cannot
-                // satisfy the permission's current mana-value constraint is an
-                // impossible cast option. Reuse the casting pipeline's typed
-                // offer-time authority so fixed constraints are checked here
-                // while dynamic/X-dependent constraints remain deferred.
-                if ability.targets.iter().any(|target| {
-                    let TargetRef::Object(id) = target else {
+                return !bound_objects.into_iter().any(|id| {
+                    let Some(object) = state.objects.get(&id) else {
                         return false;
                     };
-                    state.objects.get(id).is_some_and(|object| {
-                        !crate::game::casting::cast_permission_constraint_allows_cast(
+                    if object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                        || !crate::game::casting::cast_permission_constraint_allows_cast(
                             state, object, constraint, None,
                         )
-                    })
-                }) {
-                    return true;
-                }
+                    {
+                        return false;
+                    }
 
-                let mut simulated = state.clone();
-                return cast_from_zone::resolve(&mut simulated, ability, &mut Vec::new()).is_err();
+                    let mut candidate = ability.clone();
+                    candidate.targets = vec![TargetRef::Object(id)];
+                    let mut simulated = state.clone();
+                    cast_from_zone::resolve(&mut simulated, &candidate, &mut Vec::new()).is_ok()
+                });
             }
             false
         }
