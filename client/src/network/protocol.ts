@@ -61,6 +61,8 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
  *   4 — Archenemy derived view and scheme deck payloads
  *   5 — CardPredicateGuessMade game event shape
+ *  12 — Connive exact subject snapshots and resident paused post-replacement
+ *       drains changed P2P GameState snapshots.
  *  11 — Serialized GameState trigger provenance and paused logical zone-change owners.
  *  10 — Dedicated companion deck slot and typed companion-reveal choices.
  *   9 — Meld pair and attacking-entry choices after mana-payment preview variants.
@@ -70,7 +72,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 11 as const;
+export const WIRE_PROTOCOL_VERSION = 12 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
