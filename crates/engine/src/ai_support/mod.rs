@@ -2249,6 +2249,7 @@ mod tests {
             player: PlayerId(1),
             valid_attacker_ids: Vec::new(),
             valid_attack_targets: Vec::new(),
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
         // Acting player gets the full result (matches `legal_actions_full`).
@@ -4661,6 +4662,7 @@ mod tests {
                 ),
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             };
             obj.static_definitions = vec![def].into();

@@ -1332,6 +1332,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             )
         }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
+        QuantityRef::EventContextPlayerCount { filter } => {
+            format!("# of trigger-event {}", fmt_player_filter(filter))
+        }
         QuantityRef::CountersOn {
             scope,
             counter_type,
@@ -1344,6 +1347,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
                 ObjectScope::OtherRevealedCard => "other revealed card",
+                ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
             };
             match counter_type {
@@ -1370,6 +1374,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "event target's power".into(),
             ObjectScope::CostPaidObject => "referenced object's power".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's power".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's power".into(),
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
@@ -1382,6 +1387,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "event target's toughness".into(),
             ObjectScope::CostPaidObject => "referenced object's toughness".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's toughness".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's toughness".into(),
             ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
@@ -1394,6 +1400,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "event target's mana value".into(),
             ObjectScope::CostPaidObject => "referenced object's mana value".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's mana value".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's mana value".into(),
             ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
@@ -1407,6 +1414,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "event target's colors".into(),
             ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
             ObjectScope::OtherRevealedCard => "other revealed card's colors".into(),
+            ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's colors".into(),
             ObjectScope::AmassedArmy => "amassed Army's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
@@ -1419,6 +1427,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "typeline components on event target".into(),
             ObjectScope::CostPaidObject => "typeline components on cost-paid object".into(),
             ObjectScope::OtherRevealedCard => "typeline components on other revealed card".into(),
+            ObjectScope::OwnedLinkedExileCard => {
+                "typeline components on owned linked-exiled card".into()
+            }
             ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
@@ -1431,6 +1442,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::EventTarget => "words in event target's name".into(),
             ObjectScope::CostPaidObject => "words in cost-paid object's name".into(),
             ObjectScope::OtherRevealedCard => "words in other revealed card's name".into(),
+            ObjectScope::OwnedLinkedExileCard => "words in owned linked-exiled card's name".into(),
             ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
@@ -1442,6 +1454,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::EventTarget => "event target",
                 ObjectScope::CostPaidObject => "cost-paid object",
                 ObjectScope::OtherRevealedCard => "other revealed card",
+                ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
             };
             match color {
@@ -7373,6 +7386,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
         QuantityRef::ObjectCountBySharedQuality { .. } => ("ObjectCountBySharedQuality", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
+        QuantityRef::EventContextPlayerCount { .. } => ("EventContextPlayerCount", Handled),
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::Intensity { .. } => ("Intensity", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
@@ -7387,6 +7401,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetPower", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardPower", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
@@ -7399,6 +7414,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetToughness", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardToughness", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
@@ -7411,6 +7427,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetManaValue", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaValue", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardManaValue", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
@@ -7424,6 +7441,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardColorCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
@@ -7436,6 +7454,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetObjectNameWordCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardNameWordCount", Handled),
+            ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardNameWordCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectNameWordCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
@@ -7448,6 +7467,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetObjectTypelineComponentCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectTypelineComponentCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardTypelineComponentCount", Handled),
+            ObjectScope::OwnedLinkedExileCard => {
+                ("OwnedLinkedExileCardTypelineComponentCount", Handled)
+            }
             ObjectScope::AmassedArmy => ("AmassedArmyObjectTypelineComponentCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
@@ -7460,6 +7482,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::EventTarget => ("EventTargetManaSymbolsInManaCost", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaSymbolsInManaCost", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaSymbolsInManaCost", Handled),
+            ObjectScope::OwnedLinkedExileCard => {
+                ("OwnedLinkedExileCardManaSymbolsInManaCost", Handled)
+            }
             ObjectScope::AmassedArmy => ("AmassedArmyManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
@@ -12093,6 +12118,7 @@ mod tests {
                     description: None,
                     attack_defended: None,
                     source_controller: None,
+                    source_object: None,
                     bypass_beneficiary: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
@@ -12139,6 +12165,7 @@ mod tests {
                     description: None,
                     attack_defended: None,
                     source_controller: None,
+                    source_object: None,
                     bypass_beneficiary: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
@@ -13210,6 +13237,7 @@ mod tests {
             ),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13243,6 +13271,7 @@ mod tests {
             ),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13274,6 +13303,7 @@ mod tests {
             description: None,
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13423,6 +13453,7 @@ mod tests {
             description: Some("Skip your draw step.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13454,6 +13485,7 @@ mod tests {
             description: Some("Players skip their upkeep steps.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13495,6 +13527,7 @@ mod tests {
             description: Some("Players can't draw cards.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13527,6 +13560,7 @@ mod tests {
             description: Some("You can't draw cards.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13561,6 +13595,7 @@ mod tests {
             description: Some(oracle.to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13601,6 +13636,7 @@ mod tests {
                 description: Some(description.to_string()),
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             });
         }
@@ -13768,6 +13804,7 @@ mod tests {
             description: Some(oracle.to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 

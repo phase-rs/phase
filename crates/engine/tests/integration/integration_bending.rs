@@ -1861,8 +1861,9 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         enter_with_counters: Vec::new(),
         controller_override: Some(P0),
         enter_transformed: false,
-        applied: std::collections::HashSet::new(),
         face_down_profile: None,
+        enter_as_copy: None,
+        applied: std::collections::HashSet::new(),
     };
 
     let mut events = Vec::new();
@@ -1936,8 +1937,9 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         enter_with_counters: Vec::new(),
         controller_override: None,
         enter_transformed: false,
-        applied: std::collections::HashSet::new(),
         face_down_profile: None,
+        enter_as_copy: None,
+        applied: std::collections::HashSet::new(),
     };
 
     let mut events = Vec::new();

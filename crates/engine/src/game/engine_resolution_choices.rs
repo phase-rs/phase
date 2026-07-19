@@ -3510,8 +3510,25 @@ pub(super) fn handle_resolution_choice(
                 );
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {
-                        next_sub.targets =
-                            unchosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                        // CR 707.12a: A `CastCopyOfCard` continuation casts the
+                        // copies the player selected ("may cast" is decided
+                        // individually per copy), never the ones declined. It is
+                        // the buried consumer of a copy-cast choice whose
+                        // continuation head is an unrelated prepended sibling
+                        // (Mizzix's Mastery's "Exile Mizzix's Mastery"
+                        // self-exile), so forcing the un-selected copies onto it
+                        // as a partition would cast exactly the copies the player
+                        // declined — declining every copy (empty selection) would
+                        // otherwise re-derive and cast the whole exiled set. The
+                        // chosen copies still reach it by inheriting the head's
+                        // `targets` (set to `chosen` above) down the chain.
+                        if !matches!(
+                            next_sub.effect,
+                            crate::types::ability::Effect::CastCopyOfCard { .. }
+                        ) {
+                            next_sub.targets =
+                                unchosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                        }
                     }
                 }
             }

@@ -2445,6 +2445,46 @@ fn grim_hireling_combat_damage_trigger_is_batched() {
 }
 
 #[test]
+fn malcolm_keen_eyed_navigator_damage_trigger_counts_damaged_opponents() {
+    let def = parse_trigger_line(
+        "Whenever one or more Pirates you control deal damage to your opponents, you create a Treasure token for each opponent dealt damage.",
+        "Malcolm, Keen-Eyed Navigator",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+    assert_eq!(def.damage_kind, DamageKindFilter::Any);
+    assert_eq!(
+        def.valid_source,
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Pirate".to_string())],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        }))
+    );
+    assert!(matches!(
+        def.valid_target,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }))
+    ));
+    assert!(def.batched);
+
+    let execute = def.execute.as_ref().expect("trigger should execute");
+    let Effect::Token { name, count, .. } = execute.effect.as_ref() else {
+        panic!("expected Token effect, got {:?}", execute.effect);
+    };
+    assert_eq!(name, "Treasure");
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        }
+    );
+}
+
+#[test]
 fn primo_the_unbounded_combat_damage_trigger() {
     // Primo, the Unbounded (#1361): the triggering creatures' base power is 0,
     // and the Fractal token enters with +1/+1 counters equal to the combat
@@ -11498,7 +11538,7 @@ fn trigger_unless_you_return_from_graveyard() {
 
 #[test]
 fn trigger_unless_you_tap_untapped_creature() {
-    // CR 118.12 + CR 701.20a: Koskun Falls — "sacrifice this enchantment
+    // CR 118.12 + CR 701.26a: Koskun Falls — "sacrifice this enchantment
     // unless you tap an untapped creature you control."
     let def = parse_trigger_line(
             "At the beginning of your upkeep, sacrifice this enchantment unless you tap an untapped creature you control.",
@@ -11537,7 +11577,7 @@ fn trigger_unless_you_tap_untapped_creature() {
 
 #[test]
 fn trigger_unless_you_tap_untapped_permanent() {
-    // CR 118.12 + CR 701.20a: Command Bridge — "sacrifice it unless you
+    // CR 118.12 + CR 701.26a: Command Bridge — "sacrifice it unless you
     // tap an untapped permanent you control."
     let def = parse_trigger_line(
         "When this land enters, sacrifice it unless you tap an untapped permanent you control.",
@@ -13986,6 +14026,140 @@ fn phase_trigger_combat_on_your_turn() {
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::BeginCombat));
     assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+}
+
+/// CR 118.12 + CR 603.12 + CR 102.1: Kitt Kanto's beginning-of-combat trigger
+/// pays an optional fixed-count tap-creatures cost, then the reflexive body may
+/// target only a creature controlled by the player whose turn it is.
+#[test]
+fn kitt_kanto_reflexive_tap_two_cost_targets_active_player_creature() {
+    let def = parse_trigger_line(
+        "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.",
+        "Kitt Kanto, Mayhem Diva",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert!(
+        !def.optional,
+        "the trigger itself is mandatory; only paying the tap cost is optional"
+    );
+
+    let execute = def.execute.as_ref().expect("execute");
+    assert!(execute.optional, "the PayCost instruction is optional");
+    match execute.effect.as_ref() {
+        Effect::PayCost {
+            cost:
+                AbilityCost::TapCreatures {
+                    requirement,
+                    filter,
+                },
+            payer,
+            ..
+        } => {
+            assert_eq!(requirement.fixed_count(), Some(2));
+            assert_eq!(payer, &TargetFilter::Controller);
+            match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected creature-you-control cost filter, got {other:?}"),
+            }
+        }
+        other => panic!("expected optional PayCost(TapCreatures), got {other:?}"),
+    }
+
+    let reflexive = execute
+        .sub_ability
+        .as_ref()
+        .expect("PayCost must have WhenYouDo body");
+    assert_eq!(reflexive.condition, Some(AbilityCondition::WhenYouDo));
+    match reflexive.effect.as_ref() {
+        Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(tf)),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "\"that player controls\" must bind to the active/scoped turn player"
+            );
+        }
+        other => panic!("expected targeted GenericEffect reflexive body, got {other:?}"),
+    }
+}
+
+/// CR 118.12 + CR 603.12 + CR 102.1: Reflexive optional-payment parsing must
+/// let exact target phrases bind themselves. Seeing one "that player controls"
+/// clause must not rewrite a separate "you control" target in the same body.
+#[test]
+fn reflexive_optional_payment_does_not_rewrite_separate_you_control_target() {
+    let def = parse_trigger_line(
+        "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature you control gets +1/+1 until end of turn. Target creature that player controls gets +1/+1 until end of turn.",
+        "Reflexive Mixed Controller Test",
+    );
+
+    let execute = def.execute.as_ref().expect("execute");
+    let first = execute
+        .sub_ability
+        .as_ref()
+        .expect("PayCost must have WhenYouDo body");
+    match first.effect.as_ref() {
+        Effect::Pump {
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "the exact 'you control' target must remain controller-scoped"
+            );
+        }
+        other => panic!("expected first targeted Pump, got {other:?}"),
+    }
+
+    let second = first
+        .sub_ability
+        .as_ref()
+        .expect("reflexive chain must include the second target");
+    match second.effect.as_ref() {
+        Effect::Pump {
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "the exact 'that player controls' target must bind to the active/scoped turn player"
+            );
+        }
+        other => panic!("expected second targeted Pump, got {other:?}"),
+    }
+}
+
+/// CR 118.12 + CR 603.12: the generic reflexive optional-cost splitter only
+/// supports straight-line resolution costs. Disjunctive `OneOf` costs require a
+/// branch-choice payment flow, so they must not be exported as a supported
+/// optional `PayCost` until that flow exists.
+#[test]
+fn reflexive_optional_disjunctive_cost_remains_parser_gap() {
+    let def = parse_trigger_line(
+        "Whenever you discard a card, you may pay {1} or discard a card. When you do, draw a card.",
+        "Disjunctive Reflexive Test",
+    );
+    let execute = def.execute.as_ref().expect("execute");
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
+        "OneOf resolution costs must not be surfaced through the straight-line PayCost prompt"
+    );
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+        "unsupported reflexive optional costs should remain honest parser gaps, got {:?}",
+        execute.effect
+    );
 }
 
 /// Issue #1993: Halana and Alena, Partners — X in the counter clause must bind

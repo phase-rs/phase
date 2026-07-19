@@ -410,6 +410,13 @@ pub enum ProposedEvent {
         /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<Box<FaceDownProfile>>,
+        /// CR 614.12a + CR 616.1c + CR 707.2: Pre-entry copy payload for
+        /// Mystic Reflection-style replacements. The copied values ride the
+        /// event so later replacement passes can match the entering permanent
+        /// as it would exist after the copy effect, before the zone change is
+        /// delivered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_as_copy: Option<Box<CopyTokenSpec>>,
         applied: HashSet<AppliedReplacementKey>,
     },
     Damage {
@@ -707,6 +714,7 @@ impl ProposedEvent {
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            enter_as_copy: None,
             applied: HashSet::new(),
         }
     }

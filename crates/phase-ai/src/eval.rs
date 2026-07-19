@@ -166,6 +166,59 @@ impl EvaluationBreakdown {
     }
 }
 
+/// Single-authority **unweighted** feature vector for the tactical board eval —
+/// the Texel train/serve invariant. `evaluate_state_breakdown` is defined as
+/// `evaluate_features(..)? × weights`, so a feature harvested for offline weight
+/// fitting is byte-for-byte the value that multiplies the corresponding weight at
+/// serve time (see `crate::duel_suite::harvest::FeatureRow`, which extends this
+/// with the three strategic dimensions from `evaluate_with_strategy`).
+///
+/// Every field except `energy_offset` is a raw (self − opponent) differential
+/// that pairs with one `EvalWeights` field. `energy_offset` is a fixed-coefficient
+/// serve-time offset (`energy × 0.1`, CR 122.1) added **after** weighting, so it
+/// is excluded from [`EvalFeatures::weighted_total`] — see the energy contract in
+/// `evaluate_state_breakdown`.
+///
+/// The full fitted serve vector is `EvalFeatures` (minus `energy_offset`) plus
+/// `zone_bonus` (`zone_quality`), `SynergyGraph::board_synergy_bonus` (`synergy`),
+/// and `card_advantage::differential` (folded into `card_advantage` alongside
+/// `card_advantage_breakdown`). The two unfitted serve-time terms are
+/// `energy_offset` (this fixed offset) and `threat_adjustment` (a heuristic with
+/// no `EvalWeights` field).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EvalFeatures {
+    pub life: f64,
+    pub board_presence: f64,
+    pub board_power: f64,
+    pub board_toughness: f64,
+    pub hand_size: f64,
+    pub aggression: f64,
+    /// Unweighted non-creature-permanent differential — the `nc_diff` term that
+    /// the `card_advantage` weight multiplies in the tactical breakdown. The serve
+    /// `card_advantage` feature also folds in `card_advantage::differential`;
+    /// see `FeatureRow::extract`.
+    pub card_advantage_breakdown: f64,
+    /// Fixed-coefficient energy offset (`energy × 0.1`). Added after weighting, so
+    /// excluded from `weighted_total`.
+    pub energy_offset: f64,
+}
+
+impl EvalFeatures {
+    /// Weighted sum of every tactical feature **excluding** `energy_offset` (the
+    /// fixed serve-time offset added after weighting). Holds
+    /// `breakdown.total() == features.weighted_total(&w) + features.energy_offset`
+    /// by construction.
+    pub fn weighted_total(&self, w: &EvalWeights) -> f64 {
+        self.life * w.life
+            + self.board_presence * w.board_presence
+            + self.board_power * w.board_power
+            + self.board_toughness * w.board_toughness
+            + self.hand_size * w.hand_size
+            + self.aggression * w.aggression
+            + self.card_advantage_breakdown * w.card_advantage
+    }
+}
+
 pub fn strategic_intent(state: &GameState, player: PlayerId) -> StrategicIntent {
     let opponents = players::opponents(state, player);
     if opponents.is_empty() {
@@ -307,11 +360,18 @@ pub fn evaluate_for_planner(
     }
 }
 
-pub fn evaluate_state_breakdown(
-    state: &GameState,
-    player: PlayerId,
-    weights: &EvalWeights,
-) -> Result<EvaluationBreakdown, f64> {
+/// Extract the **unweighted** tactical feature vector from `player`'s
+/// perspective. Single authority for the feature math shared by the serve-time
+/// weighting ([`evaluate_state_breakdown`]) and offline Texel harvesting
+/// (`crate::duel_suite::harvest::FeatureRow::extract`).
+///
+/// Terminal short-circuits are identical to [`evaluate_state_breakdown`]: a
+/// game-over / lethal / all-opponents-dead position returns `Err(terminal_score)`
+/// rather than a feature vector, so harvesting skips label-leaking terminal
+/// positions by construction. Both the 2-player and multiplayer (threat-weighted)
+/// aggregations are covered — the harvested value is whatever multiplies the
+/// weight, so one extractor is path-agnostic.
+pub fn evaluate_features(state: &GameState, player: PlayerId) -> Result<EvalFeatures, f64> {
     // Check for game over
     if let WaitingFor::GameOver { winner } = &state.waiting_for {
         return Err(match winner {
@@ -337,7 +397,7 @@ pub fn evaluate_state_breakdown(
         return Err(WIN_SCORE);
     }
 
-    let mut breakdown = EvaluationBreakdown::default();
+    let mut features = EvalFeatures::default();
     let opp_count = opponents.len().max(1) as f64;
 
     // For multiplayer (3+), use threat-weighted opponent scoring
@@ -369,19 +429,17 @@ pub fn evaluate_state_breakdown(
         }
 
         // Life differential (against threat-weighted opponent)
-        breakdown.life = (p.life as f64 - weighted_opp_life) * weights.life;
+        features.life = p.life as f64 - weighted_opp_life;
 
         let (my_creatures, my_power, my_toughness, my_nc) = board_stats(state, player);
-        breakdown.board_presence =
-            (my_creatures as f64 - weighted_opp_creatures) * weights.board_presence;
-        breakdown.board_power = (my_power as f64 - weighted_opp_power) * weights.board_power;
-        breakdown.board_toughness =
-            (my_toughness as f64 - weighted_opp_toughness) * weights.board_toughness;
-        breakdown.hand_size = (p.hand.len() as f64 - weighted_opp_hand) * weights.hand_size;
-        breakdown.card_advantage = (my_nc as f64 - weighted_opp_nc) * weights.card_advantage;
+        features.board_presence = my_creatures as f64 - weighted_opp_creatures;
+        features.board_power = my_power as f64 - weighted_opp_power;
+        features.board_toughness = my_toughness as f64 - weighted_opp_toughness;
+        features.hand_size = p.hand.len() as f64 - weighted_opp_hand;
+        features.card_advantage_breakdown = my_nc as f64 - weighted_opp_nc;
 
         if p.life as f64 > weighted_opp_life && my_power > 0 {
-            breakdown.aggression = my_power as f64 * weights.aggression;
+            features.aggression = my_power as f64;
         }
     } else {
         // 2-player path: original logic (no threat weighting overhead)
@@ -403,29 +461,53 @@ pub fn evaluate_state_breakdown(
         }
 
         let avg_opp_life = total_opp_life as f64 / opp_count;
-        breakdown.life = (p.life as f64 - avg_opp_life) * weights.life;
+        features.life = p.life as f64 - avg_opp_life;
 
         let (my_creatures, my_power, my_toughness, my_nc) = board_stats(state, player);
-        breakdown.board_presence =
-            (my_creatures - total_opp_creatures) as f64 * weights.board_presence;
-        breakdown.board_power = (my_power - total_opp_power) as f64 * weights.board_power;
-        breakdown.board_toughness =
-            (my_toughness - total_opp_toughness) as f64 * weights.board_toughness;
+        features.board_presence = (my_creatures - total_opp_creatures) as f64;
+        features.board_power = (my_power - total_opp_power) as f64;
+        features.board_toughness = (my_toughness - total_opp_toughness) as f64;
 
         let avg_opp_hand = total_opp_hand_size as f64 / opp_count;
-        breakdown.hand_size = (p.hand.len() as f64 - avg_opp_hand) * weights.hand_size;
+        features.hand_size = p.hand.len() as f64 - avg_opp_hand;
 
         let avg_opp_nc = total_opp_nc as f64 / opp_count;
-        breakdown.card_advantage = (my_nc as f64 - avg_opp_nc) * weights.card_advantage;
+        features.card_advantage_breakdown = my_nc as f64 - avg_opp_nc;
 
         if p.life as f64 > avg_opp_life && my_power > 0 {
-            breakdown.aggression = my_power as f64 * weights.aggression;
+            features.aggression = my_power as f64;
         }
     }
 
     // CR 122.1: Energy counters are a minor resource — value each energy point
-    // as a small fraction of a card (comparable to scry).
-    breakdown.hand_size += p.energy as f64 * 0.1;
+    // as a small fraction of a card (comparable to scry). Fixed-coefficient
+    // offset applied AFTER weighting (see `evaluate_state_breakdown`), so it lives
+    // on `EvalFeatures` separately rather than folded into a weighted feature.
+    features.energy_offset = p.energy as f64 * 0.1;
+
+    Ok(features)
+}
+
+pub fn evaluate_state_breakdown(
+    state: &GameState,
+    player: PlayerId,
+    weights: &EvalWeights,
+) -> Result<EvaluationBreakdown, f64> {
+    let features = evaluate_features(state, player)?;
+    let mut breakdown = EvaluationBreakdown {
+        life: features.life * weights.life,
+        board_presence: features.board_presence * weights.board_presence,
+        board_power: features.board_power * weights.board_power,
+        board_toughness: features.board_toughness * weights.board_toughness,
+        hand_size: features.hand_size * weights.hand_size,
+        aggression: features.aggression * weights.aggression,
+        card_advantage: features.card_advantage_breakdown * weights.card_advantage,
+    };
+
+    // CR 122.1: energy is a fixed-coefficient offset added AFTER weighting, so
+    // `EvalFeatures::weighted_total` excludes it and it lands on `hand_size` here
+    // exactly as the historical `breakdown.hand_size += p.energy * 0.1` did.
+    breakdown.hand_size += features.energy_offset;
 
     Ok(breakdown)
 }
@@ -797,6 +879,98 @@ mod tests {
         assert!(
             krenko_value > frog_value,
             "equal bodies should inherit controller threat: Krenko={krenko_value}, Frog={frog_value}"
+        );
+    }
+
+    /// Row 1: `evaluate_state_breakdown` must equal `evaluate_features × weights`
+    /// with the energy offset added exactly once, AFTER weighting. With
+    /// `energy > 0` a regression that either drops the refactor or double-counts
+    /// energy diverges by a detectable margin.
+    #[test]
+    fn breakdown_total_equals_weighted_features_plus_energy() {
+        let mut state = make_state();
+        state.turn_number = 5; // mid phase
+        state.players[0].life = 18;
+        state.players[1].life = 11;
+        add_creature(&mut state, PlayerId(0), 4, 4, vec![]);
+        add_creature(&mut state, PlayerId(0), 2, 3, vec![]);
+        add_creature(&mut state, PlayerId(1), 3, 2, vec![]);
+        state.players[0].energy = 7; // non-vacuous energy_offset
+
+        let weights = EvalWeightSet::learned().mid;
+        let features = evaluate_features(&state, PlayerId(0)).expect("mid-game is non-terminal");
+        assert!(
+            features.energy_offset > 0.0,
+            "energy term must be non-vacuous"
+        );
+
+        let breakdown = evaluate_state_breakdown(&state, PlayerId(0), &weights)
+            .expect("mid-game is non-terminal");
+
+        assert!(
+            (breakdown.total() - (features.weighted_total(&weights) + features.energy_offset))
+                .abs()
+                < 1e-9,
+            "breakdown.total()={} must equal weighted_total + energy_offset={}",
+            breakdown.total(),
+            features.weighted_total(&weights) + features.energy_offset,
+        );
+    }
+
+    /// Row 1 hostile: terminal states short-circuit identically in both the
+    /// feature extractor and the weighted breakdown (GameOver + lethal-life).
+    #[test]
+    fn features_and_breakdown_agree_on_terminal_short_circuits() {
+        let weights = EvalWeights::default();
+
+        let mut over = make_state();
+        over.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        assert_eq!(
+            evaluate_features(&over, PlayerId(0)).unwrap_err(),
+            evaluate_state_breakdown(&over, PlayerId(0), &weights).unwrap_err(),
+        );
+        assert_eq!(
+            evaluate_features(&over, PlayerId(1)).unwrap_err(),
+            evaluate_state_breakdown(&over, PlayerId(1), &weights).unwrap_err(),
+        );
+
+        let mut lethal = make_state();
+        lethal.players[0].life = 0;
+        assert_eq!(
+            evaluate_features(&lethal, PlayerId(0)).unwrap_err(),
+            LOSS_SCORE,
+        );
+        assert_eq!(
+            evaluate_features(&lethal, PlayerId(0)).unwrap_err(),
+            evaluate_state_breakdown(&lethal, PlayerId(0), &weights).unwrap_err(),
+        );
+    }
+
+    /// Row 1 hostile: the identity also holds on a 3-player threat-weighted
+    /// position (the multiplayer aggregation branch), with energy non-zero.
+    #[test]
+    fn breakdown_identity_holds_for_threat_weighted_multiplayer() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 9; // late phase
+        add_creature(&mut state, PlayerId(0), 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(1), 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(2), 1, 1, vec![]);
+        state.players[0].energy = 3;
+
+        let weights = EvalWeightSet::learned().late;
+        let features = evaluate_features(&state, PlayerId(0)).expect("non-terminal");
+        let breakdown =
+            evaluate_state_breakdown(&state, PlayerId(0), &weights).expect("non-terminal");
+
+        assert!(
+            (breakdown.total() - (features.weighted_total(&weights) + features.energy_offset))
+                .abs()
+                < 1e-9,
+            "multiplayer identity must hold: {} vs {}",
+            breakdown.total(),
+            features.weighted_total(&weights) + features.energy_offset,
         );
     }
 

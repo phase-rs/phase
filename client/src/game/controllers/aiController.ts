@@ -84,6 +84,7 @@ export function createAIController(config: AIControllerConfig): AIController {
   let lastWaitingForKey: string | null = null;
   let consecutiveFailures = 0;
   let totalFailures = 0;
+  let lastDispatchError: string | null = null;
   const MAX_CONSECUTIVE_FAILURES = 3;
 
   const difficultyByPlayerId = new Map(config.seats.map((s) => [s.playerId, s.difficulty]));
@@ -215,6 +216,7 @@ export function createAIController(config: AIControllerConfig): AIController {
       lastWaitingForKey = key;
       consecutiveFailures = 0;
       totalFailures = 0;
+      lastDispatchError = null;
     }
 
     // Hard stop: if we've burned through both the normal and fallback paths
@@ -227,7 +229,7 @@ export function createAIController(config: AIControllerConfig): AIController {
         `AI controller halting: ${totalFailures} failures on ${waitingFor.type}`,
         "error",
       );
-      notifyEngineLost("ai-controller-stuck");
+      notifyEngineLost(`ai-controller-stuck:${waitingFor.type}`);
       stop();
       return;
     }
@@ -240,58 +242,57 @@ export function createAIController(config: AIControllerConfig): AIController {
       // Guard against re-entry: set pending so subscription callbacks during
       // the fallback dispatch don't trigger another fallback cascade.
       pending = true;
-      // Resolve a guaranteed-legal escape action. A hardcoded empty combat
-      // declaration is NOT always legal — CR 508.1d / CR 701.15b require
-      // goaded / "attacks if able" creatures to be declared. Instead, ask the
-      // engine for its legal-action list (the single authority for legality).
-      // Non-priority legal actions are already scoped to the current
-      // WaitingFor; Priority fallback keeps preferring PassPriority as the
-      // least invasive escape.
-      // CancelCast escapes a stuck casting flow; PassPriority is the final
-      // fallthrough — never dispatch `undefined`.
-      const fallbackPromise: Promise<GameAction> = state.has_pending_cast
-        ? Promise.resolve<GameAction>({ type: "CancelCast" })
-        : (() => {
-            const { adapter } = useGameStore.getState();
-            if (!adapter) return Promise.resolve<GameAction>({ type: "PassPriority" });
-            return adapter.getLegalActions().then((result) => {
-              if (waitingFor.type === "Priority") {
-                return (
-                  result.actions.find((a) => a.type === "PassPriority") ??
-                  { type: "PassPriority" }
-                );
-              }
-              return result.actions[0] ?? { type: "PassPriority" };
-            });
-          })();
-      // Dispatch the fallback as the authorized submitter being unstuck —
-      // NEVER as the local human (which `checkAndSchedule` already excludes via
-      // the `waitingPlayerId === PLAYER_ID` early-return above, CR 723.5). The
-      // engine guard would reject a non-authorized actor. A rejection from
-      // getLegalActions routes into the existing .catch() below.
-      fallbackPromise
-        .then((fallback) => dispatchAction(fallback, waitingPlayerId))
-        .then(() => {
-          consecutiveFailures = 0;
-          totalFailures = 0;
-        })
-        .catch((e) => {
-          // Increment both counters to prevent infinite fallback retry.
-          consecutiveFailures++;
-          totalFailures++;
-          debugLog(
-            `AI fallback also failed (${consecutiveFailures}/${totalFailures}): ${e instanceof Error ? e.message : String(e)}`,
-            "warn",
-          );
-        })
-        .finally(() => {
-          pending = false;
-          if (active) checkAndSchedule();
-        });
+      runEscapeFallback(waitingFor, waitingPlayerId).finally(() => {
+        pending = false;
+        if (active) checkAndSchedule();
+      });
       return;
     }
 
     scheduleAction(waitingPlayerId);
+  }
+
+  function pickEscapeAction(
+    waitingFor: WaitingFor,
+    state: GameState,
+  ): Promise<GameAction> {
+    if (state.has_pending_cast) {
+      return Promise.resolve({ type: "CancelCast" });
+    }
+    const { adapter } = useGameStore.getState();
+    if (!adapter) return Promise.resolve({ type: "PassPriority" });
+    return adapter.getLegalActions().then((result) => {
+      if (waitingFor.type === "Priority") {
+        return (
+          result.actions.find((a) => a.type === "PassPriority") ??
+          { type: "PassPriority" }
+        );
+      }
+      return result.actions[0] ?? { type: "PassPriority" };
+    });
+  }
+
+  async function runEscapeFallback(
+    waitingFor: WaitingFor,
+    waitingPlayerId: number,
+  ): Promise<void> {
+    const state = useGameStore.getState().gameState;
+    if (!state) return;
+    try {
+      const fallback = await pickEscapeAction(waitingFor, state);
+      await dispatchAction(fallback, waitingPlayerId);
+      consecutiveFailures = 0;
+      totalFailures = 0;
+      lastDispatchError = null;
+    } catch (e) {
+      consecutiveFailures++;
+      totalFailures++;
+      lastDispatchError = e instanceof Error ? e.message : String(e);
+      debugLog(
+        `AI fallback also failed (${consecutiveFailures}/${totalFailures}): ${lastDispatchError}`,
+        "warn",
+      );
+    }
   }
 
   function scheduleAction(playerId: number) {
@@ -386,10 +387,15 @@ export function createAIController(config: AIControllerConfig): AIController {
         }
         if (action == null) {
           debugLog(
-            `AI getAiAction returned null for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"})`,
+            `AI getAiAction returned null for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"}), dispatching legal-action fallback`,
             "warn",
           );
-          failed = true;
+          const waitingFor = currentWaitingFor;
+          if (waitingFor != null) {
+            await runEscapeFallback(waitingFor, playerId);
+          } else {
+            failed = true;
+          }
           return;
         }
         const guess = describeAiCardPredicateGuess(action, currentWaitingFor, currentGameState);
@@ -405,8 +411,10 @@ export function createAIController(config: AIControllerConfig): AIController {
         // Successful dispatch — reset both failure counters
         consecutiveFailures = 0;
         totalFailures = 0;
+        lastDispatchError = null;
       } catch (e) {
-        debugLog(`AI error choosing action: ${e instanceof Error ? e.message : String(e)}`);
+        lastDispatchError = e instanceof Error ? e.message : String(e);
+        debugLog(`AI error choosing action: ${lastDispatchError}`);
         failed = true;
       } finally {
         if (failed) {

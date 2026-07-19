@@ -1609,6 +1609,25 @@ fn filter_mentions_exiled_by_source(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 115.1: True when a `ChangeZone` clause selects from the battlefield
+/// (explicitly or by permanent-type default) rather than a private/off-BF zone.
+fn change_zone_selects_battlefield_permanent(origin: Option<Zone>, target: &TargetFilter) -> bool {
+    if target.is_context_ref() {
+        return false;
+    }
+    if origin.is_some_and(|zone| zone != Zone::Battlefield) {
+        return false;
+    }
+    if let Some(zone) = target.extract_in_zone() {
+        return zone == Zone::Battlefield;
+    }
+    let zones = target.extract_zones();
+    if !zones.is_empty() {
+        return zones == [Zone::Battlefield];
+    }
+    matches!(target, TargetFilter::Typed(_))
+}
+
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
     if let Effect::PutCounter { target, .. } = &clause_ir.parsed.effect {
         let lower = clause_ir
@@ -1661,19 +1680,27 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
                 .extract_zones()
                 .iter()
                 .any(|zone| *zone != Zone::Battlefield);
-    if !off_battlefield_origin {
-        return TargetChoiceTiming::Stack;
-    }
-
     let lower = clause_ir
         .source
         .fragment()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if nom_primitives::scan_contains(&lower, "target ") {
+    if off_battlefield_origin {
+        if nom_primitives::scan_contains(&lower, "target ") {
+            TargetChoiceTiming::Stack
+        } else {
+            TargetChoiceTiming::Resolution
+        }
+    } else if nom_primitives::scan_contains(&lower, "target ") {
         TargetChoiceTiming::Stack
-    } else {
+    } else if change_zone_selects_battlefield_permanent(*origin, target) {
+        // CR 115.1: battlefield non-targeted picks (Sothera edict class) resolve
+        // via EffectZoneChoice after player_scope rebinding, not stack targeting.
+        // Graveyard/hand/library seeds without "target" (Deadly Cover-Up) keep
+        // stack-time selection — their filters carry explicit InZone constraints.
         TargetChoiceTiming::Resolution
+    } else {
+        TargetChoiceTiming::Stack
     }
 }
 

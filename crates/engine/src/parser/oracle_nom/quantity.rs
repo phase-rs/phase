@@ -3642,6 +3642,25 @@ fn parse_for_each_card_drawn_this_way(input: &str) -> OracleResult<'_, QuantityR
     Ok((rest, QuantityRef::EventContextAmount))
 }
 
+/// CR 120.1 + CR 603.2c + CR 608.2c: "opponent(s) dealt damage [this way]"
+/// inside a trigger effect counts the distinct damaged opponents carried by the
+/// current trigger event batch. This is not `EventContextAmount`: the scalar
+/// damage amount is a separate quantity axis.
+pub(crate) fn parse_event_context_opponent_dealt_damage(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = opt(alt((tag("the number of "), tag("number of ")))).parse(input)?;
+    let (rest, _) = alt((tag("opponents"), tag("opponent"))).parse(input)?;
+    let (rest, _) = tag(" dealt damage").parse(rest)?;
+    let (rest, _) = opt(tag(" this way")).parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::EventContextPlayerCount {
+            filter: PlayerFilter::Opponent,
+        },
+    ))
+}
+
 /// CR 106.4: "unspent [color] mana you have" counts floating mana in the
 /// controller's mana pool.
 fn parse_for_each_unspent_mana(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -3656,6 +3675,7 @@ fn parse_for_each_clause_ref_with_they_controller(
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     alt((
+        parse_event_context_opponent_dealt_damage,
         parse_for_each_card_drawn_this_way,
         alt((
             parse_for_each_one_life_changed,
@@ -5156,8 +5176,8 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, ControllerRef, FilterProp, ObjectProperty, QuantityRef, SharedQuality,
-        SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
+        AggregateFunction, ControllerRef, FilterProp, ObjectProperty, PlayerFilter, QuantityRef,
+        SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -5169,6 +5189,30 @@ mod tests {
                 right: Box::new(pt_stat_quantity(right, scope)),
             }
         );
+    }
+
+    #[test]
+    fn for_each_opponent_dealt_damage_is_event_context_player_count() {
+        for phrase in [
+            "opponent dealt damage",
+            "opponents dealt damage",
+            "opponent dealt damage this way",
+            "opponents dealt damage this way",
+            "the number of opponent dealt damage this way",
+            "the number of opponents dealt damage this way",
+            "number of opponents dealt damage this way",
+        ] {
+            let (rest, qty) = parse_for_each_clause_ref_complete(phrase)
+                .unwrap_or_else(|error| panic!("phrase {phrase:?}: {error:?}"));
+            assert_eq!(rest, "");
+            assert_eq!(
+                qty,
+                QuantityRef::EventContextPlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+                "phrase {phrase:?} must count trigger-event players"
+            );
+        }
     }
 
     #[test]

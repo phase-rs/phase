@@ -107,6 +107,7 @@ fn main() {
         player: active,
         valid_attacker_ids: valid_attacker_ids.clone(),
         valid_attack_targets: valid_attack_targets.clone(),
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 

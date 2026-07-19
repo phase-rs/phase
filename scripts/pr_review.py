@@ -2938,6 +2938,26 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         label = packet.get("policy", {}).get("labels", {}).get("frontend_deferred")
         if label:
             recommendation["label_to_apply"] = label
+        frontend_paths = (classification.get("path_classes") or {}).get("frontend") or []
+        path_list = ", ".join(f"`{path}`" for path in frontend_paths) or "no paths returned"
+        recommendation["defer_evidence"] = {
+            "head_sha": head,
+            "author": pr.get("author_login"),
+            "surface": classification.get("surface"),
+            "frontend_paths": frontend_paths,
+            "policy_reason": reason,
+        }
+        recommendation["defer_comment"] = (
+            "<!-- pr-review-deferred -->\n"
+            "**Deferred by maintainer intake policy — not ignored.**\n\n"
+            f"This current head (`{head}`) was triaged as a frontend-only change "
+            f"({path_list}) by `{pr.get('author_login') or 'unknown'}`. The local "
+            "frontend-review allowlist does not include this author, so this route "
+            "does not perform an implementation-diff review or approve the PR.\n\n"
+            "A maintainer must explicitly take this PR or add a local frontend-review "
+            "exception before it can receive substantive review. The defer label is "
+            "a routing marker only, not a verdict on the change."
+        )
     return recommendation
 
 

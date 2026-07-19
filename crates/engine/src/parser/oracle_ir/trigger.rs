@@ -10,8 +10,9 @@ use super::ast::parsed_clause;
 use super::context::ParseContext;
 use super::effect_chain::EffectChainIr;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ModalChoice, TargetFilter,
-    TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayModifier,
+    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ModalChoice,
+    TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    UnlessPayModifier,
 };
 use crate::types::triggers::TriggerMode;
 
@@ -42,6 +43,9 @@ pub(crate) struct TriggerIr {
 pub(crate) enum TriggerBody {
     /// Normal effect chain — lowering calls `lower_effect_chain_ir`.
     EffectChain(EffectChainIr),
+    /// CR 118.12 + CR 603.12: A resolution-time optional cost and the
+    /// reflexive effect that follows when the player pays it.
+    ReflexivePayment(Box<ReflexivePaymentIr>),
     /// CR 700.2: An inline modal's marker clause and its already-lowered mode
     /// bodies. The marker still flows through ordinary trigger-chain lowering;
     /// this payload carries the modal metadata no clause can represent.
@@ -51,6 +55,12 @@ pub(crate) enum TriggerBody {
     Vote(Box<VoteIr>),
     /// CR 700.3: A pile-separation block retains its semantic root effect.
     Pile(Box<PileIr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ReflexivePaymentIr {
+    pub(crate) cost: AbilityCost,
+    pub(crate) effect_chain: EffectChainIr,
 }
 
 /// CR 700.2: Typed inline-modal trigger body.

@@ -6,9 +6,10 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{
     battlefield_active_statics, game_active_statics, game_functioning_statics, static_kind_present,
 };
+use crate::game::game_object::GameObject;
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Duration, TargetFilter, TypedFilter,
+    ContinuousModification, ControllerRef, Duration, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -718,71 +719,100 @@ pub fn check_static_ability(
     // CR 114.4: Abilities of emblems function in the command zone.
     // Check both battlefield objects and command zone emblems. The functioning
     // gate is applied before context-specific condition evaluation below.
-    for (obj, def) in game_functioning_statics(state) {
-        if def.mode != mode {
-            continue;
-        }
+    game_functioning_statics(state).any(|(obj, def)| {
+        def.mode == mode && static_ability_match_applies(state, &mode, context, obj, def)
+    })
+}
 
-        // Check affected filter if present (typed TargetFilter)
-        if let Some(ref affected) = def.affected {
-            if !static_filter_matches(state, context, affected, obj.id) {
-                continue;
-            }
+/// CR 604.1: the shared per-`(obj, def)` applicability predicate — the single
+/// authority both `check_static_ability` (early-return bool driver) and
+/// `check_static_ability_sources` (full-scan collector driver) consume. Returns
+/// true exactly where the original `check_static_ability` loop reached
+/// `return true` for a matching-mode definition. Callers pre-check
+/// `def.mode == *mode`.
+fn static_ability_match_applies(
+    state: &GameState,
+    mode: &StaticMode,
+    context: &StaticCheckContext,
+    obj: &GameObject,
+    def: &StaticDefinition,
+) -> bool {
+    // Check affected filter if present (typed TargetFilter)
+    if let Some(ref affected) = def.affected {
+        if !static_filter_matches(state, context, affected, obj.id) {
+            return false;
         }
-
-        if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
-            continue;
-        }
-
-        // CR 508.1d: Scoped attack prohibitions (Eriette, Propaganda-family flat
-        // restrictions) only apply when the declared target matches `attack_defended`.
-        // When no target is in context (eligibility queries), skip scoped statics so
-        // the creature remains able to attack other players.
-        if matches!(
-            def.mode,
-            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-        ) {
-            if let Some(defended) = def.attack_defended.as_ref() {
-                if !super::restrictions::attack_target_matches_defended_scope(
-                    state,
-                    context.attack_target.as_ref(),
-                    defended,
-                    obj.controller,
-                    obj.owner,
-                ) {
-                    continue;
-                }
-            }
-        }
-
-        // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
-        // against the affected object's controller (the player whose creature/spell
-        // is restricted), distinct from the source-relative `condition` gate above.
-        // Used by "each opponent who [did X] this turn can't [Y]" prohibitions
-        // (Angelic Arbiter's attack clause).
-        if let Some(ref cond) = def.per_player_condition {
-            let affected_player = context
-                .target_id
-                .and_then(|id| state.objects.get(&id))
-                .map(|o| o.controller)
-                .or(context.player_id);
-            match affected_player {
-                Some(p) => {
-                    if !crate::game::restrictions::evaluate_condition(state, p, obj.id, cond) {
-                        continue;
-                    }
-                }
-                // No affected player in context -> cannot evaluate a per-player
-                // gate; fail closed (skip this static) so an under-specified query
-                // never over-applies the prohibition.
-                None => continue,
-            }
-        }
-
-        return true;
     }
 
-    false
+    if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
+        return false;
+    }
+
+    // CR 508.1d: Scoped attack prohibitions (Eriette, Propaganda-family flat
+    // restrictions) only apply when the declared target matches `attack_defended`.
+    // When no target is in context (eligibility queries), skip scoped statics so
+    // the creature remains able to attack other players.
+    if matches!(mode, StaticMode::CantAttack | StaticMode::CantAttackOrBlock) {
+        if let Some(defended) = def.attack_defended.as_ref() {
+            if !super::restrictions::attack_target_matches_defended_scope(
+                state,
+                context.attack_target.as_ref(),
+                defended,
+                obj.controller,
+                obj.owner,
+            ) {
+                return false;
+            }
+        }
+    }
+
+    // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
+    // against the affected object's controller (the player whose creature/spell
+    // is restricted), distinct from the source-relative `condition` gate above.
+    // Used by "each opponent who [did X] this turn can't [Y]" prohibitions
+    // (Angelic Arbiter's attack clause).
+    if let Some(ref cond) = def.per_player_condition {
+        let affected_player = context
+            .target_id
+            .and_then(|id| state.objects.get(&id))
+            .map(|o| o.controller)
+            .or(context.player_id);
+        match affected_player {
+            Some(p) => {
+                if !crate::game::restrictions::evaluate_condition(state, p, obj.id, cond) {
+                    return false;
+                }
+            }
+            // No affected player in context -> cannot evaluate a per-player
+            // gate; fail closed (skip this static) so an under-specified query
+            // never over-applies the prohibition.
+            None => return false,
+        }
+    }
+
+    true
+}
+
+/// CR 604.1: sorted-agnostic carriers of every functioning static of `mode`
+/// applying to `context`. Same per-`(obj, def)` predicate as
+/// `check_static_ability` (`static_ability_match_applies`); this is the
+/// full-scan collector driver, on the display/payload path only. The
+/// `static_kind_present` fast-empty gate is preserved.
+pub fn check_static_ability_sources(
+    state: &GameState,
+    mode: StaticMode,
+    context: &StaticCheckContext,
+) -> Vec<ObjectId> {
+    if !static_kind_present(state, mode.kind()) {
+        return Vec::new();
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    game_functioning_statics(state)
+        .filter(|(obj, def)| {
+            def.mode == mode && static_ability_match_applies(state, &mode, context, obj, def)
+        })
+        .map(|(obj, _)| obj.id)
+        .collect()
 }
 
 /// CR 611.1 + CR 611.3: Scan `state.transient_continuous_effects` for an effect

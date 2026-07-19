@@ -165,6 +165,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     "mirror-sigil sergeant",
     // GraveyardSize read × self-return-from-graveyard — self-limiting threshold.
     "persistent marshstalker",
+    // ObjectCount(creature card in your graveyard) == 1 intervening-if read ×
+    // optional self-return-from-graveyard — self-limiting (second copy breaks the
+    // gate; issue #5983 fixture regen surfaced this card in the sweep corpus).
+    "nether spirit",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.

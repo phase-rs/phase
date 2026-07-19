@@ -2517,6 +2517,47 @@ pub enum ProhibitedActivity {
     },
 }
 
+/// Why a specific activated ability is currently blocked from activation.
+///
+/// Display read-out only (populated by the derive sweep): carries no enforcement
+/// authority. The three arms mirror the three enforcement predicates in
+/// `game::casting`, in the same order those gates consult them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AbilityBlockKind {
+    /// CR 602.5: A static ability prohibits this ability from being activated at
+    /// all (Pithing Needle's named source, Immortal Sun's loyalty abilities).
+    CantBeActivated,
+    /// CR 602.5 + CR 117.1b: A timing restriction forbids activation right now
+    /// (City of Solitude — only during the affected player's own turn).
+    CantActivateDuring,
+    /// CR 602.5: A temporary continuous effect prohibits this activity axis for
+    /// the affected players (Kang-class `ProhibitActivity`).
+    Prohibited,
+}
+
+/// A block reason paired with every prohibiting source object of this kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AbilityBlockReason {
+    /// CR 602.5: sorted, deduped permanents whose static/effect each independently
+    /// impose this block kind (two Pithing Needles naming the same card → both).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<ObjectId>,
+    #[serde(flatten)]
+    pub kind: AbilityBlockKind,
+}
+
+/// A single blocked-ability read-out entry: which ability index is blocked and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbilityBlockEntry {
+    /// Index into the object's activated-ability definition space
+    /// (`activated_ability_definitions`): `0..printed_len` for printed abilities,
+    /// `printed_len + offset` for runtime-granted ones.
+    pub ability_index: usize,
+    #[serde(flatten)]
+    pub reason: AbilityBlockReason,
+}
+
 /// When a game restriction expires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -5171,6 +5212,15 @@ pub enum ObjectScope {
     /// hand. Fail-closed to a null read (→ 0) when no "other" entry exists (empty
     /// library or an illegal target on resolution, CR 608.2b).
     OtherRevealedCard,
+    /// CR 607.2a + CR 108.3 + CR 202.3: The single source-linked exiled card
+    /// that the resolving ability's CONTROLLER OWNS — "the card you own exiled
+    /// this way". Resolved over `linked_exile_cards_for_source(state,
+    /// ability.source_id)` selecting `owner == ability.controller`. Distinct from
+    /// `OtherRevealedCard` (a per-resolution reveal-local, chosen by exclusion):
+    /// this is a source-persistent exile-pile member selected by ownership.
+    /// Mana-value-only referent today. NOTE: a THIRD set-member ObjectScope should
+    /// trigger a `SetMember { set, selector }` parameterization round.
+    OwnedLinkedExileCard,
 }
 
 /// Source set for counting distinct card types.
@@ -5633,6 +5683,12 @@ pub enum QuantityRef {
     /// CR 603.7c: Numeric value from the triggering event.
     /// Extracts amount/count from DamageDealt, LifeChanged, CardsDrawn, CounterAdded, etc.
     EventContextAmount,
+    /// CR 120.1 + CR 603.2c + CR 608.2c: Count distinct players named by the
+    /// current triggering event batch, after applying a player filter relative
+    /// to the resolving ability's controller. Used by "for each opponent dealt
+    /// damage" on one-or-more damage triggers: the count is the number of
+    /// opponents in the trigger event batch, not the amount of damage dealt.
+    EventContextPlayerCount { filter: PlayerFilter },
     /// CR 603.10a + CR 603.6e: Count of attachments of a given kind that were attached
     /// to the leaving-battlefield object at the moment it left, optionally filtered by
     /// attachment controller. Resolved via the triggering `ZoneChangeRecord`'s
@@ -19338,6 +19394,27 @@ pub struct StaticDefinition {
     /// Piper, Marble Priest; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 508.1d + CR 611.2c: The object that grafted this static onto its
+    /// carrier (the ForceAttack/Encore/mass-coerce source for a
+    /// `MustAttackPlayer` requirement). Stamped at materialization from the
+    /// resolving continuous effect's `source_id`, but ONLY for static modes in
+    /// the directing-source attribution class (see
+    /// `static_mode_carries_directing_source` in game/layers.rs) — mirrors the
+    /// conditional `source_controller` stamp. `None` = either an intrinsic def
+    /// or a grafted mode outside that class → the carrier object is its own
+    /// source (combat attributes the creature itself).
+    ///
+    /// This is a stable *reference* captured at graft time, not a snapshot of
+    /// the source's characteristics; per CR 611.2c the requirement persists
+    /// after the source leaves the battlefield, so this id may reference a
+    /// departed object. Consumers (combat source collector, frontend badge)
+    /// tolerate a departed id — it is never dereferenced in the collector.
+    ///
+    /// Serde-defaulted so pre-existing serialized statics (all `None`)
+    /// round-trip unchanged; only ever `Some` on the derived (layer-rebuilt)
+    /// `static_definitions`, never on serialized `base_static_definitions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_object: Option<crate::types::identifiers::ObjectId>,
     /// CR 702.11e + CR 609.4 + CR 109.5: For an object-scoped `IgnoreHexproof`
     /// static (one carrying an `affected` filter), which players' spells and
     /// abilities receive the "as though it didn't have hexproof" targeting
@@ -19375,6 +19452,7 @@ impl StaticDefinition {
             description: None,
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         }
     }
@@ -19419,6 +19497,15 @@ impl StaticDefinition {
     /// field doc). Set at graft time by the `AddStaticMode` layer arm.
     pub fn source_controller(mut self, controller: crate::types::player::PlayerId) -> Self {
         self.source_controller = Some(controller);
+        self
+    }
+
+    /// CR 611.2c: Stamp the directing object as this grafted static's source
+    /// (see the `source_object` field doc). Set at graft time by the
+    /// `AddStaticMode` layer arm from `effect.source_id`, gated on
+    /// `static_mode_carries_directing_source`.
+    pub fn source_object(mut self, source: crate::types::identifiers::ObjectId) -> Self {
+        self.source_object = Some(source);
         self
     }
 
@@ -20702,18 +20789,20 @@ impl CopyCountStatus {
 /// CR 608.2c: Distinguishes WHY an immediately-chained `ParentTarget` child
 /// ability was handed off with nothing to act on. The three sources are
 /// mutually exclusive per hand-off (only one effect can be the immediate
-/// parent of a given child), and each is consulted by exactly one downstream
-/// site, so they used to be three parallel boolean fields on `ResolvedAbility`
-/// / `GameState` before being consolidated here (see the PR #5834/#5836
-/// review that requested this).
+/// parent of a given child). Downstream consumers inspect the typed reason only
+/// when their exact `ParentTarget` operation needs to distinguish a missing
+/// referent from an ordinary empty target list. These used to be three parallel
+/// boolean fields on `ResolvedAbility` / `GameState` before being consolidated
+/// here (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
     /// CR 401.5 (issue #1365): A `Dig` looked at an empty library. Consulted
-    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
-    /// to resolve a `target: ParentTarget` with no selection to NO target
-    /// instead of the generic self-fallback, which would otherwise move the
-    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
-    /// it just found empty.
+    /// by exact `ParentTarget` no-op guards: the `PutAtLibraryPosition` Dig-tail
+    /// seam (`put_on_top.rs`) avoids the generic self-fallback, and optional
+    /// cast/play operations avoid offering a nonexistent card regardless of
+    /// whether their driver is immediate or lingering.
+    /// Without the first guard, the Dig's own source (e.g. a reanimated
+    /// Thassa's Oracle) would move into the library it just found empty.
     Dig,
     /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
     /// that name the missing choice through `ParentTarget` (e.g. a chained
@@ -22615,6 +22704,7 @@ mod tests {
             description: Some("Other creatures you control get +1/+1.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
@@ -22907,6 +22997,7 @@ mod tests {
                 description: None,
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),

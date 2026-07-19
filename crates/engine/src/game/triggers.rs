@@ -8357,6 +8357,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
@@ -23465,6 +23466,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -24174,6 +24176,7 @@ pub mod tests {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                valid_attack_targets_by_attacker: None,
                 attacker_constraints: Default::default(),
             };
 
@@ -24262,6 +24265,7 @@ pub mod tests {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                valid_attack_targets_by_attacker: None,
                 attacker_constraints: Default::default(),
             };
 
@@ -24549,6 +24553,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -24795,6 +24800,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -25116,6 +25122,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 

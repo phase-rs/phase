@@ -20,6 +20,8 @@ export interface BlockerConstraint {
   objectId: ObjectId;
   kind: CombatRequirement["kind"];
   status: BlockerConstraintStatus;
+  /** Engine-provided objects imposing this constraint (CR 509.1b/c). */
+  sources: ObjectId[];
 }
 
 export interface BlockerConstraints {
@@ -59,9 +61,19 @@ export function useBlockerConstraints(): BlockerConstraints {
           ? "satisfied"
           : "pending";
         if (status === "pending") unsatisfiedMustBlockCount += 1;
-        byObject.set(objectId, { objectId, kind: requirement.kind, status });
+        byObject.set(objectId, {
+          objectId,
+          kind: requirement.kind,
+          status,
+          sources: requirement.sources ?? [],
+        });
       } else if (requirement.kind === "CantBlock") {
-        byObject.set(objectId, { objectId, kind: requirement.kind, status: "info" });
+        byObject.set(objectId, {
+          objectId,
+          kind: requirement.kind,
+          status: "info",
+          sources: requirement.sources ?? [],
+        });
       }
     }
 

@@ -191,6 +191,7 @@ mod tests {
                 player: AI,
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                valid_attack_targets_by_attacker: None,
                 attacker_constraints: Default::default(),
             },
             candidates: Vec::new(),

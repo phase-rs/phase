@@ -459,6 +459,41 @@ describe("getBoardChoiceView", () => {
     ).toBeNull();
   });
 
+  it("maps resolution TapCreatures PayCost to a non-cancellable board choice", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "TapCreatures" },
+        choices: [4, 5],
+        count: 2,
+        min_count: 2,
+        resume: { type: "Resolution" },
+      },
+    };
+
+    const choice = getBoardChoiceView(
+      waitingFor,
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "tap",
+      selection: { type: "exactCount", count: 2 },
+      response: { type: "SelectCards" },
+      cancelAction: undefined,
+    });
+    expect(choice && buildBoardChoiceAction(choice, [4, 5])).toEqual({
+      type: "SelectCards",
+      data: { cards: [4, 5] },
+    });
+  });
+
   it("keeps PayCost choices modal-only unless every candidate is on the battlefield", () => {
     const waitingFor: WaitingFor = {
       type: "PayCost",

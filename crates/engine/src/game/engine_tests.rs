@@ -1500,6 +1500,7 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
         player: PlayerId(0),
         valid_attacker_ids: vec![bombardiers],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     apply_as_current(
@@ -2393,7 +2394,7 @@ fn set_may_trigger_auto_choice_clear_all_is_actor_scoped() {
     let p0_key = may_trigger_key(PlayerId(0), ObjectId(500));
     let p0_key2 = may_trigger_key(PlayerId(0), ObjectId(501));
     let p1_key = may_trigger_key(PlayerId(1), ObjectId(600));
-    state.set_may_trigger_auto_choice(p0_key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(p0_key.clone(), AutoMayChoice::Accept);
     state.set_may_trigger_auto_choice(p0_key2, AutoMayChoice::Decline);
     state.set_may_trigger_auto_choice(p1_key, AutoMayChoice::Accept);
     assert_eq!(state.may_trigger_auto_choices.len(), 3);
@@ -2657,6 +2658,7 @@ fn concede_owner_of_waiting_for_advances_state() {
         player: PlayerId(1),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 
@@ -6172,6 +6174,7 @@ fn setup_tempest_hawk_attack(library_hawk_ids: &[u64]) -> (GameState, ObjectId, 
         player: PlayerId(0),
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 

@@ -3043,11 +3043,14 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "Activated abilities cost {N} less/more to activate [unless they're mana abilities]" (global)
-    // --- "Abilities you activate [that aren't mana abilities] cost {N} less/more to activate" (activator) ---
-    // CR 601.2f + CR 118.7 + CR 605.1a: Unscoped (Suppression Field: "Activated
-    // abilities cost {2} more to activate unless they're mana abilities") or
-    // activator-scoped (Zirda, the Dawnwaker: "Abilities you activate that aren't
-    // mana abilities cost {2} less to activate") activated-ability cost modifier.
+    // --- "Abilities [you|your opponents] activate [that aren't mana abilities] cost {N} less/more to activate" (activator) ---
+    // CR 601.2f + CR 118.7 + CR 605.1a + CR 602.2: Unscoped (Suppression Field:
+    // "Activated abilities cost {2} more to activate unless they're mana
+    // abilities"), controller-activator (Zirda, the Dawnwaker: "Abilities you
+    // activate that aren't mana abilities cost {2} less to activate"), or
+    // opponent-activator (Tithe Taker: "abilities your opponents activate cost
+    // {1} more to activate unless they're mana abilities") activated-ability cost
+    // modifier.
     // The scoped "Activated abilities OF <subject>" form is owned by the branch
     // above; this handles the two subjects that carry no "of <subject>" filter.
     // `keyword == "activated"` matches every activated ability at runtime; the
@@ -3062,6 +3065,27 @@ pub(crate) fn parse_static_line_inner(
     if let Some(((activator, exemption, amount, mode), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
             let (i, (activator, prefix_exempt)) = alt((
+                // CR 602.2: opponent-activator scope — "abilities your opponents
+                // activate" (Tithe Taker) keys the adjustment off an OPPONENT of
+                // the static's controller activating the ability, not the
+                // controller. The runtime resolves `PlayerFilter::Opponent`
+                // against the static's controller (`is_opponent`) in
+                // `apply_one_reduce_ability_cost`. Ordered before the "you
+                // activate" arm so the longer, more specific subject is tried
+                // first. The target-restricted sibling (Kopala, Warden of Waves:
+                // "…activate that target a Merfolk you control cost {2}…") is NOT
+                // covered here — its intervening target clause breaks " cost {"
+                // and the branch declines (fail-closed); modeling that filter on
+                // `ReduceAbilityCost` is a separate runtime change.
+                map(
+                    (
+                        tag("abilities your opponents activate"),
+                        opt(tag(" that aren't mana abilities")),
+                    ),
+                    |(_, exempt): (&str, Option<&str>)| {
+                        (Some(PlayerFilter::Opponent), exempt.is_some())
+                    },
+                ),
                 map(
                     (
                         tag("abilities you activate"),

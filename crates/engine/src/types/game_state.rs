@@ -10,7 +10,7 @@ use super::ability::{
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
     ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification, ControlWindow,
-    CopyChooseScope, CopyScale, CostPaidObjectSnapshot, CounterCostSelection,
+    CopiableValues, CopyChooseScope, CopyScale, CostPaidObjectSnapshot, CounterCostSelection,
     DelayedTriggerCondition, Duration, EffectKind, FaceDownProfile, GameRestriction, KeywordAction,
     KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
     ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
@@ -4146,13 +4146,24 @@ pub enum CombatTaxContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CombatTaxPending {
+    /// CR 508.1k + CR 400.7: the paused attack declaration snapshots each proposed
+    /// attacker and band member as an `ObjectIncarnationRef`, not a bare `ObjectId`.
+    /// On accept, only refs whose incarnation still matches the live object (and
+    /// which remain controlled by the attacking team) become attackers — a creature
+    /// that left and re-entered the battlefield during the tax pause is a new object
+    /// (CR 400.7) and is dropped. Legacy saves that stored bare `ObjectId` numbers
+    /// deserialize through `ObjectIncarnationRefCompat::Legacy` (→ `LEGACY_INCARNATION`),
+    /// which never matches a live incarnation, so those stale attackers are also dropped.
     Attack {
-        attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+        attacks: Vec<(
+            crate::types::identifiers::ObjectIncarnationRef,
+            crate::game::combat::AttackTarget,
+        )>,
         /// CR 702.22c: attacking-band declarations captured alongside the
         /// attacks so the resume path (after combat-tax payment) stamps
-        /// `band_id` via `declare_attackers_with_bands` and groups the band for
-        /// blocking (CR 702.22h).
-        bands: Vec<Vec<ObjectId>>,
+        /// `band_id` via `commit_attack_declaration_from_snapshot` and groups the
+        /// band for blocking (CR 702.22h).
+        bands: Vec<Vec<crate::types::identifiers::ObjectIncarnationRef>>,
     },
     Block {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -4745,6 +4756,9 @@ pub enum CostResume {
         #[serde(rename = "ManaAbility")]
         mana_ability: Box<PendingManaAbility>,
     },
+    /// CR 118.12: Resume a resolution-time `Effect::PayCost` after the payer
+    /// selects objects for an interactive cost such as tapping creatures.
+    Resolution,
 }
 
 /// CR 601.2h + CR 702.48c: Identifies which spell-cost component a
@@ -5156,6 +5170,15 @@ pub enum WaitingFor {
         valid_attacker_ids: Vec<ObjectId>,
         #[serde(default)]
         valid_attack_targets: Vec<crate::game::combat::AttackTarget>,
+        /// CR 508.1a–d: engine-authoritative per-attacker legal `AttackTarget`s.
+        /// `None` = legacy serialized state (consumers fall back to the aggregate
+        /// `valid_attack_targets`). `Some(map)` = authoritative; a missing attacker
+        /// key means "no legal targets" (no fallback). New prompts always emit
+        /// `Some` — computed by the same engine constraints model that enforces
+        /// legality in `validate_attack_declaration`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        valid_attack_targets_by_attacker:
+            Option<HashMap<ObjectId, Vec<crate::game::combat::AttackTarget>>>,
         /// CR 508.1c / CR 508.1d: per-creature combat requirement/restriction
         /// (must-attack / can't-attack) for display badges and Confirm gating.
         /// Display-only — computed by `combat::attacker_constraints_for_active_player`,
@@ -5169,13 +5192,14 @@ pub enum WaitingFor {
         #[serde(default)]
         valid_block_targets: HashMap<ObjectId, Vec<ObjectId>>,
         /// CR 702.111b (Menace) + CR 509.1b: per-attacker minimum-blocker count
-        /// for attackers requiring more than one blocker. Lets the UI surface
-        /// "needs N blockers" feedback and guard confirmation; attackers with
-        /// the trivial requirement of 1 are omitted. Computed by
+        /// (`count`) plus the `sources` carriers imposing it, for attackers
+        /// requiring more than one blocker. Lets the UI surface "needs N blockers"
+        /// feedback (and which permanents demand it) and guard confirmation;
+        /// attackers with the trivial requirement of 1 are omitted. Computed by
         /// `combat::block_requirements_for_player` — the same authority that
         /// enforces the requirement in `validate_blocks`.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        block_requirements: HashMap<ObjectId, u32>,
+        block_requirements: HashMap<ObjectId, crate::game::combat::BlockRequirement>,
         /// CR 509.1b / CR 509.1c: per-creature combat requirement/restriction
         /// (must-block / can't-block) for display badges and Confirm gating.
         /// Display-only — computed by `combat::blocker_constraints_for_player`,
@@ -7375,7 +7399,7 @@ impl WaitingFor {
                     spell: pending_cast,
                     ..
                 } => Some(pending_cast),
-                CostResume::ManaAbility { .. } => None,
+                CostResume::ManaAbility { .. } | CostResume::Resolution => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
@@ -7409,7 +7433,7 @@ impl WaitingFor {
                     spell: pending_cast,
                     ..
                 } => Some(pending_cast),
-                CostResume::ManaAbility { .. } => None,
+                CostResume::ManaAbility { .. } | CostResume::Resolution => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
@@ -10477,6 +10501,12 @@ pub struct GameState {
     /// Cleared on phase/step transitions via `advance_phase()`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub lki_cache: HashMap<ObjectId, LKISnapshot>,
+    /// CR 608.2h + CR 707.2: Full copiable-values LKI for objects that leave a
+    /// public zone. Ordinary `LKISnapshot` is intentionally filter-shaped and
+    /// does not carry ability definitions; copy effects need the complete
+    /// copiable surface when the copy source later ceases to exist.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub lki_copiable_values: HashMap<ObjectId, CopiableValues>,
 
     /// CR 400.7 + CR 608.2h: LKI keyed by exact object incarnation. The legacy
     /// `lki_cache` remains the broad ObjectId-only authority for existing callers;
@@ -11905,6 +11935,7 @@ impl GameState {
             last_discover_value: None,
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
+            lki_copiable_values: HashMap::new(),
             lki_by_incarnation: HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
@@ -13018,6 +13049,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         current_trigger_events: _,
         stack_trigger_event_batches: _,
         lki_cache: _,
+        lki_copiable_values: _,
         lki_by_incarnation: _,
         linked_exile_lki: _,
         cost_payment_failed_flag: _,
@@ -13325,6 +13357,7 @@ impl PartialEq for GameState {
             && self.optional_cost_payments_this_resolution
                 == other.optional_cost_payments_this_resolution
             && self.lki_cache == other.lki_cache
+            && self.lki_copiable_values == other.lki_copiable_values
             && self.lki_by_incarnation == other.lki_by_incarnation
             && self.city_blessing == other.city_blessing
             && self.planar_deck == other.planar_deck
@@ -14637,6 +14670,70 @@ mod tests {
         );
     }
 
+    /// CR 104.4b + CR 611.2c + CR 400.7: a materialized `MustAttackPlayer`
+    /// static's `source_object` provenance is a layer-DERIVED characteristic that
+    /// `object_content_eq` deliberately omits (like the whole `static_definitions`
+    /// vec). Two states differing ONLY in a grafted requirement's directing-source
+    /// id — the shape a mandatory loop produces when it re-creates the forcing
+    /// object with a fresh CR 400.7 incarnation id each iteration — must confirm
+    /// as a repeat, else the CR 104.4b draw could never fire. Revert-failing:
+    /// adding `static_definitions` to `object_content_eq`'s allow-list makes the
+    /// two states differ and this assertion fails, reintroducing the hazard.
+    #[test]
+    fn loop_states_equal_ignores_static_source_object() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::StaticMode;
+
+        let mut a = GameState::new_two_player(7);
+        let mut object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        object.static_definitions.push(
+            StaticDefinition::new(StaticMode::MustAttackPlayer {
+                player: PlayerId(1),
+            })
+            .affected(TargetFilter::SelfRef)
+            .source_object(ObjectId(800)),
+        );
+        a.objects.insert(ObjectId(500), object);
+        a.battlefield.push_back(ObjectId(500));
+
+        // `b` is identical EXCEPT the grafted requirement's directing-source id (a
+        // fresh CR 400.7 incarnation of the forcing object).
+        let mut b = a.clone();
+        b.objects
+            .get_mut(&ObjectId(500))
+            .unwrap()
+            .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackPlayer {
+            player: PlayerId(1),
+        })
+        .affected(TargetFilter::SelfRef)
+        .source_object(ObjectId(801))]
+        .into();
+
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "states differing only in a grafted static's source_object must confirm as a repeat"
+        );
+
+        // Paired non-vacuity: a genuinely-compared field (goaded_by, CR 701.15c)
+        // DOES break equality — proving the comparator is live, not a constant true.
+        let mut c = a.clone();
+        c.objects
+            .get_mut(&ObjectId(500))
+            .unwrap()
+            .goaded_by
+            .insert(PlayerId(1));
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &c.normalize_for_loop()),
+            "a goaded_by difference must NOT confirm (the comparator is live)"
+        );
+    }
+
     /// CR 118.3a: the self-heal that fixes the reported "tap one mana → all
     /// select" bug. Mana that bypassed `add_mana_to_pool` (debug tooling, restored
     /// pre-stamping saves) carries the sentinel `pip_id 0`; `restamp_pool_pip_ids`
@@ -15224,6 +15321,7 @@ mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::DeclareBlockers {
