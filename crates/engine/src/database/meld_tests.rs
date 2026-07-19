@@ -88,6 +88,40 @@ fn goddric_conditional_flying_is_not_a_printed_keyword() {
     ));
 }
 
+#[test]
+fn subtype_loss_rider_stays_with_its_own_conditional_static() {
+    let text = "Celebration — As long as two or more nonland permanents entered the battlefield under your control this turn, Goddric is a Dragon with base power and toughness 4/4. (It loses all other creature types.)\nAs long as you control an artifact, Goddric is a Wizard with base power and toughness 2/2.";
+    let mut card = atomic(
+        "Goddric, Cloaked Reveler",
+        "Legendary Creature — Human Noble",
+        &["Creature"],
+        text,
+    );
+    card.subtypes = vec!["Human".to_string(), "Noble".to_string()];
+
+    let face = parse_face(&card);
+    let wizard_static = face
+        .static_abilities
+        .iter()
+        .find(|definition| {
+            definition.modifications.contains(
+                &crate::types::ability::ContinuousModification::AddSubtype {
+                    subtype: "Wizard".to_string(),
+                },
+            )
+        })
+        .expect("the independent conditional Wizard static must parse");
+
+    assert!(
+        !wizard_static.modifications.contains(
+            &crate::types::ability::ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            },
+        ),
+        "a rider on the Celebration static must not alter a separate conditional subtype grant"
+    );
+}
+
 /// Find an `Effect::Meld` anywhere in a face's abilities or trigger payloads,
 /// descending sub/else/mode branches so a gated meld sub-ability (the optional-cost
 /// Vanille form, where the meld lives under an "If you do" `PayCost`) is found.

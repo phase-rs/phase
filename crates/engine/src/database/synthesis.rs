@@ -9892,38 +9892,6 @@ fn build_oracle_face_inner(
         &subtypes,
     );
 
-    // CR 205.1a + CR 613.1d: the parenthetical "loses all other creature
-    // types" rider is rules text, even though the Oracle parser strips it as
-    // reminder text. Preserve replacement semantics on the conditional type
-    // grant before building the face (Goddric's Celebration).
-    if raw_oracle_text
-        .to_ascii_lowercase()
-        .contains("loses all other creature types")
-    {
-        for definition in &mut parsed.statics {
-            if definition.condition.is_some()
-                && definition.modifications.iter().any(|modification| {
-                    matches!(modification, ContinuousModification::AddSubtype { .. })
-                })
-                && !definition.modifications.iter().any(|modification| {
-                    matches!(
-                        modification,
-                        ContinuousModification::RemoveAllSubtypes {
-                            set: crate::types::card_type::SubtypeSet::Creature
-                        }
-                    )
-                })
-            {
-                definition.modifications.insert(
-                    0,
-                    ContinuousModification::RemoveAllSubtypes {
-                        set: crate::types::card_type::SubtypeSet::Creature,
-                    },
-                );
-            }
-        }
-    }
-
     let extracted_keywords = parsed.extracted_keywords;
     let extracted_has_craft = extracted_keywords
         .iter()

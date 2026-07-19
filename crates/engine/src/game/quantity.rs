@@ -2651,7 +2651,7 @@ fn resolve_ref(
                             .is_some_and(|member_cause| member_cause == cause),
                     };
                     let matches_filter = if !state.battlefield.contains(&oid) {
-                        // CR 608.2g: Use last-known information to filter a tracked object that has left the battlefield.
+                        // CR 608.2h: Use last-known information to filter a tracked object that has left the battlefield.
                         state.lki_cache.get(&oid).map_or_else(
                             || {
                                 crate::game::filter::matches_target_filter(

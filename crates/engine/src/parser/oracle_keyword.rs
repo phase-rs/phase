@@ -702,7 +702,9 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
 
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
-    // CR 702.21a + CR 608.2g: Phyrexian Fleshgorger reads its power when ward resolves.
+    // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
+    // current power on resolution, or its last known information if it left its
+    // expected public zone.
     if all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("pay life equal to "),
         alt((tag("this creature's power"), tag("~'s power"))),
