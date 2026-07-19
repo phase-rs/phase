@@ -1422,8 +1422,11 @@ fn shard_payment_options(shard: ManaCostShard) -> Option<Vec<ManaType>> {
 fn group_profiles_by_object(
     profiles: Vec<ActivatableManaProfile>,
 ) -> Vec<(ObjectId, Vec<ActivatableManaProfileKind>)> {
-    use std::collections::HashMap;
-    let mut grouped: HashMap<ObjectId, Vec<ActivatableManaProfileKind>> = HashMap::new();
+    // Issue #4878: BTreeMap (not HashMap) so the grouped Vec below is
+    // ObjectId-sorted and deterministic across processes, rather than
+    // following per-process HashMap iteration order.
+    use std::collections::BTreeMap;
+    let mut grouped: BTreeMap<ObjectId, Vec<ActivatableManaProfileKind>> = BTreeMap::new();
     for profile in profiles {
         grouped
             .entry(profile.object_id)
