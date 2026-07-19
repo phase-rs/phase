@@ -44,6 +44,10 @@ export function PayAmountChoiceUI() {
     }
   }, [data, t]);
 
+  // Display-only: the LoopCollapse prompt frames token *creation*, not a cost to
+  // "pay" (CR 732.2a loop collapse — the engine mints N copies, nothing is spent).
+  const isLoopCollapse = data?.resource.type === "LoopCollapse";
+
   const handleCommit = useCallback(() => {
     dispatch({ type: "SubmitPayAmount", data: { amount: value } });
   }, [dispatch, value]);
@@ -61,7 +65,7 @@ export function PayAmountChoiceUI() {
       >
         <div className="pointer-events-auto min-w-[320px] max-w-[420px] rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
-            {t("mana.chooseAmountTitle")}
+            {t(isLoopCollapse ? "mana.loopCollapseTitle" : "mana.chooseAmountTitle")}
             {sourceName && (
               <span className="ml-1 text-gray-400">&mdash; {sourceName}</span>
             )}
@@ -92,7 +96,9 @@ export function PayAmountChoiceUI() {
               onClick={handleCommit}
               className={gameButtonClass({ tone: "emerald", size: "md" })}
             >
-              {t("mana.payAmount", { value, resource: resourceLabel })}
+              {isLoopCollapse
+                ? t("mana.loopCollapseAmount", { value })
+                : t("mana.payAmount", { value, resource: resourceLabel })}
             </button>
           </div>
         </div>

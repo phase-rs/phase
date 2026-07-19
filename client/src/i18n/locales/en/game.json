@@ -609,6 +609,8 @@
     "resourceCounters": "counters",
     "resourceSpeed": "speed",
     "resourceLoopCollapse": "tokens",
+    "loopCollapseTitle": "Choose how many tokens to create",
+    "loopCollapseAmount": "Create {{value}} tokens",
     "manualMana": "Manual",
     "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
     "spendHint": "Click your mana to spend it on this cost",

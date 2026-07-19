@@ -577,6 +577,8 @@
     "resourceCounters": "segnalini",
     "resourceSpeed": "velocità",
     "resourceLoopCollapse": "pedine",
+    "loopCollapseTitle": "Scegli quante pedine creare",
+    "loopCollapseAmount": "Crea {{value}} pedine",
     "manualMana": "Manuale",
     "manualManaTooltip": "Mana manuale — solo questa partita. TAPpa le tue terre e il tuo mana per pagare.",
     "spendHint": "Clicca sul tuo mana per spenderlo per questo costo",

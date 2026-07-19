@@ -577,6 +577,8 @@
     "resourceCounters": "znaczników",
     "resourceSpeed": "prędkości",
     "resourceLoopCollapse": "żetonów",
+    "loopCollapseTitle": "Wybierz, ile żetonów stworzyć",
+    "loopCollapseAmount": "Stwórz {{value}} żetonów",
     "manualMana": "Ręcznie",
     "manualManaTooltip": "Ręczna mana — tylko ta gra. Stuknij własne ziemie i manę, aby zapłacić.",
     "spendHint": "Kliknij swoją manę, aby wydać ją na ten koszt",

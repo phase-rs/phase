@@ -831,6 +831,74 @@ fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
     );
 }
 
+/// STACK-SAFETY (Bug B): minting a large LoopCollapse batch must use O(1) stack
+/// depth in N. Drives the REAL public path (apply → SubmitPayAmount →
+/// drive_copy_token_batches → liminal copy-token batch) on a bounded thread stack
+/// with N = 1000 (the PayAmountChoice max).
+///
+/// REVERT-PROBE (measured on THIS worktree, non-vacuous & discriminating): the
+/// per-token stack cost differs by algorithm, not just by a base constant. The
+/// pre-fix recursive commit→continue→apply path (HEAD 7458a7a8f) is O(N) depth,
+/// ~20 KiB/token in the debug build — measured pre-fix @ 4 MiB mints N=50 but
+/// aborts at N≥100, and @ 8 MiB N=1000 still aborts (needs ~20 MiB). The post-fix
+/// iterative loop is O(1) depth in N (the only residual growth is the O(log N)
+/// `im::HashMap` HAMT COW) — measured post-fix mints N=1000 at ≥3 MiB.
+/// So an 8 MiB stack cleanly separates the two: post-fix mints 1000 with ~5 MiB
+/// of headroom, while reverting the iterative fix flips this to a process abort
+/// (Rust's stack-overflow handler `abort()`s the whole binary — the strongest
+/// non-vacuity signal). NOTE: 8 MiB is a *debug-build* budget; native/WASM release
+/// frames are far smaller (the user's real WASM overflow was ~N=200), but the
+/// debug O(N)/O(1) split is what this test pins. Positive reach-guards (the
+/// LoopCollapse-prompt precondition + `minted == 1000`) prove it isn't vacuous.
+#[test]
+fn loop_collapse_large_mint_does_not_overflow_small_stack() {
+    let mut state: GameState =
+        serde_json::from_str(&OFFER_STATE).expect("the real 4p offer dump must deserialize");
+    drive_all_accept(&mut state);
+    let before = p0_saproling_ids(&state).len();
+    drive_priority_to_next_boundary(&mut state);
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+                if player == P0
+        ),
+        "reach-guard: at the LoopCollapse prompt for P0, got {:?}",
+        state.waiting_for
+    );
+
+    // 8 MiB: comfortably above the O(1) post-fix base (~3 MiB in debug) yet far
+    // below the pre-fix O(N=1000) requirement (~20 MiB). Independent of libtest's
+    // RUST_MIN_STACK — the explicit builder stack is what bounds the mint depth.
+    let handle = std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || {
+            apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 1000 })
+                .expect("P0 submits the max LoopCollapse count");
+            state
+        })
+        .expect("spawn bounded-stack mint thread");
+    let state = handle
+        .join()
+        .expect("minting 1000 copies must NOT overflow the 8 MiB stack (O(1) depth in N)");
+
+    let after = p0_saproling_ids(&state);
+    let minted = after.len().saturating_sub(before);
+    assert_eq!(
+        minted, 1000,
+        "SubmitPayAmount{{1000}} mints exactly 1000 Saprolings"
+    );
+    // Semantics preserved by the iterative path (spot-check the tail token).
+    let sample = after.iter().last().copied().expect("≥1 minted token");
+    let o = state.objects.get(&sample).expect("minted token present");
+    assert!(o.is_token && o.tapped, "minted tokens are tapped tokens");
+    assert_eq!(o.color, vec![ManaColor::Green]);
+    assert_eq!((o.power, o.toughness), (Some(1), Some(1)));
+    // Cash-out invariant (same as T1) still holds after a large mint.
+    assert!(!state.unbounded_resources.contains_key(&P0));
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
 /// T2 (MANA NEGATIVE discriminator): a real infinite-COLORLESS mana loop (Basalt Monolith
 /// with Power Artifact) writes NO materialization stash (§5), so the boundary collapse
 /// pass does NOT prompt. Matched to T1: token axis → prompt+mint; mana axis → no prompt.

@@ -577,6 +577,8 @@
     "resourceCounters": "contadores",
     "resourceSpeed": "velocidad",
     "resourceLoopCollapse": "fichas",
+    "loopCollapseTitle": "Elige cuántas fichas crear",
+    "loopCollapseAmount": "Crear {{value}} fichas",
     "manualMana": "Manual",
     "manualManaTooltip": "Maná manual — solo esta partida. Toca tus propias tierras y maná para pagar.",
     "spendHint": "Haz clic en tu maná para gastarlo en este coste",

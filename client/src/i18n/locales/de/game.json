@@ -577,6 +577,8 @@
     "resourceCounters": "Marken",
     "resourceSpeed": "Tempo",
     "resourceLoopCollapse": "Spielsteine",
+    "loopCollapseTitle": "Wähle, wie viele Spielsteine erzeugt werden",
+    "loopCollapseAmount": "{{value}} Spielsteine erzeugen",
     "manualMana": "Manuell",
     "manualManaTooltip": "Manuelles Mana — nur für dieses Spiel. Tippe deine eigenen Länder und dein Mana an, um zu bezahlen.",
     "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",
