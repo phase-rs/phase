@@ -9884,7 +9884,7 @@ fn build_oracle_face_inner(
     // square-bracketed span from the spell's rules text. `parse_oracle_with_cleave_brackets`
     // is the single authority for the dual (printed-cost / cleave-cost) parse,
     // shared with the test scenario harness so the two pipelines cannot diverge.
-    let (mut parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
+    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
         raw_oracle_text,
         face_name,
         &parser_keyword_names,
