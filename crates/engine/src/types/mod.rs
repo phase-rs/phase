@@ -20,6 +20,7 @@ pub mod player;
 pub mod proposed_event;
 pub mod replacements;
 pub mod replay;
+pub mod resolution;
 pub mod statics;
 pub mod stickers;
 pub mod triggers;
@@ -64,6 +65,10 @@ pub use player::{Player, PlayerId};
 pub use proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
 pub use replay::{RecordedAction, ReplayHeader, ReplayLog};
+pub use resolution::{
+    ChangeZoneFrame, FrameGate, FrameKind, MultiDrawFrame, OptionalEffectFrame,
+    PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack,
+};
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
 pub use triggers::{TriggerEventKey, TriggerMode};
