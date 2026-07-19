@@ -9887,23 +9887,23 @@ pub mod tests {
     use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-        AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
-        ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        DamageChannel, DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration,
-        EachDamageRecipient, Effect, FilterProp, KickerVariant, ModalChoice, MultiTargetSpec,
-        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef,
-        TypeFilter, TypedFilter,
+        AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChoiceType,
+        ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification,
+        ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope,
+        Duration, EachDamageRecipient, Effect, FilterProp, GuessSubject, KickerVariant,
+        ModalChoice, MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition,
+        TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::events::{GameEvent, ManaTapState};
     use crate::types::game_state::{
         DamageRecord, DelayedTrigger, DistributionUnit, GameState, LayersDirty, LoopDetectionMode,
-        SpellCastRecord, StackEntry, StackEntryKind, TransientContinuousEffect, WaitingFor,
-        ZoneChangeRecord,
+        NamedChoiceSourceBinding, SpellCastRecord, StackEntry, StackEntryKind,
+        TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -29889,33 +29889,60 @@ pub mod tests {
     /// the returned Soultiller stays untouched.
     #[test]
     fn elvish_soultiller_choice_same_id_return_does_not_mutate_return() {
-        use crate::types::ability::ChoiceType;
-
         let mut state = setup();
         let soultiller = make_creature(&mut state, PlayerId(0), "Elvish Soultiller", 5, 4);
-        state.waiting_for = WaitingFor::NamedChoice {
-            player: PlayerId(0),
-            choice_type: ChoiceType::creature_type(),
-            options: vec!["Elf".to_string()],
-            source: Some(
-                crate::types::game_state::NamedChoiceSource::from_trigger_source(
-                    trigger_source_context_for_latch(
-                        &state,
-                        state.objects.get(&soultiller).unwrap(),
-                    ),
-                    crate::types::game_state::NamedChoiceSourceBinding::ResolutionContext,
-                ),
-            ),
-            persist_player: None,
-        };
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Choose {
+                    choice_type: ChoiceType::creature_type(),
+                    persist: true,
+                    selection: TargetSelectionMode::Chosen,
+                },
+            ));
+        let soultiller_object = state.objects.get_mut(&soultiller).unwrap();
+        std::sync::Arc::make_mut(&mut soultiller_object.base_trigger_definitions).push(trigger);
+        soultiller_object.materialize_base_trigger_definitions();
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, soultiller, Zone::Graveyard, &mut events);
+        let pending = collect_pending_triggers(&mut state, &events)
+            .into_iter()
+            .filter(|context| context.pending.source_id == soultiller)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pending.len(),
+            1,
+            "positive reach guard: Soultiller's real dies trigger reaches stack placement"
+        );
+        assert!(
+            process_collected_triggers_with_delayed_phase_events(
+                &mut state,
+                pending,
+                &[],
+                &mut Vec::new(),
+            )
+            .fired,
+            "positive reach guard: the collected dies trigger is placed"
+        );
+        resolve_stack_until_paused(&mut state);
+        assert!(matches!(
+            &state.waiting_for,
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::CreatureType { .. },
+                source: Some(source),
+                ..
+            } if source.is_exact_object_and_resolution()
+        ));
 
         let saved = serde_json::to_value(&state)
             .expect("Elvish Soultiller source-bound choice serializes before the return");
         state = serde_json::from_value(saved)
             .expect("Elvish Soultiller source-bound choice deserializes before the return");
 
-        let mut events = Vec::new();
-        crate::game::zones::move_to_zone(&mut state, soultiller, Zone::Graveyard, &mut events);
         crate::game::zones::move_to_zone(&mut state, soultiller, Zone::Battlefield, &mut events);
         state
             .objects
@@ -29942,21 +29969,30 @@ pub mod tests {
 
     #[test]
     fn named_choice_source_modes_roundtrip_and_write_only_their_authority() {
-        use crate::types::ability::ChoiceType;
-        use crate::types::game_state::{NamedChoiceSource, NamedChoiceSourceBinding};
-
         let choice_type = ChoiceType::Labeled {
             options: vec!["Anchor".to_string()],
         };
 
         let mut source_less = setup();
-        source_less.waiting_for = WaitingFor::NamedChoice {
-            player: PlayerId(0),
-            choice_type: choice_type.clone(),
-            options: vec!["Anchor".to_string()],
-            source: None,
-            persist_player: None,
-        };
+        crate::game::effects::choose::resolve(
+            &mut source_less,
+            &ResolvedAbility::new(
+                Effect::Choose {
+                    choice_type: choice_type.clone(),
+                    persist: false,
+                    selection: TargetSelectionMode::Chosen,
+                },
+                Vec::new(),
+                ObjectId(900),
+                PlayerId(0),
+            ),
+            &mut Vec::new(),
+        )
+        .expect("the production source-less constructor raises the prompt");
+        assert!(matches!(
+            source_less.waiting_for,
+            WaitingFor::NamedChoice { source: None, .. }
+        ));
         source_less = serde_json::from_value(
             serde_json::to_value(&source_less).expect("source-less choice serializes"),
         )
@@ -29975,23 +30011,29 @@ pub mod tests {
 
         let mut exact = setup();
         let exact_source = make_creature(&mut exact, PlayerId(0), "Exact choice source", 2, 2);
-        let exact_context = trigger_source_context_for_latch(
-            &exact,
-            exact
-                .objects
-                .get(&exact_source)
-                .expect("exact source exists"),
-        );
-        exact.waiting_for = WaitingFor::NamedChoice {
-            player: PlayerId(0),
-            choice_type: choice_type.clone(),
-            options: vec!["Anchor".to_string()],
-            source: Some(NamedChoiceSource::from_trigger_source(
-                exact_context,
-                NamedChoiceSourceBinding::ExactObjectAndResolution,
-            )),
-            persist_player: None,
-        };
+        crate::game::effects::choose::resolve(
+            &mut exact,
+            &ResolvedAbility::new(
+                Effect::Choose {
+                    choice_type: choice_type.clone(),
+                    persist: true,
+                    selection: TargetSelectionMode::Chosen,
+                },
+                Vec::new(),
+                exact_source,
+                PlayerId(0),
+            ),
+            &mut Vec::new(),
+        )
+        .expect("the production exact-object constructor raises the prompt");
+        assert!(matches!(
+            exact.waiting_for,
+            WaitingFor::NamedChoice {
+                source: Some(ref source),
+                persist_player: None,
+                ..
+            } if source.is_exact_object_and_resolution()
+        ));
         exact = serde_json::from_value(
             serde_json::to_value(&exact).expect("exact-object choice serializes"),
         )
@@ -30020,16 +30062,29 @@ pub mod tests {
                 .get(&departed_source)
                 .expect("departed source exists"),
         );
-        departed.waiting_for = WaitingFor::NamedChoice {
-            player: PlayerId(0),
-            choice_type: choice_type.clone(),
-            options: vec!["Anchor".to_string()],
-            source: Some(NamedChoiceSource::from_trigger_source(
-                departed_context,
-                NamedChoiceSourceBinding::ResolutionContext,
-            )),
-            persist_player: None,
-        };
+        let mut departed_ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::CardPredicateGuess {
+                    options: ChoiceType::land_or_nonland_card_predicate_options(),
+                },
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+            Vec::new(),
+            departed_source,
+            PlayerId(0),
+        );
+        departed_ability.set_trigger_source_recursive(departed_context);
+        crate::game::effects::choose::resolve(&mut departed, &departed_ability, &mut Vec::new())
+            .expect("the production resolution-context constructor raises the prompt");
+        assert!(matches!(
+            departed.waiting_for,
+            WaitingFor::NamedChoice {
+                source: Some(ref source),
+                persist_player: None,
+                ..
+            } if source.binding == NamedChoiceSourceBinding::ResolutionContext
+        ));
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(
             &mut departed,
@@ -30050,7 +30105,7 @@ pub mod tests {
         crate::game::engine::apply_as_current(
             &mut departed,
             GameAction::ChooseOption {
-                choice: "Anchor".to_string(),
+                choice: "land".to_string(),
             },
         )
         .expect("departed resolution-context choice accepts its answer");
@@ -30064,23 +30119,27 @@ pub mod tests {
         let mut player_bound = setup();
         let player_source =
             make_creature(&mut player_bound, PlayerId(0), "Player choice source", 2, 2);
-        let player_context = trigger_source_context_for_latch(
-            &player_bound,
-            player_bound
-                .objects
-                .get(&player_source)
-                .expect("player-bound source exists"),
+        let mut player_ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type,
+                persist: true,
+                selection: TargetSelectionMode::Chosen,
+            },
+            Vec::new(),
+            player_source,
+            PlayerId(0),
         );
-        player_bound.waiting_for = WaitingFor::NamedChoice {
-            player: PlayerId(0),
-            choice_type,
-            options: vec!["Anchor".to_string()],
-            source: Some(NamedChoiceSource::from_trigger_source(
-                player_context,
-                NamedChoiceSourceBinding::ResolutionContext,
-            )),
-            persist_player: Some(PlayerId(1)),
-        };
+        player_ability.scoped_player = Some(PlayerId(1));
+        crate::game::effects::choose::resolve(&mut player_bound, &player_ability, &mut Vec::new())
+            .expect("the production per-player constructor raises the prompt");
+        assert!(matches!(
+            player_bound.waiting_for,
+            WaitingFor::NamedChoice {
+                source: None,
+                persist_player: Some(PlayerId(1)),
+                ..
+            }
+        ));
         player_bound = serde_json::from_value(
             serde_json::to_value(&player_bound).expect("player-persistent choice serializes"),
         )
@@ -30104,12 +30163,53 @@ pub mod tests {
                 .is_empty(),
             "per-player persistence must not write the source object"
         );
+
+        let mut random = setup();
+        let random_source = make_creature(&mut random, PlayerId(0), "Random choice source", 2, 2);
+        let random_context = trigger_source_context_for_latch(
+            &random,
+            random
+                .objects
+                .get(&random_source)
+                .expect("random source exists"),
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut random, random_source, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(
+            &mut random,
+            random_source,
+            Zone::Battlefield,
+            &mut events,
+        );
+        let mut random_ability = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled {
+                    options: vec!["Anchor".to_string()],
+                },
+                persist: true,
+                selection: TargetSelectionMode::Random,
+            },
+            Vec::new(),
+            random_source,
+            PlayerId(0),
+        );
+        random_ability.set_trigger_source_recursive(random_context);
+        assert!(
+            crate::game::effects::choose::resolve_random_in_chain(
+                &mut random,
+                &mut random_ability,
+                &mut Vec::new(),
+            ),
+            "the production random constructor resolves the one legal option"
+        );
+        assert!(
+            random.objects[&random_source].chosen_attributes.is_empty(),
+            "the production random path cannot rebind a departed source to its same-ID return"
+        );
     }
 
     #[test]
     fn opponent_guess_keeps_event_time_authority_private_and_returns_priority_to_controller() {
-        use crate::types::ability::{Comparator, ControllerRef, GuessSubject};
-
         let mut state = setup();
         let source = make_creature(&mut state, PlayerId(0), "Guess source", 2, 2);
         let source_context = trigger_source_context_for_latch(

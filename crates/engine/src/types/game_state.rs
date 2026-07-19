@@ -2117,7 +2117,7 @@ pub struct LatchedSuppressTrigger {
 /// Both pause carriers persist this same shape. It deliberately has no serde
 /// defaults: an active legacy carrier cannot reconstruct the original member
 /// set, terminal outcomes, or already-delivered event authority safely.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
     pub prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
@@ -2142,7 +2142,249 @@ pub struct LogicalZoneChangeGroup {
     pub immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
 }
 
+/// Wire-only mirror used to reject malformed paused logical-zone authority at
+/// the deserialize boundary rather than trusting a later settlement caller to
+/// notice it.
+#[derive(Deserialize)]
+struct LogicalZoneChangeGroupWire {
+    logical_group_id: LogicalZoneChangeGroupId,
+    prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+    terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
+    post_event_member_contexts: Vec<Option<TriggerSourceContext>>,
+    all_origin_occurrences: Vec<LogicalZoneChangeOccurrence>,
+    immediately_before_latched: bool,
+    immediately_before_batched_triggers: Vec<LatchedBatchedTrigger>,
+    immediately_before_suppress_triggers: Vec<LatchedSuppressTrigger>,
+    immediately_after_latched: bool,
+    immediately_after_batched_triggers: Vec<LatchedBatchedTrigger>,
+    immediately_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
+}
+
+impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
+    fn from(wire: LogicalZoneChangeGroupWire) -> Self {
+        Self {
+            logical_group_id: wire.logical_group_id,
+            prospective_battlefield_members: wire.prospective_battlefield_members,
+            terminal_outcomes: wire.terminal_outcomes,
+            post_event_member_contexts: wire.post_event_member_contexts,
+            all_origin_occurrences: wire.all_origin_occurrences,
+            immediately_before_latched: wire.immediately_before_latched,
+            immediately_before_batched_triggers: wire.immediately_before_batched_triggers,
+            immediately_before_suppress_triggers: wire.immediately_before_suppress_triggers,
+            immediately_after_latched: wire.immediately_after_latched,
+            immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
+            immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LogicalZoneChangeGroup {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let group = Self::from(LogicalZoneChangeGroupWire::deserialize(deserializer)?);
+        group
+            .validate_serialized_authority()
+            .map_err(serde::de::Error::custom)?;
+        Ok(group)
+    }
+}
+
 impl LogicalZoneChangeGroup {
+    /// Validates the invariant portion of a serialized owner while it may
+    /// still be paused with pending members. Final settlement additionally
+    /// calls [`Self::validate_complete`] once every member is terminal.
+    fn validate_serialized_authority(&self) -> Result<(), String> {
+        self.immediately_before_latches()?;
+        if self.prospective_battlefield_members.len() != self.terminal_outcomes.len() {
+            return Err("logical zone-change member/outcome lengths differ".to_string());
+        }
+        if self.prospective_battlefield_members.len() != self.post_event_member_contexts.len() {
+            return Err("logical zone-change member/post-event-context lengths differ".to_string());
+        }
+        for (index, member) in self.prospective_battlefield_members.iter().enumerate() {
+            if self.prospective_battlefield_members[..index]
+                .iter()
+                .any(|prior| prior.identity == member.identity)
+            {
+                return Err(format!(
+                    "logical zone-change member {}:{} was announced more than once",
+                    member.identity.object_id.0, member.identity.incarnation
+                ));
+            }
+        }
+
+        for (expected_ordinal, occurrence) in self.all_origin_occurrences.iter().enumerate() {
+            if occurrence.ordinal != expected_ordinal {
+                return Err(format!(
+                    "logical zone-change occurrence ordinal {} is not {expected_ordinal}",
+                    occurrence.ordinal
+                ));
+            }
+            let GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+                record,
+            } = &occurrence.event
+            else {
+                return Err(format!(
+                    "logical zone-change occurrence {expected_ordinal} is not ZoneChanged"
+                ));
+            };
+            if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to
+            {
+                return Err(format!(
+                    "logical zone-change occurrence {expected_ordinal} has an incoherent record"
+                ));
+            }
+        }
+
+        let validate_latches = |latches: &[LatchedBatchedTrigger],
+                                expected_time: TriggerObservationTime,
+                                allow_before_and_after: bool|
+         -> Result<(), String> {
+            for latch in latches {
+                if latch.observations.is_empty() {
+                    return Err("latched batched trigger has no source observation".to_string());
+                }
+                for (index, observation) in latch.observations.iter().enumerate() {
+                    if observation.source_context.identity.reference != latch.definition_ref.source
+                    {
+                        return Err(
+                            "latched batched trigger source context disagrees with its definition reference"
+                                .to_string(),
+                        );
+                    }
+                    if latch.observations[..index]
+                        .iter()
+                        .any(|prior| prior.observation_time == observation.observation_time)
+                    {
+                        return Err(
+                            "latched batched trigger repeats an observation time".to_string()
+                        );
+                    }
+                    if observation.observation_time != expected_time
+                        && !(allow_before_and_after
+                            && observation.observation_time
+                                == TriggerObservationTime::ImmediatelyAfter)
+                    {
+                        return Err(
+                            "latched batched trigger is stored on the wrong observation sidecar"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            Ok(())
+        };
+        validate_latches(
+            &self.immediately_before_batched_triggers,
+            TriggerObservationTime::ImmediatelyBefore,
+            true,
+        )?;
+        validate_latches(
+            &self.immediately_after_batched_triggers,
+            TriggerObservationTime::ImmediatelyAfter,
+            false,
+        )?;
+        for after in &self.immediately_after_batched_triggers {
+            if self
+                .immediately_before_batched_triggers
+                .iter()
+                .any(|before| before.definition_ref == after.definition_ref)
+            {
+                return Err(
+                    "continuing batched trigger must merge its post-event observation into the pre-event latch"
+                        .to_string(),
+                );
+            }
+        }
+
+        let mut claimed_occurrences = BTreeSet::new();
+        for (index, (member, outcome)) in self
+            .prospective_battlefield_members
+            .iter()
+            .zip(&self.terminal_outcomes)
+            .enumerate()
+        {
+            let post_event_context = self.post_event_member_contexts[index].as_ref();
+            match outcome {
+                LogicalZoneChangeTerminalOutcome::Pending => {
+                    if post_event_context.is_some() {
+                        return Err(format!(
+                            "pending logical zone-change member {}:{} has a post-event context",
+                            member.identity.object_id.0, member.identity.incarnation
+                        ));
+                    }
+                }
+                LogicalZoneChangeTerminalOutcome::Moved { occurrence_ordinal } => {
+                    if post_event_context.is_some() {
+                        return Err(format!(
+                            "logical zone-change departed member {}:{} has a post-event context",
+                            member.identity.object_id.0, member.identity.incarnation
+                        ));
+                    }
+                    if !claimed_occurrences.insert(*occurrence_ordinal) {
+                        return Err(format!(
+                            "logical zone-change occurrence {occurrence_ordinal} is claimed by more than one member"
+                        ));
+                    }
+                    let occurrence = self.all_origin_occurrences.get(*occurrence_ordinal).ok_or_else(|| {
+                        format!(
+                            "logical zone-change member at slot {index} refers to missing occurrence {occurrence_ordinal}"
+                        )
+                    })?;
+                    let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
+                        return Err(format!(
+                            "logical zone-change member at slot {index} refers to a non-zone-change occurrence"
+                        ));
+                    };
+                    if record
+                        .trigger_source_context()
+                        .map(|context| context.identity.reference)
+                        != Some(member.identity)
+                    {
+                        return Err(format!(
+                            "logical zone-change member at slot {index} does not match its exact event-time incarnation"
+                        ));
+                    }
+                }
+                LogicalZoneChangeTerminalOutcome::Prevented
+                | LogicalZoneChangeTerminalOutcome::Remained => {
+                    if let Some(context) = post_event_context {
+                        if context.identity.reference != member.identity
+                            || context.identity.expected_zone != Zone::Battlefield
+                        {
+                            return Err(format!(
+                                "logical zone-change member {}:{} has an incoherent post-event context",
+                                member.identity.object_id.0, member.identity.incarnation
+                            ));
+                        }
+                    }
+                }
+                LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
+                    if post_event_context.is_some() {
+                        return Err(format!(
+                            "abandoned logical zone-change member {}:{} has a post-event context",
+                            member.identity.object_id.0, member.identity.incarnation
+                        ));
+                    }
+                    if self.all_origin_occurrences.iter().any(|occurrence| {
+                        self.is_member_own_occurrence(member.identity, occurrence)
+                    }) {
+                        return Err(format!(
+                            "abandoned logical zone-change member {}:{} has an original occurrence",
+                            member.identity.object_id.0, member.identity.incarnation
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(
         logical_group_id: LogicalZoneChangeGroupId,
         prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
@@ -2599,7 +2841,7 @@ impl LogicalZoneChangeGroup {
     /// Call only after every announced prospective member has reached a terminal
     /// result; a paused owner is intentionally allowed to retain `Pending` slots.
     pub fn validate_complete(&self) -> Result<(), String> {
-        self.immediately_before_latches()?;
+        self.validate_serialized_authority()?;
         if self.prospective_battlefield_members.len() != self.terminal_outcomes.len() {
             return Err("logical zone-change member/outcome lengths differ".to_string());
         }
@@ -17811,24 +18053,114 @@ mod tests {
             .validate_complete()
             .expect("the round-tripped direct fixture remains a complete logical owner");
 
+        let rejects_on_wire = |candidate: LogicalZoneChangeGroup, reason: &str| {
+            let wire = serde_json::to_value(candidate).expect("malformed group still serializes");
+            assert!(
+                serde_json::from_value::<LogicalZoneChangeGroup>(wire).is_err(),
+                "wire boundary must reject {reason}"
+            );
+        };
+
         let mut duplicate_member = group.clone();
         duplicate_member.prospective_battlefield_members[1] =
             duplicate_member.prospective_battlefield_members[0].clone();
-        assert!(
-            duplicate_member.validate_complete().is_err(),
-            "a wire fixture with duplicate announced members must reject"
-        );
+        rejects_on_wire(duplicate_member, "duplicate announced members");
         let mut misordered_occurrence = group.clone();
         misordered_occurrence.all_origin_occurrences[1].ordinal = 0;
-        assert!(
-            misordered_occurrence.validate_complete().is_err(),
-            "a wire fixture with misordered retained occurrences must reject"
-        );
+        rejects_on_wire(misordered_occurrence, "misordered retained occurrences");
         let mut missing_outcome = group.clone();
         missing_outcome.terminal_outcomes.pop();
+        rejects_on_wire(missing_outcome, "a missing prospective-member outcome");
+        let mut duplicate_outcome = group.clone();
+        duplicate_outcome.terminal_outcomes[1] = LogicalZoneChangeTerminalOutcome::Moved {
+            occurrence_ordinal: 0,
+        };
+        rejects_on_wire(
+            duplicate_outcome,
+            "two members claiming one retained occurrence",
+        );
+        let mut record_mismatch = group.clone();
+        let GameEvent::ZoneChanged { record, .. } =
+            &mut record_mismatch.all_origin_occurrences[0].event
+        else {
+            unreachable!("fixture retains only zone-change events");
+        };
+        record.to_zone = Zone::Hand;
+        rejects_on_wire(record_mismatch, "an event/record payload mismatch");
+        let mut missing_pre_latch = group.clone();
+        missing_pre_latch.immediately_before_latched = false;
+        rejects_on_wire(missing_pre_latch, "a missing pre-delivery latch");
+
+        let mut higher_incarnation = prevented.clone();
+        higher_incarnation.incarnation += 1;
+        let mut higher_incarnation_context = group.clone();
+        higher_incarnation_context.post_event_member_contexts[1] = Some(
+            higher_incarnation
+                .snapshot_for_zone_change(
+                    higher_incarnation.id,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+                .trigger_source_context
+                .expect("fixture snapshot carries source context"),
+        );
+        rejects_on_wire(
+            higher_incarnation_context,
+            "a higher-incarnation prevented-member context",
+        );
+
+        let source_context = first
+            .snapshot_for_zone_change(first.id, Some(Zone::Battlefield), Zone::Graveyard)
+            .trigger_source_context
+            .expect("fixture snapshot carries source context");
+        let trigger_ref = crate::types::ability::TriggerDefinitionRef {
+            source: source_context.identity.reference,
+            occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        let mut sidecar_mismatch = group.clone();
+        sidecar_mismatch
+            .immediately_before_batched_triggers
+            .push(LatchedBatchedTrigger::new(
+                trigger_ref,
+                crate::types::ability::TriggerDefinition::new(
+                    crate::types::TriggerMode::ChangesZone,
+                ),
+                TriggerObservationTime::ImmediatelyBefore,
+                source_context,
+            ));
+        sidecar_mismatch.immediately_before_batched_triggers[0].observations[0]
+            .source_context
+            .identity
+            .reference
+            .incarnation += 1;
+        rejects_on_wire(
+            sidecar_mismatch,
+            "a latched definition/reference provenance mismatch",
+        );
+
+        let batch_wire = serde_json::json!({
+            "logical_zone_change_group": serde_json::to_value(&group)
+                .expect("valid group serializes for BatchDelivery"),
+            "paused_current": null,
+            "remaining": [],
+            "destination": serde_json::to_value(Zone::Graveyard)
+                .expect("zone serializes for BatchDelivery")
+        });
+        let batch: PendingBatchDeliveries = serde_json::from_value(batch_wire.clone())
+            .expect("BatchDelivery accepts the complete positive logical-owner fixture");
+        assert_eq!(batch.logical_zone_change_group, group);
+        let mut malformed_batch = batch_wire;
+        malformed_batch["logical_zone_change_group"]["terminal_outcomes"][1] =
+            serde_json::to_value(LogicalZoneChangeTerminalOutcome::Moved {
+                occurrence_ordinal: 0,
+            })
+            .expect("terminal outcome serializes");
         assert!(
-            missing_outcome.validate_complete().is_err(),
-            "a wire fixture with a missing prospective-member outcome must reject"
+            serde_json::from_value::<PendingBatchDeliveries>(malformed_batch).is_err(),
+            "BatchDelivery rejects a malformed carried logical owner at the deserialize boundary"
         );
         let departures = group
             .battlefield_departures()

@@ -3013,16 +3013,17 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::ChoiceType;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
         Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
         TargetRef, TypedFilter,
     };
+    use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
-        NamedChoiceSource, NamedChoiceSourceBinding, StackEntry, StackEntryKind,
+        NamedChoiceSource, NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource,
+        PromptSourceBinding, StackEntry, StackEntryKind,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
@@ -5200,6 +5201,63 @@ mod tests {
         assert!(
             saw_land && saw_nonland,
             "seeded AI guesses must exercise both Land and Nonland"
+        );
+    }
+
+    #[test]
+    fn opponent_guess_ai_choice_is_independent_of_private_answer_authority() {
+        let mut state = make_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(0x0A11),
+            PlayerId(1),
+            "Private guess source".to_string(),
+            Zone::Battlefield,
+        );
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source_id).expect("source exists"),
+        );
+        state.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: vec!["greater".to_string(), "not greater".to_string()],
+            choice_type: ChoiceType::Labeled {
+                options: vec!["greater".to_string(), "not greater".to_string()],
+            },
+            source: OpponentGuessSource {
+                prompt: PromptSourceBinding::from_trigger_source(&context),
+            },
+            owner: Some(OpponentGuessOwner {
+                context: context.clone(),
+                committed_choice: Some(ChosenAttribute::Number(7)),
+            }),
+            proposition_truth: Some(true),
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut first_rng = SmallRng::seed_from_u64(71);
+        let first = choose_action(&state, PlayerId(0), &config, &mut first_rng)
+            .expect("the guesser receives a legal option");
+
+        let WaitingFor::OpponentGuess {
+            owner,
+            proposition_truth,
+            ..
+        } = &mut state.waiting_for
+        else {
+            unreachable!("fixture remains an opponent guess");
+        };
+        *owner = Some(OpponentGuessOwner {
+            context,
+            committed_choice: Some(ChosenAttribute::Number(1)),
+        });
+        *proposition_truth = Some(false);
+        let mut second_rng = SmallRng::seed_from_u64(71);
+        let second = choose_action(&state, PlayerId(0), &config, &mut second_rng)
+            .expect("the guesser receives a legal option after private facts change");
+
+        assert_eq!(
+            first, second,
+            "the seeded AI may use only public options, never private truth or committed choice"
         );
     }
 
