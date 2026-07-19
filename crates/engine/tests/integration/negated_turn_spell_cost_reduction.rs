@@ -99,12 +99,17 @@ fn hurkyls_pending_cost_mana_value(active_player: PlayerId) -> u32 {
     }
 
     let card_id = runner.state().objects[&spell_id].card_id;
+    // Manual payment mode surfaces `WaitingFor::ManaPayment` and pauses at the
+    // locked-cost boundary WITHOUT auto-tapping; the pending cast retains the
+    // battlefield-modified cost so we can read its mana value before payment.
+    // Auto mode would instead try to pay immediately and fail here because this
+    // scenario seeds no mana sources ("Cannot pay mana cost").
     runner
         .act(GameAction::CastSpell {
             object_id: spell_id,
             card_id,
             targets: vec![],
-            payment_mode: CastPaymentMode::Auto,
+            payment_mode: CastPaymentMode::Manual,
         })
         .expect("casting Hurkyl's Final Meditation should begin");
     assert!(matches!(
