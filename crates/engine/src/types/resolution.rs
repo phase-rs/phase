@@ -1074,12 +1074,14 @@ fn validate_shipped_post_replacement_draw_pair(
 mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
+    use crate::game::merge::MergeSide;
+    use crate::game::scenario::GameScenario;
     use crate::types::ability::{
         Effect, EffectKind, PostReplacementContinuation, QuantityExpr, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        DrainStatus, GameState, PendingCoinFlipKind, PendingProliferateActions,
+        DrainStatus, GameState, PendingCoinFlipKind, PendingMutateMerge, PendingProliferateActions,
         PendingRepeatedOptionalPayment, PostReplacementDrain, ResidentDrainPolicy,
     };
     use crate::types::identifiers::ObjectId;
@@ -1654,5 +1656,38 @@ mod tests {
         .expect("proliferate fixture resumes through the real target-choice action");
         assert!(proliferate.pending_proliferate_actions.is_none());
         assert_reserializes_v2_only(proliferate);
+
+        let mut scenario = GameScenario::new();
+        let merging_id = scenario.add_creature(PlayerId(0), "Rider", 4, 4).id();
+        let target_id = scenario.add_creature(PlayerId(0), "Host", 2, 2).id();
+        let mut mutate = scenario.state;
+        mutate.pending_mutate_merge = Some(PendingMutateMerge {
+            merging_id,
+            target_id,
+            controller: PlayerId(0),
+        });
+        mutate.waiting_for = WaitingFor::MutateMergeChoice {
+            player: PlayerId(0),
+            merging_id,
+            target_id,
+        };
+        let mut mutate = restore_v1_fixture(mutate);
+        apply_as_current(
+            &mut mutate,
+            GameAction::ChooseMutateMergeSide {
+                side: MergeSide::Top,
+            },
+        )
+        .expect("mutate fixture resumes through the real merge-choice action");
+        assert!(mutate.pending_mutate_merge.is_none());
+        assert_eq!(
+            mutate
+                .objects
+                .get(&target_id)
+                .expect("merged target remains in the object map")
+                .merged_components,
+            vec![merging_id, target_id]
+        );
+        assert_reserializes_v2_only(mutate);
     }
 }
