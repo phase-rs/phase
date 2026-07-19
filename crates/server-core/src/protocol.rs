@@ -1884,8 +1884,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_17() {
-        assert_eq!(PROTOCOL_VERSION, 17);
+    fn protocol_version_is_18() {
+        assert_eq!(PROTOCOL_VERSION, 18);
     }
 
     #[test]

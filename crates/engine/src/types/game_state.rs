@@ -17798,6 +17798,38 @@ mod tests {
         group
             .validate_complete()
             .expect("complete ownership validates");
+        let roundtripped: LogicalZoneChangeGroup = serde_json::from_value(
+            serde_json::to_value(&group)
+                .expect("prevented/remained logical-group fixture serializes"),
+        )
+        .expect("prevented/remained logical-group fixture deserializes");
+        assert_eq!(
+            roundtripped, group,
+            "the direct prevented-outcome fixture preserves every terminal classification"
+        );
+        roundtripped
+            .validate_complete()
+            .expect("the round-tripped direct fixture remains a complete logical owner");
+
+        let mut duplicate_member = group.clone();
+        duplicate_member.prospective_battlefield_members[1] =
+            duplicate_member.prospective_battlefield_members[0].clone();
+        assert!(
+            duplicate_member.validate_complete().is_err(),
+            "a wire fixture with duplicate announced members must reject"
+        );
+        let mut misordered_occurrence = group.clone();
+        misordered_occurrence.all_origin_occurrences[1].ordinal = 0;
+        assert!(
+            misordered_occurrence.validate_complete().is_err(),
+            "a wire fixture with misordered retained occurrences must reject"
+        );
+        let mut missing_outcome = group.clone();
+        missing_outcome.terminal_outcomes.pop();
+        assert!(
+            missing_outcome.validate_complete().is_err(),
+            "a wire fixture with a missing prospective-member outcome must reject"
+        );
         let departures = group
             .battlefield_departures()
             .expect("exact battlefield departure derives from retained event");
