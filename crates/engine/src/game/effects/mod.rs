@@ -9,7 +9,7 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
+    AbilityCondition, AbilityCost, AbilityKind, CardPlayMode, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
@@ -2145,6 +2145,11 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             // `last_effect_count`).
             | WaitingFor::RemoveCountersChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
+            // CR 118.12 + CR 608.2c: resolution-time costs that need object
+            // selection, such as "you may tap two untapped creatures you
+            // control", pause the parent effect before any `WhenYouDo` rider can
+            // check whether the cost was paid.
+            | WaitingFor::PayCost { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
@@ -2451,6 +2456,16 @@ fn inject_last_revealed_targets(
 ) -> Vec<TargetRef> {
     if let Some(filter) = target_filter_for_last_revealed_sub(&sub.effect) {
         let ctx = crate::game::filter::FilterContext::from_ability(parent_ability);
+        // CR 701.20e + CR 608.2c: In an immediate look-then-act chain, an exact
+        // `ParentTarget` names the object produced by the parent look even though
+        // looking does not move it or create an ordinary target. Bind that one
+        // sentinel through the existing look ledger. Composed filters remain
+        // intact so their concrete restrictions are still evaluated.
+        let filter = if matches!(filter, TargetFilter::ParentTarget) {
+            &TargetFilter::LastRevealed
+        } else {
+            filter
+        };
         return crate::game::filter::last_revealed_library_ids_matching(state, filter, &ctx)
             .into_iter()
             .map(TargetRef::Object)
@@ -2584,6 +2599,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::HasObjectTarget
             | AbilityCondition::TriggeringSpellTargetsFilter { .. }
             | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
             | AbilityCondition::ControllerControlsMatching { .. }
             | AbilityCondition::ControllerControlledMatchingAsCast { .. }
@@ -4825,14 +4841,10 @@ fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &Resolve
 
 /// CR 608.2d: "A player can't choose an impossible option." An optional effect
 /// whose only reachable outcome is a no-op must not be offered as a "you may"
-/// prompt at all. Currently the sole such class is `Effect::PutChosenCounter`
-/// reached after a `ChooseCounterKind` whose 0-kind branch fired: the iterated
-/// permanent had no counters, so no `ChosenAttribute::Counter` was persisted onto
-/// the source and "put an additional counter of that kind" has no "that kind" to
-/// add. The Caves of Androzani II/III iterates over EVERY non-Saga permanent, so
-/// without this guard the controller is flooded with impossible yes/no prompts
-/// for lands and counterless creatures. Suppressing the prompt lets the effect
-/// resolve as its defined no-op instead (CR 122.6).
+/// prompt at all. Each arm below proves infeasibility through its authoritative
+/// typed state: a missing chosen counter kind, no removable matching counter, or
+/// an exact `ParentTarget` hand-off that records no produced object. Suppressing
+/// the prompt lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutChosenCounter { .. } => {
@@ -4844,6 +4856,73 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // `OptionalEffectPerformed` rider) must be suppressed (Sun Droplet #4776).
         Effect::RemoveCounter { .. } => {
             counters::remove_counter_optional_is_infeasible(state, ability)
+        }
+        Effect::CastFromZone {
+            mode,
+            target,
+            constraint,
+            ..
+        } => {
+            // CR 608.2d: An optional exact "cast/play that card" instruction is
+            // impossible when its parent hand-off records that no object was
+            // produced. Neither a lingering permission nor `Play` mode can make
+            // the missing referent actionable, and unrelated inherited targets
+            // cannot supply the exact referent. Concrete parent targets and
+            // ordinary zone selections carry no such provenance and remain
+            // eligible.
+            if matches!(target, TargetFilter::ParentTarget)
+                && ability.parent_target_missing_reason.is_some()
+            {
+                return true;
+            }
+
+            // CR 202.3 + CR 305.1 + CR 601.2e + CR 608.2d: A CastFromZone
+            // option with bound objects is feasible when at least one of those
+            // objects can currently be cast. Probe each object independently:
+            // lands never enter the cast path, fixed permission constraints use
+            // the casting pipeline's typed offer-time authority, and the cloned
+            // resolver retains all other CR 601 legality checks. Dynamic/X
+            // constraints remain deferred by that shared authority. `Play`
+            // permits lands, so this probe is Cast-only. An empty bound set
+            // retains the original whole-ability dry-run, which keeps successful
+            // zone-selection fallbacks feasible while preserving other errors.
+            if matches!(mode, CardPlayMode::Cast) {
+                let bound_objects: Vec<_> = ability
+                    .targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect();
+                if bound_objects.is_empty() {
+                    let mut simulated = state.clone();
+                    return cast_from_zone::resolve(&mut simulated, ability, &mut Vec::new())
+                        .is_err();
+                }
+
+                return !bound_objects.into_iter().any(|id| {
+                    let Some(object) = state.objects.get(&id) else {
+                        return false;
+                    };
+                    if object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                        || !crate::game::casting::cast_permission_constraint_allows_cast(
+                            state, object, constraint, None,
+                        )
+                    {
+                        return false;
+                    }
+
+                    let mut candidate = ability.clone();
+                    candidate.targets = vec![TargetRef::Object(id)];
+                    let mut simulated = state.clone();
+                    cast_from_zone::resolve(&mut simulated, &candidate, &mut Vec::new()).is_ok()
+                });
+            }
+            false
         }
         _ => false,
     }
@@ -6414,6 +6493,64 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
 
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
 /// No SVar lookup, no parse_ability(). The depth is bounded by the data structure.
+/// CR 608.2c: True when `condition` is a quantity comparison awaiting a
+/// resolution-only object referent that the currently-paused effect will only
+/// bind after its choice resolves (Hit the Mother Lode: "if the discovered
+/// card's mana value is less than 10" — the discovered card is stamped onto the
+/// continuation only after the cast-or-hand offer). Such a condition must NOT be
+/// evaluated synchronously against the pre-choice state, where the referent
+/// reads as absent and the comparison collapses to a false gate; defer the sub
+/// to the continuation so it re-evaluates once the referent is bound.
+fn condition_awaits_resolution_only_referent(
+    condition: &AbilityCondition,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+                state, lhs, ability,
+            ) || crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+                state, rhs, ability,
+            )
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| condition_awaits_resolution_only_referent(c, state, ability)),
+        AbilityCondition::Not { condition } => {
+            condition_awaits_resolution_only_referent(condition, state, ability)
+        }
+        _ => false,
+    }
+}
+
+/// CR 701.57c + CR 608.2h: When a Discover pauses on its cast-or-hand offer, the
+/// discovered (hit) card is the referent of any follow-up "the discovered card"
+/// clause ("If the discovered card's mana value is less than 10, create ... equal
+/// to the difference" — Hit the Mother Lode). Snapshot it as an LKI at exile time
+/// — BEFORE the cast path assigns X (CR 202.3e) or the to-hand path moves it — and
+/// stamp it across the stashed continuation chain so the follow-up sub's condition
+/// and count resolve `CostPaidObject` against the right card. `effective_mana_value`
+/// in exile counts {X} as 0, matching the discover hit test.
+fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
+    let hit = match &state.waiting_for {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Discover { hit_card, .. },
+            ..
+        } => *hit_card,
+        _ => return,
+    };
+    let Some(snapshot) = state.objects.get(&hit).map(|obj| CostPaidObjectSnapshot {
+        object_id: hit,
+        lki: obj.snapshot_public_characteristics(),
+    }) else {
+        return;
+    };
+    if let Some(cont) = state.pending_continuation.as_mut() {
+        cont.chain.set_effect_context_object_recursive(snapshot);
+    }
+}
+
 pub fn resolve_ability_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -7360,10 +7497,22 @@ fn resolve_chain_body(
                 // when that rider's condition is false. Mirrors the gated-sub
                 // sibling escape hatch (the `next.sub_link == SequentialSibling`
                 // branch below).
+                // CR 615.5 + CR 120.1: A sub whose gate is an INDEPENDENT per-event
+                // predicate — `PostReplacementDamageSourceMatchesFilter`
+                // (Comeuppance's two mutually-exclusive creature/noncreature
+                // reflection riders) — does not reference this node's effect, so it
+                // must be evaluated on its own regardless of whether this node's
+                // gate held. Without this, the noncreature rider never fires when
+                // the creature rider's gate is false (and vice-versa).
+                let sub_has_independent_event_gate = matches!(
+                    sub.condition.as_ref(),
+                    Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })
+                );
                 if sub
                     .condition
                     .as_ref()
                     .is_some_and(condition_depends_on_effect_performed)
+                    || sub_has_independent_event_gate
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
                         && sub.condition.is_none())
                 {
@@ -7389,6 +7538,29 @@ fn resolve_chain_body(
         {
             return Ok(());
         }
+    }
+
+    let optional_is_infeasible = ability.optional && optional_effect_is_infeasible(state, ability);
+
+    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction does
+    // not happen. Route every such CastFromZone outcome through the existing
+    // decline authority instead of merely suppressing the prompt and falling
+    // through to `resolve_effect`: a missing exact parent could consume an
+    // unrelated inherited target, while another current-legality failure (such
+    // as trying to cast a land) could mutate casting permissions before the
+    // cast authority rejects it. The decline path also preserves the printed
+    // tail semantics: dependent "if you do" riders stay gated while independent
+    // sequential siblings and explicit decline branches continue. Other
+    // infeasible optional effects (PutChosenCounter/RemoveCounter) retain their
+    // established resolver no-op.
+    if optional_is_infeasible && matches!(ability.effect, Effect::CastFromZone { .. }) {
+        return resolve_optional_effect_decision(
+            state,
+            ability.clone(),
+            AutoMayChoice::Decline,
+            events,
+            depth + 1,
+        );
     }
 
     // CR 608.2d + CR 101.4: "Any opponent may" / "Any player may" / "Any other
@@ -7472,7 +7644,7 @@ fn resolve_chain_body(
         && !has_kind_driven_repeat(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
         && !is_repeated_optional_payment(ability)
-        && !optional_effect_is_infeasible(state, ability)
+        && !optional_is_infeasible
     {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);
@@ -8422,7 +8594,8 @@ fn resolve_chain_body(
                     || condition_depends_on_zone_change_this_way(condition)
                     || matches!(condition, AbilityCondition::WhenYouDo)
                     || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
-                        && condition_depends_on_result_object(condition)))
+                        && condition_depends_on_result_object(condition))
+                    || condition_awaits_resolution_only_referent(condition, state, ability))
             {
                 let mut sub_clone = sub.as_ref().clone();
                 if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
@@ -8435,6 +8608,11 @@ fn resolve_chain_body(
                     state,
                 );
                 prepend_to_pending_continuation(state, sub_clone);
+                // CR 701.57c + CR 608.2h: bind the paused Discover's hit card onto
+                // the just-stashed continuation so the deferred condition (and its
+                // token count) resolve against the discovered card, not an absent
+                // referent. No-op for every non-Discover pause.
+                stamp_discovered_referent_onto_continuation(state);
                 return Ok(());
             }
 
@@ -8707,6 +8885,9 @@ fn resolve_chain_body(
                 state,
             );
             prepend_to_pending_continuation(state, sub_clone);
+            // CR 701.57c + CR 608.2h: an unconditional Discover follow-up stashed
+            // here still binds the hit card as its referent (no-op otherwise).
+            stamp_discovered_referent_onto_continuation(state);
             return Ok(());
         }
 
@@ -9223,6 +9404,7 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::EventSource
             | crate::types::ability::ObjectScope::CostPaidObject
             | crate::types::ability::ObjectScope::OtherRevealedCard
+            | crate::types::ability::ObjectScope::OwnedLinkedExileCard
             | crate::types::ability::ObjectScope::EventTarget
             | crate::types::ability::ObjectScope::AmassedArmy => false,
         },
@@ -9448,6 +9630,7 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::EventSource
                 | crate::types::ability::ObjectScope::CostPaidObject
                 | crate::types::ability::ObjectScope::OtherRevealedCard
+                | crate::types::ability::ObjectScope::OwnedLinkedExileCard
                 | crate::types::ability::ObjectScope::EventTarget
                 | crate::types::ability::ObjectScope::AmassedArmy => None,
             };
@@ -9462,6 +9645,24 @@ pub(crate) fn evaluate_condition(
             comparator,
             rhs,
         } => {
+            // CR 701.57c: When a comparison operand reads a resolution-only object
+            // scope (e.g. `ObjectManaValue { CostPaidObject }` — "the discovered
+            // card's mana value") whose referent is genuinely absent, the whole
+            // comparison is meaningless. Resolution would silently read 0 (the
+            // `.unwrap_or(0)` fallback in `resolve_object_mana_value`), conflating
+            // "no referent" with "referent whose value is 0", so a legitimately
+            // MV-0 discovered card (Ornithopter) must NOT be treated the same as
+            // no discovery at all. Gate on referent PRESENCE — never on resolved
+            // value == 0 — and treat an absent referent as a false condition so
+            // the conditional effect does nothing (Hit the Mother Lode when the
+            // final exiled card's mana value exceeds N: nothing is discovered).
+            if crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+                state, lhs, ability,
+            ) || crate::game::quantity::quantity_expr_missing_resolution_only_referent(
+                state, rhs, ability,
+            ) {
+                return false;
+            }
             // CR 608.2c: a conditional second effect — evaluate the quantity
             // comparison at resolution time. Thread the full `ability` so
             // target-relative scopes (e.g. `PlayerScope::Target`,
@@ -9686,6 +9887,21 @@ pub(crate) fn evaluate_condition(
                 &crate::game::filter::FilterContext::from_ability(ability),
             )
         }
+        // CR 615.5 + CR 120.1: "If damage from a [type] source is prevented this
+        // way, …" — gate a prevention rider on the type of the PREVENTED event's
+        // damage source (Comeuppance). Reads `post_replacement_event_source`,
+        // populated while the prevention continuation drains; absent outside that
+        // window → the gate is false and the rider does not fire.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => state
+            .post_replacement_event_source()
+            .is_some_and(|source_id| {
+                crate::game::filter::matches_target_filter(
+                    state,
+                    source_id,
+                    filter,
+                    &crate::game::filter::FilterContext::from_ability(ability),
+                )
+            }),
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             origin,
             destination,
@@ -23494,6 +23710,500 @@ mod tests {
             3,
             "non-matching crewer: only the +1/+1 counter is added, no doubling"
         );
+    }
+
+    fn pure_peek_definition(sub: AbilityDefinition, count: i32) -> AbilityDefinition {
+        use crate::types::ability::DigSource;
+
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: count },
+                destination: None,
+                keep_count: Some(0),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+                enter_tapped: false,
+                source: DigSource::Library,
+            },
+        )
+        .sub_ability(sub)
+    }
+
+    /// CR 701.20e + CR 608.2c: a pure look leaves the card in the library, but
+    /// the immediate `ParentTarget` cast instruction still refers to that exact
+    /// looked-at object.
+    #[test]
+    fn pure_peek_parent_target_cast_injects_looked_library_card() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Look Source".to_string(),
+            Zone::Battlefield,
+        );
+        let looked = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Looked Spell".to_string(),
+            Zone::Library,
+        );
+        let sibling = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Library Sibling".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&looked)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let cast = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+        );
+        let ability = build_resolved_from_def(&pure_peek_definition(cast, 1), source, PlayerId(0));
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("pure-peek cast chain must resolve");
+
+        assert_eq!(state.last_revealed_ids, vec![looked]);
+        assert_eq!(
+            state.objects[&looked].zone,
+            Zone::Exile,
+            "the exact looked card must enter the lingering cast-permission path"
+        );
+        assert!(state.objects[&looked]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
+            )));
+        assert_eq!(state.objects[&sibling].zone, Zone::Library);
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+    }
+
+    /// CR 608.2d + CR 601.2a: feasibility probing must preserve valid
+    /// resolution-time casts from public zones, including typed filters.
+    #[test]
+    fn optional_cast_feasibility_preserves_valid_graveyard_and_exile_spells() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        for zone in [Zone::Graveyard, Zone::Exile] {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(900),
+                PlayerId(0),
+                "Cast Source".to_string(),
+                Zone::Battlefield,
+            );
+            let spell = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                format!("{zone:?} Spell"),
+                zone,
+            );
+            {
+                let object = state.objects.get_mut(&spell).unwrap();
+                object.card_types.core_types.push(CoreType::Instant);
+                object.base_card_types = object.card_types.clone();
+            }
+
+            let cast = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CastFromZone {
+                    target: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Instant)
+                            .properties(vec![FilterProp::InZone { zone }]),
+                    ),
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::DuringResolution,
+                    mana_spend_permission: None,
+                },
+            )
+            .optional();
+            let mut ability = build_resolved_from_def(&cast, source, PlayerId(0));
+            ability.targets = vec![TargetRef::Object(spell)];
+
+            assert!(
+                !optional_effect_is_infeasible(&state, &ability),
+                "a valid typed cast from {zone:?} must remain offerable"
+            );
+        }
+    }
+
+    /// CR 608.2d: an exact missing parent cannot become actionable through the
+    /// independent cast/play or immediate/lingering axes.
+    #[test]
+    fn missing_parent_target_blocks_optional_cast_and_play_for_every_driver() {
+        use crate::types::ability::{
+            AbilityCost, CardPlayMode, CastFromZoneDriver, CastPermissionConstraint,
+            ParentTargetMissingReason,
+        };
+
+        let state = GameState::new_two_player(42);
+        for mode in [CardPlayMode::Cast, CardPlayMode::Play] {
+            for driver in [
+                CastFromZoneDriver::DuringResolution,
+                CastFromZoneDriver::LingeringPermission,
+            ] {
+                let mut ability = ResolvedAbility::new(
+                    Effect::CastFromZone {
+                        target: TargetFilter::ParentTarget,
+                        without_paying_mana_cost: false,
+                        mode,
+                        cast_transformed: false,
+                        alt_ability_cost: Some(AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        }),
+                        constraint: Some(CastPermissionConstraint::ManaValue {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        }),
+                        duration: Some(Duration::UntilEndOfTurn),
+                        driver,
+                        mana_spend_permission: None,
+                    },
+                    vec![],
+                    ObjectId(900),
+                    PlayerId(0),
+                );
+                ability.optional = true;
+                ability.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+
+                assert!(
+                    optional_effect_is_infeasible(&state, &ability),
+                    "missing ParentTarget must suppress {mode:?}/{driver:?} even with a duration, constraint, and alternative cost"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2d: explicit missing-parent provenance remains authoritative when
+    /// normal chain hand-off also inherits a player or unrelated object target.
+    #[test]
+    fn inherited_unrelated_targets_do_not_restore_a_missing_exact_parent() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver, ParentTargetMissingReason};
+
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+
+        for inherited_targets in [
+            vec![TargetRef::Player(PlayerId(1))],
+            vec![TargetRef::Object(ObjectId(901))],
+        ] {
+            ability.targets = inherited_targets;
+            assert!(
+                optional_effect_is_infeasible(&state, &ability),
+                "unrelated inherited targets must not satisfy a missing exact ParentTarget: {:?}",
+                ability.targets
+            );
+        }
+    }
+
+    /// CR 608.2d: a concrete exact target is actionable; genuine parent hand-offs
+    /// carry the object rather than missing-parent provenance.
+    #[test]
+    fn concrete_parent_target_remains_feasible_for_optional_cast() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Cast Source".to_string(),
+            Zone::Battlefield,
+        );
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Concrete Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Instant);
+            object.base_card_types = object.card_types.clone();
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+            },
+            vec![TargetRef::Object(spell)],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "a concrete exact target must remain offerable"
+        );
+    }
+
+    /// CR 608.2d: ordinary empty target lists without exact missing-parent
+    /// provenance remain valid no-op/zone-selection shapes.
+    #[test]
+    fn empty_non_parent_cast_shapes_remain_feasible_without_missing_provenance() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        let state = GameState::new_two_player(42);
+        for target in [
+            TargetFilter::Any,
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Instant)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+        ] {
+            let mut ability = ResolvedAbility::new(
+                Effect::CastFromZone {
+                    target: target.clone(),
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::DuringResolution,
+                    mana_spend_permission: None,
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            );
+            ability.optional = true;
+
+            assert!(
+                !optional_effect_is_infeasible(&state, &ability),
+                "empty {target:?} without missing-parent provenance must remain offerable"
+            );
+        }
+    }
+
+    /// CR 701.20e + CR 608.2c: the sibling positional consumer binds the same
+    /// pure-look result and moves only that card.
+    #[test]
+    fn pure_peek_parent_target_put_at_library_position_moves_looked_card() {
+        use crate::types::ability::LibraryPosition;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Look Source".to_string(),
+            Zone::Battlefield,
+        );
+        let looked = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Looked Card".to_string(),
+            Zone::Library,
+        );
+        let sibling = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Library Sibling".to_string(),
+            Zone::Library,
+        );
+        let put = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Bottom,
+            },
+        );
+        let ability = build_resolved_from_def(&pure_peek_definition(put, 1), source, PlayerId(0));
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("pure-peek positional chain must resolve");
+
+        assert_eq!(state.last_revealed_ids, vec![looked]);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![sibling, looked],
+            "only the looked top card must move to the requested position"
+        );
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+    }
+
+    /// An explicitly announced child target is authoritative. The pure-look
+    /// ledger must not overwrite it when the parent Dig finishes.
+    #[test]
+    fn pure_peek_preserves_explicit_cast_from_zone_child_target() {
+        use crate::game::ability_utils::assign_targets_in_chain;
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Look Source".to_string(),
+            Zone::Battlefield,
+        );
+        let looked = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Looked Top".to_string(),
+            Zone::Library,
+        );
+        let sibling = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Looked Sibling".to_string(),
+            Zone::Library,
+        );
+        let explicit = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Explicit Exile Spell".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&explicit)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let cast = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Instant)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                ),
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+        )
+        .optional();
+        let mut ability =
+            build_resolved_from_def(&pure_peek_definition(cast, 2), source, PlayerId(0));
+        // Model a resumed chain whose optional child already carries a real
+        // announced target, using the canonical assignment helper on that child.
+        assign_targets_in_chain(
+            &state,
+            ability.sub_ability.as_mut().unwrap(),
+            &[TargetRef::Object(explicit)],
+        )
+        .expect("the exile card must stamp onto the cast child");
+        assert!(
+            ability.targets.is_empty(),
+            "the Dig head has no target slot"
+        );
+        assert_eq!(
+            ability.sub_ability.as_ref().unwrap().targets,
+            vec![TargetRef::Object(explicit)],
+            "precondition: the cast child owns the explicit target"
+        );
+        assert!(state.last_revealed_ids.is_empty());
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("explicit-target pure-peek chain must reach its optional prompt");
+
+        assert_eq!(state.last_revealed_ids, vec![looked, sibling]);
+        let pending = state
+            .pending_optional_effect
+            .as_ref()
+            .expect("optional cast must be pending");
+        assert_eq!(
+            pending.targets,
+            vec![TargetRef::Object(explicit)],
+            "the live optional continuation must retain only the explicit exile target"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("accepting the explicit cast grant must succeed");
+
+        assert!(state.objects[&explicit]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
+            )));
+        for id in [looked, sibling] {
+            assert_eq!(state.objects[&id].zone, Zone::Library);
+            assert!(state.objects[&id].casting_permissions.is_empty());
+        }
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
     }
 
     /// Issue #2019 — Kiora-style look-then-cast must filter chain-injected targets

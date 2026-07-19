@@ -27,45 +27,56 @@ pub(super) fn handle_declare_attackers(
     if state.active_player != player {
         return Err(EngineError::WrongPlayer);
     }
-    // CR 508.1d + CR 508.1h: Enumerate UnlessPay static abilities (Ghostly Prison,
-    // Propaganda, Sphere of Safety, etc.) before tapping attackers. If any apply,
-    // pause the declaration so the active player can pay or decline the locked-in
-    // aggregate cost. The actual `declare_attackers` call (which taps creatures
-    // per CR 508.1f and populates CombatState) is deferred until the payment is
-    // accepted or declined.
+    // CR 508.1a–e: run the full strict legality check BEFORE any tax is quoted, so
+    // an illegal declaration is rejected outright (and never opens a tax prompt)
+    // and nothing is tapped or committed on rejection. This is the single engine
+    // authority — the human submission is accept-or-reject, never rewritten.
+    super::combat::validate_attack_declaration(state, attacks, bands)
+        .map_err(EngineError::InvalidAction)?;
+
+    // CR 508.1g + CR 508.1h: enumerate the UnlessPay statics (Ghostly Prison,
+    // Propaganda, Sphere of Safety, …) and lock the aggregate total. If any tax
+    // applies, pause WITHOUT tapping/committing — snapshot the (already-validated)
+    // proposal as `ObjectIncarnationRef`s (CR 508.1k + CR 400.7) so a creature that
+    // changes zones during the pause is dropped on accept rather than attacking
+    // from a stale id.
     if let Some((total_cost, per_creature)) = super::combat::compute_attack_tax(state, attacks) {
+        let (snap_attacks, snap_bands) =
+            super::combat::snapshot_attack_declaration(state, attacks, bands);
         return Ok(WaitingFor::CombatTaxPayment {
             player,
             context: CombatTaxContext::Attacking,
             total_cost,
             per_creature,
             pending: CombatTaxPending::Attack {
-                attacks: attacks.to_vec(),
-                // CR 702.22c + CR 702.22h: preserve band declarations across the
-                // tax-payment pause so the resume path re-runs
-                // `declare_attackers_with_bands` and the band is grouped for
-                // blocking rather than being silently dropped.
-                bands: bands.to_vec(),
+                attacks: snap_attacks,
+                bands: snap_bands,
             },
         });
     }
-    let declaration_start = events.len();
-    // CR 702.22c: declare attackers together with any banding declarations so
-    // `band_id` is stamped on the attacking-band members before block
-    // propagation (CR 702.22h) and damage assignment (CR 702.22j/k).
-    super::combat::declare_attackers_with_bands(state, attacks, bands, events)
-        .map_err(EngineError::InvalidAction)?;
 
-    // CR 508.1g + CR 701.43d: before attack triggers are put on the stack, the
-    // active player pays any optional "exert this creature as it attacks" costs.
-    // Offer each eligible attacker one at a time; the post-declaration
-    // trigger/priority logic resumes via `finish_declare_attackers` once the
-    // exert queue is drained.
+    // CR 508.1f + CR 508.1k: no tax — commit the validated declaration now.
+    let declaration_start = events.len();
+    super::combat::commit_attack_declaration(state, attacks, bands, events);
+    continue_declare_attackers_after_commit(state, player, attacks, declaration_start, events)
+}
+
+/// CR 508.1g + CR 508.2: post-commit continuation shared by the no-tax path and
+/// the tax-accept path — offer each optional "exert as it attacks" (CR 701.43d)
+/// and Enlist (CR 702.154) cost one at a time, deferring declaration triggers
+/// until the queue drains, then route through `finish_declare_attackers`.
+/// `attacks` is the ACTUALLY-committed set (after any incarnation-mismatch drops
+/// on the accept path), so exert/enlist candidates and the empty-combat check
+/// reflect what really became attacking.
+fn continue_declare_attackers_after_commit(
+    state: &mut GameState,
+    player: PlayerId,
+    attacks: &[(ObjectId, AttackTarget)],
+    declaration_start: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let candidates = exert_candidates(state, attacks);
     if let Some((first, rest)) = candidates.split_first() {
-        // CR 508.2: defer the declaration triggers until after the exert
-        // sub-step so attack and exert "when you do" triggers are placed on the
-        // stack simultaneously.
         state.pending_attack_trigger_events = events[declaration_start..].to_vec();
         return Ok(WaitingFor::ExertChoice {
             player,
@@ -76,9 +87,6 @@ pub(super) fn handle_declare_attackers(
 
     if let Some(waiting_for) = next_enlist_choice(state, player, enlist_candidates(state, attacks))
     {
-        // CR 508.2: defer declaration triggers until after Enlist optional
-        // attack costs, so attack and linked "when you do" triggers are placed
-        // on the stack before priority.
         state.pending_attack_trigger_events = events[declaration_start..].to_vec();
         return Ok(waiting_for);
     }
@@ -432,7 +440,20 @@ pub(super) fn handle_pay_combat_tax(
         });
         match pending {
             CombatTaxPending::Attack { attacks, bands } => {
-                return resume_declare_attackers(state, &attacks, &bands, None, events);
+                // CR 508.1k + CR 400.7: commit the already-validated snapshot,
+                // keeping only current-incarnation, still-team-controlled refs.
+                // Requirements/restrictions/taxes are NOT re-evaluated.
+                let declaration_start = events.len();
+                let committed = super::combat::commit_attack_declaration_from_snapshot(
+                    state, &attacks, &bands, events,
+                );
+                return continue_declare_attackers_after_commit(
+                    state,
+                    player,
+                    &committed,
+                    declaration_start,
+                    events,
+                );
             }
             CombatTaxPending::Block { assignments } => {
                 return resume_declare_blockers(state, player, &assignments, events);
@@ -440,39 +461,20 @@ pub(super) fn handle_pay_combat_tax(
         }
     }
 
-    // Decline — filter the taxed creatures out of the pending declaration.
-    let taxed: HashSet<ObjectId> = per_creature.iter().map(|(id, _)| *id).collect();
     match pending {
-        CombatTaxPending::Attack { attacks, bands } => {
-            let filtered: Vec<(ObjectId, AttackTarget)> = attacks
-                .into_iter()
-                .filter(|(id, _)| !taxed.contains(id))
-                .collect();
-            // CR 702.22f: a creature dropped from the attack (because its tax was
-            // declined) is also removed from its band. Filter the taxed members
-            // out of every band. CR 702.22c: a band must still contain at least
-            // one creature with banding to remain a band — drop any band that no
-            // longer does (this also discards bands left empty). Survivors of a
-            // dissolved band stay in `filtered` as ungrouped individual attackers.
-            let filtered_bands: Vec<Vec<ObjectId>> = bands
-                .into_iter()
-                .map(|band| {
-                    band.into_iter()
-                        .filter(|id| !taxed.contains(id))
-                        .collect::<Vec<_>>()
-                })
-                .filter(|band| {
-                    band.iter()
-                        .any(|&id| crate::game::combat::has_banding(state, id))
-                })
-                .collect();
-            events.push(GameEvent::CombatTaxDeclined {
-                player,
-                dropped: taxed.iter().copied().collect(),
-            });
-            resume_declare_attackers(state, &filtered, &filtered_bands, Some(&taxed), events)
+        // CR 508.1d: declining the attack tax discards the WHOLE proposal (a player
+        // is never required to pay). No tap, no partial commit, no
+        // `declined_taxed_attackers` filter — rebuild a fresh `DeclareAttackers`
+        // prompt so the active player re-declares.
+        CombatTaxPending::Attack { attacks, bands: _ } => {
+            let dropped: Vec<ObjectId> = attacks.iter().map(|(r, _)| r.object_id).collect();
+            events.push(GameEvent::CombatTaxDeclined { player, dropped });
+            let _ = context;
+            Ok(super::combat::build_declare_attackers_waiting_for(state))
         }
+        // Block path is unchanged: filter the taxed blockers and submit the rest.
         CombatTaxPending::Block { assignments } => {
+            let taxed: HashSet<ObjectId> = per_creature.iter().map(|(id, _)| *id).collect();
             let filtered: Vec<(ObjectId, ObjectId)> = assignments
                 .into_iter()
                 .filter(|(blocker, _)| !taxed.contains(blocker))
@@ -485,51 +487,6 @@ pub(super) fn handle_pay_combat_tax(
             resume_declare_blockers(state, player, &filtered, events)
         }
     }
-}
-
-fn resume_declare_attackers(
-    state: &mut GameState,
-    attacks: &[(ObjectId, AttackTarget)],
-    bands: &[Vec<ObjectId>],
-    declined_taxed_attackers: Option<&HashSet<ObjectId>>,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    if attacks.is_empty() {
-        // CR 508.8: No creatures declared as attackers — skip to end of combat.
-        return handle_empty_attackers_with_declined_tax(state, declined_taxed_attackers, events);
-    }
-    // CR 702.22c + CR 702.22h: re-run the band-aware declaration so `band_id` is
-    // stamped on the attacking-band members and block propagation groups them
-    // (this resume path previously dropped bands, leaving members individually
-    // blockable behind a combat-tax static like Ghostly Prison).
-    match declined_taxed_attackers {
-        Some(taxed) => super::combat::declare_attackers_with_bands_after_combat_tax_declined(
-            state, attacks, bands, taxed, events,
-        ),
-        None => super::combat::declare_attackers_with_bands(state, attacks, bands, events),
-    }
-    .map_err(EngineError::InvalidAction)?;
-
-    let trigger_events = events.clone();
-    if let Some(prompt) =
-        process_declaration_triggers_with_delayed_phase(state, &trigger_events, events)
-    {
-        return Ok(prompt);
-    }
-    // CR 603.3b (#531): process_triggers may have paused on OrderTriggers
-    // for a player with 2+ simultaneous triggers. Propagate that prompt
-    // instead of overwriting it with Priority below.
-    if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-        return Ok(state.waiting_for.clone());
-    }
-    if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
-        return Ok(waiting_for);
-    }
-
-    priority::reset_priority(state);
-    Ok(WaitingFor::Priority {
-        player: state.active_player,
-    })
 }
 
 fn resume_declare_blockers(
@@ -846,25 +803,7 @@ pub(super) fn handle_empty_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    handle_empty_attackers_with_declined_tax(state, None, events)
-}
-
-fn handle_empty_attackers_with_declined_tax(
-    state: &mut GameState,
-    declined_taxed_attackers: Option<&HashSet<ObjectId>>,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    match declined_taxed_attackers {
-        Some(taxed) => super::combat::declare_attackers_with_bands_after_combat_tax_declined(
-            state,
-            &[],
-            &[],
-            taxed,
-            events,
-        ),
-        None => super::combat::declare_attackers(state, &[], events),
-    }
-    .map_err(EngineError::InvalidAction)?;
+    super::combat::declare_attackers(state, &[], events).map_err(EngineError::InvalidAction)?;
 
     let trigger_events = events.clone();
     if let Some(prompt) =
@@ -1696,10 +1635,16 @@ mod tests {
         );
     }
 
-    /// CR 508.1d + CR 701.15b: Declining a tax removes only the taxed goaded
-    /// creature. Untaxed attackers still complete the same declaration.
+    /// CR 508.1d + Decision 2: Declining an attack tax discards the WHOLE proposal —
+    /// including any untaxed attacker declared alongside the taxed one — and rebuilds
+    /// a fresh `DeclareAttackers` prompt. A player is never required to pay, and the
+    /// engine never silently keeps a subset of the abandoned declaration.
+    ///
+    /// Revert guard: the old decline path filtered only the taxed creature and
+    /// committed the untaxed remainder (resuming to `Priority` with one attacker).
+    /// Restoring that flips `resumed` back to `Priority` and re-commits `untaxed`.
     #[test]
-    fn declining_combat_tax_keeps_untaxed_attackers() {
+    fn declining_combat_tax_discards_whole_proposal_including_untaxed() {
         let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
         state.turn_number = 2;
         state.active_player = PlayerId(0);
@@ -1721,6 +1666,8 @@ mod tests {
         let mut events = Vec::new();
         let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &[], &mut events)
             .expect("attack declaration reaches the combat-tax choice");
+        // Reach-guard: only the goaded creature is taxed (proves the proposal really
+        // mixes a taxed and an untaxed attacker before the decline).
         let WaitingFor::CombatTaxPayment { per_creature, .. } = &waiting else {
             panic!("expected CombatTaxPayment, got {waiting:?}");
         };
@@ -1729,14 +1676,24 @@ mod tests {
 
         let mut events = Vec::new();
         let resumed = handle_pay_combat_tax(&mut state, waiting, false, &mut events)
-            .expect("declining a tax must preserve untaxed attackers");
+            .expect("declining a tax must succeed without forcing payment");
 
-        assert!(matches!(resumed, WaitingFor::Priority { .. }));
-        let combat = state
-            .combat
-            .as_ref()
-            .expect("untaxed attacker remains in combat");
-        assert_eq!(combat.attackers.len(), 1);
-        assert_eq!(combat.attackers[0].object_id, untaxed);
+        // New contract: fresh DeclareAttackers prompt, nothing committed, nothing tapped.
+        assert!(
+            matches!(resumed, WaitingFor::DeclareAttackers { .. }),
+            "declining must rebuild a fresh DeclareAttackers prompt, got {resumed:?}"
+        );
+        assert!(
+            state.combat.as_ref().is_none_or(|c| c.attackers.is_empty()),
+            "no attacker — taxed OR untaxed — may remain committed after decline"
+        );
+        assert!(
+            !state.objects[&taxed_goaded].tapped,
+            "the taxed attacker stays untapped"
+        );
+        assert!(
+            !state.objects[&untaxed].tapped,
+            "the untaxed attacker is also discarded and stays untapped"
+        );
     }
 }

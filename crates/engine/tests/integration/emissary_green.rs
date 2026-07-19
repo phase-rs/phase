@@ -69,6 +69,7 @@ fn attack_with_emissary() -> (GameRunner, ObjectId, ObjectId) {
             player: P0,
             valid_attacker_ids: vec![emissary],
             valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
     }

@@ -79,6 +79,7 @@ impl PaymentSelectionPolicy {
         let extra_penalty = extra_count as f64 * 0.35;
         let resume_scale = match resume {
             CostResume::Spell { .. } | CostResume::SpellCost { .. } => 1.0,
+            CostResume::Resolution => 1.0,
             CostResume::ManaAbility { .. } => 0.8,
         };
 

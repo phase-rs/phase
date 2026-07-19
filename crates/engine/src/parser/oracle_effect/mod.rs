@@ -1602,6 +1602,8 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         tag("that creature"),
         tag("that planeswalker"),
         tag("that token"),
+        tag("a permanent dealt damage by ~"),
+        tag("a creature dealt damage by ~"),
         tag("a permanent dealt damage this way"),
         tag("a creature dealt damage this way"),
         tag("it"),
@@ -4312,7 +4314,21 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     // input (matches the convention used by `parse_earthbend_params`'s sole
     // imperative caller, which passes a `rest_lower` slice).
     let lower_rest = rest.to_ascii_lowercase();
-    let (target, counter_count) = imperative::parse_earthbend_count_expr(tp.original, &lower_rest);
+    // CR 107.3: an "earthbend X, where X is …" body naming a quantity the shared
+    // parsers don't recognize yet returns `None`. Emitting the Animate +
+    // PutCounter chain with a fabricated `Variable{X}` (→ 0 for a triggered
+    // ability) would report the card as supported while applying the wrong
+    // counter count — a well-typed lie. Surface an honest strict-failure gap so
+    // coverage counts the card as unsupported until the quantity is handled.
+    // (matthewevans review, PR #5881.)
+    let Some((target, counter_count)) =
+        imperative::parse_earthbend_count_expr(tp.original, &lower_rest)
+    else {
+        return Some(parsed_clause(Effect::unimplemented(
+            "where_x_binding",
+            tp.original.to_string(),
+        )));
+    };
 
     let register_bending = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -7484,6 +7500,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // replacement. Routed here beside the other replacement-installing effect
     // helpers, before the generic clause dispatch / Unimplemented fallback.
     if let Some(effect) = parse_token_creation_replacement_effect(&lower) {
+        return parsed_clause(effect);
+    }
+    // CR 614.1a + CR 614.12 + CR 707.2: Mystic Reflection-style resolving-spell
+    // shield. Route before the generic clause dispatch so the leading "the next
+    // time" subject is not treated as non-imperative text.
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_oneshot_enter_as_copy_replacement(&lower)
+    {
         return parsed_clause(effect);
     }
     // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
@@ -14255,6 +14279,18 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         }
     }
 
+    // CR 707.12 + CR 707.12a + CR 118.9: "Copy <exiled-card anaphor>, and you may
+    // cast the copy without paying its mana cost" (Mizzix's Mastery) — the copy and
+    // its coordinated free-cast tail are a single printed clause glued by a comma
+    // conjunction. Split it into the copy half (CopySpell) plus the shared cast
+    // half (CastFromZone) so `fold_cast_copy_of_card_defs` fuses them, exactly as
+    // the period-split two-sentence form (Mnemonic Deluge) already does. Must run
+    // before the generic compound/copy paths, which would otherwise swallow the
+    // cast tail.
+    if let Some(clause) = try_split_copy_cast_compound(text, ctx) {
+        return clause;
+    }
+
     // Compound shuffle subjects: "shuffle ~ and target creature ... into their owners' libraries"
     // Must come before try_split_targeted_compound because "shuffle" is the verb, not the subject.
     if let Some(clause) = try_parse_compound_shuffle(text) {
@@ -16488,6 +16524,99 @@ fn parse_bare_damage_continuation<'a>(
         },
         rem,
     ))
+}
+
+/// CR 707.12 + CR 707.12a + CR 118.9: "Copy `<exiled-card anaphor>`, and you may
+/// cast the copy without paying its mana cost" — Mizzix's Mastery's single-sentence
+/// copy-then-cast idiom. The comma conjunction glues the copy instruction to its
+/// coordinated free-cast tail; the chunk splitter keeps the whole thing as one
+/// clause because it sits inside the `for each … , ` iteration prefix (which
+/// suppresses internal splitting). Left alone, the copy path parses "copy it" and
+/// silently drops the cast tail.
+///
+/// This splits the clause into the two halves the period-split two-sentence form
+/// (Mnemonic Deluge: "Copy that card three times. You may cast the copies …")
+/// already produces as separate chunks: a `CopySpell` primary plus a `CastFromZone`
+/// sub-ability. The cast half is produced by the shared `try_parse_cast_effect`, so
+/// it is byte-identical to the two-sentence form's cast clause. Assembly promotes
+/// the sub-ability to a sibling def, and `fold_cast_copy_of_card_defs` (Case 2)
+/// fuses the `CopySpell{ParentTarget}` + `CastFromZone{ParentTarget, without_paying,
+/// Cast}` pair into the single `Effect::CastCopyOfCard` engine primitive. The parser
+/// never constructs `CastCopyOfCard` directly — the fold remains the one fusion
+/// authority. A bare "copy it" with no coordinated cast tail fails the connector
+/// match and falls through to the plain `CopySpell` path (Fork / Reverberate class).
+/// Copy head + coordinating connector for [`try_split_copy_cast_compound`].
+/// Composed one `alt` per axis: the copy-object exiled-card anaphor, then the
+/// comma/bare `and` conjunction (CR 608.2c) that coordinates the cast tail. The
+/// returned remainder is the lowercase cast half.
+fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("copy ").parse(input)?;
+    let (input, _) = alt((
+        tag("those exiled cards"),
+        tag("the copies"),
+        tag("those cards"),
+        tag("that card"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((tag(", and "), tag(" and "))).parse(input)?;
+    Ok((input, ()))
+}
+
+fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+
+    // Copy head + coordinating connector; the remainder is the cast half (lowercase).
+    let (tail_lower, ()) = parse_copy_cast_head_connector(&lower).ok()?;
+
+    // The cast half must reference the copy just made — never fuse an unrelated
+    // "cast <other>" conjunct.
+    if !scan_contains_phrase(tail_lower, "the copy")
+        && !scan_contains_phrase(tail_lower, "the copies")
+    {
+        return None;
+    }
+
+    // CR 118.9 + CR 707.12: delegate to the shared cast parser so the emitted
+    // `CastFromZone` is identical to the period-split two-sentence form's cast
+    // clause (which the fold already fuses). Only the free-cast-of-a-copy form
+    // qualifies for fusion.
+    let cast_effect = try_parse_cast_effect(tail_lower, ctx)?;
+    if !matches!(
+        &cast_effect,
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    // CR 707.10: the copy half. `ParentTarget` is required for the fold's Case 2 —
+    // it binds to the cards exiled by the preceding clause (the same shape the
+    // two-sentence "copy it" clause produces).
+    let copy_effect = Effect::CopySpell {
+        target: TargetFilter::ParentTarget,
+        retarget: CopyRetargetPermission::KeepOriginalTargets,
+        copier: None,
+        additional_modifications: Vec::new(),
+        starting_loyalty_from_casualty_sacrifice: false,
+    };
+
+    let sub_ability = AbilityDefinition::new(AbilityKind::Spell, cast_effect);
+    Some(ParsedEffectClause {
+        effect: copy_effect,
+        duration: None,
+        sub_ability: Some(Box::new(sub_ability)),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
 }
 
 fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
@@ -20511,6 +20640,39 @@ fn parse_cast_copies_count_prefix(input: &str) -> (&str, Option<QuantityExpr>) {
     (input, None)
 }
 
+/// CR 607.2a + CR 108.3: subject 1 of Triple Triad's compound play grant —
+/// "the card you own exiled this way" (the owned source-linked exiled card).
+/// Decomposed so a reprint with minor wording drift is a one-line `alt` add.
+fn parse_owned_linked_exiled_subject(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = tag("the card you own ").parse(i)?;
+    let (i, _) = tag("exiled this way").parse(i)?;
+    Ok((i, ()))
+}
+
+/// CR 607.2a + CR 202.3: subject 2 — "each other card exiled this way with
+/// lesser mana value than it" (other linked-exiled cards strictly cheaper than
+/// the owned card). Decomposed for reprint-drift resilience.
+fn parse_lesser_linked_exiled_subject(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = tag("each other card ").parse(i)?;
+    let (i, _) = tag("exiled this way ").parse(i)?;
+    let (i, _) = alt((
+        tag("with lesser mana value than it"),
+        tag("with a lesser mana value than it"),
+    ))
+    .parse(i)?;
+    Ok((i, ()))
+}
+
+/// CR 118.9 + CR 607.2a + CR 202.3: the full "the card you own exiled this way
+/// and each other card exiled this way with lesser mana value than it" compound
+/// subject (Triple Triad). Composes the two decomposed subject matchers.
+fn parse_owned_plus_lesser_exiled_subject(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = parse_owned_linked_exiled_subject(i)?;
+    let (i, _) = tag(" and ").parse(i)?;
+    let (i, _) = parse_lesser_linked_exiled_subject(i)?;
+    Ok((i, ()))
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -20831,6 +20993,66 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         };
         return Some(Effect::CastFromZone {
             target,
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint,
+            duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        });
+    }
+
+    // Branch 1.9: the owned-linked + lesser-mana-value compound exile grant
+    // (Triple Triad: "play the card you own exiled this way and each other card
+    // exiled this way with lesser mana value than it"). Runs BEFORE Branch 2's
+    // typed-leaf branch and the bare `TargetFilter::Any` fallback so the
+    // permission covers exactly {the card the controller owns exiled this way}
+    // ∪ {other cards exiled this way whose mana value is strictly less than the
+    // owned card's}.
+    // CR 118.9 + 118.9b (cast without paying mana cost) + CR 601.3 (permission)
+    // + CR 607.2a (exiled this way) + CR 108.3 (the card you own) + CR 202.3
+    // (lesser mana value) + CR 305.1 (play).
+    if parse_owned_plus_lesser_exiled_subject(rest).is_ok() {
+        let owned_card = TargetFilter::And {
+            filters: vec![
+                // "the card you own exiled this way" — owned card, unconditional.
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed({
+                    let mut tf = TypedFilter::card();
+                    tf.properties.push(FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    });
+                    tf
+                }),
+            ],
+        };
+        // "each other card exiled this way with lesser mana value than it" — the
+        // strict `Comparator::LT` against the owned card's mana value naturally
+        // excludes the owned card itself (it is not < its own mana value), so no
+        // explicit "other than" exclusion is needed.
+        let lesser_card = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed({
+                    let mut tf = TypedFilter::card();
+                    tf.properties.push(FilterProp::Cmc {
+                        comparator: Comparator::LT,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::OwnedLinkedExileCard,
+                            },
+                        },
+                    });
+                    tf
+                }),
+            ],
+        };
+        return Some(Effect::CastFromZone {
+            target: TargetFilter::Or {
+                filters: vec![owned_card, lesser_card],
+            },
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
@@ -22836,6 +23058,62 @@ fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
     }
 }
 
+/// The match arms naming every effect that establishes a NON-targeting
+/// object POPULATION — the `*All` / scope-`All` family whose `target` (or
+/// `filter`) is a population filter rather than a chosen target. This is why they
+/// are absent from `has_typed_target_widened`'s single-target whitelist:
+/// `ParentTarget` cannot bind to them because nothing was chosen.
+///
+/// The arms live in a macro so the SINGLE authoritative variant list generates
+/// both the shared `&` and `&mut` accessors below — two hand-written matches would
+/// be two lists that drift. Callers must go through those accessors rather than
+/// re-listing variants.
+macro_rules! mass_population_filter_arms {
+    ($effect:expr) => {
+        match $effect {
+            Effect::CounterAll { target } | Effect::GainControlAll { target } => Some(target),
+            Effect::PumpAll { target, .. }
+            | Effect::DamageAll { target, .. }
+            | Effect::DestroyAll { target, .. }
+            | Effect::BounceAll { target, .. }
+            | Effect::PutCounterAll { target, .. }
+            | Effect::DoublePTAll { target, .. } => Some(target),
+            Effect::ExploreAll { filter } => Some(filter),
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::All,
+                ..
+            } => Some(target),
+            _ => None,
+        }
+    };
+}
+
+/// The NON-targeting mass population filter of an "each <type>"
+/// (`*All` / scope-`All`) effect — the single authority for "which effects
+/// establish an object population". Read-only dual of
+/// [`mass_population_filter_mut`]; both are generated from one variant list
+/// (`mass_population_filter_arms!`).
+pub(crate) fn mass_population_filter(effect: &Effect) -> Option<&TargetFilter> {
+    mass_population_filter_arms!(effect)
+}
+
+/// Mutable form of [`mass_population_filter`], for walkers that rewrite
+/// a mass population in place (e.g. `oracle_trigger`'s attached-host "each other"
+/// retarget). Shares the same authoritative variant list.
+pub(crate) fn mass_population_filter_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
+    mass_population_filter_arms!(effect)
+}
+
+/// CR 608.2c: If this clause is a mass ("each …") effect, return the object
+/// POPULATION filter it acted on. Feeds `ParseContext::chain_prior_mass_population`
+/// so a later same-chain anaphor ("They gain vigilance until end of turn") binds
+/// to that population. Delegates to the shared [`mass_population_filter`]
+/// authority rather than re-listing variants.
+fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
+    mass_population_filter(&clause.parsed.effect).cloned()
+}
+
 /// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
 /// produced by `parse_hand_possessive_target`) to the `ControllerRef` axis
 /// used to scope a card filter to that same player's hand. Exhaustive over
@@ -24090,7 +24368,7 @@ pub(crate) fn difference_anaphor_placeholder() -> QuantityExpr {
 }
 
 /// True when `expr` is the deferred "the difference" count placeholder awaiting
-/// a trigger-level bind (see [`DIFFERENCE_ANAPHOR_VARIABLE`]).
+/// a bind (see [`DIFFERENCE_ANAPHOR_VARIABLE`]).
 pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
     matches!(
         expr,
@@ -24098,6 +24376,77 @@ pub(crate) fn is_difference_anaphor_placeholder(expr: &QuantityExpr) -> bool {
             qty: QuantityRef::Variable { name },
         } if name == DIFFERENCE_ANAPHOR_VARIABLE
     )
+}
+
+/// CR 608.2c: Resolve every deferred "the difference" count-anaphor placeholder
+/// anywhere in an ability's effect tree — the single authority for both the
+/// trigger seam (`lower_trigger_ir`, Drizzt Do'Urden) and the spell clause
+/// seam (`parse_effect_chain_ir`, Hit the Mother Lode).
+///
+/// A count parser emits `difference_anaphor_placeholder()` for a bare anaphoric
+/// "equal to the difference" because the two operands live on the enclosing
+/// ability's condition, not the effect clause. `Effect::count_expr_mut` only
+/// reaches the top-level effect, so a placeholder nested under a clause-level
+/// conditional `sub_ability` / `else_ability` / single-`Box<Effect>` wrapper
+/// would otherwise escape both the bind and the guard. This walks the full tree
+/// so that:
+///   * with a bound `Difference` (`bound = Some`), each placeholder binds to it, and
+///   * with none to bind (`bound = None`), the carrying effect is downgraded to
+///     an explicit `Effect::Unimplemented` — an honest coverage gap rather than a
+///     silently-zero effect that reads as supported.
+pub(crate) fn resolve_difference_anaphor_in_ability(
+    def: &mut AbilityDefinition,
+    bound: Option<&QuantityExpr>,
+) {
+    resolve_difference_anaphor_in_effect(&mut def.effect, bound);
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        resolve_difference_anaphor_in_ability(sub, bound);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        resolve_difference_anaphor_in_ability(els, bound);
+    }
+}
+
+fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&QuantityExpr>) {
+    // Recurse into the single-`Box<Effect>` wrapper (the draw-replacement
+    // substitute) so a placeholder nested inside it is reached. This is the only
+    // `Effect` variant that wraps a heterogeneous sub-`Effect`; every other
+    // nesting is via `AbilityDefinition` (`sub_ability`/`else_ability`), walked
+    // by the caller.
+    if let Effect::CreateDrawReplacement {
+        replacement_effect: inner,
+    } = effect
+    {
+        resolve_difference_anaphor_in_effect(inner, bound);
+    }
+
+    // Only effects a count parser can emit the deferred placeholder onto ever
+    // carry it. Restrict both bind and downgrade to them, and pick an
+    // effect-appropriate `Unimplemented` name/description so the downgrade reads
+    // honestly per effect kind.
+    let downgrade: (&str, &str) = match effect {
+        Effect::PutCounter { .. } | Effect::PutCounterAll { .. } => {
+            ("put", "counters equal to the difference")
+        }
+        Effect::Token { .. } => ("create", "tokens equal to the difference"),
+        _ => return,
+    };
+    let is_placeholder = effect
+        .count_expr_mut()
+        .is_some_and(|slot| is_difference_anaphor_placeholder(slot));
+    if !is_placeholder {
+        return;
+    }
+    match bound {
+        Some(count) => {
+            if let Some(slot) = effect.count_expr_mut() {
+                *slot = count.clone();
+            }
+        }
+        None => {
+            *effect = Effect::unimplemented(downgrade.0, downgrade.1);
+        }
+    }
 }
 
 /// True when a trigger's intervening-if references the controller gaining life
@@ -25150,12 +25499,11 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
     }
 }
 
-/// Which whole-body entry-point mode a chain-lowering call runs.
+/// Which whole-body entry-point mode an ability-IR parse runs.
 ///
-/// `try_parse_chain_bypass` is intentionally empty after U3c, but the two entry
-/// points still do **not** run the same whole-body recognizer set. The difference
-/// is carried here as typed data rather than duplicated as two hand-maintained
-/// `if let` stacks:
+/// The two entry points do **not** run the same whole-body recognizer set. The
+/// difference is carried here as typed data rather than duplicated as two
+/// hand-maintained `if let` stacks:
 ///
 /// | mode | whole-body recognizers | context |
 /// |---|---|---|
@@ -25178,27 +25526,6 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
 pub(crate) enum ChainLoweringMode {
     Standalone,
     WithContext,
-}
-
-/// U3 completion seam: retain the now-empty bypass dispatcher until U6 deletes
-/// this escape hatch.
-///
-/// `ChainLoweringMode` remains the typed mode gate for the WithContext-only cloak
-/// IR producer in `parse_ability_ir`; removing either here would silently absorb
-/// the documented mode-asymmetry bug fix into this parity migration.
-/// Returns `None` so every recognizer lowers through ordinary ability IR.
-fn try_parse_chain_bypass(
-    _text: &str,
-    _kind: AbilityKind,
-    mode: ChainLoweringMode,
-    _ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
-    // U3c completed the shared list and the formerly mode-exclusive cloak
-    // recognizer. Keep explicit arms: a future entry point must choose its mode.
-    match mode {
-        ChainLoweringMode::Standalone => None,
-        ChainLoweringMode::WithContext => None,
-    }
 }
 
 /// Lowering: assemble an `AbilityDefinition` from an `AbilityIr`.
@@ -25282,16 +25609,6 @@ fn parse_ability_ir(
 }
 
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    // A fresh context per call, exactly as before: the bypasses may mutate `ctx`
-    // before declining, and those mutations must not reach `parse_effect_chain_ir`.
-    if let Some(def) = try_parse_chain_bypass(
-        text,
-        kind,
-        ChainLoweringMode::Standalone,
-        &mut ParseContext::default(),
-    ) {
-        return def;
-    }
     lower_ability_ir(&parse_ability_ir(
         text,
         kind,
@@ -25308,9 +25625,6 @@ pub(crate) fn parse_effect_chain_with_context(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    if let Some(def) = try_parse_chain_bypass(text, kind, ChainLoweringMode::WithContext, ctx) {
-        return def;
-    }
     lower_ability_ir(&parse_ability_ir(
         text,
         kind,
@@ -27977,6 +28291,16 @@ pub(crate) fn parse_effect_chain_ir(
                 .iter()
                 .rev()
                 .find_map(clause_ir_hand_reveal_target),
+            // CR 608.2c: the most-recent earlier same-chain mass ("each …")
+            // population, so a later "They <grant>" anaphor binds to it rather
+            // than reaching past it to the trigger's own subject (Ardbert,
+            // Warrior of Darkness). Mass effects choose nothing, so
+            // `parent_target_available` / `ParentTarget` cannot carry this.
+            chain_prior_mass_population: builder
+                .clauses()
+                .iter()
+                .rev()
+                .find_map(clause_ir_mass_population),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore
@@ -28411,6 +28735,35 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        // CR 608.2c: Bind a bare anaphoric "the difference" count placeholder in
+        // this clause against the two operands its own leading `QuantityCheck`
+        // condition established ("If the discovered card's mana value is less than
+        // 10, create a number of tapped Treasure tokens equal to the difference"
+        // — Hit the Mother Lode). Unlike the trigger seam — where the comparison
+        // is hoisted onto the trigger and bound in `lower_trigger_ir` — a spell's
+        // condition rides the same clause as the effect, so this is the single
+        // authority for the spell case. `difference_expr` returns `None` for a
+        // non-comparison condition (or no condition), so an unbindable placeholder
+        // is downgraded to an honest `Unimplemented` rather than a silently-zero
+        // effect. The condition may live on the chunk (`condition`) or on the
+        // clause itself (`clause.condition`) — read whichever is set.
+        {
+            let effective_condition = condition.as_ref().or(clause.condition.as_ref());
+            // ONLY bind here (never downgrade). A bare "the difference" whose
+            // operands are NOT on this clause's condition belongs to the trigger
+            // seam (`lower_trigger_ir`, Drizzt Do'Urden) — the trigger's hoisted
+            // intervening-if binds it there, or downgrades it if unbindable.
+            // Downgrading it here (bound = None) would clobber that placeholder
+            // before the trigger seam runs, breaking every difference-counter
+            // trigger. A spell's difference operands always ride the same clause
+            // (Hit the Mother Lode), so `Some(bound)` is the only case to handle.
+            if let Some(bound) = effective_condition.and_then(conditions::difference_expr) {
+                resolve_difference_anaphor_in_effect(&mut clause.effect, Some(&bound));
+                if let Some(sub) = clause.sub_ability.as_deref_mut() {
+                    resolve_difference_anaphor_in_ability(sub, Some(&bound));
+                }
+            }
+        }
         // CR 508.4 + CR 701.42: the shared leading-condition pass owns the live
         // attacking/ownership predicates, while the bare Meld body parser owns
         // the effect. Join those independently parsed building blocks here at
@@ -31262,6 +31615,129 @@ fn issue_2405_broken_bond_optional_land_from_hand() {
             sub.effect
         );
     };
+}
+
+/// Building-block coverage: Triple Triad's compound "the card you own exiled
+/// this way and each other card exiled this way with lesser mana value than it"
+/// grant must lower to a `CastFromZone` whose target is the disjunction of the
+/// owned linked-exiled card and the strictly-lesser-mana-value linked-exiled
+/// cards — NOT the bare `TargetFilter::Any` fallback (which grants no scoped
+/// permission). Drives the FULL shipped Oracle text through `parse_oracle_text`.
+#[test]
+fn triple_triad_owned_plus_lesser_mv_grant_lowers_to_disjunction() {
+    fn collect_cast_from_zone<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        out: &mut Vec<&'a Effect>,
+    ) {
+        if matches!(&*def.effect, Effect::CastFromZone { .. }) {
+            out.push(&def.effect);
+        }
+        if let Some(sub) = def.sub_ability.as_ref() {
+            collect_cast_from_zone(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_ref() {
+            collect_cast_from_zone(els, out);
+        }
+    }
+
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "At the beginning of your upkeep, each player exiles the top card of their library. Until end of turn, you may play the card you own exiled this way and each other card exiled this way with lesser mana value than it without paying their mana costs.",
+        "Triple Triad",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    assert_eq!(parsed.triggers.len(), 1, "one upkeep trigger: {parsed:#?}");
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("upkeep trigger should have an execute body");
+
+    let mut casts = Vec::new();
+    collect_cast_from_zone(execute, &mut casts);
+    assert_eq!(
+        casts.len(),
+        1,
+        "exactly one CastFromZone grant in the trigger chain: {execute:#?}"
+    );
+
+    let Effect::CastFromZone {
+        target,
+        mode,
+        without_paying_mana_cost,
+        ..
+    } = casts[0]
+    else {
+        unreachable!("filtered to CastFromZone above");
+    };
+
+    assert_eq!(
+        *mode,
+        CardPlayMode::Play,
+        "\"play ...\" grants a Play-mode permission"
+    );
+    assert!(
+        *without_paying_mana_cost,
+        "\"without paying their mana costs\" is a free-cast grant"
+    );
+
+    // The target must be a disjunction of exactly two AND disjuncts, NOT the bare
+    // `TargetFilter::Any` fallback.
+    let TargetFilter::Or { filters } = target else {
+        panic!("expected Or disjunction target, got {target:#?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "owned card ∪ lesser-MV cards: {filters:#?}"
+    );
+
+    let has_owned = filters.iter().any(|f| {
+        let TargetFilter::And { filters: conj } = f else {
+            return false;
+        };
+        let has_exiled = conj
+            .iter()
+            .any(|c| matches!(c, TargetFilter::ExiledBySource));
+        let has_owned_prop = conj.iter().any(|c| {
+            matches!(c, TargetFilter::Typed(tf)
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Owned { controller: ControllerRef::You }
+            )))
+        });
+        has_exiled && has_owned_prop
+    });
+    assert!(has_owned, "owned linked-exiled disjunct: {filters:#?}");
+
+    let has_lesser = filters.iter().any(|f| {
+        let TargetFilter::And { filters: conj } = f else {
+            return false;
+        };
+        let has_exiled = conj
+            .iter()
+            .any(|c| matches!(c, TargetFilter::ExiledBySource));
+        let has_lesser_prop = conj.iter().any(|c| {
+            matches!(c, TargetFilter::Typed(tf)
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LT,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::OwnedLinkedExileCard,
+                        },
+                    },
+                }
+            )))
+        });
+        has_exiled && has_lesser_prop
+    });
+    assert!(
+        has_lesser,
+        "lesser-mana-value linked-exiled disjunct (LT the owned card's MV): {filters:#?}"
+    );
 }
 
 #[test]

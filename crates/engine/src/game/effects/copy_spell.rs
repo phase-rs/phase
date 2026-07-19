@@ -134,12 +134,30 @@ pub fn resolve(
     // CR 707.10 / CR 707.10b: spell copies source themselves; ability copies
     // have the same source as the original ability.
     let copy_source_id = stack_entry_source_id_for_copy(&copy_kind, copy_id);
-    let copy_entry = StackEntry {
+    let mut copy_entry = StackEntry {
         id: copy_id,
         source_id: copy_source_id,
         controller: copy_controller,
         kind: copy_kind,
     };
+
+    // CR 707.10 + CR 701.27f: copying an activated or triggered ability puts
+    // a new ability onto the stack. A self-transform instruction in that copy
+    // compares against the source at copy-creation time, not the original
+    // ability's earlier stack-entry time.
+    if matches!(
+        copy_entry.kind,
+        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
+    ) {
+        let source_transformation_count = state
+            .objects
+            .get(&copy_source_id)
+            .filter(|object| object.back_face.is_some())
+            .map(|object| object.transformation_count);
+        if let Some(copied_ability) = copy_entry.ability_mut() {
+            copied_ability.set_source_transformation_count_recursive(source_transformation_count);
+        }
+    }
 
     // CR 707.10: Capture the copied spell's card id before the entry is moved
     // onto the stack. Only spell copies emit `SpellCopied` — copying an
@@ -2159,6 +2177,81 @@ mod tests {
                 .any(|event| matches!(event, GameEvent::StackPushed { .. })),
             "copying an activated ability must push a stack entry"
         );
+    }
+
+    #[test]
+    fn copied_self_transform_captures_the_copy_creation_time() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::stack::push_to_stack;
+        use crate::game::transform::transform_permanent;
+
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        crate::game::effects::incubate::resolve(
+            &mut state,
+            &ResolvedAbility::new(
+                Effect::Incubate {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                vec![],
+                ObjectId(90),
+                PlayerId(0),
+            ),
+            &mut events,
+        )
+        .expect("Incubator is created");
+        let source_id = *state
+            .battlefield
+            .iter()
+            .find(|id| state.objects[id].name == "Incubator")
+            .expect("Incubator on battlefield");
+        let definition = state.objects[&source_id]
+            .abilities
+            .first()
+            .expect("Incubator has a transform ability")
+            .clone();
+        push_to_stack(
+            &mut state,
+            StackEntry {
+                id: ObjectId(100),
+                source_id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id,
+                    ability: build_resolved_from_def(&definition, source_id, PlayerId(0)),
+                },
+            },
+            &mut events,
+        );
+        transform_permanent(&mut state, source_id, &mut events)
+            .expect("source transforms while the original ability is on the stack");
+
+        let copy_effect = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(200),
+            PlayerId(0),
+        );
+        resolve(&mut state, &copy_effect, &mut events).expect("transform ability is copied");
+        let copy = state.stack.pop_back().expect("copied ability on stack");
+        crate::game::effects::transform_effect::resolve(
+            &mut state,
+            copy.ability().expect("copied transform ability"),
+            &mut events,
+        )
+        .expect("copied transform resolves");
+
+        assert!(
+            !state.objects[&source_id].transformed,
+            "CR 707.10: the copy is put onto the stack after the intervening transform, so its self-transform instruction must resolve"
+        );
+        assert_eq!(state.objects[&source_id].transformation_count, 2);
     }
 
     #[test]

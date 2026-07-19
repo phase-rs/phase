@@ -18,6 +18,14 @@ pub struct CardDatabase {
     pub(crate) face_index: HashMap<String, CardFace>,
     pub(crate) name_alias_index: HashMap<String, String>,
     pub(crate) oracle_id_index: HashMap<String, Vec<String>>,
+    /// Maps face key (lowercased card name) to its original zero-based position
+    /// inside MTGJSON's multi-face record. Export loading flattens faces into a
+    /// JSON object, whose iteration order is not a rules authority.
+    pub(crate) face_order_index: HashMap<String, usize>,
+    /// Deterministic card-search scan order. Built once by database loaders so
+    /// interactive search does not allocate and sort the full face index on
+    /// every query.
+    pub(crate) search_face_keys: Vec<String>,
     /// Maps oracle_id → runtime LayoutKind for multi-face cards.
     /// Populated only from the export path (the MTGJSON path uses `cards` directly).
     /// Enables `rehydrate_game_from_card_db` to determine the correct layout kind
@@ -77,6 +85,7 @@ impl CardDatabase {
     fn from_export_entries(entries: HashMap<String, CardExportEntry>) -> Self {
         let mut face_index = HashMap::with_capacity(entries.len());
         let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
+        let mut face_order_index: HashMap<String, usize> = HashMap::new();
         let mut layout_index: HashMap<String, LayoutKind> = HashMap::new();
         let mut legalities = HashMap::new();
         let mut printings_index: HashMap<String, Vec<String>> = HashMap::new();
@@ -86,6 +95,9 @@ impl CardDatabase {
 
         for (export_key, entry) in entries {
             let storage_key = export_key.to_lowercase();
+            if let Some(face_order) = entry.face_index {
+                face_order_index.insert(storage_key.clone(), face_order);
+            }
             if let Some(oracle_id) = entry.face.scryfall_oracle_id.clone() {
                 oracle_id_index
                     .entry(oracle_id.clone())
@@ -111,6 +123,10 @@ impl CardDatabase {
                 legalities.insert(storage_key.clone(), normalized);
             }
         }
+        for keys in oracle_id_index.values_mut() {
+            keys.sort_by_key(|key| face_order_index.get(key).copied().unwrap_or(usize::MAX));
+        }
+        let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
         let name_alias_index = build_name_alias_index(face_index.keys());
         let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
 
@@ -119,6 +135,8 @@ impl CardDatabase {
             face_index,
             name_alias_index,
             oracle_id_index,
+            face_order_index,
+            search_face_keys,
             layout_index,
             legalities,
             printings_index,
@@ -163,6 +181,7 @@ impl CardDatabase {
                 face: face.clone(),
                 legalities: HashMap::new(),
                 layout,
+                face_index: self.face_order_index.get(&key).copied(),
                 printings: self.printings_index.get(&key).cloned().unwrap_or_default(),
                 rulings: self.rulings_index.get(&key).cloned().unwrap_or_default(),
                 bracket_signals: self
@@ -370,6 +389,39 @@ impl CardDatabase {
     }
 }
 
+pub(crate) fn build_search_face_keys(
+    face_index: &HashMap<String, CardFace>,
+    face_order_index: &HashMap<String, usize>,
+) -> Vec<String> {
+    let mut keys: Vec<String> = face_index.keys().cloned().collect();
+    keys.sort_by(|left_key, right_key| {
+        let left_oracle = face_index
+            .get(left_key)
+            .and_then(|face| face.scryfall_oracle_id.as_deref())
+            .unwrap_or("");
+        let right_oracle = face_index
+            .get(right_key)
+            .and_then(|face| face.scryfall_oracle_id.as_deref())
+            .unwrap_or("");
+        left_oracle
+            .cmp(right_oracle)
+            .then_with(|| {
+                face_order_index
+                    .get(left_key)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+                    .cmp(
+                        &face_order_index
+                            .get(right_key)
+                            .copied()
+                            .unwrap_or(usize::MAX),
+                    )
+            })
+            .then_with(|| left_key.cmp(right_key))
+    });
+    keys
+}
+
 /// CR 205.2b + CR 205.3m + CR 308.1: subtype categories are disjoint — a
 /// creature type (shared by Creature and Kindred, legacy Tribal, faces) never
 /// appears on a non-creature face, while land/artifact/enchantment subtypes
@@ -488,6 +540,10 @@ struct CardExportEntry {
     /// MTGJSON layout string for multi-face cards (e.g. "modal_dfc", "transform").
     #[serde(default)]
     layout: Option<String>,
+    /// Original zero-based position of this face within MTGJSON's multi-face
+    /// record. Optional so older card-data exports remain loadable.
+    #[serde(default)]
+    face_index: Option<usize>,
     /// Set codes the card has been printed in (from MTGJSON `printings`).
     #[serde(default)]
     printings: Vec<String>,

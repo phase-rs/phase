@@ -2542,6 +2542,47 @@ pub enum ProhibitedActivity {
     },
 }
 
+/// Why a specific activated ability is currently blocked from activation.
+///
+/// Display read-out only (populated by the derive sweep): carries no enforcement
+/// authority. The three arms mirror the three enforcement predicates in
+/// `game::casting`, in the same order those gates consult them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AbilityBlockKind {
+    /// CR 602.5: A static ability prohibits this ability from being activated at
+    /// all (Pithing Needle's named source, Immortal Sun's loyalty abilities).
+    CantBeActivated,
+    /// CR 602.5 + CR 117.1b: A timing restriction forbids activation right now
+    /// (City of Solitude — only during the affected player's own turn).
+    CantActivateDuring,
+    /// CR 602.5: A temporary continuous effect prohibits this activity axis for
+    /// the affected players (Kang-class `ProhibitActivity`).
+    Prohibited,
+}
+
+/// A block reason paired with every prohibiting source object of this kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AbilityBlockReason {
+    /// CR 602.5: sorted, deduped permanents whose static/effect each independently
+    /// impose this block kind (two Pithing Needles naming the same card → both).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<ObjectId>,
+    #[serde(flatten)]
+    pub kind: AbilityBlockKind,
+}
+
+/// A single blocked-ability read-out entry: which ability index is blocked and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbilityBlockEntry {
+    /// Index into the object's activated-ability definition space
+    /// (`activated_ability_definitions`): `0..printed_len` for printed abilities,
+    /// `printed_len + offset` for runtime-granted ones.
+    pub ability_index: usize,
+    #[serde(flatten)]
+    pub reason: AbilityBlockReason,
+}
+
 /// When a game restriction expires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -4585,6 +4626,21 @@ pub enum TargetFilter {
     Any,
     Player,
     Controller,
+    /// CR 615 + CR 614.1a: Compound damage recipient "you and [type] permanents
+    /// you control" (Comeuppance's "you and planeswalkers you control"; Channel
+    /// Harm's "you and permanents you control"). A PARSE-LAYER recipient
+    /// reference only: it exists to carry the compound player+permanent recipient
+    /// through `Effect::PreventDamage.target` serialization, and is lowered at
+    /// shield-creation time (`prevent_damage.rs::untargeted_damage_filter`) into
+    /// the dedicated `DamageTargetFilter::PlayerOrPermanentsControlledBy`. It is
+    /// never routed to the object-only `valid_card` slot (the player leg would be
+    /// dropped) — `typed_recipient_valid_card_filter` returns `None` for it and
+    /// `untargeted_damage_filter` always yields `Some`. `permanent_type` restricts
+    /// the permanent leg (`Some(Planeswalker)` for Comeuppance; `None` = any
+    /// permanent you control).
+    ControllerAndControlledPermanents {
+        permanent_type: Option<CoreType>,
+    },
     /// CR 102.2 + CR 102.3 + CR 601.2c: A player reference to an opponent of the
     /// ability's controller, used as the announcing player (`target_chooser`) for
     /// a slot whose Oracle text reads "of an opponent's choice". The casting
@@ -4884,6 +4940,20 @@ pub enum TargetFilter {
     /// controller" can stay consolidated in `parse_target` for non-prevention
     /// callers.
     PostReplacementSourceController,
+    /// CR 615.5 + CR 120.1: Resolves to the *object* that was the damage source
+    /// of the prevented event. Event-driven analog of a self/parent object
+    /// reference, exactly as `PostReplacementSourceController` is the
+    /// event-driven analog of a controller reference. Reads
+    /// `state.post_replacement_event_source()` and returns it as
+    /// `TargetRef::Object`. Used by reflection follow-ups that deal the
+    /// prevented damage back to the source itself — "Comeuppance deals that much
+    /// damage to that creature" (Comeuppance), where "that creature" is the
+    /// prevented event's creature damage source (CR 120.1: an object that deals
+    /// damage is the source of that damage). Distinct from
+    /// `PostReplacementSourceController` (its controller, a player) — this
+    /// returns the source object itself. Returns `None` outside the
+    /// post-replacement window.
+    PostReplacementDamageSource,
     /// CR 615.5: Resolves to the player or permanent that was the target of the
     /// prevented damage event. Used by prevention follow-up sentences such as
     /// "that player exiles that many cards" where the affected player is the
@@ -5167,6 +5237,15 @@ pub enum ObjectScope {
     /// hand. Fail-closed to a null read (→ 0) when no "other" entry exists (empty
     /// library or an illegal target on resolution, CR 608.2b).
     OtherRevealedCard,
+    /// CR 607.2a + CR 108.3 + CR 202.3: The single source-linked exiled card
+    /// that the resolving ability's CONTROLLER OWNS — "the card you own exiled
+    /// this way". Resolved over `linked_exile_cards_for_source(state,
+    /// ability.source_id)` selecting `owner == ability.controller`. Distinct from
+    /// `OtherRevealedCard` (a per-resolution reveal-local, chosen by exclusion):
+    /// this is a source-persistent exile-pile member selected by ownership.
+    /// Mana-value-only referent today. NOTE: a THIRD set-member ObjectScope should
+    /// trigger a `SetMember { set, selector }` parameterization round.
+    OwnedLinkedExileCard,
 }
 
 /// Source set for counting distinct card types.
@@ -5629,6 +5708,12 @@ pub enum QuantityRef {
     /// CR 603.7c: Numeric value from the triggering event.
     /// Extracts amount/count from DamageDealt, LifeChanged, CardsDrawn, CounterAdded, etc.
     EventContextAmount,
+    /// CR 120.1 + CR 603.2c + CR 608.2c: Count distinct players named by the
+    /// current triggering event batch, after applying a player filter relative
+    /// to the resolving ability's controller. Used by "for each opponent dealt
+    /// damage" on one-or-more damage triggers: the count is the number of
+    /// opponents in the trigger event batch, not the amount of damage dealt.
+    EventContextPlayerCount { filter: PlayerFilter },
     /// CR 603.10a + CR 603.6e: Count of attachments of a given kind that were attached
     /// to the leaving-battlefield object at the moment it left, optionally filtered by
     /// attachment controller. Resolved via the triggering `ZoneChangeRecord`'s
@@ -13613,8 +13698,14 @@ impl TargetFilter {
                 | TargetFilter::ParentTargetOwner
                 | TargetFilter::SourceChosenPlayer
                 | TargetFilter::PostReplacementSourceController
+                // CR 615.5: the prevented event's damage source (reflection
+                // target) and the compound "you and permanents you control"
+                // recipient are both resolved at resolution / shield-match time,
+                // never declared as player-chosen target slots.
+                | TargetFilter::PostReplacementDamageSource
                 | TargetFilter::PostReplacementDamageTarget
                 | TargetFilter::PostReplacementDamageTargetOwner
+                | TargetFilter::ControllerAndControlledPermanents { .. }
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
         )
@@ -17099,6 +17190,22 @@ pub enum AbilityCondition {
     /// the ability's source object matches the filter. Used by leveler-style cards
     /// (e.g. Figure of Fable) where each activated ability gates on the source's current type.
     SourceMatchesFilter { filter: TargetFilter },
+    /// CR 615.5 + CR 120.1: Post-replacement analog of `SourceMatchesFilter`.
+    /// Matches the *prevented event's damage source object* (read from
+    /// `state.post_replacement_event_source()`) against `filter`, instead of the
+    /// ability's own source. Gates a prevention rider on the type of the source
+    /// whose damage was just prevented — "If damage from a creature source is
+    /// prevented this way, …" (Comeuppance's two reflection riders).
+    ///
+    /// Deliberately a SIBLING of `SourceMatchesFilter`, not a parameterization of
+    /// it: the subject lies in a DIFFERENT CR section (CR 615.5 prevention-event
+    /// context vs CR 608.2c/603.4 source-bound intervening-if), so per the
+    /// categorical-boundary rule the leaf-reference layer must not unify them.
+    /// This mirrors the established source-vs-event split already modeled by the
+    /// parallel `TriggerCondition` enum (`SourceMatchesFilter` vs
+    /// `EventDamageSourceMatchesFilter`). Evaluated at rider-fire time, when the
+    /// post-replacement continuation drains and the source snapshot is populated.
+    PostReplacementDamageSourceMatchesFilter { filter: TargetFilter },
     /// CR 603.4 + CR 603.6 + CR 603.10: In a trigger-body condition, match the
     /// object from the current zone-change trigger event against a filter. ETB
     /// conditions check the live object in its destination zone; death/LTB
@@ -17514,6 +17621,10 @@ pub struct SpellContext {
     /// into runtime resolution for keyword-specific events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_tag: Option<AbilityTag>,
+    /// CR 701.27f: The source permanent's transformation generation captured
+    /// when an activated or triggered ability was put onto the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transformation_count: Option<u32>,
 }
 
 impl SpellContext {
@@ -19315,6 +19426,27 @@ pub struct StaticDefinition {
     /// Piper, Marble Priest; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 508.1d + CR 611.2c: The object that grafted this static onto its
+    /// carrier (the ForceAttack/Encore/mass-coerce source for a
+    /// `MustAttackPlayer` requirement). Stamped at materialization from the
+    /// resolving continuous effect's `source_id`, but ONLY for static modes in
+    /// the directing-source attribution class (see
+    /// `static_mode_carries_directing_source` in game/layers.rs) — mirrors the
+    /// conditional `source_controller` stamp. `None` = either an intrinsic def
+    /// or a grafted mode outside that class → the carrier object is its own
+    /// source (combat attributes the creature itself).
+    ///
+    /// This is a stable *reference* captured at graft time, not a snapshot of
+    /// the source's characteristics; per CR 611.2c the requirement persists
+    /// after the source leaves the battlefield, so this id may reference a
+    /// departed object. Consumers (combat source collector, frontend badge)
+    /// tolerate a departed id — it is never dereferenced in the collector.
+    ///
+    /// Serde-defaulted so pre-existing serialized statics (all `None`)
+    /// round-trip unchanged; only ever `Some` on the derived (layer-rebuilt)
+    /// `static_definitions`, never on serialized `base_static_definitions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_object: Option<crate::types::identifiers::ObjectId>,
     /// CR 702.11e + CR 609.4 + CR 109.5: For an object-scoped `IgnoreHexproof`
     /// static (one carrying an `affected` filter), which players' spells and
     /// abilities receive the "as though it didn't have hexproof" targeting
@@ -19352,6 +19484,7 @@ impl StaticDefinition {
             description: None,
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         }
     }
@@ -19396,6 +19529,15 @@ impl StaticDefinition {
     /// field doc). Set at graft time by the `AddStaticMode` layer arm.
     pub fn source_controller(mut self, controller: crate::types::player::PlayerId) -> Self {
         self.source_controller = Some(controller);
+        self
+    }
+
+    /// CR 611.2c: Stamp the directing object as this grafted static's source
+    /// (see the `source_object` field doc). Set at graft time by the
+    /// `AddStaticMode` layer arm from `effect.source_id`, gated on
+    /// `static_mode_carries_directing_source`.
+    pub fn source_object(mut self, source: crate::types::identifiers::ObjectId) -> Self {
+        self.source_object = Some(source);
         self
     }
 
@@ -19582,8 +19724,18 @@ pub enum DamageTargetFilter {
     /// "to a player" / "to that player" / "to an opponent"
     Player { player: DamageTargetPlayerScope },
     /// "to an opponent or a permanent an opponent controls" /
-    /// "to that player or a permanent that player controls".
-    PlayerOrPermanentsControlledBy { player: DamageTargetPlayerScope },
+    /// "to that player or a permanent that player controls" /
+    /// "to you and planeswalkers you control".
+    ///
+    /// CR 614.1a: `permanent_type` optionally restricts the permanent leg to a
+    /// single card type — `Some(Planeswalker)` for Comeuppance ("you and
+    /// planeswalkers you control"), `None` for the unrestricted "you/that player
+    /// and permanents they control" (Channel Harm, the opponent-redirect cycle).
+    /// The player leg is always matched regardless of this restriction.
+    PlayerOrPermanentsControlledBy {
+        player: DamageTargetPlayerScope,
+        permanent_type: Option<CoreType>,
+    },
 }
 
 /// CR 614.1a: Restricts whether a damage replacement applies to combat, noncombat, or all damage.
@@ -20669,18 +20821,20 @@ impl CopyCountStatus {
 /// CR 608.2c: Distinguishes WHY an immediately-chained `ParentTarget` child
 /// ability was handed off with nothing to act on. The three sources are
 /// mutually exclusive per hand-off (only one effect can be the immediate
-/// parent of a given child), and each is consulted by exactly one downstream
-/// site, so they used to be three parallel boolean fields on `ResolvedAbility`
-/// / `GameState` before being consolidated here (see the PR #5834/#5836
-/// review that requested this).
+/// parent of a given child). Downstream consumers inspect the typed reason only
+/// when their exact `ParentTarget` operation needs to distinguish a missing
+/// referent from an ordinary empty target list. These used to be three parallel
+/// boolean fields on `ResolvedAbility` / `GameState` before being consolidated
+/// here (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
     /// CR 401.5 (issue #1365): A `Dig` looked at an empty library. Consulted
-    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
-    /// to resolve a `target: ParentTarget` with no selection to NO target
-    /// instead of the generic self-fallback, which would otherwise move the
-    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
-    /// it just found empty.
+    /// by exact `ParentTarget` no-op guards: the `PutAtLibraryPosition` Dig-tail
+    /// seam (`put_on_top.rs`) avoids the generic self-fallback, and optional
+    /// cast/play operations avoid offering a nonexistent card regardless of
+    /// whether their driver is immediate or lingering.
+    /// Without the first guard, the Dig's own source (e.g. a reanimated
+    /// Thassa's Oracle) would move into the library it just found empty.
     Dig,
     /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
     /// that name the missing choice through `ParentTarget` (e.g. a chained
@@ -20711,6 +20865,12 @@ pub struct ResolvedAbility {
     /// context below; callers must never use this raw id to rebind a departed
     /// source to a newer incarnation.
     pub source_id: ObjectId,
+    /// CR 400.7: Exact source incarnation captured for self-transform guards.
+    /// The full `trigger_source` context remains the authority for all triggered
+    /// source facts; this field preserves the source epoch for activated and
+    /// delayed self-transform abilities that do not carry trigger provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
     /// CR 400.7 + CR 113.7a: Complete event-time authority for a triggered
     /// source. This is recursive across an ability chain and replaces the old
     /// independent incarnation/card-id latches.
@@ -20994,6 +21154,7 @@ impl ResolvedAbility {
             repeat_until: None,
             replacement_applied: HashSet::new(),
             sub_link: SubAbilityLink::ContinuationStep,
+            source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
             modal: None,
@@ -21016,6 +21177,7 @@ impl ResolvedAbility {
     /// chain. Each branch resolves against the same observed incarnation.
     pub fn set_trigger_source_recursive(&mut self, source: TriggerSourceContext) {
         self.source_id = source.identity.reference.object_id;
+        self.source_incarnation = Some(source.identity.reference.incarnation);
         self.controller = source.lki.controller;
         self.original_controller = Some(source.lki.controller);
         self.trigger_source = Some(source.clone());
@@ -21064,6 +21226,7 @@ impl ResolvedAbility {
     /// or a definition occurrence would reintroduce object-identity drift.
     pub fn clear_trigger_identity_recursive(&mut self) {
         self.source_id = ObjectId(0);
+        self.source_incarnation = None;
         self.trigger_source = None;
         self.trigger_definition_ref = None;
         if let Some(sub) = self.sub_ability.as_mut() {
@@ -21082,6 +21245,19 @@ impl ResolvedAbility {
 
     pub fn trigger_source_card_id(&self) -> Option<CardId> {
         self.trigger_source.as_ref().map(|source| source.card_id)
+    }
+
+    /// CR 400.7: Propagate the source's captured incarnation to this ability
+    /// and every continuation branch. Used by self-transform guards that are
+    /// intentionally distinct from full triggered-source provenance.
+    pub fn set_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
+        self.source_incarnation = incarnation;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_source_incarnation_recursive(incarnation);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_source_incarnation_recursive(incarnation);
+        }
     }
 
     /// Test-only fixture helper for a triggered ability whose source has
@@ -21105,14 +21281,36 @@ impl ResolvedAbility {
         self.set_trigger_source_recursive(context);
     }
 
+    /// CR 701.27f: Propagate the source's captured transformation generation
+    /// through every branch of an activated or triggered ability.
+    pub fn set_source_transformation_count_recursive(&mut self, count: Option<u32>) {
+        self.context.source_transformation_count = count;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_source_transformation_count_recursive(count);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_source_transformation_count_recursive(count);
+        }
+    }
     /// CR 400.7: True if the ability's source is still the same object instance it
-    /// was when the ability was created. A `None` capture (activated abilities,
-    /// casts, engine-internal abilities) is always current. Once the source has
-    /// left and re-entered the battlefield as a new object, its incarnation no
-    /// longer matches the captured value and this returns false.
+    /// was when the ability was created. Full triggered-source provenance takes
+    /// precedence; activated and delayed self-transform abilities fall back to
+    /// their captured source incarnation.
     pub fn source_is_current(&self, state: &crate::types::game_state::GameState) -> bool {
         match self.trigger_source.as_ref() {
-            None => true,
+            None => {
+                let current_incarnation = state
+                    .objects
+                    .get(&self.source_id)
+                    .map(|object| object.incarnation);
+                self.source_incarnation.is_none_or(|captured| {
+                    current_incarnation == Some(captured)
+                        || matches!(state.resolution_source_relatch, Some(r)
+                            if r.object_id == self.source_id
+                                && r.original_stamp == captured
+                                && Some(r.current_incarnation) == current_incarnation)
+                })
+            }
             Some(source) => {
                 let captured = source.identity.reference.incarnation;
                 let current_incarnation = state
@@ -22707,6 +22905,7 @@ mod tests {
             description: Some("Other creatures you control get +1/+1.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
@@ -22999,6 +23198,7 @@ mod tests {
                 description: None,
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),

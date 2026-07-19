@@ -97,8 +97,10 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         // SpecificObject before runtime) — never whole-board population.
         | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -330,8 +332,10 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         // SpecificObject before runtime) — never whole-board population.
         | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -1348,8 +1352,42 @@ pub fn matches_target_filter_on_battlefield_entry(
     ctx: &FilterContext<'_>,
 ) -> bool {
     match event {
-        ProposedEvent::ZoneChange { object_id, to, .. } if *to == Zone::Battlefield => {
-            if let Some(entry) = state.liminal_entries.get(object_id) {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            enter_as_copy,
+            ..
+        } if *to == Zone::Battlefield => {
+            if let Some(copy) = enter_as_copy {
+                let Some(mut obj) = state
+                    .liminal_entries
+                    .get(object_id)
+                    .map(|entry| entry.object.clone())
+                    .or_else(|| state.objects.get(object_id).cloned())
+                else {
+                    return false;
+                };
+                crate::game::effects::token::apply_copiable_values_to_liminal_object(
+                    &mut obj,
+                    &copy.values,
+                    copy.display_source,
+                    copy.printed_ref.clone(),
+                    copy.token_image_ref.clone(),
+                );
+                filter_inner_for_object(
+                    state,
+                    &obj,
+                    *object_id,
+                    filter,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    ctx.ability,
+                    ctx.trigger_source,
+                    ctx.recipient_id,
+                    ctx.scoped_iteration_player,
+                    ControllerLookup::LiveOrLki,
+                )
+            } else if let Some(entry) = state.liminal_entries.get(object_id) {
                 filter_inner_for_object(
                     state,
                     &entry.object,
@@ -2234,8 +2272,15 @@ fn filter_inner_for_object(
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
+        // CR 615.5: an object-typed resolution-time ref (the prevented event's
+        // damage source) — resolved via `resolve_target_filter`, not by scanning
+        // objects here, exactly like `ParentTarget`.
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::PostReplacementDamageTargetOwner => false,
+        | TargetFilter::PostReplacementDamageTargetOwner
+        // CR 615: compound damage recipient, lowered to `DamageTargetFilter`
+        // before runtime — never object-matched here.
+        | TargetFilter::ControllerAndControlledPermanents { .. } => false,
         // CR 201.2 + CR 602.5: "card with the chosen name" — match against source's
         // ChosenAttribute::CardName. The chosen name comes from a player UI prompt;
         // the comparison must mirror the spell-cast prohibition path
@@ -2567,8 +2612,10 @@ fn zone_change_filter_inner(
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
@@ -2878,8 +2925,10 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -3190,8 +3239,10 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }

@@ -558,6 +558,7 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.players_attacked_this_step.clear();
     // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
+    state.lki_copiable_values.clear();
     state.lki_by_incarnation.clear();
     // CR 607.2b + CR 603.10e: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
@@ -1774,6 +1775,10 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     };
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions.retain(|r| !expires_at_eot(r));
+        // CR 514.2: Clean up turn-bound replacement definitions from the base
+        // definitions during the cleanup step so they do not persist.
+        std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
+            .retain(|r| !expires_at_eot(r));
     }
     state
         .pending_damage_replacements
@@ -2408,18 +2413,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::DeclareAttackers => {
                 // CR 508.1: Active player declares attackers as a turn-based action.
-                let valid_attacker_ids = super::combat::get_valid_attacker_ids(state);
-                let valid_attack_targets = super::combat::get_valid_attack_targets(state);
-                let attacker_constraints = super::combat::attacker_constraints_for_active_player(
-                    state,
-                    &valid_attacker_ids,
-                );
-                return WaitingFor::DeclareAttackers {
-                    player: state.active_player,
-                    valid_attacker_ids,
-                    valid_attack_targets,
-                    attacker_constraints,
-                };
+                // Built from the single engine constraints authority (per-attacker
+                // legal map + aggregate compat + display badges).
+                return super::combat::build_declare_attackers_waiting_for(state);
             }
             Phase::DeclareBlockers => {
                 // CR 509.1: Defending player declares blockers as a turn-based action.

@@ -178,6 +178,18 @@ fn untargeted_damage_filter(
         TargetFilter::Any => None,
         TargetFilter::Player => Some(any_player_damage_filter()),
         TargetFilter::SpecificPlayer { id } => Some(player_damage_filter(*id)),
+        // CR 615 + CR 614.1a: "you and [type] permanents you control" (Comeuppance,
+        // Channel Harm) lowers to the dedicated player-OR-controlled-permanents
+        // damage filter so BOTH legs are matched. Routing this through the
+        // object-only `valid_card` slot would silently drop the player ("you")
+        // leg, so it must yield `Some` here (and `typed_recipient_valid_card_filter`
+        // returns `None` for it) — the shield's controller is the recipient player.
+        TargetFilter::ControllerAndControlledPermanents { permanent_type } => {
+            Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::Controller,
+                permanent_type: *permanent_type,
+            })
+        }
         filter if filter.is_context_ref() => Some(player_damage_filter(
             super::resolve_player_for_context_ref(state, ability, filter),
         )),
@@ -193,6 +205,12 @@ fn untargeted_damage_filter(
 fn typed_recipient_valid_card_filter(target: &TargetFilter) -> Option<TargetFilter> {
     match target {
         TargetFilter::Any | TargetFilter::ParentTarget => None,
+        // CR 615 + CR 614.1a: the compound "you and permanents you control"
+        // recipient is a player+permanent shape handled entirely by
+        // `untargeted_damage_filter`; it must NEVER route to the object-only
+        // `valid_card` slot (that would drop the "you" leg — the HIGH-severity
+        // leak this arm forecloses even if the caller's branch order changes).
+        TargetFilter::ControllerAndControlledPermanents { .. } => None,
         filter if filter.is_context_ref() => None,
         filter => Some(filter.clone()),
     }

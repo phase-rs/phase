@@ -3932,6 +3932,11 @@ fn apply_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
+            CostResume::Resolution => {
+                return Err(EngineError::InvalidAction(
+                    "Counter-cost distribution is not valid for resolution costs".to_string(),
+                ));
+            }
         },
         (
             WaitingFor::PayCost {
@@ -4209,6 +4214,40 @@ fn apply_action(
                     );
                     return Err(EngineError::InvalidAction(
                         "Cost kind cannot resume a mana ability".into(),
+                    ));
+                }
+            },
+            CostResume::Resolution => match kind {
+                PayCostKind::TapCreatures { aggregate } => {
+                    casting_costs::pay_tap_creatures_selection(
+                        state,
+                        *count,
+                        *aggregate,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?;
+                    state.last_effect_count = Some(chosen.len() as i32);
+                    if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
+                        state.waiting_for = WaitingFor::Priority { player: *player };
+                    }
+                    effects::drain_pending_continuation(state, &mut events);
+                    state.waiting_for.clone()
+                }
+                PayCostKind::Discard
+                | PayCostKind::Reveal
+                | PayCostKind::Sacrifice
+                | PayCostKind::ReturnToHand
+                | PayCostKind::ExileFromZone { .. }
+                | PayCostKind::ExilePermanent { .. }
+                | PayCostKind::UnattachFrom { .. }
+                | PayCostKind::ExileMaterials { .. }
+                | PayCostKind::ExileAggregate { .. }
+                | PayCostKind::RemoveCounter { .. }
+                | PayCostKind::Behold { .. }
+                | PayCostKind::ExileFromManaZone { .. } => {
+                    return Err(EngineError::InvalidAction(
+                        "Cost kind cannot resume a resolution PayCost".into(),
                     ));
                 }
             },

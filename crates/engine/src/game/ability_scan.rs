@@ -175,6 +175,7 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         //      none of which express a resolution-time dynamic read ----
         targets: _,                // concrete announced target refs (already resolved)
         source_id: _,              // object id
+        source_incarnation: _,     // self-transform epoch latch, no dynamic read
         trigger_source: _,         // exact triggered-source authority, no dynamic read
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
         controller: _,             // player id
@@ -1651,6 +1652,15 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             acc = acc.or(scan_player_filter(filter));
             acc
         }
+        QuantityRef::EventContextPlayerCount { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_player_filter(filter));
+            acc
+        }
         QuantityRef::CountersOn { scope, .. } => {
             let mut acc = Axes {
                 event: false,
@@ -2299,6 +2309,16 @@ fn scan_ability_condition(x: &AbilityCondition) -> Axes {
             acc = acc.or(scan_target_filter(filter));
             acc
         }
+        // CR 615.5: gates on the prevented event's damage source — an event read.
+        AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_target_filter(filter));
+            acc
+        }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             filter,
             origin: _,
@@ -2550,6 +2570,12 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 615.5: resolves the prevented event's damage source — an event read.
+        TargetFilter::PostReplacementDamageSource => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TargetFilter::PostReplacementDamageTarget => Axes {
             event: true,
             sibling: false,
@@ -2576,6 +2602,8 @@ fn scan_target_filter(x: &TargetFilter) -> Axes {
         TargetFilter::Named { name: _ } => Axes::NONE,
         TargetFilter::Owner => Axes::NONE,
         TargetFilter::AllPlayers => Axes::NONE,
+        // CR 615: controller-relative compound recipient — no event/sibling axes.
+        TargetFilter::ControllerAndControlledPermanents { .. } => Axes::NONE,
     }
 }
 
@@ -2601,6 +2629,9 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // axis, like the demonstrative/anaphoric referents.
         ObjectScope::OtherRevealedCard => Axes::NONE,
         ObjectScope::AmassedArmy => Axes::NONE,
+        // CR 607.2a: source-persistent exile-pile member read — no event/sibling
+        // projected axis (mirrors AmassedArmy).
+        ObjectScope::OwnedLinkedExileCard => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -4732,6 +4763,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
+        source_incarnation: _, // self-transform epoch latch, no resolution-time choice
         trigger_source: _, // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
         controller: _, // player id

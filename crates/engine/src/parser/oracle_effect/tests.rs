@@ -11844,6 +11844,110 @@ fn tragic_arrogance_absorbs_explicit_nonland_sacrifice_filter() {
     assert!(target_filter_contains_nonland(sacrifice_filter));
 }
 
+fn filter_has_shares_quality(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(t)
+            if t.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::SharesQuality { .. }))
+    )
+}
+
+/// Winnowing (pattern 5): "For each player, you choose a creature that player
+/// controls" lowers to a `ControllerForAll` ChooseAndSacrificeRest keyed on the
+/// single bare `[Creature]` category. Guards the choose-clause building block on
+/// its own, before the sweep sentence folds in the shared-type qualifier.
+#[test]
+fn winnowing_pattern5_choose_creature_is_controller_for_all() {
+    let def = parse_effect_chain(
+        "For each player, you choose a creature that player controls.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChooseAndSacrificeRest {
+        categories,
+        chooser_scope,
+        choose_filter,
+        sacrifice_filter,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected ChooseAndSacrificeRest, got {:?}", def.effect);
+    };
+    assert_eq!(categories, &vec![CoreType::Creature]);
+    assert!(matches!(
+        chooser_scope,
+        crate::types::ability::CategoryChooserScope::ControllerForAll
+    ));
+    assert_eq!(choose_filter, sacrifice_filter);
+    // No sweep sentence yet, so no shared-type qualifier.
+    assert!(!filter_has_shares_quality(sacrifice_filter));
+}
+
+/// Winnowing full card (review correction #2): the sweep sentence's trailing
+/// "that don't share a creature type with the chosen creature they control"
+/// qualifier must FOLD onto the preceding ChooseAndSacrificeRest's
+/// `sacrifice_filter` as a `SharesQuality { CreatureType, ParentTarget,
+/// DoesNotShare }` prop — not dangle as a sub-ability. Asserting the prop is
+/// present (not merely "no Unimplemented / no dangle") guards the silent
+/// sacrifice-everything failure mode if the fold ever regresses.
+#[test]
+fn winnowing_full_card_folds_does_not_share_creature_type() {
+    let def = parse_effect_chain(
+        "For each player, you choose a creature that player controls. Then each player \
+         sacrifices all other creatures they control that don't share a creature type \
+         with the chosen creature they control.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChooseAndSacrificeRest {
+        sacrifice_filter, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected ChooseAndSacrificeRest, got {:?}", def.effect);
+    };
+    assert!(
+        def.sub_ability.is_none(),
+        "sweep sentence must fold into the sacrifice filter, not dangle: {:?}",
+        def.sub_ability
+    );
+    let TargetFilter::Typed(typed) = sacrifice_filter else {
+        panic!("expected a Typed sacrifice filter, got {sacrifice_filter:?}");
+    };
+    assert!(typed.type_filters.contains(&TypeFilter::Creature));
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(r),
+                relation: crate::types::ability::SharedQualityRelation::DoesNotShare,
+            } if matches!(r.as_ref(), TargetFilter::ParentTarget)
+        )),
+        "sacrifice filter must carry SharesQuality{{CreatureType, ParentTarget, DoesNotShare}}, got {:?}",
+        typed.properties
+    );
+}
+
+/// Regression: Slaughter the Strong's unqualified "sacrifices all other
+/// creatures they control" must still fold WITHOUT a SharesQuality prop — the
+/// new optional qualifier in `parse_explicit_choose_and_sacrifice_rest_filter`
+/// must be inert when the qualifier is absent.
+#[test]
+fn slaughter_the_strong_sweep_carries_no_shares_quality() {
+    let def = parse_effect_chain(
+        "Each player chooses any number of creatures they control with total power 4 or \
+         less, then sacrifices all other creatures they control.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChooseAndSacrificeRest {
+        sacrifice_filter, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected ChooseAndSacrificeRest, got {:?}", def.effect);
+    };
+    assert!(!filter_has_shares_quality(sacrifice_filter));
+}
+
 #[test]
 fn effect_shuffle_library() {
     let e = parse_effect("Shuffle your library");
@@ -19524,6 +19628,7 @@ fn cant_be_activated_effect_standalone_targets_creature() {
                         who: ProhibitionScope::AllPlayers,
                         source_filter: TargetFilter::SelfRef,
                         exemption: ActivationExemption::None,
+                        kind: None,
                     }
                 ),
                 "expected CantBeActivated(AllPlayers), got {:?}",
@@ -21334,10 +21439,17 @@ fn advanced_reconstruction_body_uses_random_exile_and_tracked_permission() {
     ));
 }
 
+/// CR 707.12 + CR 707.12a + CR 118.9: Mizzix's Mastery's REAL single-sentence
+/// wording — the copy and its free-cast tail are coordinated by a comma
+/// conjunction ("copy it, and you may cast the copy …") inside the "for each …"
+/// iteration prefix. `try_split_copy_cast_compound` must split this into the same
+/// `CopySpell` + `CastFromZone` pair the period-split two-sentence form produces,
+/// so the untouched fold collapses it to `CastCopyOfCard`. The trailing self-exile
+/// ("Exile Mizzix's Mastery.") must remain intact as a following sub-ability.
 #[test]
 fn mizzix_mastery_folds_card_copy_cast_to_cr_707_12_effect() {
     let def = parse_effect_chain(
-            "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it. You may cast the copy without paying its mana cost.",
+            "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it, and you may cast the copy without paying its mana cost. Exile Mizzix's Mastery.",
             AbilityKind::Spell,
         );
     assert!(matches!(
@@ -21367,7 +21479,62 @@ fn mizzix_mastery_folds_card_copy_cast_to_cr_707_12_effect() {
         "resolver chooses and casts the tracked-set copies as one CR 707.12 instruction"
     );
     assert!(!cast_copy.optional);
-    assert!(cast_copy.sub_ability.is_none());
+
+    // CR 707.12 trailing composition: the self-exile survives as the next
+    // instruction after the interactive cast (identical to the two-sentence form).
+    let self_exile = cast_copy
+        .sub_ability
+        .as_deref()
+        .expect("self-exile sub-ability after the cast");
+    assert!(matches!(
+        self_exile.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+}
+
+/// Regression: the period-split two-sentence wording (Mnemonic Deluge class) must
+/// keep folding to `CastCopyOfCard` through the pre-existing fold path — the new
+/// comma+and splitter must not disturb it.
+#[test]
+fn mizzix_two_sentence_copy_cast_still_folds() {
+    let def = parse_effect_chain(
+            "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it. You may cast the copy without paying its mana cost. Exile Mizzix's Mastery.",
+            AbilityKind::Spell,
+        );
+    let cast_copy = def
+        .sub_ability
+        .as_deref()
+        .expect("card-copy cast sub-ability");
+    assert!(matches!(
+        cast_copy.effect.as_ref(),
+        Effect::CastCopyOfCard {
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+            ..
+        }
+    ));
+    assert!(cast_copy.repeat_for.is_none());
+}
+
+/// Regression: a bare "copy it" with no coordinated free-cast tail (Fork /
+/// Reverberate class) must stay a plain `CopySpell` — the splitter's connector
+/// match fails and the clause falls through to the normal copy path.
+#[test]
+fn bare_copy_it_stays_copy_spell_not_cast_copy() {
+    let def = parse_effect_chain(
+        "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it.",
+        AbilityKind::Spell,
+    );
+    let copy = def.sub_ability.as_deref().expect("copy sub-ability");
+    assert!(
+        matches!(copy.effect.as_ref(), Effect::CopySpell { .. }),
+        "bare 'copy it' must not fuse to CastCopyOfCard, got {:?}",
+        copy.effect
+    );
 }
 
 #[test]
@@ -35025,6 +35192,78 @@ fn conjure_into_library() {
     }
 }
 
+/// Digital-only Alchemy placement: "conjure a duplicate of that creature into
+/// the top five cards of your library at random" (Goblin Morale Sergeant class)
+/// must thread the count through as a `LibraryPosition::RandomWithinTop`, not
+/// discard it and collapse to a deterministic bottom-of-library placement.
+#[test]
+fn conjure_duplicate_into_top_n_at_random_captures_position() {
+    let e = parse_effect(
+        "conjure a duplicate of that creature into the top five cards of your library at random",
+    );
+    match e {
+        Effect::Conjure {
+            cards,
+            destination,
+            library_position,
+            ..
+        } => {
+            assert_eq!(cards.len(), 1);
+            assert_eq!(destination, Zone::Library);
+            assert_eq!(
+                library_position,
+                Some(LibraryPosition::RandomWithinTop {
+                    n: QuantityExpr::Fixed { value: 5 }
+                }),
+                "the top-N count must be preserved as a RandomWithinTop position"
+            );
+        }
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+/// The named-conjure form ("each player's library") routes through the same
+/// positional arm.
+#[test]
+fn conjure_named_into_top_n_each_player_at_random_captures_position() {
+    let e = parse_effect(
+        "conjure a card named Goblin into the top three cards of each player's library at random",
+    );
+    match e {
+        Effect::Conjure {
+            destination,
+            library_position,
+            ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert_eq!(
+                library_position,
+                Some(LibraryPosition::RandomWithinTop {
+                    n: QuantityExpr::Fixed { value: 3 }
+                })
+            );
+        }
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
+/// A plain "into your library" conjure has no positional constraint.
+#[test]
+fn conjure_plain_library_has_no_position() {
+    let e = parse_effect("conjure a card named Goblin into your library");
+    match e {
+        Effect::Conjure {
+            destination,
+            library_position,
+            ..
+        } => {
+            assert_eq!(destination, Zone::Library);
+            assert_eq!(library_position, None);
+        }
+        other => panic!("expected Conjure, got: {other:?}"),
+    }
+}
+
 #[test]
 fn conjure_two_battlefield_tapped() {
     let e = parse_effect("conjure two cards named Mishra's Foundry onto the battlefield tapped");
@@ -40695,6 +40934,39 @@ fn put_zone_change_any_number_from_hand_sets_resolution_choice_count() {
     assert!(properties
         .iter()
         .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })));
+}
+
+/// CR 115.1 + CR 109.5 (issue #5983): Sothera's dies edict — "each opponent
+/// chooses a creature they control and exiles it" names no "target" keyword, so
+/// each opponent's pick happens at resolution (EffectZoneChoice) after
+/// `player_scope` rebinding, not as a stack-time target on the caster.
+#[test]
+fn each_opponent_chooses_creature_to_exile_uses_resolution_timing() {
+    use crate::types::ability::PlayerFilter;
+
+    let def = parse_effect_chain(
+        "Each opponent chooses a creature they control and exiles it.",
+        AbilityKind::Spell,
+    );
+
+    assert!(matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+}
+
+/// CR 115.1 boundary: battlefield exile WITH "target" still requires stack-time
+/// selection — pins the keyword-presence axis against issue #5983's carve-out.
+#[test]
+fn exile_target_creature_from_battlefield_uses_stack_timing() {
+    let def = parse_effect_chain("Exile target creature.", AbilityKind::Spell);
+    assert!(matches!(&*def.effect, Effect::ChangeZone { .. }));
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
 #[test]
@@ -47240,4 +47512,134 @@ fn conjugated_draw_continuation_still_inherits_player_anchor() {
         "a conjugated \"then draws\" continuation must inherit the anchored player, \
          not fall back to the controller"
     );
+}
+
+/// CR 608.2c (issue #5985) — production-path regression for Ardbert, Warrior of
+/// Darkness: "Whenever you cast a white spell, put a +1/+1 counter on each
+/// legendary creature you control. They gain vigilance until end of turn."
+///
+/// "They" is the legendary-creature POPULATION introduced by the preceding mass
+/// clause -- the nearest antecedent -- not the cast spell that triggered the
+/// ability. Binding it to the trigger's subject (`TriggeringSource`) granted the
+/// keyword to an object on the stack, so the grant half silently did nothing
+/// while the counters still landed ("only partially fires").
+#[test]
+fn they_after_mass_effect_binds_that_population_not_trigger_source() {
+    use crate::types::ability::{Effect, StaticDefinition};
+
+    let parsed = parse_oracle_text(
+        "Whenever you cast a white spell, put a +1/+1 counter on each legendary creature you control. They gain vigilance until end of turn.\nWhenever you cast a black spell, put a +1/+1 counter on each legendary creature you control. They gain menace until end of turn.",
+        "Ardbert, Warrior of Darkness",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 2, "both cast triggers must lower");
+
+    // The population the counters were put on -- "each legendary creature you control".
+    let population = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find_map(|d| match &*d.effect {
+            Effect::PutCounterAll { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .expect("the counter half must lower to a PutCounterAll over the legendary creatures");
+
+    let grants: Vec<StaticDefinition> = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .filter_map(|d| d.sub_ability.as_deref())
+        .filter_map(|sub| match &*sub.effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.first().cloned(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        grants.len(),
+        2,
+        "each trigger must keep its \"They gain ...\" grant: {grants:?}"
+    );
+    for grant in &grants {
+        assert_eq!(
+            grant.affected,
+            Some(population.clone()),
+            "\"They\" must bind to the legendary-creature population from the preceding \
+             clause, not the triggering spell: {grant:?}"
+        );
+    }
+}
+
+/// CR 608.2c (issue #5985) — sibling coverage across the mass-population
+/// family. A later "They <grant>" clause must bind to whatever population the
+/// EARLIER mass clause acted on, for every `*All` / scope-`All` producer — not just
+/// the `PutCounterAll` shape Ardbert happens to use. Each case asserts the grant's
+/// `affected` against the population read back out of the parsed producer itself
+/// (via the shared `mass_population_filter` authority), so the test pins the
+/// BINDING rather than duplicating a literal filter.
+#[test]
+fn they_binds_producer_population_across_mass_effect_family() {
+    use super::mass_population_filter;
+    use crate::types::ability::Effect;
+
+    for (label, text) in [
+        // PutCounterAll — Ardbert's own shape (the originally covered case).
+        (
+            "PutCounterAll",
+            "Whenever you cast a white spell, put a +1/+1 counter on each legendary creature you control. They gain vigilance until end of turn.",
+        ),
+        // GainControlAll — previously omitted; fell back to TriggeringSource.
+        (
+            "GainControlAll",
+            "Whenever you cast a white spell, gain control of all creatures target opponent controls. They gain haste until end of turn.",
+        ),
+        // DoublePTAll — previously omitted.
+        (
+            "DoublePTAll",
+            "Whenever you cast a white spell, double the power and toughness of each creature you control. They gain trample until end of turn.",
+        ),
+        // Mass SetTapState (scope: All) — previously omitted.
+        (
+            "SetTapState{All}",
+            "Whenever you cast a white spell, tap all creatures your opponents control. They gain defender until end of turn.",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, "Mass Population Probe", &[], &["Creature".to_string()], &[]);
+        let def = parsed
+            .triggers
+            .first()
+            .and_then(|t| t.execute.as_deref())
+            .unwrap_or_else(|| panic!("{label}: the cast trigger must lower"));
+
+        let population = mass_population_filter(&def.effect)
+            .unwrap_or_else(|| panic!("{label}: head clause must be a mass population producer: {:?}", def.effect))
+            .clone();
+
+        let grant = def
+            .sub_ability
+            .as_deref()
+            .and_then(|sub| match &*sub.effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => static_abilities.first().cloned(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label}: the \"They <grant>\" continuation must survive"));
+
+        assert_eq!(
+            grant.affected,
+            Some(population),
+            "{label}: \"They\" must bind to the producer's population, not the triggering spell: {grant:?}"
+        );
+        assert_ne!(
+            grant.affected,
+            Some(TargetFilter::TriggeringSource),
+            "{label}: \"They\" must never fall back to the trigger's source when a mass \
+             population precedes it"
+        );
+    }
 }

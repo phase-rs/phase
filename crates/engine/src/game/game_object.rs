@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
-    AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
-    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
-    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
-    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
-    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
-    TriggerOccurrenceState,
+    AbilityBlockEntry, AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment,
+    AdditionalCostOrigin, BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission,
+    CastingRestriction, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
+    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -359,6 +359,11 @@ pub struct GameObject {
     pub face_down: bool,
     pub flipped: bool,
     pub transformed: bool,
+    /// CR 701.27f: Number of successful transforms/conversions of this object.
+    /// Stack abilities capture this generation so a stale self-transform
+    /// instruction can be ignored after another ability has already flipped it.
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub transformation_count: u32,
     /// CR 712.8a + CR 400.7: True when this object is showing its MDFC back face
     /// (set via ChooseModalFace back_face=true). Reverted to front face on any
     /// zone exit that is not to the battlefield (CR 712.8a: front face only in
@@ -788,6 +793,14 @@ pub struct GameObject {
     #[serde(skip_deserializing, default)]
     pub available_mana_pips: Vec<ManaPip>,
 
+    // CR 602.5: Derived read-out of which activated abilities on this object are
+    // currently blocked from activation, and by what. Display-only — carries no
+    // enforcement authority (the gates in `game::casting` remain the sole
+    // authority). Recomputed per-tick by the `derived.rs` block sweep; omitted
+    // from the wire when empty.
+    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_abilities: Vec<AbilityBlockEntry>,
+
     /// CR 606.3 + CR 606.1: Per-permanent loyalty-ability activation count for
     /// the current turn. Default cap is 1 (CR 606.3 "once per turn"); raised
     /// for the controller by `GameState::extra_loyalty_activations_this_turn`
@@ -1069,7 +1082,7 @@ pub struct GameObject {
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
-/// (types/game_state.rs) — the §5.2c 136-field partition. `GameObject` deliberately
+/// (types/game_state.rs) — the §5.2c 137-field partition. `GameObject` deliberately
 /// does NOT derive `PartialEq` (constant-depth loop detection must omit `timestamp`
 /// / `incarnation`), so the row comparator is hand-rolled and needs this no-`..`
 /// destructure: adding a field breaks the build until it is classified into a
@@ -1088,6 +1101,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         face_down: _,
         flipped: _,
         transformed: _,
+        transformation_count: _,
         modal_back_face: _,
         damage_marked: _,
         dealt_deathtouch_damage: _,
@@ -1175,6 +1189,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         has_mana_ability: _,
         mana_ability_index: _,
         available_mana_pips: _,
+        blocked_abilities: _,
         loyalty_activations_this_turn: _,
         is_commander: _,
         signature_spell: _,
@@ -1876,6 +1891,7 @@ impl GameObject {
             face_down: false,
             flipped: false,
             transformed: false,
+            transformation_count: 0,
             modal_back_face: false,
             damage_marked: 0,
             dealt_deathtouch_damage: false,
@@ -1963,6 +1979,7 @@ impl GameObject {
             mana_ability_index: None,
             devotion: None,
             available_mana_pips: Vec::new(),
+            blocked_abilities: Vec::new(),
             loyalty_activations_this_turn: 0,
             is_commander: false,
             signature_spell: None,

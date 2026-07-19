@@ -1621,6 +1621,23 @@ fn finish_copy_target_choice_entry(
         );
         return Ok(Some(state.waiting_for.clone()));
     }
+    // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
+    // replacement choice acquired from entering as a copy before replaying the entry.
+    if let Some(choice) =
+        super::replacement::current_self_enter_replacement_choice(state, source_id)
+    {
+        if let Some(waiting_for) = apply_post_replacement_effect(
+            state,
+            &choice,
+            Some(source_id),
+            None,
+            Some(&ReplacementEvent::Moved),
+            HashSet::new(),
+            events,
+        ) {
+            return Ok(Some(waiting_for));
+        }
+    }
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
     // captured into `state.deferred_entry_events` when `CopyTargetChoice` was
@@ -1860,9 +1877,16 @@ pub(super) fn apply_post_replacement_effect(
         if valid_targets.is_empty() {
             return None;
         }
-        // CR 607.2a: For ExiledCardByIndex (The Mimeoplasm), the target is already
-        // determined by the index - no choice prompt needed. Directly resolve the copy.
-        if matches!(target, TargetFilter::ExiledCardByIndex { .. }) {
+        // CR 614.12a + CR 707.2: Some copy sources are already determined before
+        // the permanent enters (indexed exiled cards, or the `SpecificObject`
+        // frozen by a Mystic Reflection-style ChangeZone shield). No new choice
+        // prompt is made for those shapes; resolve the copy directly. Do not
+        // generalize every `SpecificObject` ETB copy replacement here: existing
+        // Moved enter-as-copy paths still use `CopyTargetChoice` to defer the
+        // frontend entry event until the final copy snapshot is chosen.
+        let specific_change_zone_copy = matches!(target, TargetFilter::SpecificObject { .. })
+            && matches!(event, Some(ReplacementEvent::ChangeZone));
+        if matches!(target, TargetFilter::ExiledCardByIndex { .. }) || specific_change_zone_copy {
             let targets = valid_targets
                 .into_iter()
                 .map(TargetRef::Object)
@@ -2308,7 +2332,7 @@ pub(super) fn apply_etb_counters(
     true
 }
 
-fn find_copy_targets(
+pub(super) fn find_copy_targets(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,
@@ -3565,6 +3589,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -5458,6 +5483,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -5661,6 +5687,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -5780,6 +5807,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6093,6 +6121,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            enter_as_copy: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };

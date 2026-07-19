@@ -320,6 +320,7 @@ fn attacks_when_opponent_is_at_lethal() {
             player: P0,
             valid_attacker_ids: vec![attacker],
             valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
     }
@@ -400,6 +401,7 @@ fn attacks_with_evasive_creatures() {
             player: P0,
             valid_attacker_ids: vec![flyer],
             valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
     }

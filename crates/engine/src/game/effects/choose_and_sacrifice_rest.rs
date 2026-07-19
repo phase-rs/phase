@@ -644,9 +644,32 @@ fn unchosen_sacrifice_selections_for_scope(
     source_id: ObjectId,
     source_controller: PlayerId,
 ) -> Vec<(PlayerId, Vec<ObjectId>)> {
-    let filter_ctx = FilterContext::from_source_with_controller(source_id, source_controller);
     let mut selections: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
     for player in scope {
+        // CR 608.2c: When the sacrifice filter carries a `ParentTarget`-relative
+        // predicate (Winnowing's "that don't share a creature type with the
+        // chosen creature they control"), the reference must resolve to THIS
+        // player's kept creature — not to a single global keeper. Bind
+        // `recipient_id` to the first kept object this player controls so the
+        // `SharesQuality { reference: ParentTarget }` prop is scoped per player.
+        // `kept` is a flat list across all players (see `resolve`).
+        // ponytail: first kept object per player — if a future effect lets one
+        // player keep multiple creatures here, only the first is used as the
+        // shared-quality reference.
+        let recipient = kept.iter().copied().find(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == *player)
+        });
+        let filter_ctx = match recipient {
+            Some(recipient_id) => {
+                FilterContext::from_source_with_recipient(state, source_id, recipient_id)
+            }
+            // Inert for filters with no reference/recipient-reading prop
+            // (Cataclysm, Tragic Arrogance, Slaughter the Strong, Natural Balance).
+            None => FilterContext::from_source_with_controller(source_id, source_controller),
+        };
         let cards: Vec<ObjectId> = state
             .battlefield
             .iter()

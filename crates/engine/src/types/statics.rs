@@ -9,6 +9,7 @@ use super::ability::{
     AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter, QuantityExpr,
     QuantityRef, TargetFilter,
 };
+use super::events::ActivatedAbilityKind;
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
@@ -873,11 +874,22 @@ pub enum StaticMode {
     /// (CR 605.1a). Pithing Needle emits `ActivationExemption::ManaAbilities`;
     /// Phyrexian Revoker, Sorcerous Spyglass, and the standard Chalice/Karn
     /// family use `ActivationExemption::None`.
+    ///
+    /// `kind` narrows by the ability-KIND axis (CR 606.2), orthogonal to
+    /// `exemption`'s "unless it's a mana ability" bypass axis:
+    /// - `None` — any activated ability (Chalice/Karn/Pithing Needle class).
+    /// - `Some(Loyalty)` — only loyalty abilities (The Immortal Sun,
+    ///   "Players can't activate planeswalkers' loyalty abilities").
+    /// - `Some(Normal)` — only ordinary activated abilities (symmetric future
+    ///   class). Classification routes through the single-authority
+    ///   `is_loyalty_ability_cost` (CR 606.2: loyalty symbol in the cost).
     CantBeActivated {
         who: ProhibitionScope,
         source_filter: TargetFilter,
         #[serde(default)]
         exemption: ActivationExemption,
+        #[serde(default)]
+        kind: Option<ActivatedAbilityKind>,
     },
     /// CR 701.23 + CR 609.3: "Spells and abilities <scope> can't cause their controller
     /// to search their library." E.g., Ashiok, Dream Render's first static ability.
@@ -3083,6 +3095,9 @@ impl FromStr for StaticMode {
                 // CR 605.1a: Default to no exemption — legacy serialized form predates
                 // the mana-ability exemption field.
                 exemption: ActivationExemption::None,
+                // CR 606.2: Legacy serialized form predates the ability-kind axis;
+                // `None` = any activated ability, preserving pre-widening behavior.
+                kind: None,
             },
             "CastWithFlash" => StaticMode::CastWithFlash,
             "ReduceCost" => StaticMode::ModifyCost {
@@ -3512,6 +3527,9 @@ impl FromStr for StaticMode {
                             // CR 605.1a: Display round-trip is diagnostic-only; the
                             // exemption field is data-carrying and defaults to `None`.
                             exemption: ActivationExemption::None,
+                            // CR 606.2: Display round-trip is diagnostic-only; the
+                            // kind field is data-carrying and defaults to `None`.
+                            kind: None,
                         });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
@@ -4497,6 +4515,7 @@ mod tests {
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
             exemption: ActivationExemption::None,
+            kind: None,
         };
         assert_eq!(mode.to_string(), "CantBeActivated(all_players)");
 
@@ -4546,6 +4565,7 @@ mod tests {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
                 exemption: ActivationExemption::None,
+                kind: None,
             }
         );
     }

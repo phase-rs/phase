@@ -15,10 +15,11 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    AutoMayChoice, DelayedTrigger, DistributionUnit, GameState, LatchedBatchedTrigger,
-    LatchedSuppressTrigger, LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome,
-    MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
-    TargetSelectionConstraint, TriggerObservationTime, TriggerSourceContext, WaitingFor,
+    AutoMayChoice, DamageRecord, DelayedTrigger, DistributionUnit, GameState,
+    LatchedBatchedTrigger, LatchedSuppressTrigger, LogicalZoneChangeGroup,
+    LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
+    StackEntryKind, TargetSelectionConstraint, TriggerObservationTime, TriggerSourceContext,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::WardCost;
@@ -4224,7 +4225,13 @@ fn collect_ring_emblem_triggers(
     pending: &mut Vec<PendingTriggerContext>,
 ) {
     for event in events {
-        let players: Vec<_> = state.ring_level.keys().copied().collect();
+        // Issue #4878: `state.ring_level` is a default-RandomState HashMap;
+        // sort by the stable PlayerId inner value so multi-teammate Ring
+        // emblem triggers land in `pending` in a deterministic, process-
+        // independent order (matters when a stable sort downstream ties on
+        // both APNAP rank and timestamp — see `ring_pending_trigger`).
+        let mut players: Vec<_> = state.ring_level.keys().copied().collect();
+        players.sort_by_key(|p| p.0);
         for player in players {
             let level = state.ring_level.get(&player).copied().unwrap_or(0);
             let Some(bearer_id) = super::effects::ring::ring_bearer_for(state, player) else {
@@ -7160,7 +7167,7 @@ pub(crate) fn process_collected_triggers_with_delayed_phase_events(
     delayed_events: &[GameEvent],
     events_out: &mut Vec<GameEvent>,
 ) -> TriggerBatchOutcome {
-    process_collected_triggers_with_delayed_events(
+    process_collected_triggers_with_delayed_events_scoped(
         state,
         normal_pending,
         delayed_events,
@@ -7169,7 +7176,24 @@ pub(crate) fn process_collected_triggers_with_delayed_phase_events(
     )
 }
 
-fn process_collected_triggers_with_delayed_events(
+/// Combines already-collected normal trigger contexts with every delayed trigger
+/// matching the same event batch before APNAP ordering.
+pub(crate) fn process_collected_triggers_with_delayed_events(
+    state: &mut GameState,
+    normal_pending: Vec<PendingTriggerContext>,
+    delayed_events: &[GameEvent],
+    events_out: &mut Vec<GameEvent>,
+) -> TriggerBatchOutcome {
+    process_collected_triggers_with_delayed_events_scoped(
+        state,
+        normal_pending,
+        delayed_events,
+        DelayedTriggerEventScope::Any,
+        events_out,
+    )
+}
+
+fn process_collected_triggers_with_delayed_events_scoped(
     state: &mut GameState,
     normal_pending: Vec<PendingTriggerContext>,
     delayed_events: &[GameEvent],
@@ -7255,22 +7279,6 @@ pub(crate) fn process_triggers_with_delayed_phase_events(
         state,
         normal_pending,
         delayed_events,
-        events_out,
-    )
-}
-
-pub(crate) fn process_triggers_with_delayed_events(
-    state: &mut GameState,
-    normal_events: &[GameEvent],
-    delayed_events: &[GameEvent],
-    events_out: &mut Vec<GameEvent>,
-) -> TriggerBatchOutcome {
-    let normal_pending = collect_triggers_for_batch(state, normal_events);
-    process_collected_triggers_with_delayed_events(
-        state,
-        normal_pending,
-        delayed_events,
-        DelayedTriggerEventScope::Any,
         events_out,
     )
 }
@@ -8095,10 +8103,10 @@ pub(crate) fn check_trigger_condition_with_source(
                 _ => None,
             });
             match (source_id, dying_creature) {
-                (Some(src), Some(subj)) => state
-                    .damage_dealt_this_turn
-                    .iter()
-                    .any(|r| r.source_id == src && r.target == TargetRef::Object(subj)),
+                (Some(src), Some(subj)) => state.damage_dealt_this_turn.iter().any(|r| {
+                    r.source_id == src
+                        && damage_record_matches_dying_object(state, r, subj, trigger_event)
+                }),
                 _ => false,
             }
         }
@@ -8119,7 +8127,7 @@ pub(crate) fn check_trigger_condition_with_source(
                 |source| FilterContext::from_trigger_source_with_controller(source, controller),
             );
             state.damage_dealt_this_turn.iter().any(|record| {
-                record.target == TargetRef::Object(subj)
+                damage_record_matches_dying_object(state, record, subj, trigger_event)
                     && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
             })
         }
@@ -8854,6 +8862,56 @@ pub(crate) fn check_trigger_condition(
     )
 }
 
+/// CR 400.7 + CR 603.10a: Match a damage record to the incarnation that died,
+/// not a later object reusing the same storage id. Death bumps the live
+/// incarnation, and the card can move again before an intervening-if recheck,
+/// so subtract the death move and every subsequent move of that object.
+fn damage_record_matches_dying_object(
+    state: &GameState,
+    record: &DamageRecord,
+    object_id: ObjectId,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if record.target != TargetRef::Object(object_id) {
+        return false;
+    }
+    let Some(recorded_incarnation) = record.target_incarnation else {
+        return true;
+    };
+    let Some(current_incarnation) = state
+        .objects
+        .get(&object_id)
+        .map(|object| object.incarnation)
+    else {
+        return false;
+    };
+
+    let death_index = trigger_event.and_then(|event| match event {
+        GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+        GameEvent::CreatureDestroyed { .. } => state
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|change| {
+                change.object_id == object_id && change.from_zone == Some(Zone::Battlefield)
+            })
+            .map(|change| change.turn_zone_change_index),
+        _ => None,
+    });
+    let Some(death_index) = death_index else {
+        return current_incarnation == recorded_incarnation;
+    };
+    let later_moves = state
+        .zone_changes_this_turn
+        .iter()
+        .filter(|change| {
+            change.object_id == object_id && change.turn_zone_change_index > death_index
+        })
+        .count() as u64;
+
+    current_incarnation.checked_sub(later_moves + 1) == Some(recorded_incarnation)
+}
+
 fn attackers_declared_count(
     state: &GameState,
     attacker_ids: &[ObjectId],
@@ -9470,6 +9528,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
@@ -18495,6 +18554,136 @@ pub mod tests {
         ));
     }
 
+    #[test]
+    fn damage_history_death_conditions_ignore_prior_incarnation_after_reentry() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spider".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Spider".to_string());
+        let victim = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(victim),
+            target_controller: PlayerId(1),
+            target_incarnation: Some(state.objects[&victim].incarnation),
+            amount: 1,
+            is_combat: false,
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            source_subtypes: vec!["Spider".to_string()],
+            ..Default::default()
+        });
+
+        let exact = TriggerCondition::DealtDamageBySourceThisTurn;
+        let filtered = TriggerCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Spider".to_string())
+                    .controller(ControllerRef::You),
+            ),
+        };
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, victim, Zone::Graveyard, &mut events);
+        let unchanged = events.last().cloned().unwrap();
+        assert!(check_trigger_condition(
+            &state,
+            &exact,
+            PlayerId(0),
+            Some(source),
+            Some(&unchanged)
+        ));
+        assert!(check_trigger_condition(
+            &state,
+            &filtered,
+            PlayerId(0),
+            Some(source),
+            Some(&unchanged)
+        ));
+
+        crate::game::zones::move_to_zone(&mut state, victim, Zone::Exile, &mut events);
+        assert!(check_trigger_condition(
+            &state,
+            &exact,
+            PlayerId(0),
+            Some(source),
+            Some(&unchanged)
+        ));
+        assert!(check_trigger_condition(
+            &state,
+            &filtered,
+            PlayerId(0),
+            Some(source),
+            Some(&unchanged)
+        ));
+
+        let reentered_victim = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Reentered victim".to_string(),
+            Zone::Battlefield,
+        );
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(reentered_victim),
+            target_controller: PlayerId(1),
+            target_incarnation: Some(state.objects[&reentered_victim].incarnation),
+            amount: 1,
+            is_combat: false,
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            source_subtypes: vec!["Spider".to_string()],
+            ..Default::default()
+        });
+        crate::game::zones::move_to_zone(&mut state, reentered_victim, Zone::Hand, &mut events);
+        crate::game::zones::move_to_zone(
+            &mut state,
+            reentered_victim,
+            Zone::Battlefield,
+            &mut events,
+        );
+        crate::game::zones::move_to_zone(
+            &mut state,
+            reentered_victim,
+            Zone::Graveyard,
+            &mut events,
+        );
+        let reentered = events.last().cloned().unwrap();
+        assert!(!check_trigger_condition(
+            &state,
+            &exact,
+            PlayerId(0),
+            Some(source),
+            Some(&reentered)
+        ));
+        assert!(!check_trigger_condition(
+            &state,
+            &filtered,
+            PlayerId(0),
+            Some(source),
+            Some(&reentered)
+        ));
+    }
+
     /// Builds the `EventTarget`-bound excess-damage intervening-`if` condition
     /// (Maarika, Brutal Gladiator class) and checks it against `DamageDealt`
     /// trigger events. Verifies the building block, not one card: the condition
@@ -25357,6 +25546,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -26066,6 +26256,7 @@ pub mod tests {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                valid_attack_targets_by_attacker: None,
                 attacker_constraints: Default::default(),
             };
 
@@ -26154,6 +26345,7 @@ pub mod tests {
                 player: PlayerId(0),
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                valid_attack_targets_by_attacker: None,
                 attacker_constraints: Default::default(),
             };
 
@@ -26441,6 +26633,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -26687,6 +26880,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -27008,6 +27202,7 @@ pub mod tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 

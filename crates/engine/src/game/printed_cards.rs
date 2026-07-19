@@ -3,7 +3,8 @@ use crate::database::CardDatabase;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ConjureSource, ContinuousModification, CopiableValues,
     CounterSourceRider, Effect, PtValue, QuantityExpr, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition, VoteSubject,
+    ReplacementMode, RestrictionExpiry, StaticDefinition, TargetFilter, TriggerDefinition,
+    VoteSubject,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -477,11 +478,12 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
 /// CR 707.2 / CR 707.2b: copiable values are the object's printed/defining
 /// characteristics, NOT resolved continuous effects installed by other
 /// permanents (CR 611.2b "for as long as you control ~" locks). A
-/// `ControllerControlsSource`-gated replacement is a runtime continuous effect
-/// durably stored in `base_replacement_definitions` purely so it survives a
-/// layer reset (evaluate_layers rebuilds live defs from base — layers.rs); it is
-/// NOT a printed characteristic. Exclude it from copiable values so that a copy
-/// of the locked host (becomes-a-copy or a copy-token) does not inherit the lock.
+/// `ControllerControlsSource`-gated replacement and a turn-bound, target-bound
+/// die-exile rider are runtime effects durably stored in
+/// `base_replacement_definitions` purely so they survive a layer reset
+/// (evaluate_layers rebuilds live defs from base — layers.rs); neither is a
+/// printed characteristic. Exclude them from copiable values so that a copy of
+/// the affected host does not inherit the lock or die-exile rider.
 ///
 /// Zero-alloc fast path: every printed card has no gated def, so the common case
 /// keeps sharing the source `Arc<Vec<_>>`. A filtered allocation is paid only
@@ -490,14 +492,14 @@ fn copiable_replacement_definitions(obj: &GameObject) -> Arc<Vec<ReplacementDefi
     if !obj
         .base_replacement_definitions
         .iter()
-        .any(is_runtime_control_gated_replacement)
+        .any(is_runtime_non_copiable_replacement)
     {
         return Arc::clone(&obj.base_replacement_definitions);
     }
     Arc::new(
         obj.base_replacement_definitions
             .iter()
-            .filter(|def| !is_runtime_control_gated_replacement(def))
+            .filter(|def| !is_runtime_non_copiable_replacement(def))
             .cloned()
             .collect(),
     )
@@ -513,6 +515,30 @@ pub(crate) fn is_runtime_control_gated_replacement(def: &ReplacementDefinition) 
         def.condition,
         Some(ReplacementCondition::ControllerControlsSource { .. })
     )
+}
+
+/// CR 614.1a + CR 514.2: True for a runtime replacement attached to a damaged
+/// target by an effect such as Torch the Tower or Obliterating Bolt. It is
+/// persisted in base only to survive layer resets; it is not a copiable value
+/// and must lapse when that object leaves the battlefield (CR 400.7).
+pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinition) -> bool {
+    def.event == ReplacementEvent::Moved
+        && matches!(def.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(def.expiry, Some(RestrictionExpiry::EndOfTurn))
+        && def.destination_zone == Some(Zone::Graveyard)
+        && def.execute.as_deref().is_some_and(|execute| {
+            matches!(
+                *execute.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        })
+}
+
+pub(crate) fn is_runtime_non_copiable_replacement(def: &ReplacementDefinition) -> bool {
+    is_runtime_control_gated_replacement(def) || is_runtime_target_die_exile_replacement(def)
 }
 
 /// CR 707.2 + CR 712.4b: Build the copiable values for a melded permanent

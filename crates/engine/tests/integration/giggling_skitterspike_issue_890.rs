@@ -35,6 +35,7 @@ fn issue_890_attack_trigger_deals_damage() {
             player: P0,
             valid_attacker_ids: vec![skitterspike],
             valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
     }
@@ -70,6 +71,7 @@ fn issue_890_block_trigger_deals_damage() {
             player: P1,
             valid_attacker_ids: vec![attacker],
             valid_attack_targets: vec![AttackTarget::Player(P0)],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
     }

@@ -23,10 +23,13 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
-use crate::types::game_state::{DamageRecord, GameState, TriggerSourceContext};
+use crate::types::game_state::{
+    DamageRecord, GameState, LinkedExileSnapshot, TriggerSourceContext,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// Scope information for quantity resolution.
 ///
@@ -354,6 +357,9 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             // CR 608.2c: the other revealer's card is a per-resolution referent,
             // resolved only at resolution time (never a static CDA read).
             | ObjectScope::OtherRevealedCard
+            // CR 607.2a: the source-linked exiled card is read from live exile
+            // links only at resolution time, never as a static CDA read.
+            | ObjectScope::OwnedLinkedExileCard
             | ObjectScope::Demonstrative
             | ObjectScope::AmassedArmy => true,
         }
@@ -386,6 +392,151 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
         QuantityExpr::Difference { left, right } => {
             quantity_expr_uses_resolution_only_object_scope(left)
                 || quantity_expr_uses_resolution_only_object_scope(right)
+        }
+    }
+}
+
+/// CR 607.2a + CR 608.2c: Return the source-linked cards explicitly bound to
+/// this resolved ability. A nonempty result is the current materialized
+/// candidate set and is authoritative over the source's persistent exile pile.
+fn materialized_linked_exile_candidates(
+    ability: &ResolvedAbility,
+    linked: &[LinkedExileSnapshot],
+) -> Vec<ObjectId> {
+    ability
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) if linked.iter().any(|link| link.exiled_id == *id) => Some(*id),
+            TargetRef::Object(_) | TargetRef::Player(_) => None,
+        })
+        .collect()
+}
+
+/// CR 701.57c: True when `scope` is a resolution-only object scope whose referent
+/// is genuinely absent — no snapshot, event-source, or target object is bound to
+/// it. Mirrors the referent-lookup priority in `resolve_object_mana_value` /
+/// `resolve_object_pt` so presence here is exactly "resolution would find an
+/// object" (rather than fall through to `.unwrap_or(0)`).
+fn resolution_only_scope_referent_present(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: &ResolvedAbility,
+) -> bool {
+    match scope {
+        // Not resolution-only — always bound to the ability's own permanent /
+        // recipient. Never reached via the classifier, answered `true` for safety.
+        ObjectScope::Source | ObjectScope::Recipient => true,
+        ObjectScope::Target => targets.iter().any(|t| matches!(t, TargetRef::Object(_))),
+        ObjectScope::EventSource => {
+            object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
+        }
+        ObjectScope::EventTarget => {
+            object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets).is_some()
+        }
+        // CR 608.2k + CR 400.7j: cost referent, then effect-context referent, then
+        // trigger-event source — the same fallback chain resolution reads.
+        ObjectScope::CostPaidObject => {
+            ability.cost_paid_object.is_some()
+                || ability.effect_context_object.is_some()
+                || object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
+        }
+        // CR 608.2c: earlier-instruction referent, then trigger-event source, then
+        // cost referent (the `Anaphoric`/`Demonstrative` fallback order).
+        ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+            ability.effect_context_object.is_some()
+                || object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).is_some()
+                || ability.cost_paid_object.is_some()
+        }
+        // CR 608.2c: the "other" revealed card exists only when a `last_revealed_ids`
+        // entry differs from this iteration's own revealed card.
+        ObjectScope::OtherRevealedCard => {
+            let own = ability.effect_context_object.as_ref().map(|s| s.object_id);
+            state.last_revealed_ids.iter().any(|id| Some(*id) != own)
+        }
+        // CR 607.2a + CR 608.2c: A materialized current-resolution candidate set
+        // is authoritative, including when none of its cards has the required
+        // owner. Persistent linked-exile history is only a fallback when no
+        // current candidate set was supplied at all.
+        ObjectScope::OwnedLinkedExileCard => {
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let linked =
+                crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+            let current_candidates = materialized_linked_exile_candidates(ability, &linked);
+            if current_candidates.is_empty() {
+                return linked.iter().any(|link| link.owner == controller);
+            }
+            current_candidates.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Exile && obj.owner == controller)
+            })
+        }
+        ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
+    }
+}
+
+/// CR 701.57c: True when `expr` reads any resolution-only object scope whose
+/// referent is genuinely absent. Resolution of such an operand silently falls to
+/// `.unwrap_or(0)`, conflating "no referent" with "referent whose value is 0", so
+/// a comparison over a missing referent is meaningless — the caller treats the
+/// whole comparison as false. (Hit the Mother Lode: when the final exiled card's
+/// mana value exceeds N, nothing is discovered — "the discovered card's mana
+/// value" has no object to read, so the follow-up token clause does nothing.)
+pub(crate) fn quantity_expr_missing_resolution_only_referent(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> bool {
+    fn leaf_scope_missing(
+        state: &GameState,
+        scope: ObjectScope,
+        ability: &ResolvedAbility,
+    ) -> bool {
+        let ctx = QuantityContext {
+            entering: None,
+            source: ability.source_id,
+            trigger_source: ability.trigger_source.clone(),
+            recipient: None,
+            scoped_player: ability.scoped_player,
+        };
+        !resolution_only_scope_referent_present(state, scope, ctx, &ability.targets, ability)
+    }
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::Power { scope }
+            | QuantityRef::Toughness { scope }
+            | QuantityRef::ObjectManaValue { scope }
+            | QuantityRef::ObjectColorCount { scope }
+            | QuantityRef::ObjectNameWordCount { scope }
+            | QuantityRef::ObjectTypelineComponentCount { scope }
+            | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+                leaf_scope_missing(state, *scope, ability)
+            }
+            _ => false,
+        },
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            quantity_expr_missing_resolution_only_referent(state, inner, ability)
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
+            .iter()
+            .any(|e| quantity_expr_missing_resolution_only_referent(state, e, ability)),
+        QuantityExpr::UpTo { max } => {
+            quantity_expr_missing_resolution_only_referent(state, max, ability)
+        }
+        QuantityExpr::Power { exponent, .. } => {
+            quantity_expr_missing_resolution_only_referent(state, exponent, ability)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_missing_resolution_only_referent(state, left, ability)
+                || quantity_expr_missing_resolution_only_referent(state, right, ability)
         }
     }
 }
@@ -466,6 +617,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectCountDistinct { .. }
         | QuantityRef::ObjectCountBySharedQuality { .. }
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::PlayerCounter { .. }
@@ -745,6 +897,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -941,6 +1094,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -2001,6 +2155,14 @@ fn resolve_ref(
             }
         }
         QuantityRef::PlayerCount { filter } => resolve_player_count(state, filter, controller, ctx),
+        // CR 120.1 + CR 603.2c + CR 608.2c: "for each opponent dealt damage"
+        // on a batched damage trigger counts DISTINCT damaged players carried by
+        // the resolving trigger event batch. This intentionally does not read
+        // `total_damage`; the scalar damage amount remains the job of
+        // `EventContextAmount`.
+        QuantityRef::EventContextPlayerCount { filter } => {
+            resolve_event_context_player_count(state, filter, controller, source_id)
+        }
         // CR 122.1: Counters on an object, scoped via ObjectScope (Π-5).
         // Replaces CountersOnSelf / CountersOnTarget / AnyCountersOnSelf /
         // AnyCountersOnTarget. `counter_type = None` sums every type.
@@ -3933,6 +4095,7 @@ fn object_for_scope<'a>(
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
         | ObjectScope::AmassedArmy => None,
     }
@@ -3997,6 +4160,7 @@ fn object_id_for_scope(
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
         | ObjectScope::AmassedArmy => None,
     }
@@ -4644,6 +4808,8 @@ where
         // toughness, so this is a fail-closed placeholder. Extend by mirroring the
         // `last_revealed_ids` by-exclusion read in `resolve_object_mana_value`.
         ObjectScope::OtherRevealedCard => 0,
+        // MV-only referent; no P/T semantics.
+        ObjectScope::OwnedLinkedExileCard => 0,
     }
 }
 
@@ -4841,6 +5007,37 @@ fn resolve_object_mana_value(
                     )
                 })
                 .unwrap_or(0)
+        }
+        // CR 607.2a + CR 108.3: mana value of the source-linked exiled card the
+        // ability's controller owns ("... than it" in "the card you own exiled
+        // this way and each other card exiled this way with lesser mana value
+        // than it").
+        ObjectScope::OwnedLinkedExileCard => {
+            let Some(ability) = ability else {
+                return 0;
+            };
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let linked =
+                crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+            // CR 607.2a + CR 608.2c: When a same-resolution linked-exile grant
+            // materializes candidate cards into `ability.targets`, that current
+            // set is authoritative. An owner miss resolves to no referent (0);
+            // it must not borrow an older owned card from the persistent pile.
+            let current_candidates = materialized_linked_exile_candidates(ability, &linked);
+            let current_mana_value = current_candidates.iter().find_map(|id| {
+                state.objects.get(id).and_then(|obj| {
+                    (obj.zone == Zone::Exile && obj.owner == controller)
+                        .then(|| u32_to_i32_saturating(obj.effective_mana_value()))
+                })
+            });
+            if current_candidates.is_empty() {
+                linked
+                    .iter()
+                    .find(|link| link.owner == controller)
+                    .map_or(0, |link| u32_to_i32_saturating(link.mana_value))
+            } else {
+                current_mana_value.unwrap_or(0)
+            }
         }
     }
 }
@@ -5519,6 +5716,39 @@ pub(crate) fn resolve_player_count(
     )
 }
 
+/// CR 603.2c + CR 608.2c: a resolving triggered ability that says "for each
+/// [player] dealt damage" counts distinct players from the triggering event
+/// context, not the whole turn ledger.
+fn resolve_event_context_player_count(
+    state: &GameState,
+    filter: &PlayerFilter,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> i32 {
+    let mut players = HashSet::new();
+    let mut record_player = |event: &crate::types::events::GameEvent| {
+        if let Some(player) = crate::game::targeting::extract_player_from_event(event, state) {
+            if crate::game::effects::matches_player_scope(
+                state, player, filter, controller, source_id,
+            ) {
+                players.insert(player);
+            }
+        }
+    };
+
+    if state.current_trigger_events.is_empty() {
+        if let Some(event) = &state.current_trigger_event {
+            record_player(event);
+        }
+    } else {
+        for event in &state.current_trigger_events {
+            record_player(event);
+        }
+    }
+
+    usize_to_i32_saturating(players.len())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -5532,7 +5762,7 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
-    use crate::types::events::PlayerActionKind;
+    use crate::types::events::{GameEvent, PlayerActionKind};
     use crate::types::game_state::{
         DamageRecord, ExileLink, ExileLinkKind, ManaSpentSourceSnapshot, ZoneChangeRecord,
     };
@@ -9104,6 +9334,46 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style "for each opponent
+    /// dealt damage" counts distinct damaged opponents in the resolving trigger
+    /// event batch, not combat-damage amount and not duplicate events for the
+    /// same player.
+    #[test]
+    fn event_context_player_count_counts_distinct_damaged_opponents_from_batch() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.current_trigger_events = vec![
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(ObjectId(11), 4)],
+                total_damage: 4,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(2),
+                source_amounts: vec![(ObjectId(12), 9)],
+                total_damage: 9,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(1),
+                source_amounts: vec![(ObjectId(13), 2)],
+                total_damage: 2,
+            },
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id: PlayerId(0),
+                source_amounts: vec![(ObjectId(14), 7)],
+                total_damage: 7,
+            },
+        ];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
     }
 
     /// CR 120.1 + CR 510.1: Resolving `PlayerCount { OpponentDealtDamage }`

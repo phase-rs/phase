@@ -1716,6 +1716,84 @@ fn cost_mod_no_mana_value_gate_unchanged() {
     );
 }
 
+/// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: a BARE-word spell-subject filter
+/// for a cost modifier resolves the full color-CATEGORY axis (colorless /
+/// monocolored / multicolored → `ColorCount`), "historic" (→ `Historic`), a named
+/// color (→ `HasColor`), and a supertype (→ `HasSupertype`) — routed through the
+/// single `parse_color_property` authority. Before the fix, the bare-word fallback
+/// hand-rolled only the five named colors, so "Colorless"/"Multicolored"/
+/// "Historic" spell subjects dropped the whole restriction (`spell_filter: None`)
+/// and the modifier (mis)applied to EVERY spell (Herald of Kozilek, Ugin, Urza's
+/// Filter, It That Heralds the End, Jhoira's Familiar).
+#[test]
+fn cost_mod_bare_color_category_and_historic_subject() {
+    fn props(line: &str) -> Vec<FilterProp> {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
+        let StaticMode::ModifyCost { spell_filter, .. } = def.mode else {
+            panic!("expected ModifyCost for {line}");
+        };
+        match spell_filter.unwrap_or_else(|| panic!("{line} dropped its spell filter")) {
+            TargetFilter::Typed(tf) => tf.properties,
+            other => panic!("expected Typed for {line}, got {other:?}"),
+        }
+    }
+
+    // Color-category axis (the fix): each maps to the same ColorCount the
+    // noun-bearing path already produced.
+    assert_eq!(
+        props("Colorless spells you cast cost {1} less to cast."),
+        vec![FilterProp::ColorCount {
+            comparator: Comparator::EQ,
+            count: 0,
+        }],
+    );
+    assert_eq!(
+        props("Multicolored spells cost {2} less to cast."),
+        vec![FilterProp::ColorCount {
+            comparator: Comparator::GE,
+            count: 2,
+        }],
+    );
+    assert_eq!(
+        props("Monocolored spells cost {1} more to cast."),
+        vec![FilterProp::ColorCount {
+            comparator: Comparator::EQ,
+            count: 1,
+        }],
+    );
+    assert_eq!(
+        props("Historic spells you cast cost {1} less to cast."),
+        vec![FilterProp::Historic],
+    );
+    // Composes with a trailing mana-value qualifier (It That Heralds the End).
+    assert_eq!(
+        props("Colorless spells you cast with mana value 7 or greater cost {1} less to cast."),
+        vec![
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+            FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 },
+            },
+        ],
+    );
+    // Regression: named-color and supertype paths are unchanged.
+    assert_eq!(
+        props("White spells your opponents cast cost {1} more to cast."),
+        vec![FilterProp::HasColor {
+            color: crate::types::mana::ManaColor::White,
+        }],
+    );
+    assert_eq!(
+        props("Legendary spells you cast cost {1} less to cast."),
+        vec![FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Legendary,
+        }],
+    );
+}
+
 /// CR 508.1c + CR 509.1b: Grant + dual-gated restrictions emit the pump grant
 /// plus both gated combat statics on the enchanted/equipped host.
 #[test]
@@ -22080,6 +22158,95 @@ fn static_activated_ability_cost_generic_reduce_vs_raise_discriminates() {
 }
 
 #[test]
+fn static_activated_ability_cost_opponent_activator_scope() {
+    // CR 602.2: "abilities your opponents activate" is activator-scoped on the
+    // OPPONENT axis — the tax keys off an opponent of the static's controller
+    // activating the ability (Tithe Taker), distinct from the "you activate"
+    // (controller) and bare "activated abilities" (unscoped) forms. (Kopala's
+    // target-restricted variant is a separate, not-yet-covered sibling.)
+    let raise = parse_static_line("Abilities your opponents activate cost {2} more to activate.")
+        .expect("opponent-activator raise must parse");
+    assert_eq!(
+        raise.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Raise,
+            keyword: "activated".to_string(),
+            amount: 2,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: Some(PlayerFilter::Opponent),
+        },
+    );
+
+    // CR 605.1a: the "unless they're mana abilities" suffix folds into the same
+    // opponent-scoped static as an `ActivationExemption::ManaAbilities` (Tithe
+    // Taker's exact ability clause).
+    let exempt = parse_static_line(
+        "Abilities your opponents activate cost {1} more to activate unless they're mana abilities.",
+    )
+    .expect("opponent-activator raise with exemption must parse");
+    assert_eq!(
+        exempt.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Raise,
+            keyword: "activated".to_string(),
+            amount: 1,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: ActivationExemption::ManaAbilities,
+            activator: Some(PlayerFilter::Opponent),
+        },
+    );
+
+    // Regression: the pre-existing controller-activator form (Zirda) is
+    // unchanged by the added opponent branch — same grammar, `you` → Controller.
+    let you = parse_static_line(
+        "Abilities you activate that aren't mana abilities cost {2} less to activate.",
+    )
+    .expect("controller-activator reduce must still parse");
+    let StaticMode::ReduceAbilityCost {
+        mode, activator, ..
+    } = &you.mode
+    else {
+        panic!("expected ReduceAbilityCost, got {:?}", you.mode);
+    };
+    assert_eq!(*mode, CostModifyMode::Reduce);
+    assert_eq!(*activator, Some(PlayerFilter::Controller));
+}
+
+/// CR 601.2f + CR 611.3: the composed cast/activate split (Tithe Taker) emits
+/// BOTH the spell-cast `ModifyCost` and the activated-ability `ReduceAbilityCost`
+/// statics from one line, each carrying the shared leading `DuringYourTurn`
+/// condition. Regression for the combinator-driven `parse_compound_cost_tax_clauses`
+/// split (no manual slicing): the single-return path keeps only the cast half.
+#[test]
+fn compound_cost_tax_line_splits_into_cast_and_ability_statics() {
+    let defs = parse_static_line_multi(
+        "During your turn, spells your opponents cast cost {1} more to cast and abilities your opponents activate cost {1} more to activate unless they're mana abilities.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "compound line must split into cast + ability statics, got {defs:?}",
+    );
+    let cast = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ModifyCost { .. }))
+        .expect("spell-cast half");
+    let ability = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ReduceAbilityCost { .. }))
+        .expect("activated-ability half");
+    assert_eq!(cast.condition, Some(StaticCondition::DuringYourTurn));
+    assert_eq!(
+        ability.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "the leading condition must propagate to the activate half",
+    );
+}
+
+#[test]
 fn static_possessive_equip_ability_cost_reduction_self_ref() {
     // Firion, Wild Rose Warrior's granted equip-cost reduction leaf:
     // "This Equipment's equip abilities cost {2} less to activate." Keyed on the
@@ -22685,14 +22852,20 @@ fn static_rain_of_riches_treasure_qualifier_declined_to_existing() {
 }
 
 #[test]
-fn first_qualified_spell_filter_bare_historic_supported() {
+fn nth_qualified_spell_filter_bare_historic_supported() {
     // CR 700.6: bare "historic spell" must lower to a Historic-property filter.
-    let result = super::grammar::parse_first_qualified_spell_filter(
+    let result = super::grammar::parse_nth_qualified_spell_filter(
         "the first historic spell you cast each turn",
     );
-    let super::grammar::FirstQualifiedSpell::Supported(filter, timing) = result else {
-        panic!("expected Supported, got a non-Supported FirstQualifiedSpell");
+    let super::grammar::NthQualifiedSpell::Supported {
+        filter,
+        timing,
+        ordinal,
+    } = result
+    else {
+        panic!("expected Supported, got a non-Supported NthQualifiedSpell");
     };
+    assert_eq!(ordinal, 1, "\"the first …\" is ordinal 1");
     assert_eq!(
         timing,
         super::oracle_trigger::NthEventTimingKind::Unrestricted
@@ -22704,29 +22877,75 @@ fn first_qualified_spell_filter_bare_historic_supported() {
 }
 
 #[test]
-fn first_qualified_spell_subject_residue_rejected() {
+fn nth_qualified_spell_filter_second_spell_gates_on_one_prior_cast() {
+    // CR 601.2f: "the second spell you cast each turn costs {N} less" must NOT
+    // collapse to a filterless, conditionless reducer (which would cheapen every
+    // spell). The ordinal threads to `SpellsCastThisTurn == ordinal - 1`, so the
+    // reduction applies only while exactly one qualifying spell has already been
+    // cast this turn (the spell now being cast is the second).
+    let result =
+        super::grammar::parse_nth_qualified_spell_filter("the second spell you cast each turn");
+    let super::grammar::NthQualifiedSpell::Supported {
+        filter,
+        timing,
+        ordinal,
+    } = result
+    else {
+        panic!("expected Supported, got a non-Supported NthQualifiedSpell");
+    };
+    assert_eq!(ordinal, 2, "\"the second …\" is ordinal 2");
+    assert_eq!(
+        timing,
+        super::oracle_trigger::NthEventTimingKind::Unrestricted
+    );
+
+    let condition = super::grammar::nth_qualified_spell_condition(&filter, &timing, ordinal);
+    let StaticCondition::QuantityComparison {
+        lhs,
+        comparator,
+        rhs,
+    } = condition
+    else {
+        panic!("expected a bare QuantityComparison for the unrestricted-timing form");
+    };
+    assert_eq!(comparator, Comparator::EQ);
+    assert!(matches!(
+        lhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                ..
+            },
+        }
+    ));
+    // The second spell ⇒ one qualifying spell already cast this turn.
+    assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+}
+
+#[test]
+fn nth_qualified_spell_subject_residue_rejected() {
     // CR 601.2f: a subject with non-empty post-timing residue is NOT fully
     // consumed; a clean "...each turn" subject is.
     assert!(
-        !super::grammar::first_qualified_spell_subject_fully_consumed(
+        !super::grammar::nth_qualified_spell_subject_fully_consumed(
             "the first spell you cast each turn that mana from a treasure was spent to cast"
         ),
         "Treasure residue must report not-fully-consumed"
     );
     assert!(
-        !super::grammar::first_qualified_spell_subject_fully_consumed(
+        !super::grammar::nth_qualified_spell_subject_fully_consumed(
             "the first spell you cast during each of your turns with mana value 2 or greater"
         ),
         "post-timing MV residue must report not-fully-consumed"
     );
     assert!(
-        super::grammar::first_qualified_spell_subject_fully_consumed(
+        super::grammar::nth_qualified_spell_subject_fully_consumed(
             "the first spell you cast each turn"
         ),
         "clean subject must report fully-consumed"
     );
     assert!(
-        super::grammar::first_qualified_spell_subject_fully_consumed(
+        super::grammar::nth_qualified_spell_subject_fully_consumed(
             "the first spell you cast from exile each turn"
         ),
         "clean from-exile subject must report fully-consumed"
@@ -24031,6 +24250,132 @@ fn static_cant_play_lands_players() {
     );
 }
 
+// --- CR 602.5 + CR 606.2: The Immortal Sun — subject-first loyalty-activation
+// prohibition ("Players can't activate planeswalkers' loyalty abilities") ---
+
+#[test]
+fn immortal_sun_line1_parses_to_loyalty_kind_cant_be_activated() {
+    // CR 602.5 + CR 606.2: subject "Players" → AllPlayers; possessive type
+    // "planeswalkers'" → exactly Typed(Planeswalker) on the source axis;
+    // "loyalty abilities" → kind = Some(Loyalty). Revert-failing: drop the parser
+    // and the line falls to Effect::Unimplemented (no static); emit kind = None
+    // and it wrongly blocks a planeswalker's non-loyalty abilities too.
+    let def = parse_static_line("Players can't activate planeswalkers' loyalty abilities.")
+        .expect("The Immortal Sun line 1 must parse to a CantBeActivated static");
+    match def.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            exemption,
+            kind,
+        } => {
+            assert_eq!(
+                who,
+                ProhibitionScope::AllPlayers,
+                "\"Players\" → AllPlayers"
+            );
+            assert_eq!(
+                source_filter,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                "possessive \"planeswalkers'\" → exactly Typed(Planeswalker)"
+            );
+            assert_eq!(
+                exemption,
+                ActivationExemption::None,
+                "no mana-ability carve-out on this class"
+            );
+            assert_eq!(
+                kind,
+                Some(ActivatedAbilityKind::Loyalty),
+                "\"loyalty abilities\" narrows the prohibition to the loyalty kind"
+            );
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+}
+
+#[test]
+fn immortal_sun_line1_covers_the_subject_and_type_class_generically() {
+    // Build-for-the-class: the same combinator handles other subjects/types via
+    // the shared subject and type-phrase helpers, not a verbatim string match.
+    // "you" → Controller scope; possessive type stays generic.
+    let def = parse_static_line("You can't activate planeswalkers' loyalty abilities.")
+        .expect("subject axis must compose through strip_casting_prohibition_subject");
+    match def.mode {
+        StaticMode::CantBeActivated {
+            who,
+            source_filter,
+            kind,
+            ..
+        } => {
+            assert_eq!(who, ProhibitionScope::Controller, "\"You\" → Controller");
+            assert_eq!(
+                source_filter,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker))
+            );
+            assert_eq!(kind, Some(ActivatedAbilityKind::Loyalty));
+        }
+        other => panic!("expected CantBeActivated, got {other:?}"),
+    }
+}
+
+#[test]
+fn loyalty_activation_prohibition_accepts_singular_possessive_type() {
+    // The shared type parser accepts a singular type noun. The possessive suffix
+    // must therefore accept both singular spellings as well, otherwise an
+    // otherwise-valid class member silently falls through to Unimplemented.
+    for possessive in ["planeswalker's", "planeswalker\u{2019}s"] {
+        let text = format!("Players can't activate {possessive} loyalty abilities.");
+        let def = parse_static_line(&text)
+            .unwrap_or_else(|| panic!("singular possessive must parse: {text}"));
+        match def.mode {
+            StaticMode::CantBeActivated {
+                source_filter,
+                kind,
+                ..
+            } => {
+                assert_eq!(
+                    source_filter,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                    "singular possessive must retain the planeswalker filter: {text}"
+                );
+                assert_eq!(
+                    kind,
+                    Some(ActivatedAbilityKind::Loyalty),
+                    "singular possessive must retain the loyalty kind: {text}"
+                );
+            }
+            other => panic!("expected CantBeActivated for {text:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn regression_cant_be_activated_family_keeps_kind_none() {
+    // CR 606.2: The kind axis is opt-in — pre-existing activation prohibitions
+    // (Karn/Clarion source-scoped, Pithing Needle chosen-name, Damping Matrix
+    // mana exemption, self-reference) must still emit kind = None so they keep
+    // blocking ANY activated ability. Revert-failing: if the new combinator over-
+    // matched or defaulted kind to Some(..), these would stop blocking non-loyalty
+    // abilities.
+    let cases = [
+        "Activated abilities of artifacts your opponents control can't be activated.",
+        "Activated abilities of sources with the chosen name can't be activated unless they're mana abilities.",
+        "Activated abilities of artifacts and creatures can't be activated unless they're mana abilities.",
+        "Its activated abilities can't be activated.",
+    ];
+    for text in cases {
+        let def = parse_static_line(text).unwrap_or_else(|| panic!("must parse: {text}"));
+        match def.mode {
+            StaticMode::CantBeActivated { kind, .. } => assert_eq!(
+                kind, None,
+                "existing activation-prohibition class must keep kind = None: {text}"
+            ),
+            other => panic!("expected CantBeActivated for {text:?}, got {other:?}"),
+        }
+    }
+}
+
 // --- CR 602.5 + CR 603.2a: Global filter-scoped CantBeActivated (Clarion/Karn class) ---
 
 #[test]
@@ -24043,6 +24388,7 @@ fn cant_be_activated_self_ref_preserves_legacy_semantics() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, TargetFilter::SelfRef);
@@ -24064,6 +24410,7 @@ fn cant_be_activated_self_ref_mana_exemption_suffix() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, TargetFilter::SelfRef);
@@ -24092,6 +24439,7 @@ fn cant_be_activated_self_ref_typographic_apostrophe_keeps_mana_exemption() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, TargetFilter::SelfRef);
@@ -24129,6 +24477,7 @@ fn cant_be_activated_compound_aura_mana_exemption_suffix() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(*who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, &expected_affected);
@@ -24200,6 +24549,7 @@ fn cant_be_activated_compound_aura_with_cant_crew_and_activation_clause() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(*who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, &expected_affected);
@@ -24235,6 +24585,7 @@ fn cant_be_activated_compound_aura_with_crew_only_activation_clause() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(*who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, &expected_affected);
@@ -24276,6 +24627,7 @@ fn cant_be_activated_compound_equipment_with_transform_clause() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(*who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, &expected_affected);
@@ -24305,6 +24657,7 @@ fn cant_be_activated_clarion_multi_type_filter() {
             who,
             source_filter: TargetFilter::Or { filters },
             exemption,
+            ..
         } => {
             assert_eq!(who, ProhibitionScope::AllPlayers);
             assert_eq!(exemption, ActivationExemption::None);
@@ -24345,6 +24698,7 @@ fn cant_be_activated_karn_single_type_filter() {
             who,
             source_filter: TargetFilter::Typed(tf),
             exemption,
+            ..
         } => {
             assert_eq!(who, ProhibitionScope::AllPlayers);
             assert_eq!(exemption, ActivationExemption::None);
@@ -24370,6 +24724,7 @@ fn cant_be_activated_pithing_needle_chosen_name_with_mana_exemption() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, TargetFilter::HasChosenName);
@@ -24398,6 +24753,7 @@ fn cant_be_activated_chosen_name_typographic_apostrophe_keeps_mana_exemption() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, TargetFilter::HasChosenName);
@@ -24448,6 +24804,7 @@ fn cant_be_activated_phyrexian_revoker_chosen_name_no_exemption_suffix() {
             who,
             source_filter,
             exemption,
+            ..
         } => {
             assert_eq!(who, ProhibitionScope::AllPlayers);
             assert_eq!(source_filter, TargetFilter::HasChosenName);
@@ -30137,6 +30494,105 @@ fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
     assert!(
         !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
         "Rayami must not gain vigilance — no exiled card has vigilance"
+    );
+}
+
+/// Shared assertions for a source-linked exiled-object per-keyword grant: one
+/// Continuous static per listed keyword, each granting exactly `AddKeyword(K)` to
+/// `expected_subject`, gated on `IsPresent { Typed { ExiledBySource + WithKeyword(K) } }`.
+/// Discriminator vs `main`: the whole list collapses to ONE static under the
+/// first keyword's condition (or an `Unrecognized` gate), so the count and the
+/// per-keyword `WithKeyword` binding both fail there.
+#[cfg(test)]
+fn assert_source_exiled_per_keyword_grants(
+    line: &str,
+    expected_len: usize,
+    expected_subject: &TargetFilter,
+) -> Vec<Keyword> {
+    let statics = super::shared::parse_static_line_multi(line);
+    assert_eq!(
+        statics.len(),
+        expected_len,
+        "expected one conditional grant per listed keyword, got {statics:?}"
+    );
+    for s in &statics {
+        let Some(ContinuousModification::AddKeyword { keyword }) = s.modifications.first() else {
+            panic!(
+                "each static grants exactly one keyword, got {:?}",
+                s.modifications
+            );
+        };
+        assert_eq!(
+            s.affected.as_ref(),
+            Some(expected_subject),
+            "the grant lands on the stated subject"
+        );
+        let Some(StaticCondition::IsPresent {
+            filter: Some(TargetFilter::And { filters }),
+        }) = &s.condition
+        else {
+            panic!(
+                "expected an independently-evaluated IsPresent(And) condition, got {:?}",
+                s.condition
+            );
+        };
+        assert!(
+            filters.contains(&TargetFilter::ExiledBySource),
+            "presence check is scoped to the source-linked exile pool, got {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(tf)
+                    if tf.properties.contains(&FilterProp::WithKeyword { value: keyword.clone() })
+                        && tf.properties.contains(&FilterProp::InZone { zone: crate::types::zones::Zone::Exile })
+            )),
+            "each keyword K is granted only while a card exiled with the source that HAS K is present, got {filters:?}"
+        );
+    }
+    statics
+        .iter()
+        .filter_map(|s| match s.modifications.first() {
+            Some(ContinuousModification::AddKeyword { keyword }) => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Eater of Virtue — PREFIX order, `equipped creature` subject. "As long as a
+/// card exiled with ~ has flying, equipped creature has flying. The same is true
+/// for first strike, …, and vigilance." (13 keywords, identical set to Rayami).
+/// The grant lands on the EQUIPPED creature (`EquippedBy`), not the Equipment.
+#[test]
+fn eater_of_virtue_source_exiled_grant_splits_per_keyword_to_equipped_creature() {
+    let line = "As long as a card exiled with ~ has flying, equipped creature has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.";
+    let subject =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
+    let granted = assert_source_exiled_per_keyword_grants(line, 13, &subject);
+    assert!(
+        granted.contains(&Keyword::Flying),
+        "grants flying: {granted:?}"
+    );
+    assert!(
+        granted.contains(&Keyword::Vigilance),
+        "grants vigilance: {granted:?}"
+    );
+}
+
+/// Urborg Scavengers — POSTFIX order, `~` subject. "~ has flying as long as a
+/// card exiled with it has flying. The same is true for first strike, …, and
+/// vigilance." (12 keywords). Exercises the trailing-`as long as` clause order.
+#[test]
+fn urborg_scavengers_postfix_source_exiled_grant_splits_per_keyword() {
+    let line = "~ has flying as long as a card exiled with it has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.";
+    let granted = assert_source_exiled_per_keyword_grants(line, 12, &TargetFilter::SelfRef);
+    assert!(
+        granted.contains(&Keyword::Flying),
+        "grants flying: {granted:?}"
+    );
+    assert!(
+        granted.contains(&Keyword::Deathtouch),
+        "grants deathtouch: {granted:?}"
     );
 }
 
