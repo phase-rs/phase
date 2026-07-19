@@ -533,9 +533,10 @@ impl ResolutionStateWire {
                 frames
                     .validate(&legacy.waiting_for)
                     .map_err(|error| error.to_string())?;
-                Ok(Self {
-                    state: project_frames_into_legacy_state(&legacy, &frames)?,
-                })
+                let state = project_frames_into_legacy_state(&legacy, &frames)?;
+                #[cfg(debug_assertions)]
+                debug_assert_runtime_resolution_invariants(&state);
+                Ok(Self { state })
             }
             RESOLUTION_STATE_WIRE_VERSION => {
                 if legacy_resolution_wire_field(object).is_some() {
@@ -562,6 +563,8 @@ impl ResolutionStateWire {
                     return Err("v2 resolution frames cannot be represented by the legacy runtime slots"
                         .to_string());
                 }
+                #[cfg(debug_assertions)]
+                debug_assert_runtime_resolution_invariants(&projected);
                 Ok(Self { state: projected })
             }
             other => Err(format!(
@@ -588,6 +591,40 @@ impl<'de> Deserialize<'de> for ResolutionStateWire {
         D: Deserializer<'de>,
     {
         Self::from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Checks the Phase-2 boundary invariants after a restore and after every
+/// public action. `ResolutionStack` is still a wire-only view in this phase,
+/// so this additionally proves that its v2 representation never carries one
+/// of the legacy runtime families alongside `resolution_frames`.
+#[cfg(debug_assertions)]
+pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
+    let frames = canonicalize_legacy_resolution_state(state)
+        .unwrap_or_else(|error| panic!("resolution state must canonicalize: {error}"));
+    frames
+        .validate(&state.waiting_for)
+        .unwrap_or_else(|error| panic!("canonical resolution frames must validate: {error}"));
+    assert!(
+        state.pending_taps_for_mana_overrides.is_empty(),
+        "inline-mana override entries must not survive a public boundary"
+    );
+    assert!(
+        state.current_triggered_mana_override.is_none(),
+        "the active inline-mana override must not survive a public boundary"
+    );
+
+    let v2 = ResolutionStateWire::from_game_state(state.clone())
+        .to_value()
+        .expect("canonical runtime state must have a v2 wire representation");
+    let object = v2
+        .as_object()
+        .expect("resolution wire serialization is always an object");
+    for field in legacy_resolution_wire_fields() {
+        assert!(
+            !object.contains_key(*field),
+            "v2 resolution frames must not co-reside with legacy runtime field {field}"
+        );
     }
 }
 

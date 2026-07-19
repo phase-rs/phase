@@ -41,6 +41,8 @@ use super::proposed_event::{
     AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec,
 };
 use super::replacements::ReplacementEvent;
+#[cfg(debug_assertions)]
+use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::ResolutionStateWire;
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -6846,9 +6848,12 @@ fn decode_persisted_resolution_state(mut value: serde_json::Value) -> Result<Gam
     object
         .entry("resolution_state_version".to_string())
         .or_insert_with(|| serde_json::Value::from(1));
-    serde_json::from_value::<ResolutionStateWire>(value)
+    let state = serde_json::from_value::<ResolutionStateWire>(value)
         .map(ResolutionStateWire::into_game_state)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    #[cfg(debug_assertions)]
+    debug_assert_runtime_resolution_invariants(&state);
+    Ok(state)
 }
 
 impl Serialize for TrustedGameStateEnvelope {

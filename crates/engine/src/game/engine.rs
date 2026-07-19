@@ -19,6 +19,8 @@ use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::resolution::canonicalize_legacy_resolution_state;
+#[cfg(debug_assertions)]
+use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -273,6 +275,8 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         finalize_display_state(state);
     }
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
+    #[cfg(debug_assertions)]
+    debug_assert_runtime_resolution_invariants(state);
     Ok(result)
 }
 
