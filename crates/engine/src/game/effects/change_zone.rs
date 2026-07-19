@@ -897,8 +897,9 @@ pub fn resolve(
     // Tracked the same way the mass `resolve_all` path counts, so the chained
     // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
     let mut moved_count: i32 = 0;
-    let logical_zone_change_group =
+    let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
+    let logical_group_event_start = events.len();
     for (i, obj_id) in targeted_objects.iter().enumerate() {
         if dest_zone == Zone::Exile {
             let acting_player = state
@@ -956,9 +957,15 @@ pub fn resolve(
                 if moved_to_dest(state) {
                     moved_count += 1;
                 }
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[logical_group_event_start..],
+                )
+                .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
-                        logical_zone_change_group: logical_zone_change_group.clone(),
+                        logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
                             boundary.append_delivery_events(&events[delivery_start..]);
                             boundary.mark_counted();
@@ -1002,6 +1009,12 @@ pub fn resolve(
                 // the player resolves this replacement. Without the stash, every
                 // target after the first NeedsChoice would be silently dropped
                 // (issue #535).
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[logical_group_event_start..],
+                )
+                .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
@@ -1590,8 +1603,9 @@ pub fn resolve_all(
 
     let mut moved_count: i32 = 0;
     let mut departed: Vec<ObjectId> = Vec::new();
-    let logical_zone_change_group =
+    let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
+    let logical_group_event_start = events.len();
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
         // CR 400.3: Each object's actual current zone is the source zone for the
@@ -1670,6 +1684,12 @@ pub fn resolve_all(
                 // resume carrier so resumed members of a face-down mass entry (the
                 // Cyber-Controller class) still enter face down — the drain's mover
                 // (`process_one_zone_move`) now reads it from the ctx.
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[logical_group_event_start..],
+                )
+                .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
@@ -1719,6 +1739,12 @@ pub fn resolve_all(
                 // is the pending WaitingFor) and the Devour snapshot is NOT
                 // cleared — the mass-entry event is no longer terminal here and
                 // the resumed members may still consume it.
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[logical_group_event_start..],
+                )
+                .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
@@ -8319,10 +8345,20 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        for _ in 0..3 {
+        for expected_retained_occurrences in 0..3 {
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected ReplacementChoice at each iteration"
+            );
+            let group = &state
+                .pending_change_zone_iteration
+                .as_ref()
+                .expect("each pending replacement choice retains the logical owner")
+                .logical_zone_change_group;
+            assert_eq!(
+                group.all_origin_occurrences.len(),
+                expected_retained_occurrences,
+                "each re-pause must retain exactly the completed delivery segments"
             );
             let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
                 .expect("decline shock");

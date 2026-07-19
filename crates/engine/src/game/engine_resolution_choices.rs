@@ -4172,11 +4172,12 @@ pub(super) fn handle_resolution_choice(
                         )
                     })?;
                     let chosen_ids: Vec<_> = chosen.to_vec();
-                    let logical_zone_change_group =
+                    let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
                             &chosen_ids,
                         );
+                    let logical_group_event_start = events.len();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
                         let origin = state
                             .objects
@@ -4240,10 +4241,15 @@ pub(super) fn handle_resolution_choice(
                                 }
                             }
                             effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                                    state,
+                                    &mut logical_zone_change_group,
+                                    &events[logical_group_event_start..],
+                                )
+                                .expect("paused EffectZoneChoice retains its explicit delivery prefix");
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
-                                        logical_zone_change_group: logical_zone_change_group
-                                            .clone(),
+                                        logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
                                                 .append_delivery_events(&events[delivery_start..]);
@@ -4290,6 +4296,12 @@ pub(super) fn handle_resolution_choice(
                                 // `effects/mod.rs::drain_pending_change_zone_iteration`
                                 // resumes the loop after this replacement
                                 // choice resolves (issue #535).
+                                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                                    state,
+                                    &mut logical_zone_change_group,
+                                    &events[logical_group_event_start..],
+                                )
+                                .expect("paused EffectZoneChoice retains its explicit delivery prefix");
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
@@ -4597,11 +4609,12 @@ pub(super) fn handle_resolution_choice(
                     };
                     let events_before_effect = events.len();
                     let chosen_ids: Vec<_> = chosen.to_vec();
-                    let logical_zone_change_group =
+                    let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
                             &chosen_ids,
                         );
+                    let logical_group_event_start = events.len();
                     for (i, card_id) in chosen_ids.iter().enumerate() {
                         let anticipated_pause =
                             effects::change_zone::anticipated_zone_change_delivery(
@@ -4623,10 +4636,15 @@ pub(super) fn handle_resolution_choice(
                                 }
                             }
                             effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                                    state,
+                                    &mut logical_zone_change_group,
+                                    &events[logical_group_event_start..],
+                                )
+                                .expect("paused cost-payment zone move retains its explicit delivery prefix");
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
-                                        logical_zone_change_group: logical_zone_change_group
-                                            .clone(),
+                                        logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
                                                 .append_delivery_events(&events[delivery_start..]);
@@ -4666,6 +4684,12 @@ pub(super) fn handle_resolution_choice(
                                 ));
                             }
                             effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
+                                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                                    state,
+                                    &mut logical_zone_change_group,
+                                    &events[logical_group_event_start..],
+                                )
+                                .expect("paused cost-payment zone move retains its explicit delivery prefix");
                                 state.pending_change_zone_iteration =
                                     Some(crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,

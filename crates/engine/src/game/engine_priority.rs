@@ -59,6 +59,22 @@ pub(crate) fn run_post_action_pipeline_from(
     // and fired a second time by the replay, causing double-fire for ETB
     // observers like Soul Warden (issue #830).
     if !skip_trigger_scan {
+        // A paused logical zone-change owner has already Segment-collected its
+        // retained ZoneChanged occurrences into deferred trigger contexts. Do
+        // not rediscover those records through the generic post-action scan;
+        // its batched definitions remain reserved for final settlement.
+        let retained_logical_zone_events: Vec<_> = state
+            .pending_change_zone_iteration
+            .as_ref()
+            .map(|pending| {
+                pending
+                    .logical_zone_change_group
+                    .all_origin_occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.event)
+                    .collect()
+            })
+            .unwrap_or_default();
         let unconsumed_events = triggers::filter_consumed_trigger_events(
             &events[event_start..],
             &consumed_trigger_events,
@@ -68,6 +84,7 @@ pub(crate) fn run_post_action_pipeline_from(
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
                     && !state.deferred_entry_events.contains(event)
+                    && !retained_logical_zone_events.contains(event)
             })
             .cloned()
             .collect();

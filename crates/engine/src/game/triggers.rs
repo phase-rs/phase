@@ -2021,7 +2021,6 @@ fn collect_pending_triggers(
 /// Prospective battlefield members are held for settlement as observers; only
 /// the moved event subject is collected immediately from its exact record.
 /// Batched definitions remain latched on the owner for the later single pass.
-#[allow(dead_code)] // Step 14 calls this from every initial pause and re-pause.
 pub(crate) fn collect_logical_zone_trigger_segment(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
@@ -2032,6 +2031,28 @@ pub(crate) fn collect_logical_zone_trigger_segment(
         events,
         LogicalZoneTriggerCollection::Segment(group),
     )
+}
+
+/// Retain one explicit zone-change delivery segment on its logical owner and
+/// park its non-batched trigger contexts. The owner deliberately consumes only
+/// `ZoneChanged` events: other events emitted while delivering a move (such as
+/// counter placement) remain the generic post-action collector's authority.
+/// A paused carrier calls this exactly once for each completed segment; that
+/// generic collector must not rediscover the retained zone-change records.
+pub(crate) fn append_and_collect_logical_zone_trigger_segment(
+    state: &mut GameState,
+    group: &mut LogicalZoneChangeGroup,
+    events: &[GameEvent],
+) -> Result<(), String> {
+    let zone_change_events: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .cloned()
+        .collect();
+    group.append_delivery_events(&zone_change_events)?;
+    let pending = collect_logical_zone_trigger_segment(state, group, &zone_change_events);
+    state.deferred_triggers.extend(pending);
+    Ok(())
 }
 
 /// Collect the one final observer pass owned by a completed logical zone-change
