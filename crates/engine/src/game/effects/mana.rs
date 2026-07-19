@@ -41,10 +41,86 @@ fn ability_scoped_to_slot(
         filter,
         ability,
     );
-    let kept = legal.into_iter().next()?;
+    let _kept = legal.into_iter().next()?;
     let mut scoped = ability.clone();
-    scoped.targets = vec![kept];
+    scoped.targets = retain_only_player_at(ability, Some(index));
     Some(scoped)
+}
+
+/// CR 601.2c: Narrow `ability.targets` to ONE player target — the entry at
+/// `keep`, or none at all when `keep` is `None` — while leaving every NON-player
+/// target in place at its original position.
+///
+/// Scoping must be confined to the axis the shared quantity resolvers actually
+/// read. `QuantityRef::TargetZoneCardCount` and `LifeTotal { player: Target }`
+/// scan for the FIRST `TargetRef::Player`, so leaving two players visible is
+/// what let a count read the recipient. Object-scoped production
+/// (`ManaProduction::AnyCombinationOfObjectColors { scope: Target }` via
+/// `object_colors_for_scope`) reads an OBJECT target from the same vec and
+/// requires nothing about the player roles — clearing the whole vec would make
+/// that half of the production silently produce no colors, which CR 608.2b does
+/// not license: only the part that "requires information about an illegal
+/// target" fails.
+fn retain_only_player_at(ability: &ResolvedAbility, keep: Option<usize>) -> Vec<TargetRef> {
+    ability
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| !matches!(t, TargetRef::Player(_)) || Some(*i) == keep)
+        .map(|(_, t)| t.clone())
+        .collect()
+}
+
+/// CR 601.2c + CR 608.2b: The ability view the production COUNT resolves
+/// against. FOUR distinct cases, which must not be collapsed:
+///
+/// 1. No count-source role declared (no role at all, or `Recipient`-only —
+///    Jetfire, and every single-role mana). The count reads nothing
+///    target-derived, so the unscoped ability is correct and this preserves
+///    today's behavior exactly.
+/// 2. The count source is a CONTEXT REF (`ScopedPlayer`, `TriggeringPlayer`,
+///    …). It surfaces no target slot, so there is no chosen target to be
+///    illegal — the player comes from context, exactly as the recipient path
+///    does. Resolving it through the CR 608.2b branch instead would silently
+///    yield 0 under a rule that does not apply, because nothing here is an
+///    illegal target.
+/// 3. A count source is declared, surfaces a slot, and its chosen target is
+///    still legal. Narrow to that ONE player, so shared "first player target"
+///    quantity resolution (`QuantityRef::TargetZoneCardCount`,
+///    `LifeTotal { player: Target }`) cannot read the recipient instead.
+/// 4. A count source is declared but its chosen target is no longer legal.
+///    CR 608.2b: the effect "fails to determine any such information" about an
+///    illegal target — so expose NO player, resolving the count to 0. Falling
+///    back to the unscoped ability here would be a BUG: it still holds the
+///    (legal) recipient, so the count would read the RECIPIENT's hand instead
+///    of failing.
+///
+/// In cases 3 and 4 only the PLAYER axis is narrowed; non-player targets stay
+/// put (see `retain_only_player_at`).
+fn count_scoped_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    role: Option<&ManaTargetRole>,
+) -> ResolvedAbility {
+    // Case 1: nothing target-derived to scope.
+    let Some(role) = role.filter(|r| r.count_source().is_some()) else {
+        return ability.clone();
+    };
+    // Case 2: context-ref count source — read the player from context, mirroring
+    // `mana_effect_recipient`, and expose it as the sole player target.
+    if let Some(filter) = role.count_source().filter(|filter| filter.is_context_ref()) {
+        let from_context = super::resolve_player_for_context_ref(state, ability, filter);
+        let mut scoped = ability.clone();
+        scoped.targets = retain_only_player_at(ability, None);
+        scoped.targets.push(TargetRef::Player(from_context));
+        return scoped;
+    }
+    // Case 3, else case 4.
+    ability_scoped_to_slot(state, ability, role, ManaTargetSlot::CountSource).unwrap_or_else(|| {
+        let mut scoped = ability.clone();
+        scoped.targets = retain_only_player_at(ability, None);
+        scoped
+    })
 }
 
 /// CR 106.4 + CR 608.2b: Which player's mana pool receives the mana.
@@ -109,14 +185,8 @@ pub fn resolve(
     };
     // CR 601.2c + CR 608.2b: resolve the production count against a view of the
     // ability holding ONLY the count source's own chosen target, so shared
-    // "first player target" quantity resolution cannot read the recipient. The
-    // fallback preserves today's behavior for every mana effect with no count
-    // source (and for an illegal count-source target, whose unscoped view then
-    // yields no usable player and resolves to 0 — CR 608.2b).
-    let count_ability = mana_role
-        .as_ref()
-        .and_then(|r| ability_scoped_to_slot(state, ability, r, ManaTargetSlot::CountSource))
-        .unwrap_or_else(|| ability.clone());
+    // "first player target" quantity resolution cannot read the recipient.
+    let count_ability = count_scoped_ability(state, ability, mana_role.as_ref());
     let count_ability = &count_ability;
     let is_triggered_mana_inline = crate::game::mana_abilities::is_triggered_mana_ability(
         ability,
@@ -275,7 +345,12 @@ pub fn handle_choose_mana_effect(
         ));
     };
 
-    let mana_types = chosen_mana_types_for_prompt(state, ability, produced, prompt, chosen)?;
+    // CR 601.2c + CR 608.2b: the prompt-completion path derives the COUNT too
+    // (`SingleColor` multiplies the chosen color by it), so it must read the
+    // count source's own slot for exactly the same reason `resolve` does —
+    // otherwise a `Both` role with a color choice counts the RECIPIENT.
+    let count_ability = count_scoped_ability(state, ability, target.as_ref());
+    let mana_types = chosen_mana_types_for_prompt(state, &count_ability, produced, prompt, chosen)?;
     let source_could_produce_two_or_more_colors =
         mana_sources::mana_production_could_produce_two_or_more_colors(
             state,

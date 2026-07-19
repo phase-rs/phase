@@ -26,11 +26,13 @@
 //! Carpet of Flowers, and at runtime by the in-crate `effects::mana` tests.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::EffectKind;
 use engine::types::ability::{
     Effect, ManaProduction, ManaTargetRole, QuantityExpr, QuantityRef, TargetFilter, TargetRef,
     ZoneRef,
 };
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
@@ -281,4 +283,162 @@ fn count_source_only_deposits_into_the_controller_and_surfaces_one_slot() {
         "the count source supplies the amount only — it receives no mana"
     );
     assert_eq!(total_pool(&runner, P1), 0, "the bystander receives no mana");
+}
+
+/// CR 608.2b regression: a LEGAL recipient with an ILLEGAL count source must
+/// fail to determine the count — it must NOT silently fall back to reading the
+/// recipient's hand.
+///
+/// "The spell or ability … won't do anything to that target … it will fail to
+/// determine any such information about an illegal target." The recipient here
+/// stays legal, so the effect still resolves and still deposits into the
+/// recipient's pool (CR 608.2b affects only the parts naming the illegal
+/// target) — but the AMOUNT must come out 0, not the recipient's own hand size.
+///
+/// Discrimination: the two hand sizes differ (recipient 2, count source 5).
+/// Before the fix, an unresolvable count-source slot fell back to the UNSCOPED
+/// ability, which still holds the legal recipient at index 0; the shared
+/// "first player target" quantity resolution then read the RECIPIENT's hand and
+/// produced exactly RECIPIENT_HAND (2) mana. So the assert_ne! below is the
+/// revert-failing assertion, and the assert_eq! to 0 pins the CR-correct answer.
+#[test]
+fn illegal_count_source_fails_to_determine_instead_of_counting_the_recipient() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let recipient_hand = hand_names("Recipient Card", RECIPIENT_HAND);
+    let count_hand = hand_names("Count Card", COUNT_SOURCE_HAND);
+    scenario.with_cards_in_hand(
+        P1,
+        &recipient_hand
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    scenario.with_cards_in_hand(
+        P2,
+        &count_hand.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+
+    let spell = scenario
+        .add_spell_to_hand(P0, "Role Split Ritual", false)
+        .with_mana_cost(ManaCost::zero())
+        .with_ability(Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TargetZoneCardCount {
+                        zone: ZoneRef::Hand,
+                    },
+                },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: Some(ManaTargetRole::Both {
+                recipient: TargetFilter::Player,
+                count_source: TargetFilter::Player,
+            }),
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let spell_card = runner.state().objects[&spell].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: spell_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the role-split ritual must succeed");
+
+    // Slot 0 = recipient (P1), slot 1 = count source (P2).
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1), TargetRef::Player(P2)],
+        })
+        .expect("positional role targets must be accepted");
+
+    // CR 800.4a: the COUNT SOURCE leaves the game after announcement but before
+    // resolution, making that target — and only that target — illegal.
+    let p2_index = runner
+        .state()
+        .players
+        .iter()
+        .position(|p| p.id == P2)
+        .expect("P2 is in the game");
+    runner.state_mut().players[p2_index].is_eliminated = true;
+
+    // Reach guard: the RECIPIENT must still be legal, or this test would be
+    // exercising a whole-spell fizzle (CR 608.2b clause 2) rather than the
+    // per-target "fails to determine" clause it is written for.
+    let p1_index = runner
+        .state()
+        .players
+        .iter()
+        .position(|p| p.id == P1)
+        .expect("P1 is in the game");
+    assert!(
+        !runner.state().players[p1_index].is_eliminated,
+        "reach guard: the recipient must remain LEGAL so the effect still resolves"
+    );
+
+    let mut resolution_events: Vec<GameEvent> = Vec::new();
+    let mut guard = 0;
+    while !runner.state().stack.is_empty() {
+        guard += 1;
+        assert!(
+            guard < 16,
+            "too many prompts; stuck at {:?}",
+            runner.state().waiting_for
+        );
+        match runner.act(GameAction::PassPriority) {
+            Ok(result) => resolution_events.extend(result.events),
+            Err(_) => break,
+        }
+    }
+
+    // Reach guard: the spell actually left the stack.
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: the spell must have resolved — a spell still on the stack \
+         would make the pool assertions vacuous"
+    );
+    // Reach guard, the load-bearing one: the mana effect RESOLVED. An empty
+    // stack alone does not prove that — CR 608.2b's other clause (ALL targets
+    // illegal) removes the spell too, and a whole-spell fizzle would satisfy
+    // every pool assertion below while testing nothing. Asserting the effect
+    // resolved pins that this is the per-target "fails to determine" path.
+    assert!(
+        resolution_events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Mana,
+                ..
+            }
+        )),
+        "reach guard: the mana effect must have RESOLVED (recipient still legal), \
+         not fizzled — otherwise the zero-mana assertions below are vacuous. \
+         events: {resolution_events:?}"
+    );
+
+    // THE REGRESSION: the count must fail to determine, not read the recipient.
+    assert_ne!(
+        colorless_pool(&runner, P1),
+        RECIPIENT_HAND as i32,
+        "CR 608.2b: an illegal COUNT SOURCE must not fall back to counting the \
+         RECIPIENT's hand ({RECIPIENT_HAND}) — that is the unscoped-fallback bug"
+    );
+    assert_eq!(
+        colorless_pool(&runner, P1),
+        0,
+        "CR 608.2b: the effect fails to determine the illegal count source's hand \
+         size, so it produces 0 mana"
+    );
+    assert_eq!(
+        total_pool(&runner, P0),
+        0,
+        "the controller receives nothing — the recipient role is still declared"
+    );
 }
