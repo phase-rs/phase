@@ -2609,6 +2609,14 @@ fn cleaned_twice_is_only_dynamic_marker(cleaned: &str, evidence: &UnitEvidence) 
     if !has_twice {
         return false;
     }
+    // A bare "rather than once" clause is not a repeat-count instruction.
+    // `twice_is_activation_limit` has already accepted the form when the AST
+    // proves it is `ModifyActivationLimit`; without that carrier, do not let an
+    // unrelated `repeat_for` suppress this unresolved dynamic wording.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("rather than once") {
+        return false;
+    }
     // "twice that many" / "twice x" are multiplier markers, not the plain
     // repeat count `repeat_for` carries — they need a real QuantityExpr.
     // allow-noncombinator: swallow detector marker scan on classified text
@@ -4516,7 +4524,8 @@ mod tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityDefinition, DamageModification, Effect, OutsideGameSourcePool, TargetFilter,
+        AbilityDefinition, AbilityKind, DamageModification, Effect, OutsideGameSourcePool,
+        QuantityExpr, TargetFilter,
     };
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::Keyword;
@@ -4552,6 +4561,34 @@ mod tests {
     fn no_activation_limit_evidence() -> UnitEvidence {
         UnitEvidence::of(&crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        })
+    }
+
+    /// Evidence with a `repeat_for` carrier but no activation-limit static. This
+    /// distinguishes a real repeat-count parse from unsupported "rather than
+    /// once" wording that must still be reported as dynamic quantity text.
+    fn repeat_for_without_activation_limit_evidence() -> UnitEvidence {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        ability.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        UnitEvidence::of(&crate::parser::oracle::ParsedAbilities {
+            abilities: vec![ability],
             triggers: Vec::new(),
             statics: Vec::new(),
             replacements: Vec::new(),
@@ -8909,6 +8946,25 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             )),
             "\"rather than once\" wording with no ModifyActivationLimit carrier must still \
              raise DynamicQty"
+        );
+    }
+
+    /// `repeat_for` alone must not silence unbacked "rather than once"
+    /// wording: it only carries a repeat count after the parser has identified
+    /// the plain repeat instruction, not an arbitrary dynamic clause.
+    #[test]
+    fn dynamic_qty_flags_unbacked_rather_than_once_with_repeat_for() {
+        let cleaned = "creatures you control can forage twice during each of your turns rather \\
+                       than once.";
+        let evidence = repeat_for_without_activation_limit_evidence();
+        let mut found = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut found);
+        assert!(
+            found.iter().any(|d| matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "DynamicQty"
+            )),
+            "repeat_for must not hide unbacked 'rather than once' wording"
         );
     }
 }
