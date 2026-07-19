@@ -7430,26 +7430,18 @@ fn resolve_chain_body(
 
     let optional_is_infeasible = ability.optional && optional_effect_is_infeasible(state, ability);
 
-    // CR 608.2c + CR 608.2d: A missing exact parent makes "you may cast/play
-    // that card" impossible, so the instruction does not happen. Route that
-    // outcome through the existing decline authority instead of merely
-    // suppressing the prompt and falling through to `resolve_effect`: normal
-    // target inheritance may have copied an unrelated object onto this node,
-    // and CastFromZone would otherwise consume it as the missing "that card."
-    // The decline path also preserves the printed tail semantics: dependent
-    // "if you do" riders stay gated while independent sequential siblings and
-    // explicit decline branches continue. Other infeasible optional effects
-    // (PutChosenCounter/RemoveCounter) retain their established resolver no-op.
-    if optional_is_infeasible
-        && matches!(
-            ability.effect,
-            Effect::CastFromZone {
-                target: TargetFilter::ParentTarget,
-                ..
-            }
-        )
-        && ability.parent_target_missing_reason.is_some()
-    {
+    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction does
+    // not happen. Route every such CastFromZone outcome through the existing
+    // decline authority instead of merely suppressing the prompt and falling
+    // through to `resolve_effect`: a missing exact parent could consume an
+    // unrelated inherited target, while another current-legality failure (such
+    // as trying to cast a land) could mutate casting permissions before the
+    // cast authority rejects it. The decline path also preserves the printed
+    // tail semantics: dependent "if you do" riders stay gated while independent
+    // sequential siblings and explicit decline branches continue. Other
+    // infeasible optional effects (PutChosenCounter/RemoveCounter) retain their
+    // established resolver no-op.
+    if optional_is_infeasible && matches!(ability.effect, Effect::CastFromZone { .. }) {
         return resolve_optional_effect_decision(
             state,
             ability.clone(),

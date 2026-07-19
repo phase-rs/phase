@@ -16,6 +16,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const PLANETARIUM_TRIGGER: &str = "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn.";
+const LOOK_CAST_WITH_INDEPENDENT_TAIL: &str = "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. You gain 1 life.";
 
 fn reach_planetarium_cast_offer() -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
@@ -138,15 +139,21 @@ fn planetarium_decline_leaves_looked_card_in_library() {
     );
 }
 
-/// CR 608.2d + CR 305.1: a land can't be chosen for Planetarium's optional
-/// cast, so the trigger resolves without surfacing an action that casting must
-/// reject.
+/// CR 608.2c + CR 608.2d + CR 305.1: a land can't be chosen for an optional
+/// cast. The impossible instruction is declined without leaking a permission,
+/// while its independent sequential sibling still resolves.
 #[test]
 fn planetarium_land_top_does_not_offer_an_impossible_cast() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario
-        .add_creature_from_oracle(P0, "Planetarium of Wan Shi Tong", 1, 1, PLANETARIUM_TRIGGER)
+        .add_creature_from_oracle(
+            P0,
+            "Planetarium Land-Tail Regression Source",
+            1,
+            1,
+            LOOK_CAST_WITH_INDEPENDENT_TAIL,
+        )
         .as_artifact();
 
     let looked = scenario.add_card_to_library_top(P0, "Planetarium Looked Land");
@@ -155,6 +162,7 @@ fn planetarium_land_top_does_not_offer_an_impossible_cast() {
         .id();
 
     let mut runner = scenario.build();
+    let starting_life = runner.state().players[0].life;
     {
         let land = runner.state_mut().objects.get_mut(&looked).unwrap();
         land.card_types.core_types = vec![CoreType::Land];
@@ -194,6 +202,17 @@ fn planetarium_land_top_does_not_offer_an_impossible_cast() {
     );
     assert_eq!(runner.state().last_revealed_ids, vec![looked]);
     assert_eq!(runner.state().objects[&looked].zone, Zone::Library);
+    assert!(
+        runner.state().objects[&looked]
+            .casting_permissions
+            .is_empty(),
+        "declining the infeasible cast must not leak a permission onto the land"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        starting_life + 1,
+        "the independent sequential tail must resolve after the infeasible cast declines"
+    );
 }
 
 /// CR 701.25a + CR 401.5 + CR 608.2d: surveilling the only library card into
