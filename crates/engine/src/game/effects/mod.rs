@@ -1159,32 +1159,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // occurrences. Claim every occurrence from this action that belongs to
         // the owner, including the resumed delivery emitted before this drain,
         // so a replacement choice returning to Priority cannot scan it again.
-        let mut unclaimed_owned_zone_events: Vec<_> = logical_zone_change_group
-            .all_origin_occurrences
-            .iter()
-            .map(|occurrence| occurrence.event.clone())
-            .collect();
-        state
-            .consumed_before_priority_trigger_events
-            .extend(events.iter().enumerate().filter_map(|(index, event)| {
-                matches!(event, GameEvent::ZoneChanged { .. })
-                    .then(|| {
-                        unclaimed_owned_zone_events
-                            .iter()
-                            .position(|owned| owned == event)
-                    })
-                    .flatten()
-                    .map(|owned_index| {
-                        unclaimed_owned_zone_events.remove(owned_index);
-                        crate::game::triggers::ConsumedTriggerEventOccurrence {
-                            event: event.clone(),
-                            occurrence: events[..index]
-                                .iter()
-                                .filter(|prior| *prior == event)
-                                .count(),
-                        }
-                    })
-            }));
+        crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+            state,
+            &logical_zone_change_group,
+            events,
+        );
         // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
         // the whole ChangeZone entry event is complete, so clear the pre-entry
         // Devour snapshot. NOT cleared on the `paused` break above (a further

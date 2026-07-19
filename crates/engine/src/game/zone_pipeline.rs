@@ -1455,6 +1455,16 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 );
                 deferred_events.append(events);
                 events.append(&mut deferred_events);
+                // This completed owner has already collected every one of its
+                // retained ZoneChanged occurrences.  The replacement-resume
+                // action still reaches the generic priority scan, so claim the
+                // exact occurrences now rather than collecting them a second
+                // time through that scan.
+                crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+                    state,
+                    &logical_zone_change_group,
+                    events,
+                );
                 // CR 603.10a + CR 616.1: logical settlement has completed before
                 // the one post-batch cleanup can run.
                 if let Some(completion) = completion {

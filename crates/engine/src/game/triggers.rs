@@ -797,26 +797,26 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
         }
     }
 
-    let suppress_triggers = if batched_triggers.is_empty() {
-        Vec::new()
-    } else {
-        super::functioning_abilities::battlefield_active_statics(state)
-            .filter_map(|(source, definition)| {
-                let StaticMode::SuppressTriggers {
-                    source_filter,
-                    events,
-                } = &definition.mode
-                else {
-                    return None;
-                };
-                Some(LatchedSuppressTrigger {
-                    source_context: trigger_source_context_for_latch(state, source),
-                    source_filter: source_filter.clone(),
-                    events: events.clone(),
-                })
+    // Ordinary settlement observers use the same post-event suppressor latch
+    // as batched definitions. In particular, a permanent that entered with
+    // this logical owner can suppress ETB triggers even when no batched
+    // definition exists to make that latch nonempty.
+    let suppress_triggers = super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(source, definition)| {
+            let StaticMode::SuppressTriggers {
+                source_filter,
+                events,
+            } = &definition.mode
+            else {
+                return None;
+            };
+            Some(LatchedSuppressTrigger {
+                source_context: trigger_source_context_for_latch(state, source),
+                source_filter: source_filter.clone(),
+                events: events.clone(),
             })
-            .collect()
-    };
+        })
+        .collect();
 
     group
         .latch_immediately_after(batched_triggers, suppress_triggers)
@@ -869,15 +869,21 @@ impl LogicalZoneTriggerCollection<'_> {
     fn admits_source_visit(self, visit: TriggerSourceVisit, source: ObjectIncarnationRef) -> bool {
         match self {
             Self::Ordinary => true,
-            // Settlement is the one observer pass for all prospective members.
+            // CR 603.10a: Settlement is the one observer pass for all
+            // prospective members; a leaving member uses its pre-event source
+            // context rather than a successor incarnation's live ability.
             // The explicit event-subject path is its sole exemption, so a member
-            // never observes a segment through a later same-id incarnation.
+            // never observes a segment through the successor incarnation it
+            // receives after its own zone change. A logical owner cannot
+            // introduce a new member identity: every same-id successor here is
+            // the announced member's post-move object and must wait for the
+            // record-owned settlement context.
             Self::Segment(group) => {
                 matches!(visit, TriggerSourceVisit::EventSubject)
-                    || !group
-                        .prospective_battlefield_members
-                        .iter()
-                        .any(|member| member.identity == source)
+                    || !group.prospective_battlefield_members.iter().any(|member| {
+                        member.identity.object_id == source.object_id
+                            && member.identity.incarnation <= source.incarnation
+                    })
             }
             Self::Settlement(_) => matches!(visit, TriggerSourceVisit::Observer),
         }
@@ -2151,6 +2157,41 @@ pub(crate) fn sync_logical_zone_change_departure_stamps(
         };
         record.co_departed = retained_record.co_departed.clone();
     }
+}
+
+/// CR 603.2c: Claim the exact ZoneChanged occurrences already collected by a
+/// completed logical owner before the generic post-priority scan runs.  The
+/// occurrence ordinal keeps byte-identical events distinct, so the generic
+/// collector still sees every unrelated event from the same action exactly
+/// once.
+pub(crate) fn mark_logical_zone_events_consumed_before_priority(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+    events: &[GameEvent],
+) {
+    let mut unclaimed_owned_zone_events: Vec<_> = group
+        .all_origin_occurrences
+        .iter()
+        .map(|occurrence| occurrence.event.clone())
+        .collect();
+    state
+        .consumed_before_priority_trigger_events
+        .extend(events.iter().enumerate().filter_map(|(index, event)| {
+            matches!(event, GameEvent::ZoneChanged { .. })
+                .then(|| {
+                    unclaimed_owned_zone_events
+                        .iter()
+                        .position(|owned| owned == event)
+                })
+                .flatten()
+                .map(|owned_index| {
+                    unclaimed_owned_zone_events.remove(owned_index);
+                    ConsumedTriggerEventOccurrence {
+                        event: event.clone(),
+                        occurrence: trigger_event_occurrence(events, index),
+                    }
+                })
+        }));
 }
 
 /// Collect the one final observer pass owned by a completed logical zone-change
@@ -6437,7 +6478,17 @@ fn drain_deferred_trigger_queue_unchecked(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::WaitingFor> {
-    let pending = std::mem::take(&mut state.deferred_triggers);
+    let mut pending = std::mem::take(&mut state.deferred_triggers);
+    // CR 603.3b: Segment and settlement collectors intentionally append their
+    // contexts as each delivery completes. Normalize that collection order back
+    // to APNAP before grouping so every controller orders its complete batch
+    // once before the next player receives priority.
+    pending.sort_by_key(|ctx| {
+        (
+            trigger_apnap_rank(state, ctx.pending.controller),
+            ctx.pending.timestamp,
+        )
+    });
     match begin_trigger_ordering(state, pending) {
         TriggerOrderingDisposition::PromptForChoice(wf) => {
             // Mid-batch re-order (the `mem::take` above emptied `deferred_triggers`, so
@@ -9839,11 +9890,12 @@ pub mod tests {
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
         DamageChannel, DamageKindFilter, DelayedTriggerCondition, DiscardSelfScope, Duration,
-        EachDamageRecipient, Effect, FilterProp, KickerVariant, MultiTargetSpec, PlayerFilter,
-        PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
-        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
-        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        EachDamageRecipient, Effect, FilterProp, KickerVariant, ModalChoice, MultiTargetSpec,
+        PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -10233,6 +10285,229 @@ pub mod tests {
         assert!(before[0]
             .source_context_at(TriggerObservationTime::ImmediatelyAfter)
             .is_some());
+    }
+
+    /// Identity matrix (b): a live grant that survives the final layer flush
+    /// must preserve its exact ref across a look-back departure and a normal
+    /// post-event entry, then coalesce those two observation-time contexts into
+    /// one deferred context.
+    #[test]
+    fn ongoing_grant_coalesces_pre_and_post_all_origin_observations_once() {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, PlayerId(0), "Ongoing grant recipient", 2, 2);
+        let provider = make_creature(&mut state, PlayerId(0), "Ongoing grant provider", 2, 2);
+        let mut granted =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        granted.batched = true;
+        let grant = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: recipient })
+            .modifications(vec![ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted),
+            }]);
+        let provider_object = state.objects.get_mut(&provider).expect("provider exists");
+        provider_object.static_definitions.push(grant.clone());
+        std::sync::Arc::make_mut(&mut provider_object.base_static_definitions).push(grant);
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        let ongoing_ref = state.objects[&recipient]
+            .trigger_definitions
+            .iter_all()
+            .find(|entry| entry.definition.batched)
+            .map(|entry| state.objects[&recipient].trigger_definition_ref(entry))
+            .expect("positive reach guard: the ongoing grant materializes before collection");
+
+        let departed = make_creature(&mut state, PlayerId(0), "Pre-event subject", 2, 2);
+        let entered = create_object(
+            &mut state,
+            CardId(91_658),
+            PlayerId(0),
+            "Post-event subject".to_string(),
+            Zone::Hand,
+        );
+        let entered_object = state
+            .objects
+            .get_mut(&entered)
+            .expect("post-event subject exists");
+        entered_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        entered_object.base_card_types = entered_object.card_types.clone();
+        let mut group = allocate_logical_zone_change_group(&mut state, &[]);
+        let mut all_origin_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, departed, Zone::Hand, &mut all_origin_events);
+        crate::game::zones::move_to_zone(
+            &mut state,
+            entered,
+            Zone::Battlefield,
+            &mut all_origin_events,
+        );
+        group
+            .append_delivery_events(&all_origin_events)
+            .expect("both real all-origin occurrences are retained");
+        assert_eq!(
+            group.all_origin_occurrences.len(),
+            2,
+            "positive reach guard: the group contains one ImmediatelyBefore and one ImmediatelyAfter occurrence"
+        );
+        latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
+
+        let (before, _) = group
+            .immediately_before_latches()
+            .expect("pre latch exists");
+        let (after, _) = group
+            .immediately_after_latches()
+            .expect("post latch exists");
+        assert_eq!(
+            before.len(),
+            1,
+            "one ongoing grant begins at ImmediatelyBefore"
+        );
+        assert_eq!(before[0].definition_ref, ongoing_ref);
+        assert!(
+            before[0]
+                .source_context_at(TriggerObservationTime::ImmediatelyBefore)
+                .is_some()
+                && before[0]
+                    .source_context_at(TriggerObservationTime::ImmediatelyAfter)
+                    .is_some(),
+            "the unchanged exact ref has both real observation-time contexts"
+        );
+        assert!(
+            after.is_empty(),
+            "the unchanged grant coalesces into its existing exact-ref latch"
+        );
+
+        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
+            .expect("the coalesced grant settles from its retained all-origin events");
+        assert_eq!(settled.len(), 1, "one unchanged ref produces one context");
+        assert_eq!(
+            settled[0].pending.ability.trigger_definition_ref.as_ref(),
+            Some(&ongoing_ref),
+            "the one context retains the exact ongoing grant ref"
+        );
+        assert_eq!(
+            settled[0].trigger_events.len(),
+            2,
+            "one coalesced context admits the pre and post all-origin occurrences once"
+        );
+    }
+
+    /// Identity matrix (c): once the provider of a grant leaves, final-layer
+    /// reconciliation may not rediscover that removed ref for an immediately
+    /// after event. Its admitted look-back occurrence remains intact.
+    #[test]
+    fn removed_grant_keeps_only_its_pre_event_all_origin_occurrence() {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, PlayerId(0), "Removed grant recipient", 2, 2);
+        let provider = make_creature(&mut state, PlayerId(0), "Removed grant provider", 2, 2);
+        let mut granted =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        granted.batched = true;
+        let grant = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: recipient })
+            .modifications(vec![ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted),
+            }]);
+        let provider_object = state.objects.get_mut(&provider).expect("provider exists");
+        provider_object.static_definitions.push(grant.clone());
+        std::sync::Arc::make_mut(&mut provider_object.base_static_definitions).push(grant);
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        let removed_ref = state.objects[&recipient]
+            .trigger_definitions
+            .iter_all()
+            .find(|entry| entry.definition.batched)
+            .map(|entry| state.objects[&recipient].trigger_definition_ref(entry))
+            .expect(
+                "positive reach guard: the removable grant materializes before its provider leaves",
+            );
+
+        let entered = create_object(
+            &mut state,
+            CardId(91_659),
+            PlayerId(0),
+            "Removed grant post-event subject".to_string(),
+            Zone::Hand,
+        );
+        let entered_object = state
+            .objects
+            .get_mut(&entered)
+            .expect("post-event subject exists");
+        entered_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        entered_object.base_card_types = entered_object.card_types.clone();
+        let mut group = allocate_logical_zone_change_group(&mut state, &[]);
+        let mut pre_event = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, provider, Zone::Hand, &mut pre_event);
+        group
+            .append_delivery_events(&pre_event)
+            .expect("the provider departure is retained as the admitted pre-event occurrence");
+        let mut post_event = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, entered, Zone::Battlefield, &mut post_event);
+        group
+            .append_delivery_events(&post_event)
+            .expect("the later entry is retained for the post-event rediscovery check");
+        assert_eq!(
+            group.all_origin_occurrences.len(),
+            2,
+            "positive reach guard: the carrier sees both the pre and post all-origin events"
+        );
+        latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
+
+        let (before, _) = group
+            .immediately_before_latches()
+            .expect("pre latch exists");
+        let (after, _) = group
+            .immediately_after_latches()
+            .expect("post latch exists");
+        assert_eq!(
+            before.len(),
+            1,
+            "the removed ref remains in its pre-event latch"
+        );
+        assert_eq!(before[0].definition_ref, removed_ref);
+        assert!(
+            before[0]
+                .source_context_at(TriggerObservationTime::ImmediatelyAfter)
+                .is_none(),
+            "the removed ref cannot borrow an after-layer context"
+        );
+        assert!(
+            after.is_empty(),
+            "final-layer discovery does not rediscover the removed grant"
+        );
+
+        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
+            .expect("the removed pre-event grant remains resolvable");
+        assert_eq!(
+            settled.len(),
+            1,
+            "only the admitted pre-event context survives"
+        );
+        assert_eq!(
+            settled[0].pending.ability.trigger_definition_ref.as_ref(),
+            Some(&removed_ref),
+            "the surviving context carries the removed grant's exact ref"
+        );
+        assert_eq!(
+            settled[0].trigger_events, pre_event,
+            "the removed ref does not rediscover the post-event occurrence"
+        );
     }
 
     fn granted_definition_ref(
@@ -28757,6 +29032,58 @@ pub mod tests {
         observer
     }
 
+    fn add_targeted_and_modal_ltb_companions(state: &mut GameState, observer: ObjectId) {
+        let targeted = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+            ));
+        let modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            mode_descriptions: vec!["Gain 1 life".to_string()],
+            allow_repeat_modes: false,
+            constraints: vec![],
+            mode_costs: vec![],
+            mode_pawprints: vec![],
+            entwine_cost: None,
+            chooser: PlayerFilter::Controller,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
+            dynamic_max_choices: None,
+        };
+        let modal_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+            .execute(
+                AbilityDefinition::new(AbilityKind::Database, Effect::NoOp).with_modal(
+                    modal,
+                    vec![AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    )],
+                ),
+            );
+        let object = state.objects.get_mut(&observer).expect("observer exists");
+        std::sync::Arc::make_mut(&mut object.base_trigger_definitions)
+            .extend([targeted, modal_trigger]);
+        object.materialize_base_trigger_definitions();
+    }
+
     /// A dies observer deliberately permitted to function both before and after
     /// it leaves the battlefield. The Phase-0 hostile baselines use this shape
     /// to exercise the graveyard cache rather than relying on a battlefield-only
@@ -28996,6 +29323,7 @@ pub mod tests {
         );
     }
 
+    // PRODUCER-BLOCKED (P04-1d lead adjudication): no production ZoneChange replacement can yield ApplyResult::Prevented today; the production-carrier prevented-member row activates when a zone-change prevention producer ships. Settlement classification is covered by the direct-group tests below.
     #[test]
     fn logical_zone_completion_owns_exact_moved_prevented_and_remained_outcomes() {
         let mut state = setup();
@@ -29044,6 +29372,163 @@ pub mod tests {
                 .len(),
             1,
             "prevention and a completed no-move do not fabricate departures"
+        );
+    }
+
+    /// Ordinary `ChangeZone` and `Moved` registry appliers modify their proposed
+    /// event rather than preventing it. Regeneration-shield `Destroy` choices
+    /// are the engine's distinct production `ReplacementResult::Prevented` path.
+    #[test]
+    fn current_zone_change_appliers_modify_events_and_do_not_supply_prevented_deliveries() {
+        let mut entry_state = setup();
+        let change_zone_source = make_creature(
+            &mut entry_state,
+            PlayerId(0),
+            "ChangeZone modifier source",
+            2,
+            2,
+        );
+        let entering = create_object(
+            &mut entry_state,
+            CardId(91_657),
+            PlayerId(0),
+            "Modified entrant".to_string(),
+            Zone::Hand,
+        );
+        let entrant = entry_state
+            .objects
+            .get_mut(&entering)
+            .expect("modified entrant exists");
+        entrant.card_types.core_types.push(CoreType::Creature);
+        entrant.base_card_types = entrant.card_types.clone();
+        entry_state
+            .objects
+            .get_mut(&change_zone_source)
+            .expect("ChangeZone modifier source exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::ChangeZone,
+                )
+                .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                .destination_zone(Zone::Battlefield)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: crate::types::ability::EffectScope::Single,
+                        state: crate::types::ability::TapStateChange::Tap,
+                    },
+                )),
+            );
+        let mut entry_events = Vec::new();
+        let entry_result = crate::game::replacement::replace_event(
+            &mut entry_state,
+            crate::types::proposed_event::ProposedEvent::zone_change(
+                entering,
+                Zone::Hand,
+                Zone::Battlefield,
+                Some(change_zone_source),
+            ),
+            &mut entry_events,
+        );
+        assert!(
+            matches!(
+                entry_result,
+                crate::game::replacement::ReplacementResult::Execute(
+                    crate::types::proposed_event::ProposedEvent::ZoneChange {
+                        enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                        ..
+                    }
+                )
+            ),
+            "positive reach guard: ChangeZone applies its real modifier rather than preventing the event"
+        );
+        assert!(
+            entry_events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ReplacementApplied {
+                        source_id,
+                        event_type,
+                    } if *source_id == change_zone_source && event_type == "ChangeZone"
+                )
+            }),
+            "positive reach guard: the ChangeZone applier was actually selected"
+        );
+
+        let mut moved_state = setup();
+        let moved_source =
+            make_creature(&mut moved_state, PlayerId(0), "Moved modifier source", 2, 2);
+        let moved_subject = make_creature(
+            &mut moved_state,
+            PlayerId(0),
+            "Moved modifier subject",
+            2,
+            2,
+        );
+        moved_state
+            .objects
+            .get_mut(&moved_source)
+            .expect("Moved modifier source exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
+        let mut moved_events = Vec::new();
+        let moved_result = crate::game::replacement::replace_event(
+            &mut moved_state,
+            crate::types::proposed_event::ProposedEvent::zone_change(
+                moved_subject,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Some(moved_source),
+            ),
+            &mut moved_events,
+        );
+        assert!(
+            matches!(
+                moved_result,
+                crate::game::replacement::ReplacementResult::Execute(
+                    crate::types::proposed_event::ProposedEvent::ZoneChange {
+                        to: Zone::Exile,
+                        ..
+                    }
+                )
+            ),
+            "positive reach guard: Moved applies its real redirect rather than preventing the event"
+        );
+        assert!(
+            moved_events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ReplacementApplied {
+                        source_id,
+                        event_type,
+                    } if *source_id == moved_source && event_type == "Moved"
+                )
+            }),
+            "positive reach guard: the Moved applier was actually selected"
         );
     }
 
@@ -29833,6 +30318,2953 @@ pub mod tests {
             "the pre-pause observer must fire once for every co-departing member \
              across the complete logical group (life 20 + 3 = 23)"
         );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum LogicalZoneProductionCarrier {
+        ChangeZone,
+        BatchDelivery,
+    }
+
+    fn resolve_ltb_production_carrier(
+        state: &mut GameState,
+        carrier: LogicalZoneProductionCarrier,
+        source_id: ObjectId,
+        events: &mut Vec<GameEvent>,
+    ) {
+        let effect = match carrier {
+            LogicalZoneProductionCarrier::ChangeZone => Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Hand,
+                target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            LogicalZoneProductionCarrier::BatchDelivery => Effect::BounceAll {
+                target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                destination: Some(Zone::Hand),
+                count: None,
+            },
+        };
+        let ability = ResolvedAbility::new(effect, Vec::new(), source_id, PlayerId(0));
+        match carrier {
+            LogicalZoneProductionCarrier::ChangeZone => {
+                crate::game::effects::change_zone::resolve_all(state, &ability, events)
+                    .expect("ChangeZone production carrier resolves or parks");
+            }
+            LogicalZoneProductionCarrier::BatchDelivery => {
+                crate::game::effects::bounce::resolve_all(state, &ability, events)
+                    .expect("BatchDelivery production carrier resolves or parks");
+            }
+        }
+    }
+
+    /// Drives the two real logical-zone owners without reconstructing their
+    /// retained event authority in the test.  Unlike the LTB helper above, this
+    /// permits the matrix to exercise nonbattlefield origins and graveyard
+    /// destinations through the same production continuation seam.
+    fn resolve_zone_production_carrier(
+        state: &mut GameState,
+        carrier: LogicalZoneProductionCarrier,
+        source_id: ObjectId,
+        subjects: &[ObjectId],
+        destination: Zone,
+        events: &mut Vec<GameEvent>,
+    ) {
+        match carrier {
+            LogicalZoneProductionCarrier::ChangeZone => {
+                let ability = ResolvedAbility::new(
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                    subjects.iter().copied().map(TargetRef::Object).collect(),
+                    source_id,
+                    PlayerId(0),
+                );
+                crate::game::effects::change_zone::resolve(state, &ability, events)
+                    .expect("ChangeZone production carrier resolves or parks");
+            }
+            LogicalZoneProductionCarrier::BatchDelivery => {
+                let requests = subjects
+                    .iter()
+                    .copied()
+                    .map(|object_id| {
+                        crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                            object_id,
+                            destination,
+                            source_id,
+                        )
+                    })
+                    .collect();
+                assert!(
+                    matches!(
+                        crate::game::zone_pipeline::move_objects_simultaneously(
+                            state, requests, events,
+                        ),
+                        crate::game::zone_pipeline::BatchMoveResult::Done
+                            | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+                    ),
+                    "BatchDelivery production carrier resolves or parks"
+                );
+            }
+        }
+    }
+
+    /// A batched trigger carries its complete match set in the stack side table
+    /// once the real post-action priority pipeline has placed it.  Single-event
+    /// triggers deliberately have no side-table row.
+    fn stack_trigger_event_count(state: &GameState, entry_id: ObjectId) -> usize {
+        state
+            .stack_trigger_event_batches
+            .get(&entry_id)
+            .map_or(1, Vec::len)
+    }
+
+    /// Installs two distinct, material `Moved` redirects on separate sources.
+    /// The affected player must select their CR 616.1 order before the marked
+    /// member's delivery can continue, which gives both logical owners their
+    /// real `GameAction::ChooseReplacement` serialization boundary.
+    fn install_moved_ordering_pause(state: &mut GameState, member: ObjectId, destination: Zone) {
+        for (index, redirected_destination) in
+            [Zone::Exile, Zone::Graveyard].into_iter().enumerate()
+        {
+            let source = make_creature(
+                state,
+                PlayerId(0),
+                &format!("Material moved ordering source {index}"),
+                2,
+                2,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .expect("material ordering source exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SpecificObject { id: member })
+                        .destination_zone(destination)
+                        .execute(AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::ChangeZone {
+                                origin: None,
+                                destination: redirected_destination,
+                                target: TargetFilter::SelfRef,
+                                owner_library: false,
+                                enter_transformed: false,
+                                enters_under: None,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enters_attacking: false,
+                                up_to: false,
+                                enter_with_counters: vec![],
+                                conditional_enter_with_counters: vec![],
+                                face_down_profile: None,
+                                enters_modified_if: None,
+                            },
+                        ))
+                        .description(format!("Material redirect {index}")),
+                );
+        }
+    }
+
+    /// Regression for the two completed-owner call sites. A resumed replacement
+    /// action goes through the generic Priority scan, which must not rediscover
+    /// the event slice the logical owner has already Segment/Settlement-collected.
+    #[test]
+    fn logical_zone_production_carriers_consume_resumed_events_before_generic_priority() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+
+            let observer = make_creature(&mut state, PlayerId(0), "Priority observer", 2, 2);
+            let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            let observer_object = state.objects.get_mut(&observer).expect("observer exists");
+            std::sync::Arc::make_mut(&mut observer_object.base_trigger_definitions).push(trigger);
+            observer_object.materialize_base_trigger_definitions();
+
+            let subject = make_creature(&mut state, PlayerId(0), "Paused subject", 2, 2);
+            state
+                .objects
+                .get_mut(&subject)
+                .expect("subject exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park before generic Priority collection".to_string()),
+                );
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                observer,
+                &[subject],
+                Zone::Graveyard,
+                &mut events,
+            );
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} positive reach guard reaches the replacement-resume path"
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume through the generic Priority pipeline");
+
+            assert_eq!(
+                state
+                    .stack
+                    .iter()
+                    .filter(|entry| entry.source_id == observer)
+                    .count(),
+                1,
+                "{carrier:?} must place the resumed ZoneChanged trigger exactly once"
+            );
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(
+                state.players[0].life, 21,
+                "{carrier:?} exact-once placement reaches resolution exactly once"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// Separate logical owners may settle in consecutive replacement-resume
+    /// actions without one owner's retained occurrences leaking into the next.
+    #[test]
+    fn logical_zone_production_carriers_keep_sequential_groups_isolated() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+            let mut observers = Vec::new();
+
+            for group_index in 0..2 {
+                let observer = make_creature(
+                    &mut state,
+                    PlayerId(0),
+                    &format!("Group {group_index} observer"),
+                    2,
+                    2,
+                );
+                let subject = make_creature(
+                    &mut state,
+                    PlayerId(0),
+                    &format!("Group {group_index} subject"),
+                    2,
+                    2,
+                );
+                let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard)
+                    .valid_card(TargetFilter::SpecificObject { id: subject })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ));
+                let observer_object = state
+                    .objects
+                    .get_mut(&observer)
+                    .expect("group observer exists");
+                std::sync::Arc::make_mut(&mut observer_object.base_trigger_definitions)
+                    .push(trigger);
+                observer_object.materialize_base_trigger_definitions();
+                state
+                    .objects
+                    .get_mut(&subject)
+                    .expect("group subject exists")
+                    .replacement_definitions
+                    .push(
+                        ReplacementDefinition::new(
+                            crate::types::replacements::ReplacementEvent::Moved,
+                        )
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park a single isolated logical owner".to_string()),
+                    );
+
+                let mut events = Vec::new();
+                resolve_zone_production_carrier(
+                    &mut state,
+                    carrier,
+                    observer,
+                    &[subject],
+                    Zone::Graveyard,
+                    &mut events,
+                );
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "{carrier:?} group {group_index}: positive reach guard parks its own production owner"
+                );
+                let saved = serde_json::to_value(&state).expect("parked isolated group serializes");
+                state = serde_json::from_value(saved).expect("parked isolated group deserializes");
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement { index: 0 },
+                )
+                .expect("resume one isolated logical owner");
+                assert_eq!(
+                    state
+                        .stack
+                        .iter()
+                        .filter(|entry| entry.source_id == observer)
+                        .count(),
+                    1,
+                    "{carrier:?} group {group_index}: its own observer receives exactly its own occurrence"
+                );
+                assert!(
+                    observers.iter().all(|previous| {
+                        state
+                            .stack
+                            .iter()
+                            .filter(|entry| entry.source_id == *previous)
+                            .count()
+                            == 1
+                    }),
+                    "{carrier:?} group {group_index}: a later owner cannot duplicate an earlier owner's occurrence"
+                );
+                observers.push(observer);
+            }
+
+            assert_eq!(
+                observers
+                    .iter()
+                    .map(|observer| {
+                        state
+                            .stack
+                            .iter()
+                            .filter(|entry| entry.source_id == *observer)
+                            .count()
+                    })
+                    .sum::<usize>(),
+                2,
+                "{carrier:?} group isolation leaves one placed context per distinct logical owner"
+            );
+        }
+    }
+
+    /// Literal source-role matrix for both production owners.  The rows keep
+    /// source authority on a survivor, a departed event subject, a departed
+    /// observer, a prospective member that remains, and an off-zone source.
+    /// Each row runs as both an ordinary and a batched definition, then parks,
+    /// serializes, and resumes the real carrier.
+    #[test]
+    fn logical_zone_production_carriers_cover_every_source_role() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            for batched in [false, true] {
+                for role in [
+                    "surviving",
+                    "event_subject",
+                    "departed",
+                    "remained",
+                    "off_zone",
+                ] {
+                    let mut state = setup();
+                    state.active_player = PlayerId(0);
+                    state.priority_player = PlayerId(0);
+                    state.players[0].life = 20;
+                    let (
+                        source,
+                        subjects,
+                        pausing_subject,
+                        destination,
+                        expected_subjects,
+                        source_zone,
+                    ) = match role {
+                        "surviving" => {
+                            let source = add_ltb_observer(&mut state, PlayerId(0));
+                            state
+                                .objects
+                                .get_mut(&source)
+                                .expect("surviving source exists")
+                                .materialize_base_trigger_definitions();
+                            let subject =
+                                make_creature(&mut state, PlayerId(0), "Surviving subject", 2, 2);
+                            (
+                                source,
+                                vec![subject],
+                                subject,
+                                Zone::Graveyard,
+                                vec![subject],
+                                Zone::Battlefield,
+                            )
+                        }
+                        "event_subject" => {
+                            let source = add_ltb_observer(&mut state, PlayerId(0));
+                            state
+                                .objects
+                                .get_mut(&source)
+                                .expect("event-subject source exists")
+                                .materialize_base_trigger_definitions();
+                            (
+                                source,
+                                vec![source],
+                                source,
+                                Zone::Graveyard,
+                                vec![source],
+                                Zone::Graveyard,
+                            )
+                        }
+                        "departed" => {
+                            let source = add_battlefield_or_graveyard_dies_observer(
+                                &mut state,
+                                PlayerId(0),
+                                false,
+                            );
+                            state
+                                .objects
+                                .get_mut(&source)
+                                .expect("departed source exists")
+                                .materialize_base_trigger_definitions();
+                            let later =
+                                make_creature(&mut state, PlayerId(0), "Later departure", 2, 2);
+                            (
+                                source,
+                                vec![source, later],
+                                later,
+                                Zone::Graveyard,
+                                vec![source, later],
+                                Zone::Graveyard,
+                            )
+                        }
+                        "remained" => {
+                            let source =
+                                make_creature(&mut state, PlayerId(0), "Remained source", 2, 2);
+                            let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                                .destination(Zone::Battlefield)
+                                .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                                .execute(AbilityDefinition::new(
+                                    AbilityKind::Database,
+                                    Effect::GainLife {
+                                        amount: QuantityExpr::Fixed { value: 1 },
+                                        player: TargetFilter::Controller,
+                                    },
+                                ));
+                            let source_object = state
+                                .objects
+                                .get_mut(&source)
+                                .expect("remained source exists");
+                            std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions)
+                                .push(trigger);
+                            source_object.materialize_base_trigger_definitions();
+                            let subject = create_object(
+                                &mut state,
+                                CardId(91_651),
+                                PlayerId(0),
+                                "Entering source-role subject".to_string(),
+                                Zone::Hand,
+                            );
+                            let subject_object = state
+                                .objects
+                                .get_mut(&subject)
+                                .expect("entering source-role subject exists");
+                            subject_object
+                                .card_types
+                                .core_types
+                                .push(CoreType::Creature);
+                            subject_object.base_card_types = subject_object.card_types.clone();
+                            (
+                                source,
+                                vec![source, subject],
+                                subject,
+                                Zone::Battlefield,
+                                vec![subject],
+                                Zone::Battlefield,
+                            )
+                        }
+                        "off_zone" => {
+                            let source = create_object(
+                                &mut state,
+                                CardId(91_652),
+                                PlayerId(0),
+                                "Off-zone source".to_string(),
+                                Zone::Graveyard,
+                            );
+                            let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                                .destination(Zone::Exile)
+                                .trigger_zones(vec![Zone::Graveyard])
+                                .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                                .execute(AbilityDefinition::new(
+                                    AbilityKind::Database,
+                                    Effect::GainLife {
+                                        amount: QuantityExpr::Fixed { value: 1 },
+                                        player: TargetFilter::Controller,
+                                    },
+                                ));
+                            trigger.batched = true;
+                            trigger.origin_zones = vec![Zone::Hand];
+                            let source_object = state
+                                .objects
+                                .get_mut(&source)
+                                .expect("off-zone source exists");
+                            std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions)
+                                .push(trigger);
+                            source_object.materialize_base_trigger_definitions();
+                            let subject = create_object(
+                                &mut state,
+                                CardId(91_653),
+                                PlayerId(0),
+                                "Off-zone source-role subject".to_string(),
+                                Zone::Hand,
+                            );
+                            let subject_object = state
+                                .objects
+                                .get_mut(&subject)
+                                .expect("off-zone source-role subject exists");
+                            subject_object
+                                .card_types
+                                .core_types
+                                .push(CoreType::Creature);
+                            subject_object.base_card_types = subject_object.card_types.clone();
+                            // The observer's batched definition must retain this
+                            // real Hand -> Exile occurrence. The separate pauser
+                            // stays on the battlefield because only replacement
+                            // sources functioning there are candidates for an
+                            // ordinary Moved event (the hand subject is neither an
+                            // entering nor a discarded card).
+                            let pauser = make_creature(
+                                &mut state,
+                                PlayerId(0),
+                                "Off-zone source-role pauser",
+                                2,
+                                2,
+                            );
+                            (
+                                source,
+                                vec![subject, pauser],
+                                pauser,
+                                Zone::Exile,
+                                vec![subject],
+                                Zone::Graveyard,
+                            )
+                        }
+                        _ => unreachable!("source-role matrix row is exhaustive"),
+                    };
+                    {
+                        let source_object = state
+                            .objects
+                            .get_mut(&source)
+                            .expect("source-role source exists");
+                        let base_definitions =
+                            std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions);
+                        assert_eq!(
+                        base_definitions.len(),
+                        1,
+                        "{carrier:?} source-role {role} batched={batched}: the matrix source has one definition to classify"
+                    );
+                        base_definitions[0].batched = batched;
+                        source_object.materialize_base_trigger_definitions();
+                    }
+                    state
+                        .objects
+                        .get_mut(&pausing_subject)
+                        .expect("source-role pausing subject exists")
+                        .replacement_definitions
+                        .push(
+                            ReplacementDefinition::new(
+                                crate::types::replacements::ReplacementEvent::Moved,
+                            )
+                            .valid_card(TargetFilter::SelfRef)
+                            .mode(ReplacementMode::Optional { decline: None })
+                            .description("Park a source-role matrix row".to_string()),
+                        );
+
+                    let mut events = Vec::new();
+                    let source_definition_ref = state.objects[&source]
+                        .trigger_definitions
+                        .iter_all()
+                        .next()
+                        .map(|entry| state.objects[&source].trigger_definition_ref(entry))
+                        .expect("source-role source materializes one exact trigger definition");
+                    resolve_zone_production_carrier(
+                        &mut state,
+                        carrier,
+                        source,
+                        &subjects,
+                        destination,
+                        &mut events,
+                    );
+                    assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "{carrier:?} source-role {role} batched={batched}: positive reach guard parks the production owner"
+                );
+                    let saved = serde_json::to_value(&state)
+                        .expect("parked source-role carrier serializes");
+                    state = serde_json::from_value(saved)
+                        .expect("parked source-role carrier deserializes");
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::ChooseReplacement { index: 0 },
+                    )
+                    .expect("resume source-role carrier");
+                    let _ = drain_order_triggers_with_identity(&mut state);
+                    let entries = state
+                        .stack
+                        .iter()
+                        .filter(|entry| {
+                            matches!(
+                                &entry.kind,
+                                StackEntryKind::TriggeredAbility { ability, .. }
+                                    if ability.trigger_definition_ref.as_ref()
+                                        == Some(&source_definition_ref)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut expected_subjects = expected_subjects;
+                    expected_subjects.sort_unstable();
+                    if batched {
+                        assert_eq!(
+                        entries.len(),
+                        1,
+                        "{carrier:?} source-role {role} batched: one exact definition produces one deferred/APNAP context"
+                    );
+                        assert_eq!(
+                        stack_trigger_event_count(&state, entries[0].id),
+                        expected_subjects.len(),
+                        "{carrier:?} source-role {role} batched: the one exact definition retains every intended occurrence"
+                    );
+                    } else {
+                        let mut actual_subjects = entries
+                            .iter()
+                            .filter_map(|entry| match &entry.kind {
+                                StackEntryKind::TriggeredAbility {
+                                    trigger_event: Some(GameEvent::ZoneChanged { object_id, .. }),
+                                    ..
+                                } => Some(*object_id),
+                                StackEntryKind::TriggeredAbility { .. }
+                                | StackEntryKind::Spell { .. }
+                                | StackEntryKind::ActivatedAbility { .. }
+                                | StackEntryKind::KeywordAction { .. } => None,
+                            })
+                            .collect::<Vec<_>>();
+                        actual_subjects.sort_unstable();
+                        assert_eq!(
+                        actual_subjects,
+                        expected_subjects,
+                        "{carrier:?} source-role {role} ordinary: only the exact source definition observes its intended occurrence set"
+                    );
+                    }
+                    assert_eq!(
+                    state.objects[&source].zone, source_zone,
+                    "{carrier:?} source-role {role} batched={batched}: the test reached the intended source lifetime"
+                );
+                    resolve_stack_until_paused(&mut state);
+                    assert_eq!(
+                    state.players[0].life,
+                    20 + if batched { 1 } else { expected_subjects.len() as i32 },
+                    "{carrier:?} source-role {role} batched={batched}: every placed context reaches resolution exactly once"
+                );
+                    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                }
+            }
+        }
+    }
+
+    /// A fully nonbattlefield logical owner has no production `Moved`
+    /// replacement source that can truthfully park it: neither carrier invents
+    /// such a pause. This covers the real uninterrupted boundary instead — an
+    /// Exile trigger source observes a Hand and a Graveyard occurrence, then
+    /// the completed state serializes before its one batched context resolves.
+    #[test]
+    fn logical_zone_production_carriers_settle_a_nonbattlefield_only_owner_without_a_fake_pause() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+
+            let source = create_object(
+                &mut state,
+                CardId(91_654),
+                PlayerId(0),
+                "Exile-only batched observer".to_string(),
+                Zone::Exile,
+            );
+            let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Exile)
+                .trigger_zones(vec![Zone::Exile])
+                .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            trigger.batched = true;
+            trigger.origin_zones = vec![Zone::Hand, Zone::Graveyard];
+            let source_object = state
+                .objects
+                .get_mut(&source)
+                .expect("exile observer exists");
+            std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+            source_object.materialize_base_trigger_definitions();
+            let source_definition_ref = state.objects[&source]
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .map(|entry| state.objects[&source].trigger_definition_ref(entry))
+                .expect("exile observer materializes its exact batched definition");
+
+            let hand_subject = create_object(
+                &mut state,
+                CardId(91_655),
+                PlayerId(0),
+                "Hand-only owner subject".to_string(),
+                Zone::Hand,
+            );
+            let graveyard_subject = create_object(
+                &mut state,
+                CardId(91_656),
+                PlayerId(0),
+                "Graveyard-only owner subject".to_string(),
+                Zone::Graveyard,
+            );
+            for subject in [hand_subject, graveyard_subject] {
+                let object = state
+                    .objects
+                    .get_mut(&subject)
+                    .expect("nonbattlefield subject exists");
+                object.card_types.core_types.push(CoreType::Creature);
+                object.base_card_types = object.card_types.clone();
+            }
+            assert!(
+                state.battlefield.is_empty(),
+                "{carrier:?} positive reach guard: the logical owner has no battlefield source or prospective battlefield member"
+            );
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                source,
+                &[hand_subject, graveyard_subject],
+                Zone::Exile,
+                &mut events,
+            );
+            assert!(
+                state.pending_change_zone_iteration.is_none()
+                    && state.pending_batch_deliveries.is_none(),
+                "{carrier:?} exact production evidence: no nonbattlefield-only pause was fabricated"
+            );
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                "{carrier:?} uninterrupted nonbattlefield owner reaches its valid post-collection boundary"
+            );
+            assert_eq!(
+                state.deferred_triggers.len(),
+                1,
+                "{carrier:?} positive reach guard: completion retains one off-zone batched context before normal placement"
+            );
+            let pending = std::mem::take(&mut state.deferred_triggers);
+            let mut placement_events = Vec::new();
+            assert!(
+                process_collected_triggers_with_delayed_phase_events(
+                    &mut state,
+                    pending,
+                    &[],
+                    &mut placement_events,
+                )
+                .fired,
+                "{carrier:?} the normal deferred-trigger placement path receives the completed context"
+            );
+            let _ = drain_order_triggers_with_identity(&mut state);
+            let entries = state
+                .stack
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.kind,
+                        StackEntryKind::TriggeredAbility { ability, .. }
+                            if ability.trigger_definition_ref.as_ref()
+                                == Some(&source_definition_ref)
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                entries.len(),
+                1,
+                "{carrier:?} positive reach guard: the off-zone definition reaches placement"
+            );
+            assert_eq!(
+                stack_trigger_event_count(&state, entries[0].id),
+                2,
+                "{carrier:?} the single batched context retains the Hand and Graveyard occurrences"
+            );
+
+            let saved = serde_json::to_value(&state)
+                .expect("completed nonbattlefield owner serializes at Priority");
+            state = serde_json::from_value(saved)
+                .expect("completed nonbattlefield owner deserializes at Priority");
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(
+                state.players[0].life, 21,
+                "{carrier:?} the saved nonbattlefield batched context resolves once"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// Regression matrix for the two production mass-zone carriers.  The
+    /// replacement is intentionally installed on each possible delivery slot:
+    /// this proves that the logical owner remains authoritative if the pause is
+    /// before, between, or after the other co-departures.  The live state is
+    /// round-tripped while the carrier is parked; no test helper reconstructs a
+    /// pending logical group.
+    #[test]
+    fn logical_zone_production_carriers_preserve_first_middle_and_last_pause_through_save() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            for paused_index in 0..3 {
+                let mut state = setup();
+                state.active_player = PlayerId(0);
+                state.priority_player = PlayerId(0);
+                state.players[0].life = 20;
+
+                let observer = add_ltb_observer(&mut state, PlayerId(0));
+                let first = make_creature(&mut state, PlayerId(0), "First member", 2, 2);
+                let last = make_creature(&mut state, PlayerId(0), "Last member", 2, 2);
+                let members = [observer, first, last];
+                state
+                    .objects
+                    .get_mut(&observer)
+                    .expect("observer exists")
+                    .materialize_base_trigger_definitions();
+                let paused = members[paused_index];
+                state
+                    .objects
+                    .get_mut(&paused)
+                    .expect("selected production member exists")
+                    .replacement_definitions
+                    .push(
+                        ReplacementDefinition::new(
+                            crate::types::replacements::ReplacementEvent::Moved,
+                        )
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Pause this production delivery".to_string()),
+                    );
+
+                let mut events = Vec::new();
+                resolve_ltb_production_carrier(
+                    &mut state,
+                    carrier,
+                    ObjectId(91_001 + paused_index as u64),
+                    &mut events,
+                );
+
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "{carrier:?} slot {paused_index} must reach the real replacement prompt"
+                );
+                match carrier {
+                    LogicalZoneProductionCarrier::ChangeZone => assert!(
+                        state.pending_change_zone_iteration.is_some(),
+                        "ChangeZone slot {paused_index} must retain its production carrier"
+                    ),
+                    LogicalZoneProductionCarrier::BatchDelivery => assert!(
+                        state.pending_batch_deliveries.is_some(),
+                        "BatchDelivery slot {paused_index} must retain its production carrier"
+                    ),
+                }
+
+                let saved = serde_json::to_value(&state)
+                    .expect("parked production carrier serializes before resume");
+                state = serde_json::from_value(saved)
+                    .expect("parked production carrier deserializes before resume");
+
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement { index: 0 },
+                )
+                .expect("accept the one reached replacement prompt");
+                assert!(
+                    !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "exactly one replacement prompt was installed for {carrier:?} slot {paused_index}"
+                );
+
+                assert_eq!(
+                    state.stack.len(),
+                    3,
+                    "{carrier:?} slot {paused_index} must place exactly the three \
+                     co-departure trigger contexts"
+                );
+                resolve_stack_until_paused(&mut state);
+
+                assert_eq!(
+                    state.players[0].life, 23,
+                    "{carrier:?} slot {paused_index}: the observer resolves exactly once for \
+                     itself and each other co-departure"
+                );
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                    "{carrier:?} slot {paused_index} returns to Priority after trigger resolution"
+                );
+                assert!(
+                    members
+                        .iter()
+                        .all(|id| state.objects[id].zone == Zone::Hand),
+                    "{carrier:?} slot {paused_index} must deliver every announced member"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn logical_zone_production_carriers_preserve_repause_and_final_empty_tail_through_save() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+
+            let observer = add_ltb_observer(&mut state, PlayerId(0));
+            let middle = make_creature(&mut state, PlayerId(0), "Middle member", 2, 2);
+            let last = make_creature(&mut state, PlayerId(0), "Last member", 2, 2);
+            state
+                .objects
+                .get_mut(&observer)
+                .expect("observer exists")
+                .materialize_base_trigger_definitions();
+            for paused in [observer, last] {
+                state
+                    .objects
+                    .get_mut(&paused)
+                    .expect("selected production member exists")
+                    .replacement_definitions
+                    .push(
+                        ReplacementDefinition::new(
+                            crate::types::replacements::ReplacementEvent::Moved,
+                        )
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Re-pause this production delivery".to_string()),
+                    );
+            }
+
+            let mut events = Vec::new();
+            resolve_ltb_production_carrier(&mut state, carrier, ObjectId(91_100), &mut events);
+
+            for pause in 1..=2 {
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "{carrier:?} must reach replacement pause {pause}"
+                );
+                let saved = serde_json::to_value(&state)
+                    .expect("each re-paused production carrier serializes");
+                state = serde_json::from_value(saved)
+                    .expect("each re-paused production carrier deserializes");
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement { index: 0 },
+                )
+                .expect("accept the replacement and continue the same logical owner");
+            }
+
+            assert!(
+                !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} must settle after the final-member re-pause"
+            );
+            assert_eq!(
+                state.stack.len(),
+                3,
+                "{carrier:?} must retain exactly three LTB contexts across re-pause and empty tail"
+            );
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(state.players[0].life, 23);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(
+                [observer, middle, last]
+                    .iter()
+                    .all(|id| state.objects[id].zone == Zone::Hand),
+                "{carrier:?} re-pause must finish every announced member"
+            );
+        }
+    }
+
+    #[test]
+    fn logical_zone_production_carriers_match_uninterrupted_resolution() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+
+            let observer = add_ltb_observer(&mut state, PlayerId(0));
+            let first = make_creature(&mut state, PlayerId(0), "First member", 2, 2);
+            let last = make_creature(&mut state, PlayerId(0), "Last member", 2, 2);
+            state
+                .objects
+                .get_mut(&observer)
+                .expect("observer exists")
+                .materialize_base_trigger_definitions();
+
+            let mut events = Vec::new();
+            resolve_ltb_production_carrier(&mut state, carrier, ObjectId(91_200), &mut events);
+            assert!(
+                !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} uninterrupted path must not invent a replacement pause"
+            );
+            assert_eq!(
+                state.deferred_triggers.len(),
+                3,
+                "{carrier:?} uninterrupted path must collect exactly three LTB contexts"
+            );
+
+            let pending = std::mem::take(&mut state.deferred_triggers);
+            let mut placement_events = Vec::new();
+            let placement = process_collected_triggers_with_delayed_phase_events(
+                &mut state,
+                pending,
+                &[],
+                &mut placement_events,
+            );
+            assert!(placement.fired);
+            drain_order_triggers_with_identity(&mut state);
+            resolve_stack_until_paused(&mut state);
+
+            assert_eq!(state.players[0].life, 23);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(
+                [observer, first, last]
+                    .iter()
+                    .all(|id| state.objects[id].zone == Zone::Hand),
+                "{carrier:?} uninterrupted path must deliver every announced member"
+            );
+        }
+    }
+
+    #[test]
+    fn logical_zone_production_carriers_preserve_apnap_target_and_modal_placement() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+            state.players[1].life = 20;
+
+            let first_observer = add_ltb_observer(&mut state, PlayerId(0));
+            let second_observer = add_ltb_observer(&mut state, PlayerId(1));
+            let member = make_creature(&mut state, PlayerId(0), "Shared member", 2, 2);
+            for observer in [first_observer, second_observer] {
+                add_targeted_and_modal_ltb_companions(&mut state, observer);
+            }
+            state
+                .objects
+                .get_mut(&member)
+                .expect("shared member exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park APNAP target/modal production carrier".to_string()),
+                );
+
+            let mut events = Vec::new();
+            resolve_ltb_production_carrier(&mut state, carrier, ObjectId(91_300), &mut events);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} positive reach guard parks the real target/modal carrier"
+            );
+            let saved = serde_json::to_value(&state)
+                .expect("parked APNAP target/modal production carrier serializes");
+            state = serde_json::from_value(saved)
+                .expect("parked APNAP target/modal production carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume APNAP target/modal carrier through production Priority");
+            assert_eq!(
+                state
+                    .pending_trigger_order
+                    .as_ref()
+                    .expect("production priority reaches APNAP ordering")
+                    .groups
+                    .iter()
+                    .map(|group| group.triggers.len())
+                    .sum::<usize>(),
+                18,
+                "{carrier:?} positive reach guard preserves every trigger context through save/resume"
+            );
+            assert_eq!(
+                drain_order_triggers_with_identity(&mut state),
+                2,
+                "{carrier:?} must request APNAP ordering once for each controller"
+            );
+
+            let mut target_prompts = 0;
+            let mut modal_prompts = 0;
+            for _ in 0..32 {
+                match state.waiting_for.clone() {
+                    WaitingFor::TriggerTargetSelection { player, .. } => {
+                        let target = if player == PlayerId(0) {
+                            PlayerId(1)
+                        } else {
+                            PlayerId(0)
+                        };
+                        crate::game::engine::apply_as_current(
+                            &mut state,
+                            GameAction::SelectTargets {
+                                targets: vec![TargetRef::Player(target)],
+                            },
+                        )
+                        .expect("targeted trigger accepts its opponent target");
+                        target_prompts += 1;
+                    }
+                    WaitingFor::AbilityModeChoice { .. } => {
+                        crate::game::engine::apply_as_current(
+                            &mut state,
+                            GameAction::SelectModes { indices: vec![0] },
+                        )
+                        .expect("modal trigger accepts its sole mode");
+                        modal_prompts += 1;
+                    }
+                    WaitingFor::Priority { .. } => break,
+                    other => {
+                        panic!("{carrier:?} APNAP placement reached unexpected prompt {other:?}")
+                    }
+                }
+            }
+            assert_eq!(
+                target_prompts, 6,
+                "{carrier:?} must reach every targeted trigger placement prompt"
+            );
+            assert_eq!(
+                modal_prompts, 6,
+                "{carrier:?} must reach every modal trigger placement prompt"
+            );
+            for _ in 0..60 {
+                if state.stack.is_empty()
+                    && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                    "{carrier:?} target/modal stack must reach Priority before resolving"
+                );
+                crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("pass priority while resolving the constructed trigger stack");
+            }
+            assert!(
+                state.stack.is_empty(),
+                "{carrier:?} target/modal stack must settle within the reach guard"
+            );
+
+            assert_eq!(
+                state.players[0].life, 23,
+                "{carrier:?}: P0 gains six life and receives three targeted damage"
+            );
+            assert_eq!(
+                state.players[1].life, 23,
+                "{carrier:?}: P1 gains six life and receives three targeted damage"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(
+                [first_observer, second_observer, member]
+                    .iter()
+                    .all(|id| state.objects[id].zone == Zone::Hand),
+                "{carrier:?} APNAP fixture must deliver every co-departing member"
+            );
+        }
+    }
+
+    #[test]
+    fn logical_zone_production_carriers_retain_nonbattlefield_and_mixed_origin_batches() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            for all_origins in [false, true] {
+                let mut state = setup();
+                state.active_player = PlayerId(0);
+                state.priority_player = PlayerId(0);
+                state.players[0].life = 20;
+                let destination = if all_origins {
+                    Zone::Exile
+                } else {
+                    Zone::Graveyard
+                };
+
+                let source = create_object(
+                    &mut state,
+                    CardId(91_400),
+                    PlayerId(0),
+                    "Off-zone batched observer".to_string(),
+                    Zone::Graveyard,
+                );
+                let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(destination)
+                    .trigger_zones(vec![Zone::Graveyard])
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ))
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ));
+                trigger.batched = true;
+                trigger.origin_zones = if all_origins {
+                    vec![Zone::Battlefield, Zone::Hand, Zone::Graveyard]
+                } else {
+                    vec![Zone::Hand]
+                };
+                let source_object = state.objects.get_mut(&source).expect("source exists");
+                std::sync::Arc::make_mut(&mut source_object.base_trigger_definitions).push(trigger);
+                source_object.materialize_base_trigger_definitions();
+
+                // A Moved replacement only functions from the battlefield (or
+                // command zone) unless it is the entering object's own
+                // self-replacement. Keep the batched observer literally in the
+                // graveyard, and install the optional production pauser on an
+                // eligible battlefield source instead of asking the hand card to
+                // supply an impossible off-zone replacement. The pauser itself
+                // must also be a requested move: an off-zone source cannot park
+                // either production carrier merely by owning a replacement.
+                let pauser = make_creature(
+                    &mut state,
+                    PlayerId(0),
+                    "All-origin replacement source",
+                    2,
+                    2,
+                );
+                let replacement =
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .destination_zone(destination)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park the all-origin carrier for save coverage".to_string());
+                let pauser_object = state
+                    .objects
+                    .get_mut(&pauser)
+                    .expect("battlefield replacement source exists");
+                pauser_object
+                    .replacement_definitions
+                    .push(replacement.clone());
+                std::sync::Arc::make_mut(&mut pauser_object.base_replacement_definitions)
+                    .push(replacement);
+
+                let hand_subject = create_object(
+                    &mut state,
+                    CardId(91_401),
+                    PlayerId(0),
+                    "Hand subject".to_string(),
+                    Zone::Hand,
+                );
+                let hand_object = state
+                    .objects
+                    .get_mut(&hand_subject)
+                    .expect("hand subject exists");
+                hand_object.card_types.core_types.push(CoreType::Creature);
+                hand_object.base_card_types = hand_object.card_types.clone();
+                let mut subjects = vec![pauser, hand_subject];
+                if all_origins {
+                    subjects.insert(
+                        0,
+                        make_creature(&mut state, PlayerId(0), "Battlefield subject", 2, 2),
+                    );
+                    let graveyard_subject = create_object(
+                        &mut state,
+                        CardId(91_402),
+                        PlayerId(0),
+                        "Graveyard subject".to_string(),
+                        Zone::Graveyard,
+                    );
+                    let graveyard_object = state
+                        .objects
+                        .get_mut(&graveyard_subject)
+                        .expect("graveyard subject exists");
+                    graveyard_object
+                        .card_types
+                        .core_types
+                        .push(CoreType::Creature);
+                    graveyard_object.base_card_types = graveyard_object.card_types.clone();
+                    subjects.push(graveyard_subject);
+                }
+                let mut events = Vec::new();
+                resolve_zone_production_carrier(
+                    &mut state,
+                    carrier,
+                    source,
+                    &subjects,
+                    destination,
+                    &mut events,
+                );
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "{carrier:?} all_origins={all_origins}: positive reach guard reaches a real replacement before save"
+                );
+                assert_eq!(
+                    state.objects[&source].zone,
+                    Zone::Graveyard,
+                    "{carrier:?} all_origins={all_origins}: the batched observer remains in its declared off-zone source zone"
+                );
+                match carrier {
+                    LogicalZoneProductionCarrier::ChangeZone => assert!(
+                        state.pending_change_zone_iteration.is_some(),
+                        "ChangeZone must retain the mixed-origin owner while parked"
+                    ),
+                    LogicalZoneProductionCarrier::BatchDelivery => assert!(
+                        state.pending_batch_deliveries.is_some(),
+                        "BatchDelivery must retain the mixed-origin owner while parked"
+                    ),
+                }
+                let saved = serde_json::to_value(&state)
+                    .expect("paused all-origin production carrier serializes");
+                state = serde_json::from_value(saved)
+                    .expect("paused all-origin production carrier deserializes");
+                let mut pauses = 0;
+                while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::ChooseReplacement { index: 0 },
+                    )
+                    .expect("resume the exact all-origin production owner");
+                    pauses += 1;
+                }
+                assert_eq!(
+                    pauses,
+                    1,
+                    "{carrier:?} all_origins={all_origins}: the prospective replacement source reaches the replacement-resume seam"
+                );
+
+                let source_entries = state
+                    .stack
+                    .iter()
+                    .filter(|entry| entry.source_id == source)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    source_entries.len(),
+                    1,
+                    "{carrier:?} must place one off-zone batched definition"
+                );
+                assert_eq!(
+                    stack_trigger_event_count(&state, source_entries[0].id),
+                    if all_origins { subjects.len() } else { 1 },
+                    "{carrier:?} all_origins={all_origins}: the placed batched trigger retains every matching occurrence"
+                );
+                assert!(
+                    subjects
+                        .iter()
+                        .all(|id| state.objects[id].zone == destination),
+                    "{carrier:?} positive reach guard: every planned subject must move"
+                );
+                resolve_stack_until_paused(&mut state);
+                assert_eq!(state.players[0].life, 21);
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            }
+        }
+    }
+
+    /// The grant is deliberately supplied by a permanent that leaves in the
+    /// same logical group.  Its Layer-6 producer is gone after the final flush,
+    /// so only the carrier's immediately-before latch can retain the recipient's
+    /// admitted batched occurrence.
+    #[test]
+    fn logical_zone_production_carriers_retain_departing_runtime_batched_grants_through_save() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+
+            let grantor = make_creature(&mut state, PlayerId(0), "Departing grantor", 2, 2);
+            let recipient = make_creature(&mut state, PlayerId(0), "Granted recipient", 2, 2);
+            let pausing_subject = make_creature(&mut state, PlayerId(0), "Pausing subject", 2, 2);
+            let mut granted = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Hand)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            granted.batched = true;
+            let static_def = StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(granted),
+                }]);
+            let grantor_object = state.objects.get_mut(&grantor).expect("grantor exists");
+            grantor_object.static_definitions.push(static_def.clone());
+            std::sync::Arc::make_mut(&mut grantor_object.base_static_definitions).push(static_def);
+            state.layers_dirty.mark_full();
+            crate::game::layers::flush_layers(&mut state);
+            assert!(
+                state.objects[&recipient]
+                    .trigger_definitions
+                    .iter_all()
+                    .any(|entry| entry.definition.batched),
+                "{carrier:?} positive reach guard: the recipient must hold the live Layer-6 grant before departure"
+            );
+            state
+                .objects
+                .get_mut(&pausing_subject)
+                .expect("pausing subject exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park the departing-grant logical owner".to_string()),
+                );
+
+            let mut events = Vec::new();
+            resolve_ltb_production_carrier(&mut state, carrier, ObjectId(91_500), &mut events);
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} positive reach guard: the real carrier must park before its grantor disappears"
+            );
+            let saved =
+                serde_json::to_value(&state).expect("parked runtime-grant carrier serializes");
+            state =
+                serde_json::from_value(saved).expect("parked runtime-grant carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume the saved runtime-grant carrier");
+
+            assert!(
+                state.objects[&grantor].zone != Zone::Battlefield,
+                "{carrier:?} positive reach guard: the grantor must really disappear before settlement"
+            );
+            let recipient_contexts = state
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == recipient)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                recipient_contexts.len(),
+                1,
+                "{carrier:?} must place the removed grant's one admitted definition occurrence"
+            );
+            assert_eq!(
+                stack_trigger_event_count(&state, recipient_contexts[0].id),
+                3,
+                "{carrier:?} one placed grant definition must retain all three all-origin occurrences"
+            );
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(
+                state.players[0].life, 23,
+                "{carrier:?} all three pre-event grant occurrences must resolve once"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// Matrix identity (a) and (b): producer identity, rather than payload
+    /// equality, distinguishes two simultaneous grants; the same producer that
+    /// survives the final layer flush contributes one coalesced context.
+    #[test]
+    fn logical_zone_production_carriers_keep_distinct_grants_and_coalesce_each_ongoing_ref() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            for grantor_count in [1usize, 2] {
+                let mut state = setup();
+                state.active_player = PlayerId(0);
+                state.priority_player = PlayerId(0);
+                state.players[0].life = 20;
+                let recipient = make_creature(&mut state, PlayerId(0), "Grant recipient", 2, 2);
+                let mut granted = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Hand)
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ))
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ));
+                granted.batched = true;
+                for index in 0..grantor_count {
+                    let grantor = make_creature(
+                        &mut state,
+                        PlayerId(0),
+                        &format!("Grant provider {index}"),
+                        2,
+                        2,
+                    );
+                    let static_def = StaticDefinition::continuous()
+                        .affected(TargetFilter::SpecificObject { id: recipient })
+                        .modifications(vec![ContinuousModification::GrantTrigger {
+                            trigger: Box::new(granted.clone()),
+                        }]);
+                    let grantor_object = state.objects.get_mut(&grantor).expect("grantor exists");
+                    grantor_object.static_definitions.push(static_def.clone());
+                    std::sync::Arc::make_mut(&mut grantor_object.base_static_definitions)
+                        .push(static_def);
+                }
+                state.layers_dirty.mark_full();
+                crate::game::layers::flush_layers(&mut state);
+                let live_grants = state.objects[&recipient]
+                    .trigger_definitions
+                    .iter_all()
+                    .filter(|entry| entry.definition.batched)
+                    .count();
+                assert_eq!(
+                    live_grants, grantor_count,
+                    "{carrier:?} grantors={grantor_count}: positive reach guard materializes every provider occurrence"
+                );
+                state
+                    .objects
+                    .get_mut(&recipient)
+                    .expect("recipient exists")
+                    .replacement_definitions
+                    .push(
+                        ReplacementDefinition::new(
+                            crate::types::replacements::ReplacementEvent::Moved,
+                        )
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park the grant-identity carrier".to_string()),
+                    );
+
+                let mut events = Vec::new();
+                resolve_zone_production_carrier(
+                    &mut state,
+                    carrier,
+                    ObjectId(91_550 + grantor_count as u64),
+                    &[recipient],
+                    Zone::Hand,
+                    &mut events,
+                );
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "{carrier:?} grantors={grantor_count}: positive reach guard parks the real owner"
+                );
+                let saved =
+                    serde_json::to_value(&state).expect("parked grant identity carrier serializes");
+                state = serde_json::from_value(saved)
+                    .expect("parked grant identity carrier deserializes");
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement { index: 0 },
+                )
+                .expect("resume the grant-identity owner");
+
+                assert_eq!(
+                    drain_order_triggers_with_identity(&mut state),
+                    usize::from(grantor_count > 1),
+                    "{carrier:?} grantors={grantor_count}: identity-distinct grants use the normal APNAP ordering seam only when an ordering choice exists"
+                );
+                let contexts = state
+                    .stack
+                    .iter()
+                    .filter(|entry| entry.source_id == recipient)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    contexts.len(), grantor_count,
+                    "{carrier:?} grantors={grantor_count}: exactly one placed context per ongoing producer ref must survive settlement"
+                );
+                assert!(
+                    contexts
+                        .iter()
+                        .all(|entry| stack_trigger_event_count(&state, entry.id) == 1),
+                    "{carrier:?} grantors={grantor_count}: positive reach guard proves each placed context matched the moved recipient occurrence"
+                );
+                resolve_stack_until_paused(&mut state);
+                assert_eq!(
+                    state.players[0].life,
+                    20 + grantor_count as i32,
+                    "{carrier:?} grantors={grantor_count}: identity-distinct grants resolve independently, while a single ongoing ref does not double-fire"
+                );
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            }
+        }
+    }
+
+    /// Identity matrix (b) through a production carrier: an ongoing grant is
+    /// latched before the first delivery, survives the CR 616.1 ordering pause
+    /// on the second, and gains its immediately-after context only at final
+    /// settlement.  The saved carrier must still place one exact ref whose
+    /// batch owns both all-origin occurrences.
+    #[test]
+    fn logical_zone_production_carriers_serialize_ongoing_grant_across_pre_and_post_observations() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+
+            let recipient = make_creature(&mut state, PlayerId(0), "Ongoing recipient", 2, 2);
+            let provider = make_creature(&mut state, PlayerId(0), "Ongoing provider", 2, 2);
+            let mut granted =
+                TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            granted.batched = true;
+            let grant = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(granted),
+                }]);
+            let provider_object = state.objects.get_mut(&provider).expect("provider exists");
+            provider_object.static_definitions.push(grant.clone());
+            std::sync::Arc::make_mut(&mut provider_object.base_static_definitions).push(grant);
+            state.layers_dirty.mark_full();
+            crate::game::layers::flush_layers(&mut state);
+            let ongoing_ref = state.objects[&recipient]
+                .trigger_definitions
+                .iter_all()
+                .find(|entry| entry.definition.batched)
+                .map(|entry| state.objects[&recipient].trigger_definition_ref(entry))
+                .expect(
+                    "positive reach guard: the ongoing grant is live before its first observation",
+                );
+
+            let early = create_object(
+                &mut state,
+                CardId(91_582),
+                PlayerId(0),
+                "Ongoing early member".to_string(),
+                Zone::Graveyard,
+            );
+            let paused = create_object(
+                &mut state,
+                CardId(91_583),
+                PlayerId(0),
+                "Ongoing paused member".to_string(),
+                Zone::Hand,
+            );
+            for member in [early, paused] {
+                let object = state.objects.get_mut(&member).expect("member exists");
+                object.card_types.core_types.push(CoreType::Creature);
+                object.base_card_types = object.card_types.clone();
+            }
+            install_moved_ordering_pause(&mut state, paused, Zone::Battlefield);
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                ObjectId(91_580),
+                &[early, paused],
+                Zone::Battlefield,
+                &mut events,
+            );
+            assert_eq!(
+                state.objects[&early].zone,
+                Zone::Battlefield,
+                "{carrier:?} positive reach guard: the graveyard member supplies the immediately-before occurrence before the real ordering pause"
+            );
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} positive reach guard: two material Moved redirects surface the CR 616.1 production prompt"
+            );
+            let saved = serde_json::to_value(&state)
+                .expect("the paused ongoing-grant production carrier serializes");
+            state = serde_json::from_value(saved)
+                .expect("the paused ongoing-grant production carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("the ordering choice resumes the saved logical owner");
+
+            assert!(
+                state.objects[&recipient].zone == Zone::Battlefield
+                    && state.objects[&provider].zone == Zone::Battlefield,
+                "{carrier:?} positive reach guard: the grant remains live for immediately-after settlement"
+            );
+            let contexts = state
+                .stack
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.kind,
+                        StackEntryKind::TriggeredAbility { ability, .. }
+                            if ability.trigger_definition_ref.as_ref() == Some(&ongoing_ref)
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                contexts.len(),
+                1,
+                "{carrier:?} the unchanged exact grant ref coalesces instead of creating a second context"
+            );
+            assert_eq!(
+                stack_trigger_event_count(&state, contexts[0].id),
+                2,
+                "{carrier:?} the coalesced exact ref retains its before and after all-origin observations"
+            );
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(
+                state.players[0].life, 21,
+                "{carrier:?} the one coalesced batched context resolves once while retaining both event-time occurrences"
+            );
+        }
+    }
+
+    // ChangeZone variant structurally inapplicable: homogeneous-destination owner invariant (lead adjudication); covered on BatchDelivery.
+    #[test]
+    fn batch_delivery_removed_grant_retains_only_its_pre_event_observation_through_save() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+
+        let recipient = make_creature(&mut state, PlayerId(0), "Removed grant recipient", 2, 2);
+        let provider = make_creature(&mut state, PlayerId(0), "Removed grant provider", 2, 2);
+        let mut granted =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        granted.batched = true;
+        let grant = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: recipient })
+            .modifications(vec![ContinuousModification::GrantTrigger {
+                trigger: Box::new(granted),
+            }]);
+        let provider_object = state.objects.get_mut(&provider).expect("provider exists");
+        provider_object.static_definitions.push(grant.clone());
+        std::sync::Arc::make_mut(&mut provider_object.base_static_definitions).push(grant);
+        state.layers_dirty.mark_full();
+        crate::game::layers::flush_layers(&mut state);
+        let removed_ref = state.objects[&recipient]
+            .trigger_definitions
+            .iter_all()
+            .find(|entry| entry.definition.batched)
+            .map(|entry| state.objects[&recipient].trigger_definition_ref(entry))
+            .expect("positive reach guard: the grant is live before its provider departs");
+
+        let entering = create_object(
+            &mut state,
+            CardId(91_584),
+            PlayerId(0),
+            "Removed-grant post-event member".to_string(),
+            Zone::Hand,
+        );
+        let entering_object = state
+            .objects
+            .get_mut(&entering)
+            .expect("entering member exists");
+        entering_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        entering_object.base_card_types = entering_object.card_types.clone();
+        install_moved_ordering_pause(&mut state, entering, Zone::Battlefield);
+
+        let mut events = Vec::new();
+        let requests = vec![
+            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                provider,
+                Zone::Hand,
+                ObjectId(91_581),
+            ),
+            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                entering,
+                Zone::Battlefield,
+                ObjectId(91_581),
+            ),
+        ];
+        assert!(matches!(
+            crate::game::zone_pipeline::move_objects_simultaneously(
+                &mut state,
+                requests,
+                &mut events,
+            ),
+            crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+        ));
+        assert_eq!(
+            state.objects[&provider].zone,
+            Zone::Hand,
+            "positive reach guard: the provider's battlefield departure is delivered before the ordering pause"
+        );
+        let pending = state
+            .pending_batch_deliveries
+            .as_ref()
+            .expect("positive reach guard: BatchDelivery retains the mixed-direction owner");
+        assert_eq!(
+            pending
+                .logical_zone_change_group
+                .all_origin_occurrences
+                .len(),
+            1,
+            "only the provider's immediately-before occurrence is retained before save"
+        );
+        assert!(
+            pending
+                .logical_zone_change_group
+                .immediately_before_batched_triggers
+                .iter()
+                .any(|latched| latched.definition_ref == removed_ref),
+            "the departing provider's grant is latched before the post-event member resumes"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+
+        let saved = serde_json::to_value(&state)
+            .expect("paused removed-grant BatchDelivery carrier serializes");
+        state = serde_json::from_value(saved)
+            .expect("paused removed-grant BatchDelivery carrier deserializes");
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("the real ordering choice resumes the saved BatchDelivery owner");
+
+        assert_eq!(
+            state.objects[&provider].zone,
+            Zone::Hand,
+            "positive reach guard: final layer evaluation no longer has the provider"
+        );
+        assert_ne!(
+            state.objects[&entering].zone,
+            Zone::Hand,
+            "positive reach guard: the later opposite-direction member completed its actual delivery"
+        );
+        let contexts = state
+            .stack
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if ability.trigger_definition_ref.as_ref() == Some(&removed_ref)
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts.len(),
+            1,
+            "the removed exact grant produces only its admitted pre-event context"
+        );
+        assert_eq!(
+            stack_trigger_event_count(&state, contexts[0].id),
+            1,
+            "the removed grant is not rediscovered for the later immediately-after occurrence"
+        );
+        resolve_stack_until_paused(&mut state);
+        assert_eq!(state.players[0].life, 21);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Matrix identity (e): expansion retains the provider definition's exact
+    /// base-slot occurrence.  Two byte-identical provider slots are not one
+    /// payload-deduplicated grant when the recipient later pauses mid-delivery.
+    #[test]
+    fn logical_zone_production_carriers_keep_expanded_provider_occurrences_distinct() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+            let host = make_creature(&mut state, PlayerId(0), "Expansion host", 2, 2);
+            let recipient = make_creature(&mut state, PlayerId(0), "Expansion recipient", 2, 2);
+            let provider = make_creature(&mut state, PlayerId(0), "Expansion provider", 2, 2);
+            let mut provider_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Hand)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            provider_trigger.batched = true;
+            state
+                .objects
+                .get_mut(&provider)
+                .expect("provider exists")
+                .install_trigger_base_definitions(std::sync::Arc::new(vec![
+                    provider_trigger.clone(),
+                    provider_trigger,
+                ]))
+                .expect("two provider base slots materialize");
+            let host_static = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                    source: TargetFilter::SpecificObject { id: provider },
+                }]);
+            let host_object = state.objects.get_mut(&host).expect("host exists");
+            host_object.static_definitions.push(host_static.clone());
+            std::sync::Arc::make_mut(&mut host_object.base_static_definitions).push(host_static);
+            state.layers_dirty.mark_full();
+            crate::game::layers::flush_layers(&mut state);
+            let mut expected_expanded_refs =
+                state.objects[&recipient]
+                    .trigger_definitions
+                    .iter_all()
+                    .filter(|entry| {
+                        entry.definition.batched
+                            && matches!(
+                            &entry.occurrence,
+                            crate::types::ability::TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                                ..
+                            }
+                        )
+                    })
+                    .map(|entry| state.objects[&recipient].trigger_definition_ref(entry))
+                    .collect::<Vec<_>>();
+            expected_expanded_refs.sort_unstable();
+            let expanded_grants = expected_expanded_refs.len();
+            assert_eq!(
+                expanded_grants, 2,
+                "{carrier:?} positive reach guard expands both provider base-slot occurrences"
+            );
+            state
+                .objects
+                .get_mut(&recipient)
+                .expect("recipient exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park the expanded-provider carrier".to_string()),
+                );
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                ObjectId(91_560),
+                &[recipient],
+                Zone::Hand,
+                &mut events,
+            );
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let saved =
+                serde_json::to_value(&state).expect("parked expanded-provider carrier serializes");
+            state = serde_json::from_value(saved)
+                .expect("parked expanded-provider carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume the expanded-provider carrier");
+
+            assert_eq!(
+                drain_order_triggers_with_identity(&mut state),
+                1,
+                "{carrier:?} distinct provider occurrences reach their normal APNAP ordering seam"
+            );
+            let contexts = state
+                .stack
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.kind,
+                        StackEntryKind::TriggeredAbility { ability, .. }
+                            if ability.trigger_definition_ref.as_ref()
+                                .is_some_and(|definition_ref| {
+                                    expected_expanded_refs.contains(definition_ref)
+                                })
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut placed_refs = contexts
+                .iter()
+                .filter_map(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility { ability, .. } => {
+                        ability.trigger_definition_ref.clone()
+                    }
+                    StackEntryKind::Spell { .. }
+                    | StackEntryKind::ActivatedAbility { .. }
+                    | StackEntryKind::KeywordAction { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            placed_refs.sort_unstable();
+            assert_eq!(
+                placed_refs,
+                expected_expanded_refs,
+                "{carrier:?} each expanded provider occurrence must retain its exact definition reference through placement"
+            );
+            assert!(
+                contexts
+                    .iter()
+                    .all(|entry| stack_trigger_event_count(&state, entry.id) == 1),
+                "{carrier:?} positive reach guard proves each placed expanded grant observed the recipient move"
+            );
+            let life_before_resolution = state.players[0].life;
+            resolve_stack_until_paused(&mut state);
+            assert!(
+                state.players[0].life >= life_before_resolution + 2,
+                "{carrier:?} the two exact expanded contexts both resolve their gain-life effects"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// Matrix identity (d): after a producer is genuinely retired by a layer
+    /// pass, reintroducing byte-identical payload allocates a new generation;
+    /// the subsequent saved carrier observes that fresh occurrence, never the
+    /// retired one.
+    #[test]
+    fn logical_zone_production_carriers_assign_a_fresh_generation_to_a_regrant() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+            let grantor = make_creature(&mut state, PlayerId(0), "Regrant source", 2, 2);
+            let recipient = make_creature(&mut state, PlayerId(0), "Regrant recipient", 2, 2);
+            let mut granted = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Hand)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            granted.batched = true;
+            let grant = StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(granted),
+                }]);
+            let grantor_object = state.objects.get_mut(&grantor).expect("grantor exists");
+            grantor_object.static_definitions.push(grant.clone());
+            std::sync::Arc::make_mut(&mut grantor_object.base_static_definitions)
+                .push(grant.clone());
+            state.layers_dirty.mark_full();
+            crate::game::layers::flush_layers(&mut state);
+            let retired_occurrence = state.objects[&recipient]
+                .trigger_definitions
+                .iter_all()
+                .find(|entry| entry.definition.batched)
+                .expect("initial grant materializes")
+                .occurrence
+                .clone();
+
+            let grantor_object = state.objects.get_mut(&grantor).expect("grantor exists");
+            grantor_object.static_definitions.clear();
+            std::sync::Arc::make_mut(&mut grantor_object.base_static_definitions).clear();
+            state.layers_dirty.mark_full();
+            crate::game::layers::flush_layers(&mut state);
+            assert!(
+                state.objects[&recipient]
+                    .trigger_definitions
+                    .iter_all()
+                    .all(|entry| !entry.definition.batched),
+                "{carrier:?} positive reach guard retires the original producer before re-grant"
+            );
+
+            let grantor_object = state.objects.get_mut(&grantor).expect("grantor exists");
+            grantor_object.static_definitions.push(grant.clone());
+            std::sync::Arc::make_mut(&mut grantor_object.base_static_definitions).push(grant);
+            state.layers_dirty.mark_full();
+            crate::game::layers::flush_layers(&mut state);
+            let fresh_occurrence = state.objects[&recipient]
+                .trigger_definitions
+                .iter_all()
+                .find(|entry| entry.definition.batched)
+                .expect("re-grant materializes")
+                .occurrence
+                .clone();
+            assert_ne!(
+                fresh_occurrence, retired_occurrence,
+                "{carrier:?} a later byte-identical re-grant must receive a fresh generation"
+            );
+            state
+                .objects
+                .get_mut(&recipient)
+                .expect("recipient exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park the fresh-regrant carrier".to_string()),
+                );
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                ObjectId(91_570),
+                &[recipient],
+                Zone::Hand,
+                &mut events,
+            );
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let saved =
+                serde_json::to_value(&state).expect("parked fresh-regrant carrier serializes");
+            state =
+                serde_json::from_value(saved).expect("parked fresh-regrant carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume the fresh-regrant carrier");
+            let contexts = state
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == recipient)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                contexts.len(),
+                1,
+                "{carrier:?} only the fresh re-grant's admitted occurrence reaches stack placement"
+            );
+            assert_eq!(stack_trigger_event_count(&state, contexts[0].id), 1);
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(state.players[0].life, 21);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    #[test]
+    fn logical_zone_production_carriers_latch_co_departing_and_surviving_suppressors() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            for co_departing in [false, true] {
+                let mut state = setup();
+                state.active_player = PlayerId(0);
+                state.priority_player = PlayerId(0);
+                state.players[0].life = 20;
+
+                let suppressor = add_suppress_triggers_permanent(
+                    &mut state,
+                    PlayerId(0),
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    vec![SuppressedTriggerEvent::Dies],
+                );
+                let suppressor_static = state.objects[&suppressor]
+                    .static_definitions
+                    .first()
+                    .expect("suppressor has its static definition")
+                    .clone();
+                let suppressor_object = state
+                    .objects
+                    .get_mut(&suppressor)
+                    .expect("suppressor exists");
+                std::sync::Arc::make_mut(&mut suppressor_object.base_static_definitions)
+                    .push(suppressor_static);
+                let victim =
+                    add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), false);
+                state
+                    .objects
+                    .get_mut(&victim)
+                    .expect("victim exists")
+                    .materialize_base_trigger_definitions();
+                assert!(
+                    state.objects[&victim]
+                        .trigger_definitions
+                        .iter_all()
+                        .any(|entry| !entry.definition.batched),
+                    "{carrier:?} co_departing={co_departing}: positive reach guard materializes the victim trigger before suppression"
+                );
+                state
+                    .objects
+                    .get_mut(&victim)
+                    .expect("victim exists")
+                    .replacement_definitions
+                    .push(
+                        ReplacementDefinition::new(
+                            crate::types::replacements::ReplacementEvent::Moved,
+                        )
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park the suppressor regression carrier".to_string()),
+                    );
+                let subjects = if co_departing {
+                    vec![victim, suppressor]
+                } else {
+                    vec![victim]
+                };
+
+                let mut events = Vec::new();
+                resolve_zone_production_carrier(
+                    &mut state,
+                    carrier,
+                    ObjectId(91_600),
+                    &subjects,
+                    Zone::Graveyard,
+                    &mut events,
+                );
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "{carrier:?} co_departing={co_departing}: positive reach guard reaches the saved replacement"
+                );
+                let logical_group = match carrier {
+                    LogicalZoneProductionCarrier::ChangeZone => {
+                        &state
+                            .pending_change_zone_iteration
+                            .as_ref()
+                            .expect("ChangeZone suppressor owner is parked")
+                            .logical_zone_change_group
+                    }
+                    LogicalZoneProductionCarrier::BatchDelivery => {
+                        &state
+                            .pending_batch_deliveries
+                            .as_ref()
+                            .expect("BatchDelivery suppressor owner is parked")
+                            .logical_zone_change_group
+                    }
+                };
+                assert!(
+                    logical_group.immediately_before_latched
+                        && logical_group.immediately_before_suppress_triggers.len() == 1,
+                    "{carrier:?} co_departing={co_departing}: positive reach guard preserves the event-time suppressor latch"
+                );
+                let saved = serde_json::to_value(&state)
+                    .expect("parked suppressor production carrier serializes");
+                state = serde_json::from_value(saved)
+                    .expect("parked suppressor production carrier deserializes");
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement { index: 0 },
+                )
+                .expect("resume the suppressor production carrier");
+
+                assert_eq!(
+                    state.objects[&victim].zone,
+                    Zone::Graveyard,
+                    "{carrier:?} co_departing={co_departing}: positive reach guard records the actual dies event"
+                );
+                assert!(
+                    state.deferred_triggers.is_empty(),
+                    "{carrier:?} co_departing={co_departing}: the event-time suppressor must prevent the victim trigger"
+                );
+                assert_eq!(
+                    state.players[0].life, 20,
+                    "{carrier:?} co_departing={co_departing}: the suppressed trigger must not reach resolution"
+                );
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            }
+
+            let mut control = setup();
+            control.active_player = PlayerId(0);
+            control.priority_player = PlayerId(0);
+            control.players[0].life = 20;
+            let control_victim =
+                add_battlefield_or_graveyard_dies_observer(&mut control, PlayerId(0), false);
+            control
+                .objects
+                .get_mut(&control_victim)
+                .expect("control victim exists")
+                .materialize_base_trigger_definitions();
+            control
+                .objects
+                .get_mut(&control_victim)
+                .expect("control victim exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park the unsuppressed positive control".to_string()),
+                );
+            let mut control_events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut control,
+                carrier,
+                ObjectId(91_601),
+                &[control_victim],
+                Zone::Graveyard,
+                &mut control_events,
+            );
+            assert!(
+                matches!(control.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} unsuppressed control reaches the same saved replacement seam"
+            );
+            let saved =
+                serde_json::to_value(&control).expect("parked unsuppressed control serializes");
+            control =
+                serde_json::from_value(saved).expect("parked unsuppressed control deserializes");
+            crate::game::engine::apply_as_current(
+                &mut control,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume unsuppressed control");
+            assert_eq!(
+                control
+                    .stack
+                    .iter()
+                    .filter(|entry| entry.source_id == control_victim)
+                    .count(),
+                1,
+                "{carrier:?} unsuppressed positive control proves the victim trigger reaches placement"
+            );
+            resolve_stack_until_paused(&mut control);
+            assert_eq!(
+                control.players[0].life, 21,
+                "{carrier:?} unsuppressed positive control proves the negative branch did not pass through an unreachable trigger"
+            );
+            assert!(matches!(control.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    #[test]
+    fn logical_zone_production_carriers_admit_an_entering_suppressor_only_after_delivery() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+
+            let entering_creature = create_object(
+                &mut state,
+                CardId(91_610),
+                PlayerId(0),
+                "Entering trigger subject".to_string(),
+                Zone::Hand,
+            );
+            let entering_object = state
+                .objects
+                .get_mut(&entering_creature)
+                .expect("entering creature exists");
+            entering_object
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            entering_object.base_card_types = entering_object.card_types.clone();
+            entering_object.replacement_definitions.push(
+                ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Park the entering-suppressor carrier".to_string()),
+            );
+
+            // Request the surviving observer to remain on the battlefield with
+            // the logical group. Its exact post-event context must therefore be
+            // admitted at settlement, when the simultaneous suppressor is
+            // finally functioning, rather than being an outsider collected in
+            // the first delivery segment.
+            let observer = add_etb_observer(&mut state, PlayerId(0));
+            let mut observer_trigger = state.objects[&observer]
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .expect("ETB observer has its trigger")
+                .definition
+                .clone();
+            observer_trigger.valid_card = Some(TargetFilter::SpecificObject {
+                id: entering_creature,
+            });
+            let observer_object = state
+                .objects
+                .get_mut(&observer)
+                .expect("ETB observer exists");
+            std::sync::Arc::make_mut(&mut observer_object.base_trigger_definitions)
+                .push(observer_trigger);
+            observer_object.materialize_base_trigger_definitions();
+            assert!(
+                state.objects[&observer]
+                    .trigger_definitions
+                    .iter_all()
+                    .any(|entry| !entry.definition.batched),
+                "{carrier:?} positive reach guard materializes the ETB observer before suppression"
+            );
+            let entering_suppressor = add_suppress_triggers_permanent(
+                &mut state,
+                PlayerId(0),
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![SuppressedTriggerEvent::EntersBattlefield],
+            );
+            let suppressor_static = state.objects[&entering_suppressor]
+                .static_definitions
+                .first()
+                .expect("entering suppressor has its static definition")
+                .clone();
+            let suppressor_object = state
+                .objects
+                .get_mut(&entering_suppressor)
+                .expect("entering suppressor exists");
+            std::sync::Arc::make_mut(&mut suppressor_object.base_static_definitions)
+                .push(suppressor_static);
+            let mut prelude_events = Vec::new();
+            crate::game::zones::move_to_zone(
+                &mut state,
+                entering_suppressor,
+                Zone::Hand,
+                &mut prelude_events,
+            );
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                ObjectId(91_611),
+                &[entering_creature, observer, entering_suppressor],
+                Zone::Battlefield,
+                &mut events,
+            );
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} positive reach guard parks the simultaneous entry"
+            );
+            let logical_group = match carrier {
+                LogicalZoneProductionCarrier::ChangeZone => {
+                    &state
+                        .pending_change_zone_iteration
+                        .as_ref()
+                        .expect("ChangeZone entering-suppressor owner is parked")
+                        .logical_zone_change_group
+                }
+                LogicalZoneProductionCarrier::BatchDelivery => {
+                    &state
+                        .pending_batch_deliveries
+                        .as_ref()
+                        .expect("BatchDelivery entering-suppressor owner is parked")
+                        .logical_zone_change_group
+                }
+            };
+            assert!(
+                logical_group.immediately_before_latched
+                    && logical_group.immediately_before_suppress_triggers.is_empty(),
+                "{carrier:?} positive reach guard proves the entering suppressor was not fabricated into the pre-event latch"
+            );
+            assert!(
+                logical_group
+                .prospective_battlefield_members
+                .iter()
+                .any(|member| member.identity.object_id == observer),
+                "{carrier:?} positive reach guard retains the exact surviving observer for post-event settlement"
+            );
+            let saved = serde_json::to_value(&state)
+                .expect("parked entering-suppressor carrier serializes");
+            state = serde_json::from_value(saved)
+                .expect("parked entering-suppressor carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume the entering-suppressor carrier");
+
+            assert!(
+                [entering_creature, observer, entering_suppressor]
+                    .iter()
+                    .all(|id| state.objects[id].zone == Zone::Battlefield),
+                "{carrier:?} positive reach guard delivers both entrants and retains the requested observer"
+            );
+            assert!(
+                state.deferred_triggers.is_empty(),
+                "{carrier:?} post-event suppression from the entering permanent must prevent the ETB observer"
+            );
+            assert!(
+                state.stack.iter().all(|entry| entry.source_id != observer),
+                "{carrier:?} post-event suppression must prevent the ETB observer from reaching stack placement"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+            let mut control = setup();
+            control.active_player = PlayerId(0);
+            control.priority_player = PlayerId(0);
+            let control_observer = add_etb_observer(&mut control, PlayerId(0));
+            let control_trigger = control.objects[&control_observer]
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .expect("control observer has its ETB trigger")
+                .definition
+                .clone();
+            let control_observer_object = control
+                .objects
+                .get_mut(&control_observer)
+                .expect("control observer exists");
+            std::sync::Arc::make_mut(&mut control_observer_object.base_trigger_definitions)
+                .push(control_trigger);
+            control_observer_object.materialize_base_trigger_definitions();
+            let control_subject = create_object(
+                &mut control,
+                CardId(91_612),
+                PlayerId(0),
+                "Unsuppressed ETB subject".to_string(),
+                Zone::Hand,
+            );
+            let control_subject_object = control
+                .objects
+                .get_mut(&control_subject)
+                .expect("control subject exists");
+            control_subject_object
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            control_subject_object.base_card_types = control_subject_object.card_types.clone();
+            control_subject_object.replacement_definitions.push(
+                ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Park the unsuppressed ETB control".to_string()),
+            );
+            let mut control_events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut control,
+                carrier,
+                ObjectId(91_613),
+                &[control_subject],
+                Zone::Battlefield,
+                &mut control_events,
+            );
+            assert!(
+                matches!(control.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} unsuppressed ETB control reaches the same saved replacement seam"
+            );
+            let saved =
+                serde_json::to_value(&control).expect("parked unsuppressed ETB control serializes");
+            control = serde_json::from_value(saved)
+                .expect("parked unsuppressed ETB control deserializes");
+            crate::game::engine::apply_as_current(
+                &mut control,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume unsuppressed ETB control");
+            assert_eq!(
+                control
+                    .stack
+                    .iter()
+                    .filter(|entry| entry.source_id == control_observer)
+                    .count(),
+                1,
+                "{carrier:?} unsuppressed ETB control proves the negative suppression assertion reached a live observer"
+            );
+        }
+    }
+
+    /// A prospective battlefield member can remain when its announced move is a
+    /// no-op, but it must still use its exact post-event context to observe both
+    /// the already-delivered and post-pause entries in the same owner.
+    #[test]
+    fn logical_zone_production_carriers_keep_a_remained_member_observing_early_and_later_events() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+
+            let remained = make_creature(&mut state, PlayerId(0), "Remained observer", 2, 2);
+            let observer_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            let remained_object = state.objects.get_mut(&remained).expect("observer exists");
+            remained_object
+                .trigger_definitions
+                .push(observer_trigger.clone());
+            std::sync::Arc::make_mut(&mut remained_object.base_trigger_definitions)
+                .push(observer_trigger);
+            remained_object.materialize_base_trigger_definitions();
+
+            let first = make_creature(&mut state, PlayerId(0), "Early entrant", 2, 2);
+            let paused = make_creature(&mut state, PlayerId(0), "Later entrant", 2, 2);
+            let mut prelude_events = Vec::new();
+            for object_id in [first, paused] {
+                crate::game::zones::move_to_zone(
+                    &mut state,
+                    object_id,
+                    Zone::Hand,
+                    &mut prelude_events,
+                );
+            }
+            state
+                .objects
+                .get_mut(&paused)
+                .expect("later entrant exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park after the first observed entry".to_string()),
+                );
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                ObjectId(91_620),
+                &[remained, first, paused],
+                Zone::Battlefield,
+                &mut events,
+            );
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} positive reach guard parks after the first real entry"
+            );
+            let saved =
+                serde_json::to_value(&state).expect("parked remained-member carrier serializes");
+            state =
+                serde_json::from_value(saved).expect("parked remained-member carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume the remained-member carrier");
+
+            let observed_contexts = state
+                .deferred_triggers
+                .iter()
+                .filter(|context| context.pending.source_id == remained)
+                .count()
+                + state
+                    .stack
+                    .iter()
+                    .filter(|entry| entry.source_id == remained)
+                    .count();
+            assert_eq!(
+                observed_contexts, 2,
+                "{carrier:?} the same remained incarnation must observe the early and later entry exactly once"
+            );
+            assert!(
+                [first, paused]
+                    .iter()
+                    .all(|id| state.objects[id].zone == Zone::Battlefield),
+                "{carrier:?} positive reach guard completes both actual entries"
+            );
+            if !state.deferred_triggers.is_empty() {
+                let pending = std::mem::take(&mut state.deferred_triggers);
+                let mut placement_events = Vec::new();
+                assert!(
+                    process_collected_triggers_with_delayed_phase_events(
+                        &mut state,
+                        pending,
+                        &[],
+                        &mut placement_events,
+                    )
+                    .fired,
+                    "{carrier:?} observed contexts reach placement"
+                );
+                let _ = drain_order_triggers_with_identity(&mut state);
+            }
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(
+                state.players[0].life, 22,
+                "{carrier:?} both observed entry triggers resolve from the remained member's post-event context"
+            );
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    /// The observer leaves in the first delivery and is then eligible through
+    /// its graveyard trigger zone while a later member is parked.  The owner
+    /// must reserve it as an observer candidate, while still admitting its own
+    /// event-subject trigger exactly once at settlement.
+    #[test]
+    fn logical_zone_production_carriers_preserve_an_early_battlefield_graveyard_observer() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+            let observer =
+                add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), false);
+            state
+                .objects
+                .get_mut(&observer)
+                .expect("observer exists")
+                .materialize_base_trigger_definitions();
+            let observer_definition_ref = state.objects[&observer]
+                .trigger_definitions
+                .iter_all()
+                .next()
+                .map(|entry| state.objects[&observer].trigger_definition_ref(entry))
+                .expect("early observer materializes its exact source definition");
+            let early_subject = make_creature(&mut state, PlayerId(0), "Early subject", 2, 2);
+            let paused_subject =
+                make_creature(&mut state, PlayerId(0), "Paused later subject", 2, 2);
+            state
+                .objects
+                .get_mut(&paused_subject)
+                .expect("paused subject exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .description("Park after the observer has left".to_string()),
+                );
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                ObjectId(91_630),
+                &[observer, early_subject, paused_subject],
+                Zone::Graveyard,
+                &mut events,
+            );
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} positive reach guard parks after the observer is in its off-zone trigger zone"
+            );
+            assert_eq!(
+                state.objects[&observer].zone,
+                Zone::Graveyard,
+                "{carrier:?} positive reach guard moves the observer before the later segment"
+            );
+            let saved =
+                serde_json::to_value(&state).expect("parked early-observer carrier serializes");
+            state =
+                serde_json::from_value(saved).expect("parked early-observer carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("resume the early-observer carrier");
+
+            let mut observed_subjects = state
+                .stack
+                .iter()
+                .filter_map(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility {
+                        ability,
+                        trigger_event: Some(GameEvent::ZoneChanged { object_id, .. }),
+                        ..
+                    } if ability.trigger_definition_ref.as_ref()
+                        == Some(&observer_definition_ref) =>
+                    {
+                        Some(*object_id)
+                    }
+                    StackEntryKind::TriggeredAbility { .. }
+                    | StackEntryKind::Spell { .. }
+                    | StackEntryKind::ActivatedAbility { .. }
+                    | StackEntryKind::KeywordAction { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            observed_subjects.sort_unstable();
+            let mut expected_subjects = vec![observer, early_subject, paused_subject];
+            expected_subjects.sort_unstable();
+            assert_eq!(
+                observed_subjects,
+                expected_subjects,
+                "{carrier:?} the record-owned observer must retain exactly its own and both co-departure occurrences"
+            );
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(state.players[0].life, 23);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(
+                [observer, early_subject, paused_subject]
+                    .iter()
+                    .all(|id| state.objects[id].zone == Zone::Graveyard),
+                "{carrier:?} positive reach guard completes every planned departure"
+            );
+        }
+    }
+
+    #[test]
+    fn logical_zone_production_carriers_retain_redirected_zone_occurrences() {
+        for carrier in [
+            LogicalZoneProductionCarrier::ChangeZone,
+            LogicalZoneProductionCarrier::BatchDelivery,
+        ] {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.players[0].life = 20;
+            let observer = make_creature(&mut state, PlayerId(0), "Redirect observer", 2, 2);
+            let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Exile)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            trigger.batched = true;
+            let observer_object = state.objects.get_mut(&observer).expect("observer exists");
+            observer_object.trigger_definitions.push(trigger.clone());
+            std::sync::Arc::make_mut(&mut observer_object.base_trigger_definitions).push(trigger);
+            observer_object.materialize_base_trigger_definitions();
+            let redirected = make_creature(&mut state, PlayerId(0), "Redirected subject", 2, 2);
+            state
+                .objects
+                .get_mut(&redirected)
+                .expect("redirected subject exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .destination_zone(Zone::Graveyard)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .execute(AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::ChangeZone {
+                                origin: None,
+                                destination: Zone::Exile,
+                                target: TargetFilter::SelfRef,
+                                owner_library: false,
+                                enter_transformed: false,
+                                enters_under: None,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                                enters_attacking: false,
+                                up_to: false,
+                                enter_with_counters: vec![],
+                                conditional_enter_with_counters: vec![],
+                                face_down_profile: None,
+                                enters_modified_if: None,
+                            },
+                        ))
+                        .description("Redirect the production move to exile".to_string()),
+                );
+
+            let mut events = Vec::new();
+            resolve_zone_production_carrier(
+                &mut state,
+                carrier,
+                ObjectId(91_640),
+                &[redirected],
+                Zone::Graveyard,
+                &mut events,
+            );
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "{carrier:?} positive reach guard reaches the destination-changing replacement"
+            );
+            let saved = serde_json::to_value(&state).expect("parked redirected carrier serializes");
+            state = serde_json::from_value(saved).expect("parked redirected carrier deserializes");
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .expect("accept the redirect and resume the exact owner");
+
+            assert_eq!(
+                state.objects[&redirected].zone,
+                Zone::Exile,
+                "{carrier:?} positive reach guard proves the requested graveyard move was redirected"
+            );
+            let contexts = state
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == observer)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                contexts.len(),
+                1,
+                "{carrier:?} the observer places the actual redirected occurrence once"
+            );
+            assert_eq!(stack_trigger_event_count(&state, contexts[0].id), 1);
+            resolve_stack_until_paused(&mut state);
+            assert_eq!(state.players[0].life, 21);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
     }
 
     /// CR 603.2 performance benchmark: replay the production Scute Swarm
