@@ -3399,6 +3399,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             description: Some("Assassin spells you cast have freerunning {B}{B}.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         };
         obj.static_definitions = vec![def].into();
@@ -11889,6 +11890,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 description: None,
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             }]
             .into();
@@ -14468,6 +14470,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             ),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         };
         obj.static_definitions = vec![def].into();
@@ -14584,6 +14587,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
             ),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         }]
         .into();
@@ -30255,6 +30259,208 @@ fn pithing_needle_blocks_named_non_mana_ability_but_not_mana_ability() {
         !is_blocked_by_cant_be_activated(&state, PlayerId(1), other, &other_ability),
         "Pithing Needle must NOT block sources whose name doesn't match the chosen name"
     );
+}
+
+/// F2.4 drift pin (CR 602.5): the bool enforcement shim and the source collector
+/// share one predicate, so `is_blocked_by_cant_be_activated` MUST agree with
+/// `!cant_be_activated_sources(..).is_empty()` for every input. Covers a blocked
+/// case, the CR 605.1a mana-exempt case, and an unmatched-name case; also pins the
+/// multi-source count (two Needles → both carriers). REVERT-FAIL: diverging either
+/// driver's predicate flips one side while the other stays.
+#[test]
+fn cant_be_activated_bool_and_sources_drivers_agree() {
+    use crate::types::ability::ChosenAttribute;
+    let mut state = setup_game_at_main_phase();
+
+    // Two Pithing Needles, both naming "Llanowar Elves".
+    let mut needles = Vec::new();
+    for card in [CardId(0x9EED1), CardId(0x9EED2)] {
+        let needle = create_object(
+            &mut state,
+            card,
+            PlayerId(0),
+            "Pithing Needle".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&needle).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.entered_battlefield_turn = Some(0);
+        obj.chosen_attributes
+            .push(ChosenAttribute::CardName("Llanowar Elves".to_string()));
+        obj.static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeActivated {
+                who: ProhibitionScope::AllPlayers,
+                source_filter: TargetFilter::HasChosenName,
+                exemption: ActivationExemption::ManaAbilities,
+                kind: None,
+            }));
+        needles.push(needle);
+    }
+
+    let elves = create_object(
+        &mut state,
+        CardId(0xE17E5),
+        PlayerId(1),
+        "Llanowar Elves".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&elves).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.entered_battlefield_turn = Some(0);
+        Arc::make_mut(&mut obj.abilities).push(make_tap_for_green_mana_ability());
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+            .cost(crate::types::ability::AbilityCost::Tap),
+        );
+    }
+    let mana_ability = state.objects[&elves].abilities[0].clone();
+    let non_mana_ability = state.objects[&elves].abilities[1].clone();
+
+    // Blocked case: bool true ⟺ sources non-empty; BOTH needles surface.
+    let bool_blocked =
+        is_blocked_by_cant_be_activated(&state, PlayerId(1), elves, &non_mana_ability);
+    let mut src_blocked = cant_be_activated_sources(&state, PlayerId(1), elves, &non_mana_ability);
+    assert!(bool_blocked);
+    assert_eq!(bool_blocked, !src_blocked.is_empty());
+    src_blocked.sort_unstable();
+    let mut want = needles.clone();
+    want.sort_unstable();
+    assert_eq!(
+        src_blocked, want,
+        "both Needles are recorded, sorted + deduped"
+    );
+
+    // CR 605.1a exempt case: bool false ⟺ sources empty.
+    let bool_exempt = is_blocked_by_cant_be_activated(&state, PlayerId(1), elves, &mana_ability);
+    let src_exempt = cant_be_activated_sources(&state, PlayerId(1), elves, &mana_ability);
+    assert!(!bool_exempt);
+    assert_eq!(bool_exempt, !src_exempt.is_empty());
+
+    // Unmatched-name case: bool false ⟺ sources empty.
+    let other = add_artifact_with_activated_ability(&mut state, PlayerId(1));
+    let other_ability = state.objects[&other].abilities[0].clone();
+    let bool_other = is_blocked_by_cant_be_activated(&state, PlayerId(1), other, &other_ability);
+    let src_other = cant_be_activated_sources(&state, PlayerId(1), other, &other_ability);
+    assert!(!bool_other);
+    assert_eq!(bool_other, !src_other.is_empty());
+}
+
+/// F2.4 drift pin (CR 602.5): the `ProhibitActivity::ActivateAbilities` bool shim
+/// and source collector share one per-restriction predicate. REVERT-FAIL: diverge
+/// either and one side flips.
+#[test]
+fn cant_activate_abilities_bool_and_sources_drivers_agree() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(0xA8E2),
+        PlayerId(1),
+        "Abeyance Source".to_string(),
+        Zone::Exile,
+    );
+    state.restrictions.push(GameRestriction::ProhibitActivity {
+        source,
+        affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+        expiry: RestrictionExpiry::EndOfTurn,
+        activity: ProhibitedActivity::ActivateAbilities {
+            exemption: ActivationExemption::ManaAbilities,
+            only_tag: None,
+        },
+    });
+
+    let non_mana = AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Activated,
+        crate::types::ability::Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: crate::types::ability::TargetFilter::Controller,
+        },
+    )
+    .cost(crate::types::ability::AbilityCost::Tap);
+    let mana = make_tap_for_green_mana_ability();
+
+    // Affected player, non-mana ability: blocked; single source.
+    let bool_blocked = is_blocked_by_cant_activate_abilities(&state, PlayerId(0), &non_mana);
+    let src_blocked = cant_activate_abilities_sources(&state, PlayerId(0), &non_mana);
+    assert!(bool_blocked);
+    assert_eq!(bool_blocked, !src_blocked.is_empty());
+    assert_eq!(src_blocked, vec![source]);
+
+    // CR 605.1a exempt mana ability: not blocked.
+    let bool_exempt = is_blocked_by_cant_activate_abilities(&state, PlayerId(0), &mana);
+    let src_exempt = cant_activate_abilities_sources(&state, PlayerId(0), &mana);
+    assert!(!bool_exempt);
+    assert_eq!(bool_exempt, !src_exempt.is_empty());
+
+    // Unaffected player: not blocked.
+    let bool_other = is_blocked_by_cant_activate_abilities(&state, PlayerId(1), &non_mana);
+    let src_other = cant_activate_abilities_sources(&state, PlayerId(1), &non_mana);
+    assert!(!bool_other);
+    assert_eq!(bool_other, !src_other.is_empty());
+}
+
+/// F2.4 drift pin (CR 602.5 + CR 117.1b): the `CantActivateDuring` bool shim
+/// (`is_blocked_by_cant_activate_during`) and its source collector
+/// (`cant_activate_during_sources`) consult one shared predicate
+/// (`cant_activate_during_static_hits`), so they MUST agree for every input.
+/// Covers the three distinct predicate branches: (a) an affected opponent whose
+/// turn condition is satisfied (blocked, single carrier), (b) the timing/turn
+/// gate exempting an affected player on their own turn (CR 102.1), and (c) the
+/// scope gate exempting an unaffected player (the source controller, who is not
+/// among "opponents"). REVERT-FAIL: diverging either driver's predicate flips one
+/// side while the other stays.
+#[test]
+fn cant_activate_during_bool_and_sources_drivers_agree() {
+    let mut state = setup_game_at_main_phase();
+    let p0 = PlayerId(0);
+    let p1 = PlayerId(1);
+    // City-of-Solitude-class static on P0's battlefield, scoped to P0's opponents
+    // so the scope gate distinguishes affected (P1) from unaffected (P0) players.
+    let source = add_cant_activate_during_permanent(
+        &mut state,
+        p0,
+        ProhibitionScope::Opponents,
+        CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
+        ActivationExemption::None,
+    );
+    let ability = AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Activated,
+        crate::types::ability::Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .cost(crate::types::ability::AbilityCost::Tap);
+
+    // (a) Affected opponent, not their turn: bool true ⟺ sources non-empty, and
+    // the single carrier surfaces. active=P0, activator=P1.
+    state.active_player = p0;
+    let bool_blocked = is_blocked_by_cant_activate_during(&state, p1, &ability);
+    let src_blocked = cant_activate_during_sources(&state, p1, &ability);
+    assert!(bool_blocked);
+    assert_eq!(bool_blocked, !src_blocked.is_empty());
+    assert_eq!(src_blocked, vec![source]);
+
+    // (b) CR 102.1 timing gate exempts: affected player on their own turn.
+    // active=P1, activator=P1 → bool false ⟺ sources empty.
+    state.active_player = p1;
+    let bool_own_turn = is_blocked_by_cant_activate_during(&state, p1, &ability);
+    let src_own_turn = cant_activate_during_sources(&state, p1, &ability);
+    assert!(!bool_own_turn);
+    assert_eq!(bool_own_turn, !src_own_turn.is_empty());
+
+    // (c) Scope gate exempts an unaffected player: the source controller (P0) is
+    // not among "opponents". active=P1, activator=P0 → bool false ⟺ sources empty.
+    let bool_unaffected = is_blocked_by_cant_activate_during(&state, p0, &ability);
+    let src_unaffected = cant_activate_during_sources(&state, p0, &ability);
+    assert!(!bool_unaffected);
+    assert_eq!(bool_unaffected, !src_unaffected.is_empty());
 }
 
 // === CR 119.8: pay-life cost under CantLoseLife ===

@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 176,
+      "date": "2026-07-18",
+      "title": "Attack requirements are now enforced",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "ai",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Angel's Grace, Opposition Agent, Gideon of the Trials, There Are No Permanents, Jaws of Defeat, and Winnowing join the supported card pool\n• Arcum's Weathervane and Thermal Flux can now remove the snow supertype, while Ward of Bones and The Immortal Sun enforce their printed activation and casting limits\n• Mizzix's Mastery now copies and lets you cast the right cards, including overload's self-exile; Hit the Mother Lode and Comeuppance also resolve their linked effects correctly\n• Conjure effects that put a card among the top N cards of a library now choose a random position in that window\n\n🛠️ Cards That Now Work Right\n• Sun Droplet no longer offers a counter-removal choice when no removable counter exists, so its \"if you do\" life gain cannot fire from nothing\n• Deep-Cavern Bat, Atraxa, Grand Unifier, Invoke Calamity, Shigeki, Jukai Visionary, Field of Ruin, and Worldsoul's Rage now retain their legal targets and finish their resolution choices correctly\n• Tithe Taker now taxes opponents' nonmana activated abilities on your turn; Eater of Virtue and Urborg Scavengers grant each exiled card's actual keywords independently\n• The Boulder, Ready to Rumble, Azor's Gateway, Squirrel Girl, Ragavan, Malcolm, Keen-Eyed Navigator, Kitt Kanto, Mystic Reflection, and Triple Triad now follow their printed abilities\n• Inline Equipment tokens now receive their unquoted equip abilities, and double-faced-card searches keep the front face first\n\n⚔️ Combat & Gameplay\n• Attack declarations are now engine-validated against every applicable requirement, including goad and \"must attack\" effects; the AI follows the same rules and combat taxes never create extra requirements\n• Zone changes and replacement effects preserve the right object, target, and timing through chained resolutions, including delayed returns, copy effects, and simultaneous deaths\n• Prevention effects such as Comeuppance now track the correct damage source and reflect each prevented combat hit correctly\n\n🤖 AI\n• Every search preset now uses the same full-information search model, avoiding the old case where Medium could search deeper than harder presets\n• Very Hard games with an unbounded card pool avoid duplicating the full card database across workers, and safely fall back to one worker if a subset rebuild fails\n\n🖥️ Interface\n• A failed lazy-loaded update no longer traps the game in an endless reload loop; after two retries, the client stops, explains the update failure, and captures diagnostic details",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1528209706773119167"
+    },
+    {
       "id": 175,
       "date": "2026-07-17",
       "title": "Oathbreaker format arrives",

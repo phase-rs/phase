@@ -1047,6 +1047,34 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// CR 306: Make this card a planeswalker with a printed loyalty number.
+    /// If the object is already on the battlefield, mirror the printed loyalty
+    /// into counters to model a pre-existing planeswalker fixture.
+    pub fn as_planeswalker_with_loyalty(&mut self, subtype: &str, loyalty: u32) -> &mut Self {
+        let obj = self.obj();
+        obj.card_types.core_types.retain(|t| {
+            !matches!(
+                t,
+                CoreType::Creature | CoreType::Instant | CoreType::Sorcery
+            )
+        });
+        if !obj.card_types.core_types.contains(&CoreType::Planeswalker) {
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+        }
+        obj.card_types.subtypes = vec![subtype.to_string()];
+        obj.power = None;
+        obj.toughness = None;
+        obj.base_power = None;
+        obj.base_toughness = None;
+        obj.loyalty = Some(loyalty);
+        obj.base_loyalty = Some(loyalty);
+        if obj.zone == Zone::Battlefield {
+            obj.counters.insert(CounterType::Loyalty, loyalty);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     /// Add the Legendary supertype (CR 205.4a: a card's supertypes are printed
     /// on the type line; CR 205.4d: a permanent with the legendary supertype is
     /// subject to the "legend rule" state-based action).

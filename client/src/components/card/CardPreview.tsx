@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
+import type { AbilityBlockKind, ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel, loyaltyBadge, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -31,6 +31,17 @@ import {
   buildPTSources,
   formatPTDelta,
 } from "../../viewmodel/attribution.ts";
+
+/**
+ * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
+ * display formatting — no game logic. Kept exhaustive so a new kind is a
+ * compile error until a key is added.
+ */
+const ABILITY_BLOCK_REASON_KEY: Record<AbilityBlockKind, string> = {
+  CantBeActivated: "abilityBlock.cantBeActivated",
+  CantActivateDuring: "abilityBlock.cantActivateDuring",
+  Prohibited: "abilityBlock.prohibited",
+};
 
 let lastPointerPosition: { x: number; y: number } | null = null;
 
@@ -1002,6 +1013,42 @@ function CardInfoPanel({
               />
             ),
           )}
+        </div>
+      )}
+
+      {/* CR 602.5: blocked activated abilities (display-only read-out from the
+          engine). One row per blocked ability; the ability's description labels
+          printed abilities, runtime-granted ones (index past the printed list)
+          show the reason alone. Each prohibiting source name(s) is shown only
+          when that object is still present in the state. */}
+      {(obj.blocked_abilities?.length ?? 0) > 0 && (
+        <div className="mt-1 space-y-0.5 text-amber-300/90">
+          {(obj.blocked_abilities ?? []).map((entry, i) => {
+            const abilityName =
+              entry.ability_index < obj.abilities.length
+                ? obj.abilities[entry.ability_index]?.description
+                : undefined;
+            const names = (entry.sources ?? [])
+              .map((id) => objects?.[String(id)]?.name)
+              .filter((n): n is string => !!n);
+            const reason = t(ABILITY_BLOCK_REASON_KEY[entry.type]);
+            return (
+              <div key={i} className="flex items-start gap-1">
+                <span aria-hidden>⊘</span>
+                <span>
+                  {abilityName && (
+                    <span className="text-gray-300">{abilityName}: </span>
+                  )}
+                  {reason}
+                  {names.length > 0 && (
+                    <span className="ml-1 text-amber-400/70">
+                      {t("preview.fromSource", { source: names.join(", ") })}
+                    </span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
 

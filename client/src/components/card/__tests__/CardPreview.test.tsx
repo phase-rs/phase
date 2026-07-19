@@ -162,3 +162,75 @@ describe("CardPreview chosen attributes", () => {
     }));
   });
 });
+
+// MAJOR-1 (CR 602.5): CardPreview is the SECOND `blocked_abilities` consumer and
+// had no coverage before this change. It renders every prohibiting source name via
+// preview.fromSource, joined, dropping ids absent from `objects`.
+describe("CardPreview blocked abilities", () => {
+  function inspectWith(object: GameObject, sources: GameObject[] = []) {
+    const gameState = buildGameState({
+      objects: buildObjectMap(object, ...sources),
+      next_object_id: 999,
+      battlefield: [object.id],
+      next_timestamp: 2,
+    });
+    useGameStore.setState({ gameState, spellCosts: {} });
+    useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });
+    render(<CardPreview cardName="Grim Monolith" position={{ x: 20, y: 20 }} />);
+  }
+
+  it("renders both prohibiting source names when two sources block one ability", () => {
+    const object = battlefieldObject({
+      id: 101,
+      name: "Grim Monolith",
+      abilities: [
+        {
+          description: "{T}: draw",
+          effects: [],
+          targets: [],
+          cost: { type: "Tap" },
+          timing: "AnyTime",
+          kind: "Activated",
+        },
+      ],
+      blocked_abilities: [
+        { ability_index: 0, sources: [201, 202], type: "CantBeActivated" },
+      ],
+    });
+    inspectWith(object, [
+      buildGameObject({ id: 201, name: "Needle A" }),
+      buildGameObject({ id: 202, name: "Needle B" }),
+    ]);
+
+    expect(screen.getByText(/\(from Needle A, Needle B\)/)).toBeInTheDocument();
+  });
+
+  it("renders a single prohibiting source name", () => {
+    const object = battlefieldObject({
+      id: 101,
+      name: "Grim Monolith",
+      abilities: [],
+      blocked_abilities: [
+        { ability_index: 0, sources: [201], type: "CantBeActivated" },
+      ],
+    });
+    inspectWith(object, [buildGameObject({ id: 201, name: "Needle A" })]);
+
+    expect(screen.getByText(/\(from Needle A\)/)).toBeInTheDocument();
+  });
+
+  it("drops a departed source id and renders no fromSource span", () => {
+    const object = battlefieldObject({
+      id: 101,
+      name: "Grim Monolith",
+      abilities: [],
+      // source 999 is absent from `objects` — the departed-source guard drops it.
+      blocked_abilities: [
+        { ability_index: 0, sources: [999], type: "Prohibited" },
+      ],
+    });
+    inspectWith(object);
+
+    expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
+  });
+});

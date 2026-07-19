@@ -133,9 +133,12 @@ pub struct SearchConfig {
     /// disabled sentinel, matching the `max_nodes`/`rollout_samples` numeric-knob
     /// convention rather than a bool flag. `K > 0` replaces the opponent's real
     /// hidden hand/library with K resampled plausible worlds and means the
-    /// per-action scores across them (§7 of the determinization plan). Higher
-    /// tiers set larger K; Medium keeps `0` to preserve the default-tier strength
-    /// floor.
+    /// per-action scores across them (§7 of the determinization plan). Every
+    /// shipped preset sets `0` (perfect-information search) as of the 2026-07-18
+    /// product decision — determinized sampling costs the difficulty ladder its
+    /// monotonicity when shipped. `K > 0` remains an experiment/measurement knob:
+    /// set it directly on `SearchConfig` after construction (as the `search.rs`
+    /// ensemble tests do) to exercise the retained machinery.
     pub determinization_samples: u32,
 }
 
@@ -896,8 +899,11 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::ArchetypeOnly,
                 projection_min_budget_ms: 2000,
-                // Medium keeps perfect-information search (K=0): the default
-                // tier's strength floor (§7c/F1) — determinization is Hard+.
+                // K=0: perfect-information search. Product decision 2026-07-18 —
+                // all search tiers ship the strength floor; determinized sampling
+                // (K>0) remains config-reachable for experiments/measurement but
+                // cost the ladder its monotonicity when shipped (see
+                // .agents/ai-strength/u1-all-tiers-cheat/PLAN.md).
                 determinization_samples: 0,
             },
         ),
@@ -922,9 +928,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
-                // K=2: halves single-sample variance at 2x base cost; node cap
-                // 48 keeps each search short. Exercised by the quick ai-gate.
-                determinization_samples: 2,
+                // K=0: perfect-information search. Product decision 2026-07-18 —
+                // all search tiers ship the strength floor; determinized sampling
+                // (K>0) remains config-reachable for experiments/measurement but
+                // cost the ladder its monotonicity when shipped (see
+                // .agents/ai-strength/u1-all-tiers-cheat/PLAN.md).
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -948,8 +957,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 threat_awareness: ThreatAwareness::Full,
                 projection_min_budget_ms: 2000,
-                // K=3: materially de-biases without runaway cost; node cap 64.
-                determinization_samples: 3,
+                // K=0: perfect-information search. Product decision 2026-07-18 —
+                // all search tiers ship the strength floor; determinized sampling
+                // (K>0) remains config-reachable for experiments/measurement but
+                // cost the ladder its monotonicity when shipped (see
+                // .agents/ai-strength/u1-all-tiers-cheat/PLAN.md).
+                determinization_samples: 0,
             },
         ),
         AiDifficulty::CEDH => (
@@ -975,8 +988,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 // == AI_SEARCH_TIME_BUDGET_MS: projections only at turn start,
                 // before nodes consume the budget
                 projection_min_budget_ms: 1500,
-                // K=3: same as VeryHard; multiplayer + node cap 96 dominates cost.
-                determinization_samples: 3,
+                // K=0: perfect-information search. Product decision 2026-07-18 —
+                // all search tiers ship the strength floor; determinized sampling
+                // (K>0) remains config-reachable for experiments/measurement but
+                // cost the ladder its monotonicity when shipped (see
+                // .agents/ai-strength/u1-all-tiers-cheat/PLAN.md).
+                determinization_samples: 0,
             },
         ),
     };
@@ -997,20 +1014,18 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
     };
 
     // WASM platform constraints: reduce search budgets. AI computation runs in
-    // a Web Worker so it does not block the UI thread. Wall-clock deadlines are
-    // intentionally absent — bounds are set by `max_depth` / `max_nodes` /
-    // `rollout_depth` instead, so AI quality is consistent regardless of host
-    // speed. Wall-clock capping was previously needed to hide a deep-clone
-    // perf regression; the Arc-share migration removed that cost.
+    // a Web Worker so it does not block the UI thread. Budgets are reduced via
+    // `max_depth` / `max_nodes` / `rollout_depth`. The wall-clock deadline
+    // remains live on WASM per `AI_SEARCH_TIME_BUDGET_MS` (the single source of
+    // truth, applied across all difficulties and platforms): it caps
+    // user-visible latency on slow browser hardware and is load-bearing for
+    // `can_afford_projection`'s projection throttle (`policies/context.rs`),
+    // which treats a missing deadline as "always affordable" and would otherwise
+    // run uncached ~1.5s multi-turn projections on every decision.
     if platform == Platform::Wasm {
         config.search.max_depth = config.search.max_depth.min(2);
         config.search.max_nodes = config.search.max_nodes * 2 / 3;
         config.search.rollout_depth = config.search.rollout_depth.min(2);
-        // The frontend worker pool already provides cross-sample root
-        // parallelism (ai-worker-pool.ts merges N workers), so cap per-worker K
-        // at 2 — effective samples = N_workers x K without per-worker latency
-        // blow-up (§7c).
-        config.search.determinization_samples = config.search.determinization_samples.min(2);
     }
 
     config
@@ -1051,10 +1066,6 @@ pub fn create_config_for_players(
                 config.search.max_nodes = config.search.max_nodes * 2 / 3;
                 config.search.max_branching = config.search.max_branching.min(4);
                 config.search.rollout_depth = config.search.rollout_depth.min(1);
-                // Determinizing 3+ opponents per sample multiplies pool work;
-                // keep K modest beyond 2 players (§7c). cEDH keeps its tier K.
-                config.search.determinization_samples =
-                    config.search.determinization_samples.min(1);
             }
         }
         _ => {
@@ -1066,10 +1077,6 @@ pub fn create_config_for_players(
                 config.search.max_nodes /= 3;
                 config.search.max_branching = config.search.max_branching.min(3);
                 config.search.rollout_depth = config.search.rollout_depth.min(1);
-                // 5-6+ players: one determinized sample at most (pool work scales
-                // with opponent count).
-                config.search.determinization_samples =
-                    config.search.determinization_samples.min(1);
             }
         }
     }
@@ -1109,8 +1116,9 @@ mod tests {
         assert_eq!(config.search.max_depth, 2);
         assert_eq!(config.search.max_nodes, 24);
         assert_eq!(config.search.rollout_depth, 1);
-        // Medium stays at perfect-information search (K=0) — the default-tier
-        // strength floor (§7c/F1).
+        // Every shipped preset is perfect-information search (K=0); Medium is no
+        // longer a special "floor" but the universal setting (product decision
+        // 2026-07-18).
         assert_eq!(config.search.determinization_samples, 0);
     }
 
@@ -1122,9 +1130,8 @@ mod tests {
         assert_eq!(config.search.max_depth, 3);
         assert_eq!(config.search.max_nodes, 48);
         assert_eq!(config.search.rollout_depth, 2);
-        // Hard is the first tier to determinize opponent hidden zones (K=2) —
-        // the tier the quick ai-gate exercises (§7c/§11).
-        assert_eq!(config.search.determinization_samples, 2);
+        // Hard ships perfect-information search (K=0) like every tier.
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]
@@ -1136,7 +1143,7 @@ mod tests {
         assert_eq!(config.search.max_nodes, 64);
         assert_eq!(config.search.max_branching, 5);
         assert_eq!(config.search.rollout_samples, 2);
-        assert_eq!(config.search.determinization_samples, 3);
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]
@@ -1147,28 +1154,33 @@ mod tests {
         assert!(wasm.search.max_depth <= 2);
         assert!(wasm.search.max_nodes < native.search.max_nodes);
         assert!(wasm.search.rollout_depth <= native.search.rollout_depth);
-        // WASM caps per-worker K at 2 (Hard native K=2 -> still 2 here).
-        assert!(wasm.search.determinization_samples <= 2);
-        assert_eq!(wasm.search.determinization_samples, 2);
+        assert_eq!(wasm.search.determinization_samples, 0);
     }
 
     #[test]
-    fn wasm_caps_determinization_samples_at_two() {
-        // VeryHard native K=3 must be capped to 2 on WASM (§7c min(2,tier)).
-        let native = create_config(AiDifficulty::VeryHard, Platform::Native);
-        let wasm = create_config(AiDifficulty::VeryHard, Platform::Wasm);
-        assert_eq!(native.search.determinization_samples, 3);
-        assert_eq!(wasm.search.determinization_samples, 2);
-    }
-
-    #[test]
-    fn multiplayer_caps_determinization_samples() {
-        // Hard at 4 players: paranoid scaling caps K at 1 (§7c).
-        let four = create_config_for_players(AiDifficulty::Hard, Platform::Native, 4);
-        assert_eq!(four.search.determinization_samples, 1);
-        // cEDH skips paranoid scaling entirely, so it keeps its tier K=3 at 4p.
-        let cedh4 = create_config_for_players(AiDifficulty::CEDH, Platform::Native, 4);
-        assert_eq!(cedh4.search.determinization_samples, 3);
+    fn all_search_tiers_ship_perfect_information() {
+        // Product decision 2026-07-18: every shipped preset is K=0 (perfect-info
+        // "strength floor") on every platform and player count. K>0 is an
+        // experiment/measurement knob only — the ensemble machinery is covered by
+        // search.rs ensemble tests, which set K manually.
+        for diff in [
+            AiDifficulty::VeryEasy,
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
+        ] {
+            for platform in [Platform::Native, Platform::Wasm] {
+                for players in [2u8, 4, 6] {
+                    let c = create_config_for_players(diff, platform, players);
+                    assert_eq!(
+                        c.search.determinization_samples, 0,
+                        "{diff:?}/{platform:?}/{players}p"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1330,7 +1342,7 @@ mod tests {
         ));
         assert_eq!(config.search.projection_min_budget_ms, 1500);
         assert_eq!(config.search.time_budget_ms, AI_SEARCH_TIME_BUDGET_MS);
-        assert_eq!(config.search.determinization_samples, 3);
+        assert_eq!(config.search.determinization_samples, 0);
     }
 
     #[test]

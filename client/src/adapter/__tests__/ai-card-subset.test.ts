@@ -142,6 +142,30 @@ describe("WasmAdapter AI-pool subset lifecycle", () => {
     expect(loadedB).not.toContain("Game A Card");
   });
 
+  it("falls through to single-worker getAiAction when selectActionFromScores returns null", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    mockWorkerClient.buildAiCardSubset.mockResolvedValue(
+      JSON.stringify({ kind: "subset", json: "{}", count: 0 }),
+    );
+    mockWorkerClient.getAiScoredCandidates.mockResolvedValue([
+      [{ type: "PassPriority" }, 1.0],
+      [{ type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } }, 0.5],
+    ]);
+    mockWorkerClient.selectActionFromScores.mockResolvedValue(null);
+    mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    await adapter.warmCardDatabase();
+
+    const action = await adapter.getAiAction("VeryHard", 0, "Priority");
+
+    expect(mockWorkerClient.selectActionFromScores).toHaveBeenCalled();
+    expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("VeryHard", 0);
+    expect(action).toEqual({ type: "PassPriority" });
+  });
+
   it("degrades to the single-worker path when the rebuild subset fails, then retries next decision", async () => {
     const { WasmAdapter } = await import("../wasm-adapter");
 

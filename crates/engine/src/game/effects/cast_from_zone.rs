@@ -184,10 +184,31 @@ pub fn resolve(
     // would drop every target not in `last_revealed_ids`. The remap therefore
     // only applies on the empty-target fallback below.
     if target_ids.is_empty() && target_filter.references_exiled_by_source() {
-        let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        target_ids = crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+        let linked = crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+        let current_linked_ids: Vec<_> = state
+            .last_zone_changed_ids
             .iter()
-            .map(|link| link.exiled_id)
+            .copied()
+            .filter(|id| linked.iter().any(|link| link.exiled_id == *id))
+            .collect();
+        let candidate_ids: Vec<_> = if current_linked_ids.is_empty() {
+            linked.iter().map(|link| link.exiled_id).collect()
+        } else {
+            current_linked_ids
+        };
+        // CR 607.2a + CR 608.2c: For an immediately chained "exiled this way"
+        // cast grant, bind the filter's object-scope reads to the current
+        // resolution's linked cards, not the source's lifetime exile pile.
+        let mut scoped_ability = ability.clone();
+        scoped_ability.targets = candidate_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect();
+        let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+        target_ids = candidate_ids
+            .iter()
+            .copied()
             .filter(|id| {
                 state
                     .objects

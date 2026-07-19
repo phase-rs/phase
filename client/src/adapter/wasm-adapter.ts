@@ -390,11 +390,12 @@ export class WasmAdapter implements EngineAdapter {
             if (merged.length === 1) return merged[0][0];
             // Delegate softmax selection to Rust (keeps all AI logic in the engine)
             const scoresJson = JSON.stringify(merged);
-            return this.engine.selectActionFromScores(
+            const selected = await this.engine.selectActionFromScores(
               scoresJson,
               difficulty,
               Date.now(),
             );
+            if (selected != null) return selected;
           }
         } catch (err) {
           // STATE_LOST / ENGINE_PANIC must escalate immediately — falling

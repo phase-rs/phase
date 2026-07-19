@@ -354,6 +354,9 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
   if (data.resume.type === "ManaAbility") {
     return (data.resume.ManaAbility as { source_id?: ObjectId } | undefined)?.source_id;
   }
+  if (data.resume.type === "Resolution") {
+    return undefined;
+  }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }
 

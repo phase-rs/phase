@@ -7502,6 +7502,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some(effect) = parse_token_creation_replacement_effect(&lower) {
         return parsed_clause(effect);
     }
+    // CR 614.1a + CR 614.12 + CR 707.2: Mystic Reflection-style resolving-spell
+    // shield. Route before the generic clause dispatch so the leading "the next
+    // time" subject is not treated as non-imperative text.
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_oneshot_enter_as_copy_replacement(&lower)
+    {
+        return parsed_clause(effect);
+    }
     // CR 614.1a + CR 901.9c: "if a player would planeswalk as a result of rolling
     // the planar die, [effect] instead" (Fixed Point in Time). Routed here in the
     // replacement chain — BEFORE the leading-"if" strip further down would peel
@@ -20632,6 +20640,39 @@ fn parse_cast_copies_count_prefix(input: &str) -> (&str, Option<QuantityExpr>) {
     (input, None)
 }
 
+/// CR 607.2a + CR 108.3: subject 1 of Triple Triad's compound play grant —
+/// "the card you own exiled this way" (the owned source-linked exiled card).
+/// Decomposed so a reprint with minor wording drift is a one-line `alt` add.
+fn parse_owned_linked_exiled_subject(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = tag("the card you own ").parse(i)?;
+    let (i, _) = tag("exiled this way").parse(i)?;
+    Ok((i, ()))
+}
+
+/// CR 607.2a + CR 202.3: subject 2 — "each other card exiled this way with
+/// lesser mana value than it" (other linked-exiled cards strictly cheaper than
+/// the owned card). Decomposed for reprint-drift resilience.
+fn parse_lesser_linked_exiled_subject(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = tag("each other card ").parse(i)?;
+    let (i, _) = tag("exiled this way ").parse(i)?;
+    let (i, _) = alt((
+        tag("with lesser mana value than it"),
+        tag("with a lesser mana value than it"),
+    ))
+    .parse(i)?;
+    Ok((i, ()))
+}
+
+/// CR 118.9 + CR 607.2a + CR 202.3: the full "the card you own exiled this way
+/// and each other card exiled this way with lesser mana value than it" compound
+/// subject (Triple Triad). Composes the two decomposed subject matchers.
+fn parse_owned_plus_lesser_exiled_subject(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = parse_owned_linked_exiled_subject(i)?;
+    let (i, _) = tag(" and ").parse(i)?;
+    let (i, _) = parse_lesser_linked_exiled_subject(i)?;
+    Ok((i, ()))
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -20952,6 +20993,66 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         };
         return Some(Effect::CastFromZone {
             target,
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint,
+            duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            mana_spend_permission: None,
+        });
+    }
+
+    // Branch 1.9: the owned-linked + lesser-mana-value compound exile grant
+    // (Triple Triad: "play the card you own exiled this way and each other card
+    // exiled this way with lesser mana value than it"). Runs BEFORE Branch 2's
+    // typed-leaf branch and the bare `TargetFilter::Any` fallback so the
+    // permission covers exactly {the card the controller owns exiled this way}
+    // ∪ {other cards exiled this way whose mana value is strictly less than the
+    // owned card's}.
+    // CR 118.9 + 118.9b (cast without paying mana cost) + CR 601.3 (permission)
+    // + CR 607.2a (exiled this way) + CR 108.3 (the card you own) + CR 202.3
+    // (lesser mana value) + CR 305.1 (play).
+    if parse_owned_plus_lesser_exiled_subject(rest).is_ok() {
+        let owned_card = TargetFilter::And {
+            filters: vec![
+                // "the card you own exiled this way" — owned card, unconditional.
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed({
+                    let mut tf = TypedFilter::card();
+                    tf.properties.push(FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    });
+                    tf
+                }),
+            ],
+        };
+        // "each other card exiled this way with lesser mana value than it" — the
+        // strict `Comparator::LT` against the owned card's mana value naturally
+        // excludes the owned card itself (it is not < its own mana value), so no
+        // explicit "other than" exclusion is needed.
+        let lesser_card = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed({
+                    let mut tf = TypedFilter::card();
+                    tf.properties.push(FilterProp::Cmc {
+                        comparator: Comparator::LT,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::OwnedLinkedExileCard,
+                            },
+                        },
+                    });
+                    tf
+                }),
+            ],
+        };
+        return Some(Effect::CastFromZone {
+            target: TargetFilter::Or {
+                filters: vec![owned_card, lesser_card],
+            },
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
@@ -31448,6 +31549,129 @@ fn issue_2405_broken_bond_optional_land_from_hand() {
             sub.effect
         );
     };
+}
+
+/// Building-block coverage: Triple Triad's compound "the card you own exiled
+/// this way and each other card exiled this way with lesser mana value than it"
+/// grant must lower to a `CastFromZone` whose target is the disjunction of the
+/// owned linked-exiled card and the strictly-lesser-mana-value linked-exiled
+/// cards — NOT the bare `TargetFilter::Any` fallback (which grants no scoped
+/// permission). Drives the FULL shipped Oracle text through `parse_oracle_text`.
+#[test]
+fn triple_triad_owned_plus_lesser_mv_grant_lowers_to_disjunction() {
+    fn collect_cast_from_zone<'a>(
+        def: &'a crate::types::ability::AbilityDefinition,
+        out: &mut Vec<&'a Effect>,
+    ) {
+        if matches!(&*def.effect, Effect::CastFromZone { .. }) {
+            out.push(&def.effect);
+        }
+        if let Some(sub) = def.sub_ability.as_ref() {
+            collect_cast_from_zone(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_ref() {
+            collect_cast_from_zone(els, out);
+        }
+    }
+
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "At the beginning of your upkeep, each player exiles the top card of their library. Until end of turn, you may play the card you own exiled this way and each other card exiled this way with lesser mana value than it without paying their mana costs.",
+        "Triple Triad",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    assert_eq!(parsed.triggers.len(), 1, "one upkeep trigger: {parsed:#?}");
+    let execute = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("upkeep trigger should have an execute body");
+
+    let mut casts = Vec::new();
+    collect_cast_from_zone(execute, &mut casts);
+    assert_eq!(
+        casts.len(),
+        1,
+        "exactly one CastFromZone grant in the trigger chain: {execute:#?}"
+    );
+
+    let Effect::CastFromZone {
+        target,
+        mode,
+        without_paying_mana_cost,
+        ..
+    } = casts[0]
+    else {
+        unreachable!("filtered to CastFromZone above");
+    };
+
+    assert_eq!(
+        *mode,
+        CardPlayMode::Play,
+        "\"play ...\" grants a Play-mode permission"
+    );
+    assert!(
+        *without_paying_mana_cost,
+        "\"without paying their mana costs\" is a free-cast grant"
+    );
+
+    // The target must be a disjunction of exactly two AND disjuncts, NOT the bare
+    // `TargetFilter::Any` fallback.
+    let TargetFilter::Or { filters } = target else {
+        panic!("expected Or disjunction target, got {target:#?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "owned card ∪ lesser-MV cards: {filters:#?}"
+    );
+
+    let has_owned = filters.iter().any(|f| {
+        let TargetFilter::And { filters: conj } = f else {
+            return false;
+        };
+        let has_exiled = conj
+            .iter()
+            .any(|c| matches!(c, TargetFilter::ExiledBySource));
+        let has_owned_prop = conj.iter().any(|c| {
+            matches!(c, TargetFilter::Typed(tf)
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Owned { controller: ControllerRef::You }
+            )))
+        });
+        has_exiled && has_owned_prop
+    });
+    assert!(has_owned, "owned linked-exiled disjunct: {filters:#?}");
+
+    let has_lesser = filters.iter().any(|f| {
+        let TargetFilter::And { filters: conj } = f else {
+            return false;
+        };
+        let has_exiled = conj
+            .iter()
+            .any(|c| matches!(c, TargetFilter::ExiledBySource));
+        let has_lesser_prop = conj.iter().any(|c| {
+            matches!(c, TargetFilter::Typed(tf)
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LT,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::OwnedLinkedExileCard,
+                        },
+                    },
+                }
+            )))
+        });
+        has_exiled && has_lesser_prop
+    });
+    assert!(
+        has_lesser,
+        "lesser-mana-value linked-exiled disjunct (LT the owned card's MV): {filters:#?}"
+    );
 }
 
 #[test]

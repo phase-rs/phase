@@ -1651,6 +1651,15 @@ fn scan_quantity_ref(x: &QuantityRef) -> Axes {
             acc = acc.or(scan_player_filter(filter));
             acc
         }
+        QuantityRef::EventContextPlayerCount { filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: false,
+            };
+            acc = acc.or(scan_player_filter(filter));
+            acc
+        }
         QuantityRef::CountersOn { scope, .. } => {
             let mut acc = Axes {
                 event: false,
@@ -2619,6 +2628,9 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // axis, like the demonstrative/anaphoric referents.
         ObjectScope::OtherRevealedCard => Axes::NONE,
         ObjectScope::AmassedArmy => Axes::NONE,
+        // CR 607.2a: source-persistent exile-pile member read — no event/sibling
+        // projected axis (mirrors AmassedArmy).
+        ObjectScope::OwnedLinkedExileCard => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,

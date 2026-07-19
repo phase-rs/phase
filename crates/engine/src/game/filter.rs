@@ -1305,8 +1305,41 @@ pub fn matches_target_filter_on_battlefield_entry(
     ctx: &FilterContext<'_>,
 ) -> bool {
     match event {
-        ProposedEvent::ZoneChange { object_id, to, .. } if *to == Zone::Battlefield => {
-            if let Some(entry) = state.liminal_entries.get(object_id) {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            enter_as_copy,
+            ..
+        } if *to == Zone::Battlefield => {
+            if let Some(copy) = enter_as_copy {
+                let Some(mut obj) = state
+                    .liminal_entries
+                    .get(object_id)
+                    .map(|entry| entry.object.clone())
+                    .or_else(|| state.objects.get(object_id).cloned())
+                else {
+                    return false;
+                };
+                crate::game::effects::token::apply_copiable_values_to_liminal_object(
+                    &mut obj,
+                    &copy.values,
+                    copy.display_source,
+                    copy.printed_ref.clone(),
+                    copy.token_image_ref.clone(),
+                );
+                filter_inner_for_object(
+                    state,
+                    &obj,
+                    *object_id,
+                    filter,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    ctx.ability,
+                    ctx.recipient_id,
+                    ctx.scoped_iteration_player,
+                    ControllerLookup::LiveOrLki,
+                )
+            } else if let Some(entry) = state.liminal_entries.get(object_id) {
                 filter_inner_for_object(
                     state,
                     &entry.object,
