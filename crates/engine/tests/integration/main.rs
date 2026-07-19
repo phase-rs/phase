@@ -16,6 +16,7 @@ mod angels_grace;
 mod angels_grace_2hg;
 mod announce_locked_x_runtime;
 mod another_round_repeat;
+mod anya_merciless_angel_5920;
 mod archmage_ascension_gated_draw_replacement;
 mod arcum_weathervane_supertype_removal;
 mod ark_of_hunger_play_from_graveyard_751;
