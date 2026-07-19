@@ -11814,12 +11814,19 @@ fn try_parse_additional_land_this_turn(tp: TextPair) -> Option<ParsedEffectClaus
     let (count, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
         let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
         let (input, _) = tag("play ").parse(input)?;
-        // "an additional land" (count 1) or "<number> additional lands".
+        // "an additional land" (count 1) or "[up to ]<number> additional lands".
+        // CR 305.2: "up to <n>" grants the same +n land-play allowance as a bare
+        // "<n>" — playing lands is already optional, so the "up to" hedge (Summer
+        // Bloom) is functionally identical to the fixed count.
         let (input, count) = alt((
             value(1u8, tag("an additional land")),
             map(
-                (nom_primitives::parse_number, tag(" additional lands")),
-                |(n, _)| n as u8,
+                (
+                    opt(tag("up to ")),
+                    nom_primitives::parse_number,
+                    tag(" additional lands"),
+                ),
+                |(_, n, _)| n as u8,
             ),
         ))
         .parse(input)?;

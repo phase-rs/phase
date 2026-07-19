@@ -22145,6 +22145,45 @@ fn play_two_additional_lands_this_turn_parses_count() {
     }
 }
 
+/// Issue #5979: "play up to <n> additional lands this turn" (Summer Bloom) is
+/// functionally identical to the bare "<n> additional lands" grant — the "up to"
+/// hedge is redundant because land plays are already optional (CR 305.2). It must
+/// carry `AdditionalLandDrop { count: 3 }`, not fall through to Unimplemented.
+#[test]
+fn summer_bloom_up_to_three_additional_lands_parses_count() {
+    let def = parse_effect_chain(
+        "You may play up to three additional lands this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !def.optional,
+        "permission grant must not become an optional resolution choice"
+    );
+    match &*def.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } => {
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+            let s = &static_abilities[0];
+            assert_eq!(s.mode, StaticMode::AdditionalLandDrop { count: 3 });
+            assert_eq!(s.affected, Some(TargetFilter::Controller));
+            assert!(
+                s.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::AdditionalLandDrop { count: 3 }
+                    }
+                )),
+                "expected AddStaticMode(AdditionalLandDrop count 3), got {:?}",
+                s.modifications
+            );
+        }
+        other => panic!("expected GenericEffect, got {other:?}"),
+    }
+}
+
 /// Issue #2879: the complete Escape to the Wilds oracle text parses to a
 /// 3-link chain (ExileTop -> PlayFromExile grant -> additional-land
 /// GenericEffect) with no Unimplemented / CastFromZone{Any}.
