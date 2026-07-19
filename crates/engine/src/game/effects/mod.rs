@@ -4791,7 +4791,12 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         Effect::RemoveCounter { .. } => {
             counters::remove_counter_optional_is_infeasible(state, ability)
         }
-        Effect::CastFromZone { mode, target, .. } => {
+        Effect::CastFromZone {
+            mode,
+            target,
+            constraint,
+            ..
+        } => {
             // CR 608.2d: An optional exact "cast/play that card" instruction is
             // impossible when its parent hand-off records that no object was
             // produced. Neither a lingering permission nor `Play` mode can make
@@ -4820,6 +4825,24 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                             .contains(&crate::types::card_type::CoreType::Land)
                     })
                 {
+                    return true;
+                }
+
+                // CR 202.3 + CR 601.2e + CR 608.2d: A bound card that cannot
+                // satisfy the permission's current mana-value constraint is an
+                // impossible cast option. Reuse the casting pipeline's typed
+                // offer-time authority so fixed constraints are checked here
+                // while dynamic/X-dependent constraints remain deferred.
+                if ability.targets.iter().any(|target| {
+                    let TargetRef::Object(id) = target else {
+                        return false;
+                    };
+                    state.objects.get(id).is_some_and(|object| {
+                        !crate::game::casting::cast_permission_constraint_allows_cast(
+                            state, object, constraint, None,
+                        )
+                    })
+                }) {
                     return true;
                 }
 

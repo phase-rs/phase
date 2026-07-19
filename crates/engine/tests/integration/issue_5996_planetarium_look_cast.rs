@@ -274,6 +274,63 @@ fn beseech_bargained_land_skips_cast_offer_and_runs_hand_fallback() {
     );
 }
 
+/// CR 702.166a + CR 202.3 + CR 601.2e + CR 608.2d: Beseech cannot offer its
+/// bargained free cast when the found nonland card exceeds mana value 4. The
+/// declined impossible option must run the printed not-cast hand fallback.
+#[test]
+fn beseech_bargained_mana_value_five_skips_cast_offer_and_runs_hand_fallback() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+    }
+    let bargain_artifact = scenario
+        .add_creature(P0, "Bargain Artifact", 1, 1)
+        .as_artifact()
+        .id();
+    let found_spell = scenario
+        .add_spell_to_library_top(P0, "Beseech Found Mana Value Five Spell", false)
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    let beseech = scenario
+        .add_spell_to_hand(P0, "Beseech the Mirror", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            generic: 1,
+        })
+        .from_oracle_text_with_keywords(&["bargain"], BESEECH_THE_MIRROR)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(beseech)
+        .accept_optional()
+        .sacrifice_with(&[bargain_artifact])
+        .search_first_legal()
+        .resolve();
+
+    outcome.assert_zone(&[bargain_artifact, beseech], Zone::Graveyard);
+    outcome.assert_zone(&[found_spell], Zone::Hand);
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Beseech's constrained-out spell must not leave an optional prompt pending"
+    );
+    assert!(
+        outcome.state().pending_optional_effect.is_none(),
+        "the infeasible constrained cast must be auto-declined rather than offered"
+    );
+    assert!(
+        outcome.state().objects[&found_spell]
+            .casting_permissions
+            .is_empty(),
+        "auto-declining the constrained cast must not leak an exile-cast permission"
+    );
+}
+
 /// CR 701.25a + CR 401.5 + CR 608.2d: surveilling the only library card into
 /// the graveyard leaves Planetarium's subsequent look with no "that card"
 /// referent, so no optional cast action can be offered.
