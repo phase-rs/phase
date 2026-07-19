@@ -637,11 +637,11 @@ export const PermanentCard = memo(function PermanentCard({
   // strip / tap glyph) so it stays a corner affordance instead of covering
   // half of a small battlefield card.
   const attachmentBadgeSize = useArtCrop
-    ? "clamp(14px, calc(var(--art-crop-w) * 0.24), 24px)"
-    : "clamp(16px, calc(var(--card-w) * 0.22), 26px)";
+    ? "clamp(20px, calc(var(--art-crop-w) * 0.24), 26px)"
+    : "clamp(20px, calc(var(--card-w) * 0.22), 28px)";
   const attachmentBadgeFontSize = useArtCrop
-    ? "clamp(9px, calc(var(--art-crop-w) * 0.13), 13px)"
-    : "clamp(10px, calc(var(--card-w) * 0.12), 14px)";
+    ? "clamp(12px, calc(var(--art-crop-w) * 0.13), 14px)"
+    : "clamp(12px, calc(var(--card-w) * 0.12), 15px)";
 
   return (
     <motion.div
@@ -971,7 +971,7 @@ export const PermanentCard = memo(function PermanentCard({
       {obj.attachments.length === 1 && (
         <button
           type="button"
-          className="absolute -left-2 -top-2 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          className="absolute -left-2.5 -top-2.5 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           style={{
             width: attachmentBadgeSize,
             height: attachmentBadgeSize,

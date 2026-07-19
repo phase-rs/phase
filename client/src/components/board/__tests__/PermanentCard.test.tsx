@@ -338,6 +338,20 @@ describe("PermanentCard", () => {
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
   });
 
+  it("keeps the single-attachment control readable at compact card sizes", () => {
+    renderPermanent();
+
+    const button = screen.getByRole("button", {
+      name: "View Test Creature's attached card",
+    });
+
+    expect(button).toHaveStyle({
+      width: "clamp(20px, calc(var(--card-w) * 0.22), 28px)",
+      height: "clamp(20px, calc(var(--card-w) * 0.22), 28px)",
+      fontSize: "clamp(12px, calc(var(--card-w) * 0.12), 15px)",
+    });
+  });
+
   it("refreshes the attachment fan when the engine clears host attachments", () => {
     const gameState = makeState();
     const host = gameState.objects[1];
