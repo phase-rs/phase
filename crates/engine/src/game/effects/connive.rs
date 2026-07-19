@@ -69,6 +69,7 @@ pub(crate) fn propose_connive(
 ) -> Result<(), EffectError> {
     let proposed = ProposedEvent::Connive {
         object_id: conniver.object_id(),
+        subject: Box::new(conniver.snapshot.clone()),
         count,
         applied,
     };
@@ -128,7 +129,10 @@ pub(crate) fn resolve_connive_effect(
         controller,
         count,
         HashSet::new(),
-        crate::types::game_state::DrawSequenceOrigin::ConniveTail { conniver, count },
+        crate::types::game_state::DrawSequenceOrigin::ConniveTail {
+            conniver: Box::new(conniver),
+            count,
+        },
         events,
     ) {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}

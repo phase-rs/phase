@@ -1807,15 +1807,6 @@ pub struct CommanderDamageEntry {
 /// without the other and break the "pause emits the same event as
 /// non-pause" invariant.
 ///
-/// CR 615.5: typed ownership of a resident post-replacement drain while a
-/// continuation is paused. This is deliberately a marker, not a drain ID or a
-/// reverse reference: the resident top is the sole drain being dispatched, and
-/// the marker only extends that dispatch until its owned continuation finishes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PostReplacementDispatchPauseOwner {
-    Dispatch,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -1833,10 +1824,6 @@ pub struct PendingContinuation {
     /// finished or merely paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_context: Option<ResolvingTriggerContext>,
-    /// CR 615.5: a paused post-replacement continuation owns the resident
-    /// drain's event context until the chain truly completes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_drain_owner: Option<PostReplacementDispatchPauseOwner>,
 }
 
 impl PendingContinuation {
@@ -1849,7 +1836,6 @@ impl PendingContinuation {
             parent_kind: None,
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
-            post_replacement_drain_owner: None,
         }
     }
 
@@ -1867,7 +1853,6 @@ impl PendingContinuation {
             parent_kind: Some(parent_kind),
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
-            post_replacement_drain_owner: None,
         }
     }
 }
@@ -12646,7 +12631,7 @@ pub struct PendingConniveReentry {
 /// The old single slot expressed this by taking the continuation early and
 /// clearing the event fields late — an interleaving that no type enforced and
 /// every caller had to respect. Here it is a state transition:
-/// `Ready(work)` → `Dispatching` → popped.
+/// `Ready(work)` → `Dispatching` → `Paused` → popped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DrainStatus {
     /// Not yet run. `Template` is an AST resolved against `source`; `Resolved`
@@ -12655,6 +12640,21 @@ pub enum DrainStatus {
     /// Taken and running. The drain stays resident so the running effect can still
     /// read its event context (CR 615.5).
     Dispatching,
+    /// The taken continuation paused. This status lives on the exact stack entry
+    /// that dispatched it, so nested post-replacement draws retain independent
+    /// event contexts without a drain-id graph or a reverse frame reference.
+    Paused,
+}
+
+/// A transient, typed claim on one resident post-replacement drain dispatch.
+///
+/// The drain stack owns the persisted lifecycle status; this handle only lets
+/// the synchronous dispatcher finish or pause the entry it took after a nested
+/// replacement has pushed another drain above it. It is never serialized and
+/// introduces no cross-carrier reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostReplacementDrainDispatch {
+    depth: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12812,7 +12812,7 @@ impl PostReplacementDrain {
     ) -> Option<&crate::types::ability::PostReplacementContinuation> {
         match &self.status {
             DrainStatus::Ready(continuation) => Some(continuation),
-            DrainStatus::Dispatching => None,
+            DrainStatus::Dispatching | DrainStatus::Paused => None,
         }
     }
 }
@@ -12899,19 +12899,67 @@ impl PostReplacementDrainStack {
     ///
     /// Returns `None` if there is no resident drain, or its continuation was
     /// already taken.
-    pub fn begin_dispatch(&mut self) -> Option<crate::types::ability::PostReplacementContinuation> {
-        let drain = self.drains.last_mut()?;
+    pub fn begin_dispatch(
+        &mut self,
+    ) -> Option<(
+        crate::types::ability::PostReplacementContinuation,
+        PostReplacementDrainDispatch,
+    )> {
+        let depth = self.drains.len().checked_sub(1)?;
+        let drain = self.drains.get_mut(depth)?;
         match std::mem::replace(&mut drain.status, DrainStatus::Dispatching) {
-            DrainStatus::Ready(continuation) => Some(continuation),
-            // Already dispatching: report no work. The `mem::replace` above has
-            // already written `Dispatching` back, so there is nothing to restore.
+            DrainStatus::Ready(continuation) => {
+                Some((continuation, PostReplacementDrainDispatch { depth }))
+            }
+            // Already dispatching or paused: report no work. The `mem::replace`
+            // above has written `Dispatching` back, so restore a paused owner.
             DrainStatus::Dispatching => None,
+            DrainStatus::Paused => {
+                drain.status = DrainStatus::Paused;
+                None
+            }
         }
     }
 
-    /// Pop the drain whose continuation has finished dispatching.
-    pub fn finish_dispatch(&mut self) -> Option<PostReplacementDrain> {
-        if matches!(self.drains.last()?.status, DrainStatus::Dispatching) {
+    /// Whether this dispatch still owns the resident stack top. A nested
+    /// replacement drain makes this false without invalidating the handle.
+    pub fn dispatch_is_resident_top(&self, dispatch: PostReplacementDrainDispatch) -> bool {
+        dispatch.depth.checked_add(1) == Some(self.drains.len())
+    }
+
+    /// Mark the exact drain whose continuation paused. The typed handle keeps a
+    /// nested dispatch from changing the outer entry by accident.
+    pub fn pause_dispatch(&mut self, dispatch: PostReplacementDrainDispatch) -> bool {
+        let Some(drain) = self.drains.get_mut(dispatch.depth) else {
+            return false;
+        };
+        if !matches!(drain.status, DrainStatus::Dispatching) {
+            return false;
+        }
+        drain.status = DrainStatus::Paused;
+        true
+    }
+
+    /// Pop the exact drain whose continuation has finished dispatching. It may
+    /// sit below a nested paused drain; this retires only that finished owner's
+    /// event context and leaves the nested continuation intact.
+    pub fn finish_dispatch(
+        &mut self,
+        dispatch: PostReplacementDrainDispatch,
+    ) -> Option<PostReplacementDrain> {
+        if matches!(
+            self.drains.get(dispatch.depth)?.status,
+            DrainStatus::Dispatching
+        ) {
+            return Some(self.drains.remove(dispatch.depth));
+        }
+        None
+    }
+
+    /// Pop only the innermost dispatch that itself paused. This preserves the
+    /// outer event context while a contained replacement continuation runs.
+    pub fn finish_paused_dispatch(&mut self) -> Option<PostReplacementDrain> {
+        if matches!(self.drains.last()?.status, DrainStatus::Paused) {
             return self.drains.pop();
         }
         None
@@ -12949,7 +12997,7 @@ pub enum DrawSequenceOrigin {
     /// CR 701.50a/701.50d: after the connive draws settle, discard `count` cards and
     /// put +1/+1 counters equal to nonland cards discarded on `conniver`.
     ConniveTail {
-        conniver: ConniveSubject,
+        conniver: Box<ConniveSubject>,
         count: u32,
     },
     /// CR 701.22d-adjacent bookkeeping: a scry replaced into a draw completes by
@@ -12977,11 +13025,6 @@ pub struct DrawSequenceFrame {
     /// The instruction's completion behavior. Old saves default to [`DrawSequenceOrigin::Plain`].
     #[serde(default)]
     pub origin: DrawSequenceOrigin,
-    /// CR 615.5: if a post-replacement continuation pauses directly on this
-    /// draw, this frame keeps the resident drain's event context alive until
-    /// the draw (and any transferred continuation) truly completes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_drain_owner: Option<PostReplacementDispatchPauseOwner>,
     /// CR 121.6b: individual draws of this instruction not yet attempted. "If an
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
@@ -13046,6 +13089,17 @@ impl DrawSequenceStack {
             .filter(|frame| frame.frame_id == frame_id)
     }
 
+    /// Locate a still-live frame by its stable identity without making it active.
+    ///
+    /// CR 121.6b: only [`Self::active_if`] may *resume* a frame. Completion
+    /// accounting, however, must still credit an outer unit that delivered just
+    /// before a nested replacement draw pushed its own frame above it.
+    pub fn frame_mut(&mut self, frame_id: DrawSequenceFrameId) -> Option<&mut DrawSequenceFrame> {
+        self.frames
+            .iter_mut()
+            .find(|frame| frame.frame_id == frame_id)
+    }
+
     /// Push a new instruction and return its ID. Monotonic: the allocator never
     /// rewinds, so an ID from a popped frame is never reissued.
     pub fn push(&mut self, player: PlayerId, count: u32) -> DrawSequenceFrameId {
@@ -13083,7 +13137,6 @@ impl DrawSequenceStack {
             player,
             applied,
             origin,
-            post_replacement_drain_owner: None,
             remaining: count,
             accumulated: 0,
         });
@@ -13388,29 +13441,6 @@ const _: fn() = || {
 };
 
 impl GameState {
-    /// CR 615.5: Move resident post-replacement dispatch ownership onto the
-    /// concrete paused work. A continuation takes precedence because it owns a
-    /// later chain after the current draw settles; otherwise the active draw
-    /// frame is the pause carrier.
-    pub fn park_post_replacement_drain_dispatch(&mut self) -> bool {
-        if let Some(continuation) = self.pending_continuation.as_mut() {
-            continuation.post_replacement_drain_owner =
-                Some(PostReplacementDispatchPauseOwner::Dispatch);
-            return true;
-        }
-        if let Some(frame) = self.draw_sequences.active_mut() {
-            frame.post_replacement_drain_owner = Some(PostReplacementDispatchPauseOwner::Dispatch);
-            return true;
-        }
-        false
-    }
-
-    /// CR 615.5: Retire a resident dispatch only after the typed owner has no
-    /// paused continuation or draw frame left to resume.
-    pub fn finish_post_replacement_drain_dispatch(&mut self) {
-        self.post_replacement_drains.finish_dispatch();
-    }
-
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -15797,6 +15827,79 @@ mod drain_stack_reentrancy_tests {
         );
     }
 
+    /// CR 615.5 + CR 616.1g: nested pausing replacement continuations own
+    /// distinct stack entries. Completing the inner draw must not pop or strand
+    /// the outer prevented-event context.
+    #[test]
+    fn nested_paused_dispatches_finish_lifo() {
+        let mut stack = PostReplacementDrainStack::default();
+        assert!(stack.install(ready_drain("outer"), ResidentDrainPolicy::KeepResident));
+        let (_, outer_dispatch) = stack.begin_dispatch().expect("outer dispatch starts");
+        assert!(stack.pause_dispatch(outer_dispatch));
+
+        assert!(stack.install(ready_drain("inner"), ResidentDrainPolicy::KeepResident));
+        let (_, inner_dispatch) = stack.begin_dispatch().expect("inner dispatch starts");
+        assert!(stack.pause_dispatch(inner_dispatch));
+        assert_eq!(
+            stack.drains.len(),
+            2,
+            "both paused contexts remain resident"
+        );
+
+        assert!(stack.finish_paused_dispatch().is_some());
+        assert!(
+            matches!(
+                stack.resident(),
+                Some(PostReplacementDrain {
+                    status: DrainStatus::Paused,
+                    ..
+                })
+            ),
+            "finishing the inner pause must preserve the outer paused context"
+        );
+        assert!(stack.finish_paused_dispatch().is_some());
+        assert!(
+            stack.is_empty(),
+            "the outer pause retires only after its own resume"
+        );
+    }
+
+    /// CR 615.5 + CR 616.1g: if an outer continuation completes by starting an
+    /// inner continuation that pauses, its typed dispatch handle removes the
+    /// outer `Dispatching` entry rather than mistaking the paused inner top for
+    /// its own state. The inner context remains available until its resume.
+    #[test]
+    fn completed_outer_dispatch_does_not_strand_below_nested_pause() {
+        let mut stack = PostReplacementDrainStack::default();
+        assert!(stack.install(ready_drain("outer"), ResidentDrainPolicy::KeepResident));
+        let (_, outer_dispatch) = stack.begin_dispatch().expect("outer dispatch starts");
+
+        assert!(stack.install(ready_drain("inner"), ResidentDrainPolicy::KeepResident));
+        let (_, inner_dispatch) = stack.begin_dispatch().expect("inner dispatch starts");
+        assert!(stack.pause_dispatch(inner_dispatch));
+        assert!(
+            !stack.dispatch_is_resident_top(outer_dispatch),
+            "reach guard: the nested pause now owns the resident top"
+        );
+
+        assert!(stack.finish_dispatch(outer_dispatch).is_some());
+        assert!(
+            matches!(
+                stack.resident(),
+                Some(PostReplacementDrain {
+                    status: DrainStatus::Paused,
+                    ..
+                })
+            ),
+            "retiring the completed outer dispatch preserves the nested pause"
+        );
+        assert!(stack.finish_paused_dispatch().is_some());
+        assert!(
+            stack.is_empty(),
+            "both completed contexts retire exactly once"
+        );
+    }
+
     /// `KeepResident` drops a stash that arrives while a READY drain is pending.
     ///
     /// This pins the drop as a **leak-guard**, which is what it actually is — not,
@@ -15832,7 +15935,7 @@ mod drain_stack_reentrancy_tests {
         stack
             .drains
             .iter()
-            .find(|drain| matches!(drain.status, DrainStatus::Dispatching))
+            .find(|drain| matches!(drain.status, DrainStatus::Dispatching | DrainStatus::Paused))
             .and_then(|drain| drain.event_source)
     }
 

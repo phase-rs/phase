@@ -719,7 +719,6 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 parent_kind,
                 search_attach_host,
                 trigger_context,
-                post_replacement_drain_owner,
             } = cont;
             state.search_continuation_attach_host = search_attach_host;
             let source_id = chain.source_id;
@@ -741,10 +740,10 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     subject: None,
                 });
             }
-            if post_replacement_drain_owner.is_some()
-                && !state.park_post_replacement_drain_dispatch()
-            {
-                state.finish_post_replacement_drain_dispatch();
+            if !waits_for_resolution_choice(&state.waiting_for) {
+                // CR 615.5: a resumed continuation completes its own paused
+                // resident drain only after it has not raised another choice.
+                state.post_replacement_drains.finish_paused_dispatch();
             }
         }
     }
@@ -1330,7 +1329,6 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             parent_kind,
             search_attach_host,
             trigger_context,
-            post_replacement_drain_owner,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.pending_continuation = Some(PendingContinuation {
@@ -1341,7 +1339,6 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             // ability's resolution is anchored to its earliest pause, not
             // re-latched to whatever is live at splice time.
             trigger_context,
-            post_replacement_drain_owner,
         });
     } else {
         state.pending_continuation = Some(PendingContinuation::new(Box::new(head), state));
