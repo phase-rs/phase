@@ -1957,6 +1957,10 @@ pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
     pub prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
     pub terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
+    /// Exact post-delivery authority for prospective members that remained on
+    /// the battlefield. A later same-ID incarnation cannot stand in for this
+    /// context at settlement (CR 400.7).
+    pub post_event_member_contexts: Vec<Option<TriggerSourceContext>>,
     pub all_origin_occurrences: Vec<LogicalZoneChangeOccurrence>,
     /// `true` only after the initial pre-delivery layer flush has captured the
     /// full batched-trigger and trigger-suppression authority. This marker is
@@ -1982,10 +1986,15 @@ impl LogicalZoneChangeGroup {
             .iter()
             .map(|_| LogicalZoneChangeTerminalOutcome::Pending)
             .collect();
+        let post_event_member_contexts = prospective_battlefield_members
+            .iter()
+            .map(|_| None)
+            .collect();
         Self {
             logical_group_id,
             prospective_battlefield_members,
             terminal_outcomes,
+            post_event_member_contexts,
             all_origin_occurrences: Vec::new(),
             immediately_before_latched: false,
             immediately_before_batched_triggers: Vec::new(),
@@ -2179,6 +2188,161 @@ impl LogicalZoneChangeGroup {
         Ok(())
     }
 
+    /// Latch the post-event authority for a prospective member that did not
+    /// change zones. The caller must have completed final delivery and its
+    /// layer flush before taking this snapshot.
+    pub fn latch_post_event_member_context(
+        &mut self,
+        member: ObjectIncarnationRef,
+        source_context: TriggerSourceContext,
+    ) -> Result<(), String> {
+        if source_context.identity.reference != member {
+            return Err(format!(
+                "logical zone-change member {}:{} rebound to a different post-event source",
+                member.object_id.0, member.incarnation
+            ));
+        }
+        let Some(index) = self
+            .prospective_battlefield_members
+            .iter()
+            .position(|candidate| candidate.identity == member)
+        else {
+            return Err(format!(
+                "logical zone-change member {}:{} was not announced from the battlefield",
+                member.object_id.0, member.incarnation
+            ));
+        };
+        if !matches!(
+            self.terminal_outcomes[index],
+            LogicalZoneChangeTerminalOutcome::Prevented
+                | LogicalZoneChangeTerminalOutcome::Remained
+        ) {
+            return Err(format!(
+                "logical zone-change member {}:{} did not remain for a post-event context",
+                member.object_id.0, member.incarnation
+            ));
+        }
+        let Some(slot) = self.post_event_member_contexts.get_mut(index) else {
+            return Err(format!(
+                "logical zone-change member {}:{} lacks a post-event context slot",
+                member.object_id.0, member.incarnation
+            ));
+        };
+        if slot.is_some() {
+            return Err(format!(
+                "logical zone-change member {}:{} already has a post-event context",
+                member.object_id.0, member.incarnation
+            ));
+        }
+        *slot = Some(source_context);
+        Ok(())
+    }
+
+    /// Return the one source authority permitted for a prospective member at
+    /// settlement. Departures use their record-owned pre-event context; a
+    /// prevented or remaining member requires its exact post-event latch.
+    pub fn settlement_member_source_context(
+        &self,
+        member_index: usize,
+    ) -> Result<&TriggerSourceContext, String> {
+        let member = self
+            .prospective_battlefield_members
+            .get(member_index)
+            .ok_or_else(|| format!("logical zone-change member slot {member_index} is missing"))?;
+        let outcome = self
+            .terminal_outcomes
+            .get(member_index)
+            .ok_or_else(|| format!("logical zone-change outcome slot {member_index} is missing"))?;
+        let source_context = match outcome {
+            LogicalZoneChangeTerminalOutcome::Moved { occurrence_ordinal } => {
+                let occurrence = self.all_origin_occurrences.get(*occurrence_ordinal).ok_or_else(|| {
+                    format!(
+                        "logical zone-change member slot {member_index} refers to missing occurrence {occurrence_ordinal}"
+                    )
+                })?;
+                let GameEvent::ZoneChanged { from, record, .. } = &occurrence.event else {
+                    return Err(format!(
+                        "logical zone-change member slot {member_index} refers to a non-zone-change occurrence"
+                    ));
+                };
+                if *from != Some(Zone::Battlefield) {
+                    return Err(format!(
+                        "logical zone-change member {}:{} moved from a nonbattlefield zone",
+                        member.identity.object_id.0, member.identity.incarnation
+                    ));
+                }
+                if self
+                    .post_event_member_contexts
+                    .get(member_index)
+                    .is_some_and(Option::is_some)
+                {
+                    return Err(format!(
+                        "logical zone-change departed member {}:{} has a post-event context",
+                        member.identity.object_id.0, member.identity.incarnation
+                    ));
+                }
+                record.trigger_source_context().ok_or_else(|| {
+                    format!(
+                        "logical zone-change member {}:{} lacks its pre-event source context",
+                        member.identity.object_id.0, member.identity.incarnation
+                    )
+                })?
+            }
+            LogicalZoneChangeTerminalOutcome::Prevented
+            | LogicalZoneChangeTerminalOutcome::Remained => self
+                .post_event_member_contexts
+                .get(member_index)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    format!(
+                        "logical zone-change member {}:{} lacks its exact post-event source context",
+                        member.identity.object_id.0, member.identity.incarnation
+                    )
+                })?,
+            LogicalZoneChangeTerminalOutcome::Pending => {
+                return Err(format!(
+                    "logical zone-change member {}:{} is not terminal",
+                    member.identity.object_id.0, member.identity.incarnation
+                ));
+            }
+        };
+        if source_context.identity.reference != member.identity {
+            return Err(format!(
+                "logical zone-change member {}:{} rebound to a different settlement source",
+                member.identity.object_id.0, member.identity.incarnation
+            ));
+        }
+        if matches!(
+            outcome,
+            LogicalZoneChangeTerminalOutcome::Prevented
+                | LogicalZoneChangeTerminalOutcome::Remained
+        ) && source_context.identity.expected_zone != Zone::Battlefield
+        {
+            return Err(format!(
+                "logical zone-change member {}:{} is no longer on the battlefield at settlement",
+                member.identity.object_id.0, member.identity.incarnation
+            ));
+        }
+        Ok(source_context)
+    }
+
+    /// Whether one retained occurrence is the member's own event-subject
+    /// observation, which segment collection already handled. Settlement may
+    /// replay that member only as an observer of the other occurrences.
+    pub fn is_member_own_occurrence(
+        &self,
+        member: ObjectIncarnationRef,
+        occurrence: &LogicalZoneChangeOccurrence,
+    ) -> bool {
+        matches!(
+            &occurrence.event,
+            GameEvent::ZoneChanged { record, .. }
+                if record
+                    .trigger_source_context()
+                    .is_some_and(|source| source.identity.reference == member)
+        )
+    }
+
     /// Validates the complete, serialized authority of this logical action.
     /// Call only after every announced prospective member has reached a terminal
     /// result; a paused owner is intentionally allowed to retain `Pending` slots.
@@ -2186,6 +2350,9 @@ impl LogicalZoneChangeGroup {
         self.immediately_before_latches()?;
         if self.prospective_battlefield_members.len() != self.terminal_outcomes.len() {
             return Err("logical zone-change member/outcome lengths differ".to_string());
+        }
+        if self.prospective_battlefield_members.len() != self.post_event_member_contexts.len() {
+            return Err("logical zone-change member/post-event-context lengths differ".to_string());
         }
         for (index, member) in self.prospective_battlefield_members.iter().enumerate() {
             if self.prospective_battlefield_members[..index]

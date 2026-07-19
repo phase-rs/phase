@@ -240,7 +240,7 @@ struct OffZoneTriggerSourceCache {
 }
 
 struct ActiveSuppressTriggerStatic {
-    source_id: ObjectId,
+    source_context: TriggerSourceContext,
     source_filter: TargetFilter,
     events: Vec<SuppressedTriggerEvent>,
 }
@@ -850,15 +850,16 @@ enum TriggerSource<'a> {
     Context(&'a TriggerSourceContext),
 }
 
-/// Collection authority for an ordinary event batch or one explicit segment of
-/// a logical zone-change owner. Segment collection reserves prospective
-/// battlefield members for final settlement, except when the member is the
-/// event subject observed through its own zone-change record (CR 603.10a).
+/// Collection authority for an ordinary event batch, an explicit segment, or
+/// final settlement of a logical zone-change owner. Segment collection reserves
+/// prospective battlefield members for settlement, except when the member is
+/// the event subject observed through its own zone-change record (CR 603.10a).
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Step 14 wires Segment into each logical-owner pause path.
 pub(crate) enum LogicalZoneTriggerCollection<'a> {
     Ordinary,
     Segment(&'a LogicalZoneChangeGroup),
+    #[allow(dead_code)] // Step 15 wires final completion into this settlement pass.
+    Settlement(&'a LogicalZoneChangeGroup),
 }
 
 #[derive(Clone, Copy)]
@@ -883,11 +884,23 @@ impl LogicalZoneTriggerCollection<'_> {
                         .iter()
                         .any(|member| member.identity == source)
             }
+            Self::Settlement(_) => matches!(visit, TriggerSourceVisit::Observer),
         }
     }
 
     fn skips_batched_definitions(self) -> bool {
-        matches!(self, Self::Segment(_))
+        matches!(self, Self::Segment(_) | Self::Settlement(_))
+    }
+
+    fn omits_member_event_subject(self, source: ObjectIncarnationRef, event: &GameEvent) -> bool {
+        match self {
+            Self::Settlement(group) => group
+                .all_origin_occurrences
+                .iter()
+                .find(|occurrence| occurrence.event == *event)
+                .is_some_and(|occurrence| group.is_member_own_occurrence(source, occurrence)),
+            Self::Ordinary | Self::Segment(_) => false,
+        }
     }
 }
 
@@ -1065,6 +1078,9 @@ fn collect_matching_triggers_inner(
     if !collection.admits_source_visit(visit, source_context.identity.reference) {
         return Vec::new();
     }
+    if collection.omits_member_event_subject(source_context.identity.reference, event) {
+        return Vec::new();
+    }
     let use_latched_trigger_entries = match source {
         TriggerSource::Live(source_obj) => {
             ObjectIncarnationRef::from_object(source_obj) != source_context.identity.reference
@@ -1232,6 +1248,20 @@ fn collect_matching_triggers_inner(
         // fire-count ledgers for them first.
         if collection.skips_batched_definitions() && trig_def.batched {
             continue;
+        }
+        if let LogicalZoneTriggerCollection::Settlement(group) = collection {
+            let (_, suppressors) = match trigger_observation_time(trig_def, event) {
+                TriggerObservationTime::ImmediatelyBefore => group
+                    .immediately_before_latches()
+                    .expect("settlement requires its immediately-before latch"),
+                TriggerObservationTime::ImmediatelyAfter => group
+                    .immediately_after_latches()
+                    .expect("settlement requires its immediately-after latch"),
+            };
+            let suppressors = latched_suppress_trigger_statics(suppressors);
+            if event_is_suppressed_by_static_triggers_cached(state, event, &suppressors) {
+                continue;
+            }
         }
         // CR 603.2c: "One or more" (batched) triggers fire once per batch of
         // simultaneous events, not once per individual event. Skip if already
@@ -1666,10 +1696,26 @@ fn active_suppress_trigger_statics(state: &GameState) -> Vec<ActiveSuppressTrigg
                 return None;
             };
             Some(ActiveSuppressTriggerStatic {
-                source_id: bf_obj.id,
+                source_context: trigger_source_context_for_latch(state, bf_obj),
                 source_filter: source_filter.clone(),
                 events: events.clone(),
             })
+        })
+        .collect()
+}
+
+/// Rehydrate the carrier-owned suppressor projection without consulting a
+/// current object by ID. Settlement must evaluate the static that existed at
+/// the trigger's observation time, not a later same-ID incarnation.
+fn latched_suppress_trigger_statics(
+    suppressors: &[LatchedSuppressTrigger],
+) -> Vec<ActiveSuppressTriggerStatic> {
+    suppressors
+        .iter()
+        .map(|suppressor| ActiveSuppressTriggerStatic {
+            source_context: suppressor.source_context.clone(),
+            source_filter: suppressor.source_filter.clone(),
+            events: suppressor.events.clone(),
         })
         .collect()
 }
@@ -1706,7 +1752,7 @@ fn event_is_suppressed_by_static_triggers_cached(
             continue;
         }
         // CR 603.10a: Zone-change last-known information — use the record snapshot.
-        let filter_ctx = super::filter::FilterContext::from_source(state, suppressor.source_id);
+        let filter_ctx = FilterContext::from_trigger_source(&suppressor.source_context);
         if super::filter::matches_target_filter_on_zone_change_record(
             state,
             record,
@@ -1744,8 +1790,7 @@ fn ward_becomes_target_suppressed(
             .events
             .contains(&SuppressedTriggerEvent::BecomesTargeted)
             && {
-                let filter_ctx =
-                    super::filter::FilterContext::from_source(state, suppressor.source_id);
+                let filter_ctx = FilterContext::from_trigger_source(&suppressor.source_context);
                 super::filter::matches_target_filter(
                     state,
                     targeted_id,
@@ -1987,6 +2032,235 @@ pub(crate) fn collect_logical_zone_trigger_segment(
         events,
         LogicalZoneTriggerCollection::Segment(group),
     )
+}
+
+/// Collect the one final observer pass owned by a completed logical zone-change
+/// group. Segment collection already admitted each moved member's own
+/// event-subject trigger, so settlement replays a member only over the other
+/// retained occurrences. Batched definitions use the carrier latches below;
+/// they are never rediscovered through the current live trigger surface.
+#[allow(dead_code)] // Step 15 calls this once after final delivery and latching.
+pub(crate) fn collect_logical_zone_trigger_settlement(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+) -> Result<Vec<PendingTriggerContext>, String> {
+    group.validate_complete()?;
+    group.immediately_before_latches()?;
+    group.immediately_after_latches()?;
+
+    let all_events: Vec<GameEvent> = group
+        .all_origin_occurrences
+        .iter()
+        .map(|occurrence| occurrence.event.clone())
+        .collect();
+    let mut pending = Vec::new();
+
+    for member_index in 0..group.prospective_battlefield_members.len() {
+        let member = group.prospective_battlefield_members[member_index].identity;
+        let source_context = group.settlement_member_source_context(member_index)?;
+        for occurrence in &group.all_origin_occurrences {
+            if group.is_member_own_occurrence(member, occurrence) {
+                continue;
+            }
+            let mut batched_this_pass = HashSet::new();
+            let mut registered_this_event = HashSet::new();
+            let matched_triggers = collect_matching_triggers_from_context(
+                state,
+                &occurrence.event,
+                &all_events,
+                source_context,
+                Some(Zone::Battlefield),
+                &mut batched_this_pass,
+                &mut registered_this_event,
+                &[],
+                LogicalZoneTriggerCollection::Settlement(group),
+                TriggerSourceVisit::Observer,
+            );
+            for matched in matched_triggers {
+                debug_assert!(
+                    !matched.batched,
+                    "settlement's collector path reserves batched triggers for carrier latches"
+                );
+                record_trigger_fired_with_ref(
+                    state,
+                    matched.constraint.as_ref(),
+                    matched.pending.ability.trigger_source.as_ref(),
+                    matched.definition_ref.as_ref(),
+                    &occurrence.event,
+                );
+                pending.push(PendingTriggerContext::batched(
+                    matched.pending,
+                    matched.trigger_events,
+                ));
+            }
+        }
+    }
+
+    collect_latched_batched_zone_triggers(state, group, &all_events, &mut pending)?;
+    Ok(pending)
+}
+
+/// Match one latched batched definition against the complete logical event set.
+/// The source context and suppressor set are selected per occurrence at the
+/// CR 603.10 observation time, but one definition still produces one pending
+/// context containing every admitted occurrence.
+#[allow(dead_code)] // Reached by the Step-15 settlement entry point.
+fn collect_latched_batched_zone_triggers(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+    all_events: &[GameEvent],
+    pending: &mut Vec<PendingTriggerContext>,
+) -> Result<(), String> {
+    let (immediately_before, _) = group.immediately_before_latches()?;
+    let (immediately_after, _) = group.immediately_after_latches()?;
+
+    for latched in immediately_before.iter().chain(immediately_after) {
+        let Some(matcher) = trigger_matcher(latched.definition.mode.clone()) else {
+            continue;
+        };
+        let mut admitted = Vec::new();
+        for event in all_events {
+            let observation_time = trigger_observation_time(&latched.definition, event);
+            let Some(source_context) = latched.source_context_at(observation_time) else {
+                continue;
+            };
+            let (_, suppressors) = match observation_time {
+                TriggerObservationTime::ImmediatelyBefore => group
+                    .immediately_before_latches()
+                    .expect("settlement checked its immediately-before latch"),
+                TriggerObservationTime::ImmediatelyAfter => group
+                    .immediately_after_latches()
+                    .expect("settlement checked its immediately-after latch"),
+            };
+            let suppressors = latched_suppress_trigger_statics(suppressors);
+            if event_is_suppressed_by_static_triggers_cached(state, event, &suppressors)
+                || !matcher(event, &latched.definition, source_context, state)
+                || !check_trigger_constraint_with_ref(
+                    state,
+                    &latched.definition,
+                    Some(&latched.definition_ref),
+                    Some(source_context),
+                    source_context.lki.controller,
+                    event,
+                )
+                || !latched
+                    .definition
+                    .condition
+                    .as_ref()
+                    .is_none_or(|condition| {
+                        check_trigger_condition_with_source(
+                            state,
+                            condition,
+                            source_context.lki.controller,
+                            Some(source_context),
+                            Some(event),
+                        )
+                    })
+            {
+                continue;
+            }
+            if let Some(contextual_event) =
+                contextual_batched_trigger_event(state, event, &latched.definition, source_context)
+            {
+                admitted.push((source_context, contextual_event));
+            }
+        }
+
+        let Some((source_context, first_event)) = admitted.first() else {
+            continue;
+        };
+        let trigger_events: Vec<GameEvent> =
+            admitted.iter().map(|(_, event)| event.clone()).collect();
+        if batched_zone_change_replay_guard_applies(&latched.definition, &trigger_events)
+            && batched_zone_change_already_collected(
+                state,
+                Some(&latched.definition_ref),
+                &trigger_events,
+            )
+        {
+            continue;
+        }
+
+        let trig_idx = source_context
+            .trigger_entries
+            .iter()
+            .position(|entry| source_context.definition_ref(entry) == latched.definition_ref)
+            .ok_or_else(|| {
+                format!(
+                    "latched batched trigger {:?} is absent from its exact source context",
+                    latched.definition_ref
+                )
+            })?;
+        let mut ability = build_triggered_ability_from_context(
+            state,
+            &latched.definition,
+            source_context,
+            Some(&latched.definition_ref),
+        );
+        ability.ability_index = Some(trig_idx);
+        let (modal, mode_abilities) = latched
+            .definition
+            .execute
+            .as_ref()
+            .map(|execute| (execute.modal.clone(), execute.mode_abilities.clone()))
+            .unwrap_or_default();
+        let subject_match_count = super::trigger_matchers::count_trigger_subjects_in_batch(
+            state,
+            latched.definition.valid_card.as_ref(),
+            source_context,
+            &trigger_events,
+        );
+        let matched = MatchedTrigger {
+            trig_idx,
+            definition_ref: Some(latched.definition_ref.clone()),
+            pending: PendingTrigger {
+                source_id: source_context.identity.reference.object_id,
+                controller: source_context.lki.controller,
+                condition: latched.definition.condition.as_ref().and_then(|condition| {
+                    stack_condition_for_trigger(&latched.definition, condition)
+                }),
+                ability,
+                timestamp: source_context.entered_battlefield_turn.unwrap_or(0),
+                target_constraints: latched
+                    .definition
+                    .execute
+                    .as_ref()
+                    .map(|execute| execute.target_constraints.clone())
+                    .unwrap_or_default(),
+                distribute: latched
+                    .definition
+                    .execute
+                    .as_ref()
+                    .and_then(|execute| execute.distribute.clone()),
+                trigger_event: Some(first_event.clone()),
+                modal,
+                mode_abilities,
+                description: latched.definition.description.clone(),
+                may_trigger_origin: Some(MayTriggerOrigin::Definition {
+                    definition_ref: latched.definition_ref.clone(),
+                }),
+                subject_match_count,
+                die_result: None,
+            },
+            trigger_events,
+            batched: true,
+            constraint: latched.definition.constraint.clone(),
+        };
+        record_trigger_fired_with_ref(
+            state,
+            matched.constraint.as_ref(),
+            matched.pending.ability.trigger_source.as_ref(),
+            matched.definition_ref.as_ref(),
+            first_event,
+        );
+        record_matched_batched_zone_change_replay(state, &matched);
+        let trigger_context =
+            PendingTriggerContext::batched(matched.pending, matched.trigger_events);
+        if !pending_trigger_is_auto_inert_noop(state, &trigger_context) {
+            pending.push(trigger_context);
+        }
+    }
+    Ok(())
 }
 
 fn collect_pending_triggers_with_collection(
@@ -28474,6 +28748,128 @@ pub mod tests {
                 .count(),
             1,
             "the record-owned moved source is the sole member exemption"
+        );
+    }
+
+    #[test]
+    fn logical_zone_settlement_replays_member_only_as_observer_of_other_occurrences() {
+        let mut state = setup();
+        let observer = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), false);
+        let subject = make_creature(&mut state, PlayerId(0), "Settlement subject", 2, 2);
+        let mut group = allocate_logical_zone_change_group(&mut state, &[observer, subject]);
+
+        let mut subject_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, subject, Zone::Graveyard, &mut subject_events);
+        group
+            .append_delivery_events(&subject_events)
+            .expect("retain the first actual occurrence");
+
+        let mut observer_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            observer,
+            Zone::Graveyard,
+            &mut observer_events,
+        );
+        group
+            .append_delivery_events(&observer_events)
+            .expect("retain the observer's own occurrence");
+        latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
+
+        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
+            .expect("complete departure contexts settle");
+        assert_eq!(
+            settled
+                .iter()
+                .filter(|context| context.pending.source_id == observer)
+                .count(),
+            1,
+            "the member replays only the other retained event; its own event was collected by Segment"
+        );
+        assert_eq!(
+            settled[0].trigger_events, subject_events,
+            "the settlement context retains the exact other occurrence"
+        );
+    }
+
+    #[test]
+    fn logical_zone_settlement_batches_all_retained_occurrences_once() {
+        let mut state = setup();
+        let observer = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), true);
+        let first_subject = make_creature(&mut state, PlayerId(0), "First batched subject", 2, 2);
+        let second_subject = make_creature(&mut state, PlayerId(0), "Second batched subject", 2, 2);
+        let mut group = allocate_logical_zone_change_group(&mut state, &[]);
+
+        let mut first_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            first_subject,
+            Zone::Graveyard,
+            &mut first_events,
+        );
+        group
+            .append_delivery_events(&first_events)
+            .expect("retain first all-origin occurrence");
+        let mut second_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            second_subject,
+            Zone::Graveyard,
+            &mut second_events,
+        );
+        group
+            .append_delivery_events(&second_events)
+            .expect("retain second all-origin occurrence");
+        latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
+
+        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
+            .expect("batched latches settle");
+        assert_eq!(
+            settled.len(),
+            1,
+            "one definition creates one pending context"
+        );
+        assert_eq!(settled[0].pending.source_id, observer);
+        assert_eq!(
+            settled[0].trigger_events.len(),
+            2,
+            "the one context contains every retained matching occurrence"
+        );
+    }
+
+    #[test]
+    fn logical_zone_settlement_rejects_a_same_id_post_event_rebind() {
+        let mut state = setup();
+        let member = make_creature(&mut state, PlayerId(0), "Prevented member", 2, 2);
+        let member_identity =
+            ObjectIncarnationRef::from_object(state.objects.get(&member).expect("member exists"));
+        let mut group = allocate_logical_zone_change_group(&mut state, &[member]);
+        group
+            .record_prevented(member_identity)
+            .expect("record prevented member");
+        latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
+
+        state
+            .objects
+            .get_mut(&member)
+            .expect("member exists")
+            .incarnation += 1;
+        let rebound_context = trigger_source_context_for_latch(
+            &state,
+            state
+                .objects
+                .get(&member)
+                .expect("replacement object exists"),
+        );
+        assert!(
+            group
+                .latch_post_event_member_context(member_identity, rebound_context)
+                .is_err(),
+            "a new incarnation cannot satisfy the original member's post-event authority"
+        );
+        assert!(
+            collect_logical_zone_trigger_settlement(&mut state, &group).is_err(),
+            "settlement fails closed without an exact post-event context"
         );
     }
 
