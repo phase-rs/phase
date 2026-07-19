@@ -3327,14 +3327,27 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "As long as ..." (generic conditional static, no comma separator) ---
+    // CR 604.1 + CR 611.3a: a static's "as long as" gate is simply true or false
+    // at any moment, so the condition must be TYPED whenever the parser can type
+    // it. `StaticCondition::Unrecognized` is evaluated as always-true by the
+    // layer system, silently converting a conditional static into an
+    // unconditional one — reserve it for text the condition authority genuinely
+    // cannot decompose. Delegate to `parse_static_condition` (→
+    // `nom_condition::parse_inner_condition`, the single authority for
+    // game-state conditions) exactly as the four sibling arms above do.
+    // Recursion safety unchanged: `parse_inner_condition` never re-enters this
+    // parser. `parse_static_condition` enforces full consumption, so this can
+    // only NARROW the set of lines that end up `Unrecognized`, never widen it.
     if let Some(rest_tp) = nom_tag_tp(&tp, "as long as ") {
         let condition_text = rest_tp.original.trim_end_matches('.');
+        let condition =
+            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+                text: condition_text.to_string(),
+            });
         return Some(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .condition(StaticCondition::Unrecognized {
-                    text: condition_text.to_string(),
-                })
+                .condition(condition)
                 .description(text.to_string()),
         );
     }

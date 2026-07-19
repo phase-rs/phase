@@ -154,6 +154,7 @@ mod floodpits_drowner;
 mod flowstone_surge_mixed_anthem;
 mod foretell_pipeline;
 mod frenzy_attacker_unblocked_pump;
+mod frodo_ringbearer_must_be_blocked_gate;
 mod frostcliff_siege_anchor_word_modes;
 mod fury_sliver_double_strike_grant;
 mod fuse_runtime;
