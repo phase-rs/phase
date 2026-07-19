@@ -348,9 +348,31 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
     stripped.trim()
 }
 
+/// CR 604.1: Parse a LEADING "during your turn, " / "during turns other than
+/// yours, " turn-scope clause into its `StaticCondition`. Shares the negated-turn
+/// vocabulary the CDA / dispatch / type-change static parsers already recognize
+/// (`nom_tag_tp("during turns other than yours, ")`), and the affirmative form
+/// mirrors the trailing suffix arm below — so a cost modifier fronted by the
+/// clause (Geyser Drake, Naiad of Hidden Coves: "During turns other than yours,
+/// spells you cast cost {1} less") no longer drops the timing restriction.
+fn parse_leading_turn_scope(text: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        value(
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+            tag("during turns other than yours, "),
+        ),
+        value(StaticCondition::DuringYourTurn, tag("during your turn, ")),
+    ))
+    .parse(text)
+}
+
 /// CR 604.1 + CR 601.2f: Strip an inline "during your turn" timing clause from
 /// a cost-modification subject before type parsing. Paladin Class: "Spells your
-/// opponents cast during your turn cost {1} more to cast."
+/// opponents cast during your turn cost {1} more to cast." The LEADING clause
+/// (affirmative + negated) is handled once for every branch by the shared
+/// `parse_leading_turn_scope` fallback near the end of `try_parse_cost_modification`.
 fn strip_cost_mod_during_your_turn_scope(text: &str) -> (&str, Option<StaticCondition>) {
     if let Ok((_, prefix)) = terminated(
         take_until(" during your turn"),
@@ -946,19 +968,21 @@ pub(crate) fn try_parse_cost_modification(
         }
     }
 
-    // CR 102.1 + CR 601.2f: Leading "During your turn," timing restriction —
-    // the cost modification functions only on the static controller's turn
-    // (Tithe Taker: "During your turn, spells your opponents cast cost {1} more
-    // to cast ..."). The trailing/`if` scans above miss this because it is a
-    // comma-separated timing prefix, not an "if"/"as long as" clause. The cost
-    // resolver gates on `StaticCondition::DuringYourTurn`, which is evaluated
-    // against the source permanent's controller (CR 102.1: active player).
-    if definition.condition.is_none()
-        && tag::<_, _, OracleError<'_>>("during your turn, ")
-            .parse(lower)
-            .is_ok()
-    {
-        definition.condition = Some(StaticCondition::DuringYourTurn);
+    // CR 102.1 + CR 604.1 + CR 601.2f: Leading "During your turn," / "During turns
+    // other than yours," timing restriction — the cost modification functions only
+    // on (affirmative) or off (negated) the static controller's turn: Tithe Taker
+    // ("During your turn, spells your opponents cast cost {1} more"); Geyser Drake /
+    // Naiad of Hidden Coves ("During turns other than yours, spells you cast cost
+    // {1} less"). The trailing/`if` scans above miss this because it is a
+    // comma-separated timing prefix, not an "if"/"as long as" clause. A single
+    // authority for every cost-mod branch (self-spell, first-qualified, generic):
+    // the cost resolver gates on the resulting StaticCondition
+    // (`DuringYourTurn` / `Not(DuringYourTurn)`), evaluated against the source
+    // permanent's controller (CR 102.1: active player).
+    if definition.condition.is_none() {
+        if let Ok((_, cond)) = parse_leading_turn_scope(lower.trim_start()) {
+            definition.condition = Some(cond);
+        }
     }
 
     // CR 601.2f + CR 702.34a: Caller-proven casting variant (e.g. Flashback from

@@ -660,6 +660,7 @@ mod mystic_forge_regression;
 mod narset_jeskai_waymaster_draw_spells_cast;
 mod natural_balance;
 mod necrodominance_pay_any_life_draw;
+mod negated_turn_spell_cost_reduction;
 mod nether_spirit_only_creature_card_intervening_if;
 mod nettling_imp_continuity_target;
 mod niko_light_of_hope;
