@@ -27,6 +27,7 @@ import {
   computeGapPx,
   computeReorderedHand,
   flankingHandIndices,
+  isHandPermutation,
 } from "./handInsertionSlot.ts";
 import { useCastableZoneObjects } from "../../hooks/useCastableZoneObjects.ts";
 import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
@@ -354,7 +355,16 @@ export function PlayerHand() {
           targetSlot,
           pendingObjectId != null || organizeActive,
         );
-        if (nextOrder) {
+        // The order above is built from the hand this gesture was set up
+        // against. A draw / discard / cast landing mid-drag changes the real
+        // hand, and the engine rejects a `ReorderHand` that is not a permutation
+        // of the CURRENT hand ("expected N ids, got M"), which surfaced to
+        // players as a spurious error flag (issue #5913). Re-read the hand at
+        // drop time — `getState()` is immune to the stale closure an in-flight
+        // drag can hold — and drop the gesture when it no longer matches rather
+        // than replaying a slot index chosen against the old layout.
+        const currentHand = useGameStore.getState().gameState?.players[playerId]?.hand;
+        if (nextOrder && currentHand && isHandPermutation(nextOrder, currentHand)) {
           dispatchAction({ type: "ReorderHand", data: { order: nextOrder } });
         }
         return false;
@@ -366,7 +376,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, player, playerId, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(
