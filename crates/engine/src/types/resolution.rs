@@ -1077,11 +1077,14 @@ mod tests {
     use crate::game::merge::MergeSide;
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
-        Effect, EffectKind, PostReplacementContinuation, QuantityExpr, TargetFilter,
+        Effect, EffectKind, PostReplacementContinuation, QuantityExpr, RepeatContinuation,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        DrainStatus, GameState, PendingCoinFlipKind, PendingMutateMerge, PendingProliferateActions,
+        DrainStatus, GameState, PendingCoinFlipKind, PendingCounterAdditionQueue,
+        PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingMutateMerge,
+        PendingProliferateActions, PendingRepeatIteration, PendingRepeatUntil,
         PendingRepeatedOptionalPayment, PostReplacementDrain, ResidentDrainPolicy,
     };
     use crate::types::identifiers::ObjectId;
@@ -1209,6 +1212,12 @@ mod tests {
                 "resumed v2 fixture must not write legacy field {field}"
             );
         }
+    }
+
+    fn resume_priority_fixture(mut state: GameState) -> GameState {
+        apply_as_current(&mut state, GameAction::PassPriority)
+            .expect("priority action resumes the legacy resolution drain");
+        state
     }
 
     #[test]
@@ -1689,5 +1698,89 @@ mod tests {
             vec![merging_id, target_id]
         );
         assert_reserializes_v2_only(mutate);
+    }
+
+    #[test]
+    fn v1_after_child_fixtures_resume_on_the_real_priority_drain() {
+        let mut continuation = GameState::new_two_player(110);
+        continuation.pending_continuation = Some(PendingContinuation::new(
+            Box::new(resolved_draw(110)),
+            &continuation,
+        ));
+        let continuation = resume_priority_fixture(restore_v1_fixture(continuation));
+        assert!(continuation.pending_continuation.is_none());
+        assert_reserializes_v2_only(continuation);
+
+        let mut repeat_for = GameState::new_two_player(111);
+        repeat_for.pending_repeat_iteration = Some(PendingRepeatIteration {
+            ability: Box::new(resolved_draw(111)),
+            tracked_members: Vec::new(),
+            iterated_counter_kinds: Vec::new(),
+            next_iteration: 0,
+            total_iterations: 0,
+        });
+        let repeat_for = resume_priority_fixture(restore_v1_fixture(repeat_for));
+        assert!(repeat_for.pending_repeat_iteration.is_none());
+        assert_reserializes_v2_only(repeat_for);
+
+        let mut repeat_until = GameState::new_two_player(112);
+        let mut repeat_ability = resolved_draw(112);
+        repeat_ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
+        repeat_until.pending_repeat_until = Some(PendingRepeatUntil {
+            ability: Box::new(repeat_ability),
+        });
+        let mut repeat_until = resume_priority_fixture(restore_v1_fixture(repeat_until));
+        assert!(matches!(
+            repeat_until.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        apply_as_current(
+            &mut repeat_until,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("repeat-until fixture resumes through the real repeat decision");
+        assert!(repeat_until.pending_repeat_until.is_none());
+        assert_reserializes_v2_only(repeat_until);
+
+        let ResolutionFrame::ChangeZone(change_zone_frame) = change_zone_frame(113) else {
+            unreachable!("helper constructs a change-zone frame")
+        };
+        let mut change_zone = GameState::new_two_player(113);
+        change_zone.pending_change_zone_iteration = change_zone_frame.pending;
+        change_zone.devour_eligible_snapshot = Some(HashSet::from([ObjectId(113)]));
+        let change_zone = resume_priority_fixture(restore_v1_fixture(change_zone));
+        assert!(change_zone.pending_change_zone_iteration.is_none());
+        assert_reserializes_v2_only(change_zone);
+
+        let mut counter_moves = GameState::new_two_player(114);
+        counter_moves.pending_counter_moves = Some(PendingCounterMoveQueue {
+            remaining: Vec::new(),
+            effect_kind: EffectKind::MoveCounters,
+            source_id: ObjectId(114),
+        });
+        let counter_moves = resume_priority_fixture(restore_v1_fixture(counter_moves));
+        assert!(counter_moves.pending_counter_moves.is_none());
+        assert_reserializes_v2_only(counter_moves);
+
+        let mut counter_removals = GameState::new_two_player(115);
+        counter_removals.pending_counter_removals = Some(PendingCounterRemovalQueue {
+            remaining: Vec::new(),
+            source_id: ObjectId(115),
+            effect_kind: EffectKind::RemoveCounter,
+            source_ability_id: ObjectId(115),
+            total: 0,
+        });
+        let counter_removals = resume_priority_fixture(restore_v1_fixture(counter_removals));
+        assert!(counter_removals.pending_counter_removals.is_none());
+        assert_reserializes_v2_only(counter_removals);
+
+        let mut counter_additions = GameState::new_two_player(116);
+        counter_additions.pending_counter_additions = Some(PendingCounterAdditionQueue {
+            remaining: Vec::new(),
+            completion: None,
+        });
+        let counter_additions = resume_priority_fixture(restore_v1_fixture(counter_additions));
+        assert!(counter_additions.pending_counter_additions.is_none());
+        assert_reserializes_v2_only(counter_additions);
     }
 }
