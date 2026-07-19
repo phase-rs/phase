@@ -3767,6 +3767,51 @@ fn modal_spell_block_keeps_mode_branches_separate() {
     ));
 }
 
+/// Issue #5979 (modal-card context): "play up to <n> additional lands this
+/// turn" also reaches the additional-land grammar as a modal mode bullet, not
+/// only as a standalone sentence. Journey of Discovery's second mode ("You may
+/// play up to two additional lands this turn.") must parse — through the
+/// production card parser — to the `AdditionalLandDrop { count: 2 }` grant, not
+/// misroute to `CastFromZone`. Entwine is a keyword line and adds no mode.
+#[test]
+fn journey_of_discovery_modal_up_to_two_additional_lands() {
+    use crate::types::statics::StaticMode;
+    let r = parse(
+        "Choose one —\n• Search your library for up to two basic land cards, reveal them, put them into your hand, then shuffle.\n• You may play up to two additional lands this turn.\nEntwine {2}{G}",
+        "Journey of Discovery",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    let modal = r.modal.expect("Journey of Discovery is a modal spell");
+    assert_eq!(
+        modal.mode_count, 2,
+        "Entwine must not register as a third mode"
+    );
+    assert_eq!(
+        r.abilities.len(),
+        2,
+        "one ability per mode: {:?}",
+        r.abilities
+    );
+
+    // Second mode: the turn-scoped additional-land grant (count 2).
+    match &*r.abilities[1].effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => assert!(
+            static_abilities
+                .iter()
+                .any(|d| d.mode == StaticMode::AdditionalLandDrop { count: 2 }),
+            "expected AdditionalLandDrop {{ count: 2 }} in second mode, got {static_abilities:?}"
+        ),
+        other => {
+            panic!("expected GenericEffect additional-land grant as second mode, got {other:?}")
+        }
+    }
+}
+
 #[test]
 fn non_spell_permanent_resolution_like_lines_do_not_merge() {
     let r = parse(
