@@ -38,7 +38,7 @@ const HARVEST_PERSPECTIVE: PlayerId = PlayerId(0);
 /// unfitted heuristic). The serve-reconstruction test in `planner::mod` pins that
 /// identity so a future strategic term without a matching field fails loudly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct FeatureRow {
+pub struct FeatureRow {
     pub life: f64,
     pub board_presence: f64,
     pub board_power: f64,
@@ -100,7 +100,7 @@ impl FeatureRow {
 
     /// Weighted sum of all 9 fitted features, **excluding** `energy_offset`. Mirrors
     /// `evaluate_with_strategy` minus its two serve-time carve-outs.
-    pub(crate) fn weighted_total(&self, w: &EvalWeights) -> f64 {
+    pub fn weighted_total(&self, w: &EvalWeights) -> f64 {
         self.life * w.life
             + self.board_presence * w.board_presence
             + self.board_power * w.board_power

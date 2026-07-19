@@ -1162,6 +1162,7 @@ pub struct BeamContinuationPlanner {
 }
 
 impl BeamContinuationPlanner {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn search_value(
         &self,
         state: &GameState,
