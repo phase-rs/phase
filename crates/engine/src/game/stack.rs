@@ -2377,8 +2377,8 @@ fn observer_candidates_are_inert(
     candidates: &[ObjectId],
 ) -> bool {
     let event_keys = crate::game::trigger_index::keys_from_event(event, state);
-    for candidate in candidates.iter().copied() {
-        let Some(source_obj) = state.objects.get(&candidate) else {
+    for candidate in candidates {
+        let Some(source_obj) = state.objects.get(candidate) else {
             continue;
         };
         let source_context = super::triggers::trigger_source_context_for_latch(state, source_obj);

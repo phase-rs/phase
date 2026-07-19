@@ -743,7 +743,7 @@ pub(crate) fn trigger_observation_time(
     let looks_back = observes_event
         && (matches!(from, Some(Zone::Battlefield) | Some(Zone::Graveyard))
             || (matches!(to, Zone::Hand | Zone::Library)
-                && from.is_some_and(|zone| zone_is_visible_to_all_players(zone))));
+                && from.is_some_and(zone_is_visible_to_all_players)));
 
     if looks_back {
         TriggerObservationTime::ImmediatelyBefore
@@ -801,26 +801,26 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
         }
     }
 
-    let suppress_triggers = (!batched_triggers.is_empty())
-        .then(|| {
-            super::functioning_abilities::battlefield_active_statics(state)
-                .filter_map(|(source, definition)| {
-                    let StaticMode::SuppressTriggers {
-                        source_filter,
-                        events,
-                    } = &definition.mode
-                    else {
-                        return None;
-                    };
-                    Some(LatchedSuppressTrigger {
-                        source_context: trigger_source_context_for_latch(state, source),
-                        source_filter: source_filter.clone(),
-                        events: events.clone(),
-                    })
+    let suppress_triggers = if batched_triggers.is_empty() {
+        Vec::new()
+    } else {
+        super::functioning_abilities::battlefield_active_statics(state)
+            .filter_map(|(source, definition)| {
+                let StaticMode::SuppressTriggers {
+                    source_filter,
+                    events,
+                } = &definition.mode
+                else {
+                    return None;
+                };
+                Some(LatchedSuppressTrigger {
+                    source_context: trigger_source_context_for_latch(state, source),
+                    source_filter: source_filter.clone(),
+                    events: events.clone(),
                 })
-                .collect()
-        })
-        .unwrap_or_default();
+            })
+            .collect()
+    };
 
     group
         .latch_immediately_after(batched_triggers, suppress_triggers)
@@ -6960,6 +6960,7 @@ fn delayed_trigger_event_with_index(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // The condition supplies independent zone, filter, and exact-source facts.
 fn delayed_zone_change_event_with_index(
     events: &[GameEvent],
     state: &GameState,
@@ -7176,6 +7177,7 @@ fn check_trigger_constraint_with_ref(
 /// the exact trigger source. Keeping this value-level avoids a source-id
 /// fallback that could bind a later incarnation during an intervening-if
 /// recheck (CR 603.4).
+#[allow(clippy::too_many_arguments)] // Event-subject and exact-source payment projections share this value matcher.
 fn additional_cost_paid_matches(
     payment_source: crate::types::ability::AdditionalCostPaymentSource,
     origin: Option<AdditionalCostOrigin>,
