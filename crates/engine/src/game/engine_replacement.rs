@@ -1995,10 +1995,14 @@ pub(crate) fn apply_pending_post_replacement_effect(
         ),
         None => None,
     };
-    // The dispatch is over: retire the drain, taking its event context with it.
-    // This replaces the hand-clearing of `post_replacement_event_source` /
-    // `_event_target` that used to sit below.
-    state.post_replacement_drains.finish_dispatch();
+    // CR 615.5: a pausing draw or its parked continuation owns this dispatch.
+    // Keep the drain resident so the resumed chain can still read the prevented
+    // event's source and target; otherwise the synchronous dispatch is complete.
+    if waiting_for.is_some() && state.park_post_replacement_drain_dispatch() {
+        // The typed pause owner retires the resident drain at true completion.
+    } else {
+        state.finish_post_replacement_drain_dispatch();
+    }
     // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
     // here. This drain runs for EVERY replacement continuation — including a
     // nested one that pauses inside an outer token-choice ChooseOneOf (issue
@@ -5048,12 +5052,9 @@ mod tests {
         assert_eq!(state.players[1].life, initial_life - 3);
     }
 
-    /// Phase-0 G4 baseline. A general post-replacement drain begins a true draw
-    /// that pauses on a replacement consult, the paused state is saved/reloaded,
-    /// and a continuation then reads `PostReplacementSourceController`. Today
-    /// `finish_dispatch` pops the resident drain before that continuation resumes,
-    /// so the event-source context is lost. Phase 1 must retain typed ownership
-    /// across this pause: P1 must draw the second card instead of P0.
+    /// G4 regression: a general post-replacement drain that begins a true draw
+    /// retains its event context across a save/reload at a replacement pause,
+    /// through its context-dependent follow-up.
     #[test]
     fn phase0_g4_general_drain_loses_event_context_across_pausing_draw_resume() {
         use crate::types::ability::{
@@ -5135,8 +5136,14 @@ mod tests {
             "reach guard: general drain's first draw must pause on a replacement consult"
         );
         assert!(
-            state.post_replacement_drains.is_empty(),
-            "CURRENT behavior: finish_dispatch already popped the dispatching drain at the pause"
+            matches!(
+                state.post_replacement_drains.resident(),
+                Some(crate::types::game_state::PostReplacementDrain {
+                    status: crate::types::game_state::DrainStatus::Dispatching,
+                    ..
+                })
+            ),
+            "the dispatching drain must own its event context across the paused draw"
         );
 
         let serialized = serde_json::to_string(&state).expect("save paused state");
@@ -5152,8 +5159,12 @@ mod tests {
         );
         assert_eq!(
             restored.players[1].hand.len(),
-            0,
-            "CURRENT (wrong): the post-resume PostReplacementSourceController read has no resident drain context, so P1 draws zero; Phase 1 must make P1 draw one"
+            1,
+            "the resumed PostReplacementSourceController follow-up must draw for P1 from the persisted drain context"
+        );
+        assert!(
+            restored.post_replacement_drains.is_empty(),
+            "the drain is retired only after its resumed continuation completes"
         );
     }
 

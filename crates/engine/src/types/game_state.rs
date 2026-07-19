@@ -1807,6 +1807,15 @@ pub struct CommanderDamageEntry {
 /// without the other and break the "pause emits the same event as
 /// non-pause" invariant.
 ///
+/// CR 615.5: typed ownership of a resident post-replacement drain while a
+/// continuation is paused. This is deliberately a marker, not a drain ID or a
+/// reverse reference: the resident top is the sole drain being dispatched, and
+/// the marker only extends that dispatch until its owned continuation finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PostReplacementDispatchPauseOwner {
+    Dispatch,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -1824,6 +1833,10 @@ pub struct PendingContinuation {
     /// finished or merely paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_context: Option<ResolvingTriggerContext>,
+    /// CR 615.5: a paused post-replacement continuation owns the resident
+    /// drain's event context until the chain truly completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_replacement_drain_owner: Option<PostReplacementDispatchPauseOwner>,
 }
 
 impl PendingContinuation {
@@ -1836,6 +1849,7 @@ impl PendingContinuation {
             parent_kind: None,
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
+            post_replacement_drain_owner: None,
         }
     }
 
@@ -1853,6 +1867,7 @@ impl PendingContinuation {
             parent_kind: Some(parent_kind),
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
+            post_replacement_drain_owner: None,
         }
     }
 }
@@ -12962,6 +12977,11 @@ pub struct DrawSequenceFrame {
     /// The instruction's completion behavior. Old saves default to [`DrawSequenceOrigin::Plain`].
     #[serde(default)]
     pub origin: DrawSequenceOrigin,
+    /// CR 615.5: if a post-replacement continuation pauses directly on this
+    /// draw, this frame keeps the resident drain's event context alive until
+    /// the draw (and any transferred continuation) truly completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_replacement_drain_owner: Option<PostReplacementDispatchPauseOwner>,
     /// CR 121.6b: individual draws of this instruction not yet attempted. "If an
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
@@ -13063,6 +13083,7 @@ impl DrawSequenceStack {
             player,
             applied,
             origin,
+            post_replacement_drain_owner: None,
             remaining: count,
             accumulated: 0,
         });
@@ -13367,6 +13388,29 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// CR 615.5: Move resident post-replacement dispatch ownership onto the
+    /// concrete paused work. A continuation takes precedence because it owns a
+    /// later chain after the current draw settles; otherwise the active draw
+    /// frame is the pause carrier.
+    pub fn park_post_replacement_drain_dispatch(&mut self) -> bool {
+        if let Some(continuation) = self.pending_continuation.as_mut() {
+            continuation.post_replacement_drain_owner =
+                Some(PostReplacementDispatchPauseOwner::Dispatch);
+            return true;
+        }
+        if let Some(frame) = self.draw_sequences.active_mut() {
+            frame.post_replacement_drain_owner = Some(PostReplacementDispatchPauseOwner::Dispatch);
+            return true;
+        }
+        false
+    }
+
+    /// CR 615.5: Retire a resident dispatch only after the typed owner has no
+    /// paused continuation or draw frame left to resume.
+    pub fn finish_post_replacement_drain_dispatch(&mut self) {
+        self.post_replacement_drains.finish_dispatch();
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through

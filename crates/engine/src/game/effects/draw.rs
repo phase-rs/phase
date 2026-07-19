@@ -301,6 +301,7 @@ pub(crate) fn resume_draw_sequence(
         return ReplacementResult::Prevented;
     };
     state.last_effect_count = Some(frame.accumulated as i32);
+    let post_replacement_drain_owner = frame.post_replacement_drain_owner;
 
     match frame.origin {
         DrawSequenceOrigin::Plain => {
@@ -317,6 +318,10 @@ pub(crate) fn resume_draw_sequence(
                 subject: None,
             });
         }
+    }
+
+    if post_replacement_drain_owner.is_some() && !state.park_post_replacement_drain_dispatch() {
+        state.finish_post_replacement_drain_dispatch();
     }
 
     ReplacementResult::Execute(ProposedEvent::Draw {
