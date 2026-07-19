@@ -1810,6 +1810,7 @@ mod tests {
                 supertypes: Vec::new(),
                 keywords: Vec::new(),
                 trigger_definitions: Vec::new(),
+                trigger_source_context: None,
                 power: None,
                 toughness: None,
                 base_power: None,

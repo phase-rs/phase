@@ -34,15 +34,11 @@ use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
 use crate::types::counter::{has_positive_counters, CounterType};
-#[cfg(test)]
-use crate::types::game_state::MayTriggerOrigin;
 use crate::types::game_state::{
     DayNight, GameState, LayersDirty, StaticGateKey, TransientContinuousEffect,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
-#[cfg(test)]
-use crate::types::keywords::KeywordKind;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -1157,6 +1153,7 @@ fn evaluate_condition_with_context(
                     QuantityContext {
                         entering: None,
                         source: source_id,
+                        trigger_source: None,
                         recipient: recipient_id,
                         scoped_player: None,
                     },
@@ -16482,12 +16479,20 @@ mod tests {
                     .map(|trigger| trigger.may_trigger_origin.clone())
             })
             .flatten();
-        assert_eq!(
-            origin,
-            Some(MayTriggerOrigin::Keyword {
-                keyword: KeywordKind::Undying,
-            }),
-            "LKI-synthesized Undying must keep keyword origin instead of a fake printed index"
+        assert!(
+            matches!(
+                origin,
+                Some(crate::types::game_state::MayTriggerOrigin::Definition {
+                    definition_ref: crate::types::ability::TriggerDefinitionRef {
+                        occurrence:
+                            crate::types::ability::TriggerDefinitionOccurrenceRef::KeywordCompanion {
+                                ..
+                            },
+                        ..
+                    },
+                })
+            ),
+            "LKI snapshot must preserve Undying's concrete keyword-companion occurrence"
         );
     }
 

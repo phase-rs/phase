@@ -2023,7 +2023,7 @@ pub(crate) fn fight_subject_needs_target_slot(subject: &TargetFilter) -> bool {
 /// recomputation would re-offer every player and reintroduce the hang.
 ///
 /// For a damage-to-player trigger the slot is bound to the damaged player(s) of
-/// the triggering event (CR 120.3a). Gated on `source_incarnation` (carried only
+/// the triggering event (CR 120.3a). Gated on `trigger_source` (carried only
 /// by triggered abilities) so a stale event batch never constrains a spell's
 /// genuine free-choice "target player". Otherwise every legal player is offered.
 fn companion_target_player_legal_targets(
@@ -2044,7 +2044,8 @@ fn companion_target_player_legal_targets(
         return targeting::find_legal_targets(state, payer, ability.controller, ability.source_id);
     }
     ability
-        .source_incarnation
+        .trigger_source
+        .as_ref()
         .and_then(|_| damaged_player_targets_for_companion_slot(state))
         .unwrap_or_else(|| {
             // CR 109.4 + CR 102.2 / CR 102.3: "target opponent controls" offers only
@@ -3036,12 +3037,10 @@ fn effect_references_target_opponent(effect: &Effect) -> bool {
 }
 
 fn ability_needs_companion_target_player_slot(ability: &ResolvedAbility) -> bool {
-    // Triggered abilities carry source_incarnation. Hellkite-style
+    // Triggered abilities carry an exact trigger source. Hellkite-style
     // GainControlAll uses "that player" from the triggering event, not a
     // declared target player, so surfacing a stack target here makes it fizzle.
-    if matches!(ability.effect, Effect::GainControlAll { .. })
-        && ability.source_incarnation.is_some()
-    {
+    if matches!(ability.effect, Effect::GainControlAll { .. }) && ability.trigger_source.is_some() {
         return false;
     }
     effect_references_target_player(&ability.effect)
@@ -7226,9 +7225,9 @@ mod tests {
             alela,
             PlayerId(3),
         );
-        // Triggered abilities carry a source incarnation; the constraint is
+        // Triggered abilities carry an exact source context; the constraint is
         // gated on it so only triggers (not spells) read the pending event batch.
-        ability.source_incarnation = Some(1);
+        ability.set_test_trigger_source_recursive(1, CardId(0));
 
         let slots = build_target_slots(&state, &ability).expect("target slots build");
 

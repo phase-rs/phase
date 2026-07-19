@@ -1596,7 +1596,8 @@ fn reanimator_aura_reenters_from_exile_and_attaches_to_graveyard_creature() {
 
     // (c) The ETB reanimation chain fires through the real trigger pipeline and
     // pulls the creature onto the battlefield under the Aura controller's control.
-    crate::game::triggers::process_triggers(&mut state, &events);
+    let mut trigger_events = Vec::new();
+    let _ = crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut trigger_events);
     assert_eq!(
         state.stack.len(),
         1,

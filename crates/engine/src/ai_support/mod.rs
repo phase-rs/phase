@@ -1220,6 +1220,7 @@ fn beneficial_mana_tap_trigger_hold(
             let Some(obj) = state.objects.get(&trigger_source) else {
                 return false;
             };
+            let source_context = triggers::trigger_source_context_for_latch(state, obj);
             obj.trigger_definitions.iter_all().any(|trigger| {
                 let trigger = trigger.definition();
                 if !mana_sources::is_non_mana_tap_trigger(trigger)
@@ -1238,12 +1239,12 @@ fn beneficial_mana_tap_trigger_hold(
                             trigger,
                             state,
                             mana_source,
-                            trigger_source,
+                            &source_context,
                         ) && crate::game::trigger_matchers::valid_player_matches(
                             trigger,
                             state,
                             player,
-                            trigger_source,
+                            &source_context,
                         )
                     }
                     // CR 605.1b: a `ManaAdded` trigger has no card filter
@@ -1255,7 +1256,7 @@ fn beneficial_mana_tap_trigger_hold(
                             trigger,
                             state,
                             player,
-                            trigger_source,
+                            &source_context,
                         )
                     }
                     _ => false,
@@ -4843,7 +4844,7 @@ mod tests {
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },
             options: vec![],
-            source_id: None,
+            source: None,
             persist_player: None,
         };
 
@@ -5317,8 +5318,7 @@ mod tests {
             source,
             PlayerId(1),
         );
-        ability.source_incarnation = Some(2);
-        ability.source_card_id = Some(CardId(77));
+        ability.set_test_trigger_source_recursive(2, CardId(77));
         state.stack.push_back(StackEntry {
             id: ObjectId(600),
             source_id: source,

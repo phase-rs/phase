@@ -4023,21 +4023,12 @@ fn exclude_attached_host_in_filter(filter: &TargetFilter) -> TargetFilter {
 /// intentionally excluded so their source-relative `FilterProp::Another`
 /// (e.g. Bound by Moonsilver's sacrifice cost) is never retargeted here.
 fn retarget_each_other_to_attached_host_in_effect(effect: &mut Effect) {
-    let filter = match effect {
-        Effect::CounterAll { target } | Effect::GainControlAll { target } => target,
-        Effect::PumpAll { target, .. }
-        | Effect::DamageAll { target, .. }
-        | Effect::DestroyAll { target, .. }
-        | Effect::BounceAll { target, .. }
-        | Effect::PutCounterAll { target, .. }
-        | Effect::DoublePTAll { target, .. } => target,
-        Effect::ExploreAll { filter } => filter,
-        Effect::SetTapState {
-            target,
-            scope: crate::types::ability::EffectScope::All,
-            ..
-        } => target,
-        _ => return,
+    // Delegates to the shared mass-population authority
+    // (`oracle_effect::mass_population_filter_mut`) so this walker and the
+    // anaphora seeding in `oracle_effect` read ONE variant list — a second
+    // hand-written list here would silently drift from it.
+    let Some(filter) = crate::parser::oracle_effect::mass_population_filter_mut(effect) else {
+        return;
     };
     *filter = exclude_attached_host_in_filter(filter);
 }

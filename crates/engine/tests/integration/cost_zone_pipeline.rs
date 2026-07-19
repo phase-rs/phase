@@ -154,13 +154,13 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         "a re-paused rest batch still cannot publish its tracked set"
     );
     for redirect_source in redirect_sources {
-        runner
+        let redirect_source = runner
             .state_mut()
             .objects
             .get_mut(&redirect_source)
-            .expect("synthetic redirect source remains on the battlefield")
-            .replacement_definitions
-            .clear();
+            .expect("synthetic redirect source remains on the battlefield");
+        redirect_source.replacement_definitions.clear();
+        Arc::make_mut(&mut redirect_source.base_replacement_definitions).clear();
     }
     let completed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
@@ -303,13 +303,13 @@ fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
         .values()
         .all(|set| !set.contains(&selected_a) && !set.contains(&selected_b)));
     for redirect_source in redirect_sources {
-        runner
+        let redirect_source = runner
             .state_mut()
             .objects
             .get_mut(&redirect_source)
-            .expect("synthetic redirect source remains on the battlefield")
-            .replacement_definitions
-            .clear();
+            .expect("synthetic redirect source remains on the battlefield");
+        redirect_source.replacement_definitions.clear();
+        Arc::make_mut(&mut redirect_source.base_replacement_definitions).clear();
     }
     let completed = runner
         .act(GameAction::ChooseReplacement { index: 0 })

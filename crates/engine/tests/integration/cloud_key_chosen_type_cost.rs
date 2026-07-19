@@ -108,14 +108,14 @@ fn cloud_key_reduces_only_the_chosen_card_type_after_etb_choice() {
     match outcome.final_waiting_for() {
         WaitingFor::NamedChoice {
             choice_type,
-            source_id,
+            source: Some(source),
             ..
         } => {
             assert!(
                 matches!(choice_type, ChoiceType::CardType { .. }),
                 "Cloud Key ETB must be a CardType choice, got {choice_type:?}"
             );
-            assert_eq!(*source_id, Some(cloud_key));
+            assert_eq!(source.prompt.identity.reference.object_id, cloud_key);
         }
         other => panic!("expected NamedChoice after Cloud Key ETB, got {other:?}"),
     }

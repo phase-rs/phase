@@ -5488,6 +5488,20 @@ mod tests {
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
 
+    fn exact_choice_source(
+        state: &GameState,
+        object_id: ObjectId,
+    ) -> crate::types::game_state::NamedChoiceSource {
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            state,
+            state.objects.get(&object_id).unwrap(),
+        );
+        crate::types::game_state::NamedChoiceSource::from_trigger_source(
+            context,
+            crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution,
+        )
+    }
+
     #[test]
     fn ordered_valid_blocker_ids_sorts_numeric_keys_and_handles_small_maps() {
         let mut targets = HashMap::new();
@@ -8504,9 +8518,9 @@ mod tests {
                 &runner.state().waiting_for,
                 WaitingFor::NamedChoice {
                     choice_type: ChoiceType::Color { .. },
-                    source_id: Some(id),
+                    source: Some(source),
                     ..
-                } if *id == mother
+                } if source.prompt.identity.reference.object_id == mother
             ),
             "resolving Mother of Runes' ability must pause on a persisted color \
              choice keyed to the granting source, got {:?}",
@@ -8972,7 +8986,8 @@ mod tests {
         let labeled = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &labeled, "Right", Some(pramikon), None);
+        let mut source = exact_choice_source(&state, pramikon);
+        bind_named_choice(&mut state, &labeled, "Right", Some(&mut source), None);
 
         // Exactly one Direction persists, and it is Right.
         assert_eq!(
@@ -9076,7 +9091,8 @@ mod tests {
         let labeled = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &labeled, "Left", Some(teyo), None);
+        let mut source = exact_choice_source(&state, teyo);
+        bind_named_choice(&mut state, &labeled, "Left", Some(&mut source), None);
         assert_eq!(
             state.objects.get(&teyo).unwrap().chosen_direction(),
             Some(SeatDirection::Left),
