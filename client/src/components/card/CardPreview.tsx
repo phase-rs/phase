@@ -1019,8 +1019,8 @@ function CardInfoPanel({
       {/* CR 602.5: blocked activated abilities (display-only read-out from the
           engine). One row per blocked ability; the ability's description labels
           printed abilities, runtime-granted ones (index past the printed list)
-          show the reason alone. The prohibiting source name is shown only when
-          that object is still present in the state. */}
+          show the reason alone. Each prohibiting source name(s) is shown only
+          when that object is still present in the state. */}
       {(obj.blocked_abilities?.length ?? 0) > 0 && (
         <div className="mt-1 space-y-0.5 text-amber-300/90">
           {(obj.blocked_abilities ?? []).map((entry, i) => {
@@ -1028,7 +1028,9 @@ function CardInfoPanel({
               entry.ability_index < obj.abilities.length
                 ? obj.abilities[entry.ability_index]?.description
                 : undefined;
-            const sourceName = objects?.[String(entry.source)]?.name;
+            const names = (entry.sources ?? [])
+              .map((id) => objects?.[String(id)]?.name)
+              .filter((n): n is string => !!n);
             const reason = t(ABILITY_BLOCK_REASON_KEY[entry.type]);
             return (
               <div key={i} className="flex items-start gap-1">
@@ -1038,9 +1040,9 @@ function CardInfoPanel({
                     <span className="text-gray-300">{abilityName}: </span>
                   )}
                   {reason}
-                  {sourceName && (
+                  {names.length > 0 && (
                     <span className="ml-1 text-amber-400/70">
-                      {t("preview.fromSource", { source: sourceName })}
+                      {t("preview.fromSource", { source: names.join(", ") })}
                     </span>
                   )}
                 </span>

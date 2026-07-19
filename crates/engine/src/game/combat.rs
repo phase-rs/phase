@@ -147,6 +147,49 @@ pub enum CombatRequirement {
     },
 }
 
+/// CR 702.111b (Menace) + CR 509.1b ("except by N or more"): the minimum-blocker
+/// COUNT floor for one attacker, with `sources` naming the carriers imposing it
+/// (the attacker itself for Menace; each `MinBlockers` static's carrier otherwise).
+/// Display-only; `count` is the same value `validate_blocks` enforces via
+/// `min_blockers_required`. `sources` is sorted + deduped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockRequirement {
+    pub count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<ObjectId>,
+}
+
+// Custom `Deserialize` (R4-NIT-4): a mid-combat restore/undo/P2P-resume snapshot
+// serialized BEFORE this change carries `block_requirements` values as bare
+// integers (`{"3": 2}`). `decode_restored_game_state` (engine-wasm) deserializes a
+// JS-supplied `PersistedGameState` at a system boundary, so the shape change
+// int→object must degrade gracefully rather than hard-fail the whole restore. The
+// private `#[serde(untagged)]` helper makes the `sources` default declarative and
+// un-forgettable (a hand-rolled visitor could silently omit it).
+impl<'de> Deserialize<'de> for BlockRequirement {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum BlockRequirementWire {
+            /// Pre-change on-disk shape: a bare minimum-blocker count.
+            Int(u32),
+            /// Current shape; `sources` defaults so an elided array still decodes.
+            Obj {
+                count: u32,
+                #[serde(default)]
+                sources: Vec<ObjectId>,
+            },
+        }
+        Ok(match BlockRequirementWire::deserialize(d)? {
+            BlockRequirementWire::Int(count) => BlockRequirement {
+                count,
+                sources: vec![],
+            },
+            BlockRequirementWire::Obj { count, sources } => BlockRequirement { count, sources },
+        })
+    }
+}
+
 /// Tracks the state of the current combat phase.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CombatState {
@@ -2610,6 +2653,13 @@ fn must_attack_sources_gated(
     }
     // CR 508.1d: MustAttackPlayer statics are local (`must_attack_players_for_creature`
     // scans `active_static_definitions`) → carrier = the creature itself.
+    // DEFERRED: when the requirement was grafted by a directing object (Curse-style
+    // `GenericEffect`), that object's id is NOT recoverable here — the layers apply step
+    // pushes a bare `StaticDefinition` into `static_definitions`
+    // (layers.rs GrantStaticAbility/AddStaticMode) with no object carrier, and
+    // `StaticDefinition` records only `source_controller` (a PlayerId, CR 611.2c anchor).
+    // True directing-carrier attribution needs new provenance infra
+    // (`StaticDefinition.source_object` threaded through all graft sites) — out of scope.
     if has_attackable_must_player {
         sources.push(obj_id);
     }
@@ -4894,6 +4944,44 @@ pub fn min_blockers_required_from_precomputed(
     min
 }
 
+/// CR 702.111b + CR 509.1b: sorted, deduped carriers of the non-trivial min-blocker
+/// floor on `attacker_id`. Mirrors `min_blockers_required_from_precomputed` arm-for-arm
+/// (Menace → the attacker itself; each `MinBlockers { min > 1 }` static → its carrier),
+/// so `count > 1` ⟺ `!sources.is_empty()`.
+fn min_blockers_sources_from_precomputed(
+    state: &GameState,
+    attacker_id: ObjectId,
+    block_restriction: &[(ObjectId, StaticDefinition)],
+) -> Vec<ObjectId> {
+    let mut sources = Vec::new();
+    if state
+        .objects
+        .get(&attacker_id)
+        .is_some_and(|a| a.has_keyword(&Keyword::Menace))
+    {
+        // CR 702.111b: menace is intrinsic to the attacker. Read-seam caveat:
+        // granted menace's carrier is the attacker object at read time (the
+        // keyword is projected onto it) — same accepted limitation as F3.
+        sources.push(attacker_id);
+    }
+    for (def, src_id) in
+        block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
+    {
+        if let StaticMode::CantBeBlockedExceptBy {
+            kind: BlockExceptionKind::MinBlockers { min },
+        } = &def.mode
+        {
+            if *min > 1 {
+                // CR 509.1b: only non-trivial floors contribute a source.
+                sources.push(src_id);
+            }
+        }
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
 /// CR 509.1b: The maximum number of creatures that may block `attacker_id`, if
 /// any `CantBeBlockedByMoreThan` restriction applies (Stalking Tiger, "can't be
 /// blocked by more than N creatures"). When multiple such restrictions apply,
@@ -4929,7 +5017,7 @@ pub fn max_blockers_allowed_from_precomputed(
 pub fn block_requirements_for_player(
     state: &GameState,
     player: PlayerId,
-) -> HashMap<ObjectId, u32> {
+) -> HashMap<ObjectId, BlockRequirement> {
     let combat = match state.combat.as_ref() {
         Some(c) => c,
         None => return HashMap::new(),
@@ -4942,9 +5030,13 @@ pub fn block_requirements_for_player(
         .iter()
         .filter(|a| a.defending_player == player)
         .filter_map(|a| {
-            let required =
+            let count =
                 min_blockers_required_from_precomputed(state, a.object_id, &block_restriction);
-            (required > 1).then_some((a.object_id, required))
+            (count > 1).then(|| {
+                let sources =
+                    min_blockers_sources_from_precomputed(state, a.object_id, &block_restriction);
+                (a.object_id, BlockRequirement { count, sources })
+            })
         })
         .collect()
 }
@@ -12255,6 +12347,170 @@ mod tests {
         // Three blockers satisfy both: legal.
         assert!(
             validate_blockers(&state, &[(b1, attacker), (b2, attacker), (b3, attacker)]).is_ok()
+        );
+    }
+
+    /// F1 primary discriminator (CR 702.111b + CR 509.1b): the DeclareBlockers
+    /// producer attributes the min-blocker floor to BOTH the Menace carrier (the
+    /// attacker itself) and an EXTERNAL `MinBlockers` restrictor. R4-MINOR-2: the
+    /// restrictor is a distinct object with `affected: Some(SpecificObject)` so its
+    /// carrier id can't collapse onto the attacker. REVERT-FAIL: dropping the
+    /// `sources` wiring (or the collector's `MinBlockers` push) omits the restrictor.
+    #[test]
+    fn block_requirements_for_player_attributes_menace_and_minblockers_sources() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::{BlockExceptionKind, StaticMode};
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Menace Troll", 4, 6);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Menace);
+        // External restrictor imposing "can't be blocked except by 3 or more" on
+        // the attacker — a DISTINCT object (id != attacker) via `affected`.
+        let restrictor = create_creature(&mut state, PlayerId(0), "Blockade Anthem", 0, 1);
+        state
+            .objects
+            .get_mut(&restrictor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
+                    kind: BlockExceptionKind::MinBlockers { min: 3 },
+                })
+                .affected(TargetFilter::SpecificObject { id: attacker }),
+            );
+        // Reach-guard: a plain attacker with no floor must be ABSENT from the map.
+        let plain = create_creature(&mut state, PlayerId(0), "Plain Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(attacker, PlayerId(1)),
+                AttackerInfo::attacking_player(plain, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+
+        let reqs = block_requirements_for_player(&state, PlayerId(1));
+        let mut expected_sources = vec![attacker, restrictor];
+        expected_sources.sort_unstable();
+        assert_eq!(
+            reqs.get(&attacker),
+            Some(&BlockRequirement {
+                count: 3,
+                sources: expected_sources,
+            }),
+            "Menace(self) + external MinBlockers(3) → count 3, sorted[attacker, restrictor]"
+        );
+        assert!(
+            !reqs.contains_key(&plain),
+            "an attacker with the trivial floor of 1 is omitted from the map"
+        );
+    }
+
+    /// F1 drift pin (CR 702.111b + CR 509.1b): the producer's `count > 1` ⟺
+    /// `!sources.is_empty()`. Two distinct EXTERNAL `MinBlockers` restrictors on one
+    /// attacker → 2 sorted sources; a `MinBlockers { min: 1 }` restrictor is NOT a
+    /// source (its floor is trivial) and leaves the attacker off the map entirely.
+    #[test]
+    fn block_req_count_gt_one_iff_sources_nonempty() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::{BlockExceptionKind, StaticMode};
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Doubly Restricted", 4, 6);
+        let r1 = create_creature(&mut state, PlayerId(0), "Restrictor A", 0, 1);
+        let r2 = create_creature(&mut state, PlayerId(0), "Restrictor B", 0, 1);
+        for (restrictor, min) in [(r1, 2u32), (r2, 3u32)] {
+            state
+                .objects
+                .get_mut(&restrictor)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
+                        kind: BlockExceptionKind::MinBlockers { min },
+                    })
+                    .affected(TargetFilter::SpecificObject { id: attacker }),
+                );
+        }
+        // A trivial `MinBlockers { min: 1 }` restrictor targeting a second attacker
+        // must NOT contribute a source — the attacker stays off the map.
+        let trivial_attacker = create_creature(&mut state, PlayerId(0), "Trivial Floor", 2, 2);
+        let trivial_restrictor = create_creature(&mut state, PlayerId(0), "Weak Anthem", 0, 1);
+        state
+            .objects
+            .get_mut(&trivial_restrictor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
+                    kind: BlockExceptionKind::MinBlockers { min: 1 },
+                })
+                .affected(TargetFilter::SpecificObject {
+                    id: trivial_attacker,
+                }),
+            );
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(attacker, PlayerId(1)),
+                AttackerInfo::attacking_player(trivial_attacker, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+
+        let reqs = block_requirements_for_player(&state, PlayerId(1));
+        // Every surfaced entry obeys the iff.
+        for req in reqs.values() {
+            assert!(req.count > 1);
+            assert!(!req.sources.is_empty());
+        }
+        let mut expected = vec![r1, r2];
+        expected.sort_unstable();
+        assert_eq!(
+            reqs.get(&attacker),
+            Some(&BlockRequirement {
+                count: 3,
+                sources: expected,
+            }),
+            "two distinct external MinBlockers restrictors → 2 sorted sources, count max(2,3)"
+        );
+        assert!(
+            !reqs.contains_key(&trivial_attacker),
+            "a MinBlockers min-of-1 floor is trivial — no source, off the map"
+        );
+    }
+
+    /// F1 legacy decode (R4-NIT-4): a pre-change restore snapshot carries
+    /// `block_requirements` values as bare ints. The custom untagged `Deserialize`
+    /// decodes a bare int, a full object, and an elided object. REVERT-FAIL:
+    /// deleting the `Int` arm makes `"2"` error.
+    #[test]
+    fn block_requirement_decodes_bare_int() {
+        assert_eq!(
+            serde_json::from_str::<BlockRequirement>("2").unwrap(),
+            BlockRequirement {
+                count: 2,
+                sources: vec![],
+            },
+        );
+        assert_eq!(
+            serde_json::from_str::<BlockRequirement>(r#"{"count":3,"sources":[5,6]}"#).unwrap(),
+            BlockRequirement {
+                count: 3,
+                sources: vec![ObjectId(5), ObjectId(6)],
+            },
+        );
+        assert_eq!(
+            serde_json::from_str::<BlockRequirement>(r#"{"count":2}"#).unwrap(),
+            BlockRequirement {
+                count: 2,
+                sources: vec![],
+            },
         );
     }
 

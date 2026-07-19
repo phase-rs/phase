@@ -1338,6 +1338,7 @@ pub fn apply_candidate(state: &GameState, candidate: &CandidateAction) -> Option
 mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, TacticalClass};
+    use engine::game::combat::BlockRequirement;
     use engine::game::perf_counters;
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -1573,15 +1574,39 @@ mod tests {
         left_targets.insert(ObjectId(10), vec![ObjectId(1), ObjectId(2)]);
         left_targets.insert(ObjectId(20), vec![ObjectId(3)]);
         let mut left_requirements = HashMap::new();
-        left_requirements.insert(ObjectId(10), 2);
-        left_requirements.insert(ObjectId(20), 1);
+        left_requirements.insert(
+            ObjectId(10),
+            BlockRequirement {
+                count: 2,
+                sources: vec![],
+            },
+        );
+        left_requirements.insert(
+            ObjectId(20),
+            BlockRequirement {
+                count: 1,
+                sources: vec![],
+            },
+        );
 
         let mut right_targets = HashMap::new();
         right_targets.insert(ObjectId(20), vec![ObjectId(3)]);
         right_targets.insert(ObjectId(10), vec![ObjectId(1), ObjectId(2)]);
         let mut right_requirements = HashMap::new();
-        right_requirements.insert(ObjectId(20), 1);
-        right_requirements.insert(ObjectId(10), 2);
+        right_requirements.insert(
+            ObjectId(20),
+            BlockRequirement {
+                count: 1,
+                sources: vec![],
+            },
+        );
+        right_requirements.insert(
+            ObjectId(10),
+            BlockRequirement {
+                count: 2,
+                sources: vec![],
+            },
+        );
 
         let mut left = make_state();
         left.waiting_for = WaitingFor::DeclareBlockers {

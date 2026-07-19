@@ -787,68 +787,101 @@ pub(crate) fn is_blocked_by_cant_play_lands(
 
 /// CR 602.5 + CR 605.1a: Temporary game restrictions can prohibit activating
 /// abilities, optionally exempting mana abilities via the single classifier.
+///
+/// CR 602.5: shared predicate — does this single `ProhibitActivity` restriction
+/// forbid activating `activating_ability` for `caster`? Sole authority both the
+/// bool enforcement shim and the source collector consult, so they can never drift.
+fn cant_activate_abilities_restriction_hits(
+    state: &GameState,
+    caster: PlayerId,
+    activating_ability: &AbilityDefinition,
+    restriction: &GameRestriction,
+) -> bool {
+    let GameRestriction::ProhibitActivity {
+        source,
+        affected_players,
+        expiry,
+        activity:
+            ProhibitedActivity::ActivateAbilities {
+                exemption,
+                only_tag,
+            },
+    } = restriction
+    else {
+        return false;
+    };
+    // CR 514.2 + CR 500.7: A `UntilEndOfNextTurnOf` prohibition (Kang's "during
+    // that turn, power-up abilities can't be activated") is created PRE-ARMED and
+    // only takes force during the granted extra turn. It stays dormant on the
+    // creating turn until that player's next untap step CONVERTS it to
+    // `EndOfTurn` (turns.rs). While still pre-armed it is not yet in force, so it
+    // must not block activations on the creation turn — the expiry variant is the
+    // single source of truth shared with the untap-step arming.
+    if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
+        return false;
+    }
+    let source_controller = state
+        .objects
+        .get(source)
+        .map(|source_obj| source_obj.controller);
+    let caster_affected =
+        restriction_scope_matches_player(source_controller, affected_players, caster);
+    if !caster_affected {
+        return false;
+    }
+    // CR 101.2 + CR 602.5: A tag-scoped prohibition (Kang → power-up) applies
+    // only to abilities carrying that keyword tag; every other activation is
+    // still legal. `None` prohibits all activations (legacy behavior).
+    if let Some(required_tag) = only_tag {
+        if activating_ability.ability_tag != Some(*required_tag) {
+            return false;
+        }
+    }
+    match exemption {
+        ActivationExemption::None => true,
+        ActivationExemption::ManaAbilities => {
+            // CR 605.1a: Mana abilities are exempt from this prohibition.
+            !super::mana_abilities::is_mana_ability(activating_ability)
+        }
+    }
+}
+
+/// CR 602.5: sorted, deduped sources of every in-force `ProhibitActivity`
+/// restriction that forbids `activating_ability` for `caster`.
+fn cant_activate_abilities_sources(
+    state: &GameState,
+    caster: PlayerId,
+    activating_ability: &AbilityDefinition,
+) -> Vec<ObjectId> {
+    let mut sources: Vec<ObjectId> = state
+        .restrictions
+        .iter()
+        .filter(|restriction| {
+            cant_activate_abilities_restriction_hits(state, caster, activating_ability, restriction)
+        })
+        .filter_map(|restriction| match restriction {
+            GameRestriction::ProhibitActivity { source, .. } => Some(*source),
+            _ => None,
+        })
+        .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
 /// CR 602.5: reason core for the `ProhibitActivity::ActivateAbilities` gate
-/// (Kang-class temporary prohibitions). Returns the first matching restriction's
-/// source paired with `AbilityBlockKind::Prohibited`, or `None` when no in-force
-/// prohibition applies. Sole implementation — `is_blocked_by_cant_activate_abilities`
-/// is a `.is_some()` shim over this.
+/// (Kang-class temporary prohibitions). Carries every prohibiting source paired
+/// with `AbilityBlockKind::Prohibited`, or `None` when no in-force prohibition
+/// applies.
 fn cant_activate_abilities_reason(
     state: &GameState,
     caster: PlayerId,
     activating_ability: &AbilityDefinition,
 ) -> Option<AbilityBlockReason> {
-    state.restrictions.iter().find_map(|restriction| {
-        let GameRestriction::ProhibitActivity {
-            source,
-            affected_players,
-            expiry,
-            activity:
-                ProhibitedActivity::ActivateAbilities {
-                    exemption,
-                    only_tag,
-                },
-        } = restriction
-        else {
-            return None;
-        };
-        // CR 514.2 + CR 500.7: A `UntilEndOfNextTurnOf` prohibition (Kang's "during
-        // that turn, power-up abilities can't be activated") is created PRE-ARMED and
-        // only takes force during the granted extra turn. It stays dormant on the
-        // creating turn until that player's next untap step CONVERTS it to
-        // `EndOfTurn` (turns.rs). While still pre-armed it is not yet in force, so it
-        // must not block activations on the creation turn — the expiry variant is the
-        // single source of truth shared with the untap-step arming.
-        if matches!(expiry, RestrictionExpiry::UntilEndOfNextTurnOf { .. }) {
-            return None;
-        }
-        let source_controller = state
-            .objects
-            .get(source)
-            .map(|source_obj| source_obj.controller);
-        let caster_affected =
-            restriction_scope_matches_player(source_controller, affected_players, caster);
-        if !caster_affected {
-            return None;
-        }
-        // CR 101.2 + CR 602.5: A tag-scoped prohibition (Kang → power-up) applies
-        // only to abilities carrying that keyword tag; every other activation is
-        // still legal. `None` prohibits all activations (legacy behavior).
-        if let Some(required_tag) = only_tag {
-            if activating_ability.ability_tag != Some(*required_tag) {
-                return None;
-            }
-        }
-        let blocked = match exemption {
-            ActivationExemption::None => true,
-            ActivationExemption::ManaAbilities => {
-                // CR 605.1a: Mana abilities are exempt from this prohibition.
-                !super::mana_abilities::is_mana_ability(activating_ability)
-            }
-        };
-        blocked.then_some(AbilityBlockReason {
-            source: *source,
-            kind: AbilityBlockKind::Prohibited,
-        })
+    let sources = cant_activate_abilities_sources(state, caster, activating_ability);
+    (!sources.is_empty()).then_some(AbilityBlockReason {
+        sources,
+        kind: AbilityBlockKind::Prohibited,
     })
 }
 
@@ -857,7 +890,9 @@ fn is_blocked_by_cant_activate_abilities(
     caster: PlayerId,
     activating_ability: &AbilityDefinition,
 ) -> bool {
-    cant_activate_abilities_reason(state, caster, activating_ability).is_some()
+    state.restrictions.iter().any(|restriction| {
+        cant_activate_abilities_restriction_hits(state, caster, activating_ability, restriction)
+    })
 }
 
 /// Oathbreaker RC: true when `player` has their Oathbreaker on the battlefield
@@ -18040,6 +18075,109 @@ fn is_blocked_from_casting_from_zone(
     false
 }
 
+/// CR 602.5 + CR 605.1a: shared predicate — does one `CantBeActivated` static
+/// (`bf_obj`/`def`) prohibit `activating_ability` on `activating_source_id` for
+/// `caster`? Sole authority the bool enforcement shim and the source collector
+/// both consult, so they can never drift. The who/kind/filter/exemption axes are
+/// preserved verbatim from the former core body.
+fn cant_be_activated_static_hits(
+    state: &GameState,
+    caster: PlayerId,
+    activating_source_id: ObjectId,
+    activating_ability: &AbilityDefinition,
+    bf_obj: &GameObject,
+    def: &StaticDefinition,
+) -> bool {
+    let bf_id = bf_obj.id;
+    let StaticMode::CantBeActivated {
+        ref who,
+        ref source_filter,
+        ref exemption,
+        ref kind,
+    } = def.mode
+    else {
+        return false;
+    };
+    // CR 109.5: The "who" axis — is the caster within the scope?
+    if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
+        return false;
+    }
+    // CR 606.1 + CR 606.2: The ability-KIND axis. A loyalty-only prohibition
+    // (The Immortal Sun) blocks only loyalty abilities — activated abilities
+    // with a loyalty symbol in their cost (CR 606.2) — classified through the
+    // single-authority `is_loyalty_ability_cost` the activation path itself
+    // uses. `Some(Normal)` blocks only ordinary activated abilities; `None`
+    // blocks any activated ability (Chalice/Karn/Pithing Needle class).
+    if let Some(required_kind) = kind {
+        let is_loyalty = activating_ability
+            .cost
+            .as_ref()
+            .is_some_and(crate::types::ability::is_loyalty_ability_cost);
+        let ability_kind = if is_loyalty {
+            ActivatedAbilityKind::Loyalty
+        } else {
+            ActivatedAbilityKind::Normal
+        };
+        if *required_kind != ability_kind {
+            return false;
+        }
+    }
+    // CR 602.5: The permanent-axis — does the object whose ability is being
+    // activated match the static's filter? `ControllerRef` is resolved against
+    // the static's source controller (`bf_id`), not the caster.
+    let filter_ctx = super::filter::FilterContext::from_source(state, bf_id);
+    if !super::filter::matches_target_filter(
+        state,
+        activating_source_id,
+        source_filter,
+        &filter_ctx,
+    ) {
+        return false;
+    }
+    // CR 605.1a: Apply the exemption gate. Routes through the single
+    // `mana_abilities::is_mana_ability` classifier — no duplicated logic.
+    match exemption {
+        ActivationExemption::None => true,
+        ActivationExemption::ManaAbilities => {
+            !super::mana_abilities::is_mana_ability(activating_ability)
+        }
+    }
+}
+
+/// CR 602.5 + CR 605.1a: sorted, deduped carriers of every `CantBeActivated`
+/// static that prohibits `activating_ability` on `activating_source_id` for
+/// `caster` (two Pithing Needles naming the same source → both).
+fn cant_be_activated_sources(
+    state: &GameState,
+    caster: PlayerId,
+    activating_source_id: ObjectId,
+    activating_ability: &AbilityDefinition,
+) -> Vec<ObjectId> {
+    // CR 604.1: O(1) presence gate — no CantBeActivated static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantBeActivated) {
+        return Vec::new();
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    let mut sources: Vec<ObjectId> =
+        super::functioning_abilities::battlefield_active_statics(state)
+            .filter_map(|(bf_obj, def)| {
+                cant_be_activated_static_hits(
+                    state,
+                    caster,
+                    activating_source_id,
+                    activating_ability,
+                    bf_obj,
+                    def,
+                )
+                .then_some(bf_obj.id)
+            })
+            .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
 /// CR 602.5 + CR 603.2a: Check if any active CantBeActivated static on the battlefield
 /// prohibits the given player from activating the given permanent's activated abilities.
 /// Each matching static contributes both an activator-axis check (`who` vs caster) AND
@@ -18060,89 +18198,23 @@ fn is_blocked_from_casting_from_zone(
 ///   prohibits activation of opponent-controlled artifacts' activated abilities.
 /// - Pithing Needle (`source_filter=HasChosenName, exemption=ManaAbilities`): prohibits
 ///   activation of named-card sources except their mana abilities.
+///
 /// CR 602.5 + CR 605.1a: reason core for the `CantBeActivated` static gate
 /// (Pithing Needle's named source, The Immortal Sun's loyalty abilities).
-/// Returns the blocking static's source object paired with
-/// `AbilityBlockKind::CantBeActivated`, or `None` when no static applies. Sole
-/// implementation — `is_blocked_by_cant_be_activated` is a `.is_some()` shim over
-/// this. The kind/exemption/scope axes below are preserved exactly from the
-/// former bool body; only the return values change (`true` → `Some`, `false` →
-/// `None`).
+/// Carries every prohibiting source paired with `AbilityBlockKind::CantBeActivated`
+/// (via `cant_be_activated_sources`), or `None` when no static applies.
 fn cant_be_activated_reason(
     state: &GameState,
     caster: PlayerId,
     activating_source_id: ObjectId,
     activating_ability: &AbilityDefinition,
 ) -> Option<AbilityBlockReason> {
-    // CR 604.1: O(1) presence gate — no CantBeActivated static means no prohibition.
-    if !static_kind_present(state, StaticModeKind::CantBeActivated) {
-        return None;
-    }
-    crate::game::perf_counters::record_static_full_scan();
-    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
-    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        let bf_id = bf_obj.id;
-        let StaticMode::CantBeActivated {
-            ref who,
-            ref source_filter,
-            ref exemption,
-            ref kind,
-        } = def.mode
-        else {
-            continue;
-        };
-        // CR 109.5: The "who" axis — is the caster within the scope?
-        if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
-            continue;
-        }
-        // CR 606.1 + CR 606.2: The ability-KIND axis. A loyalty-only prohibition
-        // (The Immortal Sun) blocks only loyalty abilities — activated abilities
-        // with a loyalty symbol in their cost (CR 606.2) — classified through the
-        // single-authority `is_loyalty_ability_cost` the activation path itself
-        // uses. `Some(Normal)` blocks only ordinary activated abilities; `None`
-        // blocks any activated ability (Chalice/Karn/Pithing Needle class).
-        if let Some(required_kind) = kind {
-            let is_loyalty = activating_ability
-                .cost
-                .as_ref()
-                .is_some_and(crate::types::ability::is_loyalty_ability_cost);
-            let ability_kind = if is_loyalty {
-                ActivatedAbilityKind::Loyalty
-            } else {
-                ActivatedAbilityKind::Normal
-            };
-            if *required_kind != ability_kind {
-                continue;
-            }
-        }
-        // CR 602.5: The permanent-axis — does the object whose ability is being
-        // activated match the static's filter? `ControllerRef` is resolved against
-        // the static's source controller (`bf_id`), not the caster.
-        let filter_ctx = super::filter::FilterContext::from_source(state, bf_id);
-        if !super::filter::matches_target_filter(
-            state,
-            activating_source_id,
-            source_filter,
-            &filter_ctx,
-        ) {
-            continue;
-        }
-        // CR 605.1a: Apply the exemption gate. Routes through the single
-        // `mana_abilities::is_mana_ability` classifier — no duplicated logic.
-        let reason = AbilityBlockReason {
-            source: bf_id,
-            kind: AbilityBlockKind::CantBeActivated,
-        };
-        match exemption {
-            ActivationExemption::None => return Some(reason),
-            ActivationExemption::ManaAbilities => {
-                if !super::mana_abilities::is_mana_ability(activating_ability) {
-                    return Some(reason);
-                }
-            }
-        }
-    }
-    None
+    let sources =
+        cant_be_activated_sources(state, caster, activating_source_id, activating_ability);
+    (!sources.is_empty()).then_some(AbilityBlockReason {
+        sources,
+        kind: AbilityBlockKind::CantBeActivated,
+    })
 }
 
 pub(super) fn is_blocked_by_cant_be_activated(
@@ -18151,7 +18223,22 @@ pub(super) fn is_blocked_by_cant_be_activated(
     activating_source_id: ObjectId,
     activating_ability: &AbilityDefinition,
 ) -> bool {
-    cant_be_activated_reason(state, caster, activating_source_id, activating_ability).is_some()
+    // CR 604.1: O(1) presence gate — no CantBeActivated static means no prohibition.
+    if !static_kind_present(state, StaticModeKind::CantBeActivated) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    super::functioning_abilities::battlefield_active_statics(state).any(|(bf_obj, def)| {
+        cant_be_activated_static_hits(
+            state,
+            caster,
+            activating_source_id,
+            activating_ability,
+            bf_obj,
+            def,
+        )
+    })
 }
 
 /// CR 117.1 + CR 604.1: Evaluate a `CastingProhibitionCondition` against the
@@ -18243,51 +18330,79 @@ fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
 /// bypass the prohibition. City of Solitude emits `ActivationExemption::None`
 /// per its 2009-10-01 ruling ("This stops players from activating mana
 /// abilities") — mana abilities are NOT exempt for that card.
+///
+/// CR 602.5 + CR 117.1b: shared predicate — does one `CantActivateDuring` static
+/// (`bf_obj`/`def`) prohibit `activating_ability` for `activator` right now? Sole
+/// authority both the bool enforcement shim and the source collector consult.
+fn cant_activate_during_static_hits(
+    state: &GameState,
+    activator: PlayerId,
+    activating_ability: &AbilityDefinition,
+    bf_obj: &GameObject,
+    def: &StaticDefinition,
+) -> bool {
+    let StaticMode::CantActivateDuring {
+        ref who,
+        ref when,
+        ref exemption,
+    } = def.mode
+    else {
+        return false;
+    };
+    if !casting_prohibition_scope_matches(who, activator, bf_obj, state) {
+        return false;
+    }
+    if !evaluate_casting_prohibition_condition(state, when, bf_obj.controller, activator) {
+        return false;
+    }
+    // CR 605.1a: Apply the exemption gate via the single classifier authority.
+    match exemption {
+        ActivationExemption::None => true,
+        ActivationExemption::ManaAbilities => {
+            !super::mana_abilities::is_mana_ability(activating_ability)
+        }
+    }
+}
+
+/// CR 602.5 + CR 117.1b: sorted, deduped carriers of every `CantActivateDuring`
+/// static prohibiting `activating_ability` for `activator` right now.
+fn cant_activate_during_sources(
+    state: &GameState,
+    activator: PlayerId,
+    activating_ability: &AbilityDefinition,
+) -> Vec<ObjectId> {
+    // CR 604.1: O(1) presence gate — no CantActivateDuring static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantActivateDuring) {
+        return Vec::new();
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    let mut sources: Vec<ObjectId> =
+        super::functioning_abilities::battlefield_active_statics(state)
+            .filter_map(|(bf_obj, def)| {
+                cant_activate_during_static_hits(state, activator, activating_ability, bf_obj, def)
+                    .then_some(bf_obj.id)
+            })
+            .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
 /// CR 602.5 + CR 117.1b: reason core for the `CantActivateDuring` static gate
-/// (City of Solitude). Returns the blocking static's source paired with
-/// `AbilityBlockKind::CantActivateDuring`, or `None`. Sole implementation —
-/// `is_blocked_by_cant_activate_during` is a `.is_some()` shim over this.
+/// (City of Solitude). Carries every prohibiting source paired with
+/// `AbilityBlockKind::CantActivateDuring` (via `cant_activate_during_sources`),
+/// or `None` when no static applies.
 fn cant_activate_during_reason(
     state: &GameState,
     activator: PlayerId,
     activating_ability: &AbilityDefinition,
 ) -> Option<AbilityBlockReason> {
-    // CR 604.1: O(1) presence gate — no CantActivateDuring static means no restriction.
-    if !static_kind_present(state, StaticModeKind::CantActivateDuring) {
-        return None;
-    }
-    crate::game::perf_counters::record_static_full_scan();
-    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
-    for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        let StaticMode::CantActivateDuring {
-            ref who,
-            ref when,
-            ref exemption,
-        } = def.mode
-        else {
-            continue;
-        };
-        if !casting_prohibition_scope_matches(who, activator, bf_obj, state) {
-            continue;
-        }
-        if !evaluate_casting_prohibition_condition(state, when, bf_obj.controller, activator) {
-            continue;
-        }
-        // CR 605.1a: Apply the exemption gate via the single classifier authority.
-        let reason = AbilityBlockReason {
-            source: bf_obj.id,
-            kind: AbilityBlockKind::CantActivateDuring,
-        };
-        match exemption {
-            ActivationExemption::None => return Some(reason),
-            ActivationExemption::ManaAbilities => {
-                if !super::mana_abilities::is_mana_ability(activating_ability) {
-                    return Some(reason);
-                }
-            }
-        }
-    }
-    None
+    let sources = cant_activate_during_sources(state, activator, activating_ability);
+    (!sources.is_empty()).then_some(AbilityBlockReason {
+        sources,
+        kind: AbilityBlockKind::CantActivateDuring,
+    })
 }
 
 pub(super) fn is_blocked_by_cant_activate_during(
@@ -18295,7 +18410,15 @@ pub(super) fn is_blocked_by_cant_activate_during(
     activator: PlayerId,
     activating_ability: &AbilityDefinition,
 ) -> bool {
-    cant_activate_during_reason(state, activator, activating_ability).is_some()
+    // CR 604.1: O(1) presence gate — no CantActivateDuring static means no restriction.
+    if !static_kind_present(state, StaticModeKind::CantActivateDuring) {
+        return false;
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
+    super::functioning_abilities::battlefield_active_statics(state).any(|(bf_obj, def)| {
+        cant_activate_during_static_hits(state, activator, activating_ability, bf_obj, def)
+    })
 }
 
 /// CR 602.5: first-matching activation prohibition in enforcement-gate order;

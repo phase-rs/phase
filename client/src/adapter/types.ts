@@ -326,6 +326,15 @@ export type CombatRequirement =
   | { kind: "CantAttack"; sources?: ObjectId[] }
   | { kind: "CantBlock"; sources?: ObjectId[] };
 
+// CR 702.111b (Menace) + CR 509.1b ("except by N or more"): the minimum-blocker
+// COUNT floor for one attacker, with `sources` naming the carriers imposing it
+// (the attacker itself for Menace; each `MinBlockers` static's carrier otherwise).
+// Mirrors the Rust `BlockRequirement`; `sources` omitted when empty.
+export interface BlockRequirementInfo {
+  count: number;
+  sources?: ObjectId[];
+}
+
 // CR 702.19: Which trample variant applies to combat damage assignment.
 export type TrampleKind = "Standard" | "OverPlaneswalkers";
 
@@ -868,13 +877,14 @@ export type AbilityBlockKind =
  * CR 602.5: A single blocked-ability read-out entry. `ability_index` indexes the
  * object's activated-ability definition space (`0..abilities.length` for printed
  * abilities; `>= abilities.length` for runtime-granted ones — render the reason
- * text alone in that case). `source` is the prohibiting permanent's object id
- * (may be absent from `gameState.objects` if it has since left play).
- * Mirrors the Rust `AbilityBlockEntry` (flattened reason).
+ * text alone in that case). `sources` are the prohibiting permanents' object ids
+ * (each may be absent from `gameState.objects` if it has since left play; two
+ * Pithing Needles naming the same card → both). Mirrors the Rust
+ * `AbilityBlockEntry` (flattened reason); `sources` is omitted when empty.
  */
 export interface AbilityBlockEntry {
   ability_index: number;
-  source: number;
+  sources?: number[];
   type: AbilityBlockKind;
 }
 
@@ -1512,7 +1522,7 @@ export type WaitingFor =
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId; pending_mana_ability?: unknown } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[]; valid_attack_targets_by_attacker?: Record<string, AttackTarget[]>; attacker_constraints?: Record<string, CombatRequirement> } }
-  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number>; blocker_constraints?: Record<string, CombatRequirement> } }
+  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, BlockRequirementInfo>; blocker_constraints?: Record<string, CombatRequirement> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }

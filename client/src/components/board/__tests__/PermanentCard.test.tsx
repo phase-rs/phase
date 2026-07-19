@@ -1265,7 +1265,7 @@ describe("PermanentCard", () => {
         },
       ] satisfies GameObject["abilities"],
       blocked_abilities: [
-        { ability_index: 0, source: 1, type: "CantBeActivated" },
+        { ability_index: 0, sources: [1], type: "CantBeActivated" },
       ],
     };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
@@ -1278,6 +1278,34 @@ describe("PermanentCard", () => {
     expect(
       screen.getByText(/This ability can't be activated/),
     ).toBeInTheDocument();
+    // Single-source name renders via preview.fromSource.
+    expect(screen.getByText(/\(from Test Creature\)/)).toBeInTheDocument();
+  });
+
+  it("renders every prohibiting source when two sources block one ability", () => {
+    const gameState = makeState();
+    gameState.objects[10] = makeObject({ id: 10, name: "Needle A" });
+    gameState.objects[11] = makeObject({ id: 11, name: "Needle B" });
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "Tap ability",
+          effect: { type: "Draw" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, sources: [10, 11], type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Both prohibiting source names render in the joined fromSource string.
+    expect(screen.getByText(/\(from Needle A, Needle B\)/)).toBeInTheDocument();
   });
 
   it("renders a blocked-ability reason without throwing when the source is departed", () => {
@@ -1288,7 +1316,7 @@ describe("PermanentCard", () => {
       // source 999 is not present in objects — the departed-source guard must
       // render the reason alone and never dereference a missing object.
       blocked_abilities: [
-        { ability_index: 5, source: 999, type: "Prohibited" },
+        { ability_index: 5, sources: [999], type: "Prohibited" },
       ],
     };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
@@ -1297,5 +1325,7 @@ describe("PermanentCard", () => {
     expect(
       screen.getByText(/Activating this ability is prohibited/),
     ).toBeInTheDocument();
+    // Departed source is dropped — no fromSource span renders.
+    expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
   });
 });

@@ -1312,7 +1312,10 @@ fn build_prompt_input(
                 .map(|(attacker_id, blocker_ids)| BlockableAttackerDto {
                     attacker_id: encode_object_id(*attacker_id),
                     valid_blocker_ids: blocker_ids.iter().copied().map(encode_object_id).collect(),
-                    min_blockers: block_requirements.get(attacker_id).copied().unwrap_or(0),
+                    min_blockers: block_requirements
+                        .get(attacker_id)
+                        .map(|r| r.count)
+                        .unwrap_or(0),
                     max_blockers: None,
                     must_be_blocked: block_requirements.contains_key(attacker_id),
                 })

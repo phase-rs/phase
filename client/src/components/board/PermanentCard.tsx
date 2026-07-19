@@ -113,13 +113,15 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
             entry.ability_index < obj.abilities.length
               ? obj.abilities[entry.ability_index]?.description
               : undefined;
-          const sourceName = objects?.[String(entry.source)]?.name;
+          const names = (entry.sources ?? [])
+            .map((id) => objects?.[String(id)]?.name)
+            .filter((n): n is string => !!n);
           const reason = t(ABILITY_BLOCK_REASON_KEY[entry.type]);
           return (
             <span key={i} className="block">
               {abilityName ? `${abilityName}: ${reason}` : reason}
-              {sourceName
-                ? ` ${t("preview.fromSource", { source: sourceName })}`
+              {names.length
+                ? ` ${t("preview.fromSource", { source: names.join(", ") })}`
                 : ""}
             </span>
           );

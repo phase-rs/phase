@@ -2536,17 +2536,19 @@ pub enum AbilityBlockKind {
     Prohibited,
 }
 
-/// A block reason paired with the prohibiting source object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// A block reason paired with every prohibiting source object of this kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AbilityBlockReason {
-    /// The permanent whose static/effect imposes the block (Needle, City, Kang).
-    pub source: ObjectId,
+    /// CR 602.5: sorted, deduped permanents whose static/effect each independently
+    /// impose this block kind (two Pithing Needles naming the same card → both).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<ObjectId>,
     #[serde(flatten)]
     pub kind: AbilityBlockKind,
 }
 
 /// A single blocked-ability read-out entry: which ability index is blocked and why.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AbilityBlockEntry {
     /// Index into the object's activated-ability definition space
     /// (`activated_ability_definitions`): `0..printed_len` for printed abilities,

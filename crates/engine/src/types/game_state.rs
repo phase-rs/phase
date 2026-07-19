@@ -5192,13 +5192,14 @@ pub enum WaitingFor {
         #[serde(default)]
         valid_block_targets: HashMap<ObjectId, Vec<ObjectId>>,
         /// CR 702.111b (Menace) + CR 509.1b: per-attacker minimum-blocker count
-        /// for attackers requiring more than one blocker. Lets the UI surface
-        /// "needs N blockers" feedback and guard confirmation; attackers with
-        /// the trivial requirement of 1 are omitted. Computed by
+        /// (`count`) plus the `sources` carriers imposing it, for attackers
+        /// requiring more than one blocker. Lets the UI surface "needs N blockers"
+        /// feedback (and which permanents demand it) and guard confirmation;
+        /// attackers with the trivial requirement of 1 are omitted. Computed by
         /// `combat::block_requirements_for_player` — the same authority that
         /// enforces the requirement in `validate_blocks`.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        block_requirements: HashMap<ObjectId, u32>,
+        block_requirements: HashMap<ObjectId, crate::game::combat::BlockRequirement>,
         /// CR 509.1b / CR 509.1c: per-creature combat requirement/restriction
         /// (must-block / can't-block) for display badges and Confirm gating.
         /// Display-only — computed by `combat::blocker_constraints_for_player`,
