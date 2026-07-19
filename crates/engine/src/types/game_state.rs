@@ -2245,7 +2245,16 @@ impl LogicalZoneChangeGroup {
                                 expected_time: TriggerObservationTime,
                                 allow_before_and_after: bool|
          -> Result<(), String> {
-            for latch in latches {
+            for (latch_index, latch) in latches.iter().enumerate() {
+                if latches[..latch_index]
+                    .iter()
+                    .any(|prior| prior.definition_ref == latch.definition_ref)
+                {
+                    return Err(
+                        "latched batched trigger repeats a definition reference on one observation sidecar"
+                            .to_string(),
+                    );
+                }
                 if latch.observations.is_empty() {
                     return Err("latched batched trigger has no source observation".to_string());
                 }
@@ -18131,6 +18140,26 @@ mod tests {
                 TriggerObservationTime::ImmediatelyBefore,
                 source_context,
             ));
+        let mut duplicate_latch = sidecar_mismatch.clone();
+        let repeated_latch = duplicate_latch.immediately_before_batched_triggers[0].clone();
+        duplicate_latch
+            .immediately_before_batched_triggers
+            .push(repeated_latch);
+        rejects_on_wire(
+            duplicate_latch.clone(),
+            "the same latched definition repeated with the same payload",
+        );
+        let mut duplicate_latch_payload_mismatch = sidecar_mismatch.clone();
+        let mut mismatched_latch =
+            duplicate_latch_payload_mismatch.immediately_before_batched_triggers[0].clone();
+        mismatched_latch.definition.optional = true;
+        duplicate_latch_payload_mismatch
+            .immediately_before_batched_triggers
+            .push(mismatched_latch);
+        rejects_on_wire(
+            duplicate_latch_payload_mismatch.clone(),
+            "the same latched definition repeated with conflicting payloads",
+        );
         sidecar_mismatch.immediately_before_batched_triggers[0].observations[0]
             .source_context
             .identity
@@ -18152,6 +18181,23 @@ mod tests {
         let batch: PendingBatchDeliveries = serde_json::from_value(batch_wire.clone())
             .expect("BatchDelivery accepts the complete positive logical-owner fixture");
         assert_eq!(batch.logical_zone_change_group, group);
+        let rejects_batch_on_wire = |candidate: LogicalZoneChangeGroup, reason: &str| {
+            let mut malformed = batch_wire.clone();
+            malformed["logical_zone_change_group"] =
+                serde_json::to_value(candidate).expect("malformed group still serializes");
+            assert!(
+                serde_json::from_value::<PendingBatchDeliveries>(malformed).is_err(),
+                "BatchDelivery wire boundary must reject {reason}"
+            );
+        };
+        rejects_batch_on_wire(
+            duplicate_latch,
+            "the same latched definition repeated with the same payload",
+        );
+        rejects_batch_on_wire(
+            duplicate_latch_payload_mismatch,
+            "the same latched definition repeated with conflicting payloads",
+        );
         let mut malformed_batch = batch_wire;
         malformed_batch["logical_zone_change_group"]["terminal_outcomes"][1] =
             serde_json::to_value(LogicalZoneChangeTerminalOutcome::Moved {
