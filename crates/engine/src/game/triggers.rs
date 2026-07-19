@@ -850,6 +850,47 @@ enum TriggerSource<'a> {
     Context(&'a TriggerSourceContext),
 }
 
+/// Collection authority for an ordinary event batch or one explicit segment of
+/// a logical zone-change owner. Segment collection reserves prospective
+/// battlefield members for final settlement, except when the member is the
+/// event subject observed through its own zone-change record (CR 603.10a).
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // Step 14 wires Segment into each logical-owner pause path.
+pub(crate) enum LogicalZoneTriggerCollection<'a> {
+    Ordinary,
+    Segment(&'a LogicalZoneChangeGroup),
+}
+
+#[derive(Clone, Copy)]
+enum TriggerSourceVisit {
+    /// The moved object reads its own record-owned immediately-before view.
+    EventSubject,
+    /// Every other source path: live index, off-zone cache, or co-departed LKI.
+    Observer,
+}
+
+impl LogicalZoneTriggerCollection<'_> {
+    fn admits_source_visit(self, visit: TriggerSourceVisit, source: ObjectIncarnationRef) -> bool {
+        match self {
+            Self::Ordinary => true,
+            // Settlement is the one observer pass for all prospective members.
+            // The explicit event-subject path is its sole exemption, so a member
+            // never observes a segment through a later same-id incarnation.
+            Self::Segment(group) => {
+                matches!(visit, TriggerSourceVisit::EventSubject)
+                    || !group
+                        .prospective_battlefield_members
+                        .iter()
+                        .any(|member| member.identity == source)
+            }
+        }
+    }
+
+    fn skips_batched_definitions(self) -> bool {
+        matches!(self, Self::Segment(_))
+    }
+}
+
 /// Returns the record-owned source for a battlefield departure. An absent or
 /// mismatched context is not recoverable from the current object map: that map
 /// may already hold a different incarnation at the same storage id.
@@ -951,6 +992,8 @@ fn collect_matching_triggers(
     batched_this_pass: &mut HashSet<(ObjectId, usize)>,
     registered_this_event: &mut HashSet<(ObjectId, usize)>,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+    collection: LogicalZoneTriggerCollection<'_>,
+    visit: TriggerSourceVisit,
 ) -> Vec<MatchedTrigger> {
     collect_matching_triggers_inner(
         state,
@@ -963,6 +1006,8 @@ fn collect_matching_triggers(
         registered_this_event,
         None,
         active_suppress_triggers,
+        collection,
+        visit,
     )
 }
 
@@ -976,6 +1021,8 @@ fn collect_matching_triggers_from_context(
     batched_this_pass: &mut HashSet<(ObjectId, usize)>,
     registered_this_event: &mut HashSet<(ObjectId, usize)>,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+    collection: LogicalZoneTriggerCollection<'_>,
+    visit: TriggerSourceVisit,
 ) -> Vec<MatchedTrigger> {
     collect_matching_triggers_inner(
         state,
@@ -988,6 +1035,8 @@ fn collect_matching_triggers_from_context(
         registered_this_event,
         None,
         active_suppress_triggers,
+        collection,
+        visit,
     )
 }
 
@@ -1003,6 +1052,8 @@ fn collect_matching_triggers_inner(
     registered_this_event: &mut HashSet<(ObjectId, usize)>,
     cached_granted_keyword_triggers: Option<&[(KeywordKind, TriggerDefinition)]>,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+    collection: LogicalZoneTriggerCollection<'_>,
+    visit: TriggerSourceVisit,
 ) -> Vec<MatchedTrigger> {
     let mut pending = Vec::new();
     let source_context = match source {
@@ -1011,6 +1062,9 @@ fn collect_matching_triggers_inner(
         }
         TriggerSource::Context(source_context) => source_context.clone(),
     };
+    if !collection.admits_source_visit(visit, source_context.identity.reference) {
+        return Vec::new();
+    }
     let use_latched_trigger_entries = match source {
         TriggerSource::Live(source_obj) => {
             ObjectIncarnationRef::from_object(source_obj) != source_context.identity.reference
@@ -1163,18 +1217,21 @@ fn collect_matching_triggers_inner(
             } else {
                 trig_def.trigger_zones.contains(&zone)
             };
-            if !zones_match {
-                if use_latched_trigger_entries {
-                    if let GameEvent::ZoneChanged { record, to, .. } = event {
-                        zones_match = record.from_zone
-                            == Some(source_context.identity.expected_zone)
-                            && trig_def.trigger_zones.contains(to);
-                    }
+            if !zones_match && use_latched_trigger_entries {
+                if let GameEvent::ZoneChanged { record, to, .. } = event {
+                    zones_match = record.from_zone == Some(source_context.identity.expected_zone)
+                        && trig_def.trigger_zones.contains(to);
                 }
             }
             if !zones_match {
                 continue;
             }
+        }
+        // Batched definitions are admitted exactly once during logical-owner
+        // settlement. Segment collection must not reach matcher conditions or
+        // fire-count ledgers for them first.
+        if collection.skips_batched_definitions() && trig_def.batched {
+            continue;
         }
         // CR 603.2c: "One or more" (batched) triggers fire once per batch of
         // simultaneous events, not once per individual event. Skip if already
@@ -1911,6 +1968,32 @@ fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
+    collect_pending_triggers_with_collection(state, events, LogicalZoneTriggerCollection::Ordinary)
+}
+
+/// Collect one explicit delivery segment of a logical zone-change owner.
+///
+/// Prospective battlefield members are held for settlement as observers; only
+/// the moved event subject is collected immediately from its exact record.
+/// Batched definitions remain latched on the owner for the later single pass.
+#[allow(dead_code)] // Step 14 calls this from every initial pause and re-pause.
+pub(crate) fn collect_logical_zone_trigger_segment(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+    events: &[GameEvent],
+) -> Vec<PendingTriggerContext> {
+    collect_pending_triggers_with_collection(
+        state,
+        events,
+        LogicalZoneTriggerCollection::Segment(group),
+    )
+}
+
+fn collect_pending_triggers_with_collection(
+    state: &mut GameState,
+    events: &[GameEvent],
+    collection: LogicalZoneTriggerCollection<'_>,
+) -> Vec<PendingTriggerContext> {
     // CR 603.6a + CR 611.2e: Continuous effects (including statics that grant
     // triggered abilities to a class — sliver-lord pattern) apply the moment
     // the affected permanent is on the battlefield. The newcomers must be
@@ -2093,6 +2176,8 @@ fn collect_pending_triggers(
                         &mut batched_this_pass,
                         &mut registered_this_event,
                         &active_suppress_triggers,
+                        collection,
+                        TriggerSourceVisit::Observer,
                     ),
                 )
             };
@@ -2466,6 +2551,8 @@ fn collect_pending_triggers(
                         &mut shadow_batched,
                         &mut shadow_registered,
                         &active_suppress_triggers,
+                        collection,
+                        TriggerSourceVisit::Observer,
                     );
                     for m in matched {
                         shadow_matched.insert((obj_id, m.trig_idx));
@@ -2508,6 +2595,8 @@ fn collect_pending_triggers(
                         &mut batched_this_pass,
                         &mut registered_this_event,
                         &active_suppress_triggers,
+                        collection,
+                        TriggerSourceVisit::EventSubject,
                     )
                 } else {
                     // A record without its owned pre-event context cannot prove that
@@ -2565,6 +2654,8 @@ fn collect_pending_triggers(
                         &mut batched_this_pass,
                         &mut registered_this_event,
                         &active_suppress_triggers,
+                        collection,
+                        TriggerSourceVisit::Observer,
                     )
                 };
                 for matched in matched_triggers {
@@ -2663,6 +2754,8 @@ fn collect_pending_triggers(
                         &mut batched_this_pass,
                         &mut registered_this_event,
                         &active_suppress_triggers,
+                        collection,
+                        TriggerSourceVisit::Observer,
                     )
                 };
                 // Restore the live object's `attached_to` to avoid leaking
@@ -2729,6 +2822,8 @@ fn collect_pending_triggers(
                         &mut registered_this_event,
                         None,
                         &active_suppress_triggers,
+                        collection,
+                        TriggerSourceVisit::Observer,
                     )
                 };
 
@@ -9619,7 +9714,7 @@ pub mod tests {
     fn immediately_after_latch_is_required_for_post_event_etb_authority() {
         let mut state = setup();
         let mut group = state.allocate_logical_zone_change_group(&[]);
-        latch_logical_zone_change_group_immediately_before(&mut state, &mut group);
+        latch_logical_zone_change_group_immediately_before(&state, &mut group);
         assert!(
             group
                 .immediately_before_latches()
@@ -9672,7 +9767,7 @@ pub mod tests {
         source_object.materialize_base_trigger_definitions();
 
         let mut group = state.allocate_logical_zone_change_group(&[]);
-        latch_logical_zone_change_group_immediately_before(&mut state, &mut group);
+        latch_logical_zone_change_group_immediately_before(&state, &mut group);
         let (before, _) = group
             .immediately_before_latches()
             .expect("pre-delivery latch");
@@ -28328,6 +28423,57 @@ pub mod tests {
             replay_count, 2,
             "CURRENT rejected-prototype proof: the final replay revisits B/A from the \
              off-zone cache as well as B's own departure; Phase 1 must not replay B/A"
+        );
+    }
+
+    #[test]
+    fn logical_zone_segment_reserves_members_but_keeps_the_event_subject() {
+        let mut state = setup();
+        let observer = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), false);
+        let subject = make_creature(&mut state, PlayerId(0), "Segment subject", 2, 2);
+        let batched_outsider =
+            add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), true);
+        let group = allocate_logical_zone_change_group(&mut state, &[observer, subject]);
+
+        let mut subject_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, subject, Zone::Graveyard, &mut subject_events);
+
+        let segment = collect_logical_zone_trigger_segment(&mut state, &group, &subject_events);
+        assert!(
+            segment.is_empty(),
+            "member observers and batched definitions wait for settlement"
+        );
+
+        let ordinary = collect_pending_triggers(&mut state, &subject_events);
+        assert!(
+            ordinary
+                .iter()
+                .any(|context| context.pending.source_id == observer),
+            "the observer fixture reaches the ordinary collector"
+        );
+        assert!(
+            ordinary
+                .iter()
+                .any(|context| context.pending.source_id == batched_outsider),
+            "the batched fixture reaches the ordinary collector"
+        );
+
+        let mut observer_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            observer,
+            Zone::Graveyard,
+            &mut observer_events,
+        );
+        let event_subject =
+            collect_logical_zone_trigger_segment(&mut state, &group, &observer_events);
+        assert_eq!(
+            event_subject
+                .iter()
+                .filter(|context| context.pending.source_id == observer)
+                .count(),
+            1,
+            "the record-owned moved source is the sole member exemption"
         );
     }
 
