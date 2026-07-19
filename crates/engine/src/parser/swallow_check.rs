@@ -8954,7 +8954,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// the plain repeat instruction, not an arbitrary dynamic clause.
     #[test]
     fn dynamic_qty_flags_unbacked_rather_than_once_with_repeat_for() {
-        let cleaned = "creatures you control can forage twice during each of your turns rather \\
+        let cleaned = "creatures you control can forage twice during each of your turns rather \
                        than once.";
         let evidence = repeat_for_without_activation_limit_evidence();
         let mut found = Vec::new();
