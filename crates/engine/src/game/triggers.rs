@@ -3336,7 +3336,13 @@ fn collect_ring_emblem_triggers(
     pending: &mut Vec<PendingTriggerContext>,
 ) {
     for event in events {
-        let players: Vec<_> = state.ring_level.keys().copied().collect();
+        // Issue #4878: `state.ring_level` is a default-RandomState HashMap;
+        // sort by the stable PlayerId inner value so multi-teammate Ring
+        // emblem triggers land in `pending` in a deterministic, process-
+        // independent order (matters when a stable sort downstream ties on
+        // both APNAP rank and timestamp — see `ring_pending_trigger`).
+        let mut players: Vec<_> = state.ring_level.keys().copied().collect();
+        players.sort_by_key(|p| p.0);
         for player in players {
             let level = state.ring_level.get(&player).copied().unwrap_or(0);
             let Some(bearer_id) = super::effects::ring::ring_bearer_for(state, player) else {

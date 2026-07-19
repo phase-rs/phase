@@ -4226,7 +4226,7 @@ fn remove_counter_cost_distribution_candidate(
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
-        let available: Vec<_> = match counter_type {
+        let mut available: Vec<_> = match counter_type {
             CounterMatch::OfType(counter_type) => obj
                 .counters
                 .get(counter_type)
@@ -4240,6 +4240,10 @@ fn remove_counter_cost_distribution_candidate(
                 .map(|(counter_type, count)| (counter_type.clone(), *count))
                 .collect(),
         };
+        // Issue #4878: `obj.counters` is a default-RandomState HashMap; sort by
+        // CounterType so the emitted distribution's content is a function of
+        // game state, not per-process hash iteration order.
+        available.sort_by(|a, b| a.0.cmp(&b.0));
         for (counter_type, available) in available {
             if remaining == 0 {
                 break;
