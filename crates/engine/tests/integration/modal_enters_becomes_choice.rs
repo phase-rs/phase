@@ -61,13 +61,14 @@ fn place_and_choose(
         .id();
     let mut runner = scenario.build();
 
+    let source = crate::support::exact_named_choice_source(runner.state(), obj);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
         player: P0,
         choice_type: ChoiceType::Labeled {
             options: labels.iter().map(|s| s.to_string()).collect(),
         },
         options: labels.iter().map(|s| s.to_string()).collect(),
-        source_id: Some(obj),
+        source: Some(source),
         persist_player: None,
     };
     runner
@@ -382,7 +383,9 @@ fn cast_and_engine_choose(
     // LOAD-BEARING: the engine (not the test) must have paused the entry on the
     // modal choice produced by the Moved/Battlefield Choose replacement.
     let WaitingFor::NamedChoice {
-        options, source_id, ..
+        options,
+        source: Some(source),
+        ..
     } = runner.state().waiting_for.clone()
     else {
         panic!(
@@ -391,8 +394,7 @@ fn cast_and_engine_choose(
         );
     };
     assert_eq!(
-        source_id,
-        Some(obj),
+        source.prompt.identity.reference.object_id, obj,
         "the NamedChoice source must be the entering modal creature (proves the \
          SelfRef/Battlefield Moved replacement fired on THIS entrant)"
     );

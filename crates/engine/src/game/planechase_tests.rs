@@ -972,7 +972,12 @@ fn planar_die_fires_generic_rolled_die_trigger() {
         .find(|e| matches!(e, GameEvent::DieRolled { .. }))
         .expect("planar roll must emit a generic DieRolled event");
     assert!(
-        super::trigger_matchers::match_rolled_die(die_event, &trigger, source_id, &state),
+        super::trigger_matchers::match_rolled_die(
+            die_event,
+            &trigger,
+            &super::trigger_matchers::test_trigger_source_context(&state, source_id),
+            &state,
+        ),
         "RolledDie trigger (no die_sides) must fire on the planar die roll"
     );
 }
@@ -1004,7 +1009,12 @@ fn planar_die_sides_filter_boundary() {
         TriggerDefinition::new(TriggerMode::RolledDie).valid_target(TargetFilter::Controller);
     d6_trigger.die_sides = Some(6);
     assert!(
-        super::trigger_matchers::match_rolled_die(die_event, &d6_trigger, source_id, &state),
+        super::trigger_matchers::match_rolled_die(
+            die_event,
+            &d6_trigger,
+            &super::trigger_matchers::test_trigger_source_context(&state, source_id),
+            &state,
+        ),
         "die_sides: Some(6) must match the six-faced planar die (CR 901.3a)"
     );
 
@@ -1012,7 +1022,12 @@ fn planar_die_sides_filter_boundary() {
         TriggerDefinition::new(TriggerMode::RolledDie).valid_target(TargetFilter::Controller);
     d20_trigger.die_sides = Some(20);
     assert!(
-        !super::trigger_matchers::match_rolled_die(die_event, &d20_trigger, source_id, &state),
+        !super::trigger_matchers::match_rolled_die(
+            die_event,
+            &d20_trigger,
+            &super::trigger_matchers::test_trigger_source_context(&state, source_id),
+            &state,
+        ),
         "die_sides: Some(20) must NOT match the planar die (CR 706.7 boundary)"
     );
 }
@@ -1060,11 +1075,21 @@ fn start_next_turn_syncs_planar_controller() {
     // The active plane's "you"-scoped (Controller) trigger now matches p1, not p0.
     let trig = &state.objects.get(&active_id).unwrap().trigger_definitions[0];
     assert!(
-        super::trigger_matchers::valid_player_matches(&trig.definition, &state, p1, active_id),
+        super::trigger_matchers::valid_player_matches(
+            &trig.definition,
+            &state,
+            p1,
+            &super::trigger_matchers::test_trigger_source_context(&state, active_id),
+        ),
         "Controller-scoped trigger must now match the NEW controller p1"
     );
     assert!(
-        !super::trigger_matchers::valid_player_matches(&trig.definition, &state, p0, active_id),
+        !super::trigger_matchers::valid_player_matches(
+            &trig.definition,
+            &state,
+            p0,
+            &super::trigger_matchers::test_trigger_source_context(&state, active_id),
+        ),
         "Controller-scoped trigger must no longer match the OLD controller p0"
     );
 }

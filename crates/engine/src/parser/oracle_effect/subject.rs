@@ -3137,10 +3137,24 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
             TargetFilter::TriggeringPlayer
         }
         Some(TargetFilter::Player) => TargetFilter::TriggeringPlayer,
-        // Object-type trigger subject
-        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
-            TargetFilter::TriggeringSource
-        }
+        // Object-type trigger subject: the trigger's SOURCE is "they" only when no
+        // nearer antecedent exists.
+        //
+        // CR 608.2c (issue #5985): a mass ("each …") effect in an earlier clause of
+        // the same chain establishes an object population, and that population is
+        // the nearer antecedent — Ardbert, Warrior of Darkness: "Whenever you cast a
+        // white spell, put a +1/+1 counter on each legendary creature you control.
+        // They gain vigilance until end of turn." "They" is those creatures, not the
+        // cast spell. Binding to the spell granted the keyword to an object on the
+        // stack, so the grant half silently did nothing while the counters landed.
+        //
+        // A mass effect chooses no target, so `ParentTarget` cannot express this
+        // (see `has_typed_target_widened`'s single-target whitelist); the anaphor
+        // inherits the population FILTER itself.
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => ctx
+            .chain_prior_mass_population
+            .clone()
+            .unwrap_or(TargetFilter::TriggeringSource),
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
     }

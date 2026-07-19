@@ -47,7 +47,7 @@ export interface DeckData {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

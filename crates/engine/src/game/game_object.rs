@@ -16,8 +16,10 @@ use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
-use crate::types::game_state::{AttackDeclarationRecord, GameState, LKISnapshot};
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::game_state::{
+    AttackDeclarationRecord, GameState, LKISnapshot, TriggerSourceContext,
+};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
 use crate::types::player::PlayerId;
@@ -209,7 +211,7 @@ pub struct BackFaceData {
 }
 
 /// CR 719.3b: Tracks the solve state of a Case enchantment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseState {
     pub is_solved: bool,
     pub solve_condition: SolveCondition,
@@ -1718,6 +1720,52 @@ impl GameObject {
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
             trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
+            trigger_source_context: Some(TriggerSourceContext {
+                identity: ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::from_object(self),
+                    from.unwrap_or(self.zone),
+                ),
+                lki: self.snapshot_public_characteristics(),
+                card_id: self.card_id,
+                printed_ref: self.printed_ref.clone(),
+                is_token: self.is_token,
+                face_down: self.face_down,
+                transformed: self.transformed,
+                is_renowned: self.is_renowned,
+                is_saddled: self.is_saddled,
+                echo_due: self.echo_due,
+                harnessed: self.harnessed,
+                saddled_by: self.saddled_by.clone(),
+                convoked_creatures: self.convoked_creatures.clone(),
+                case_state: self.case_state.clone(),
+                class_level: self.class_level,
+                trigger_entries: self.trigger_definitions.iter_all().cloned().collect(),
+                timestamp: self.timestamp,
+                entered_battlefield_turn: self.entered_battlefield_turn,
+                paired_with: self.paired_with,
+                pair_controller: self.pair_controller,
+                attached_to: self.attached_to,
+                attachments: Vec::new(),
+                linked_exile_snapshot: Vec::new(),
+                cards_exiled_this_turn: Vec::new(),
+                combat_status: Default::default(),
+                cast_from_zone: self.cast_from_zone,
+                played_from_zone: self.played_from_zone,
+                entered_via_ability_source: self.entered_via_ability_source,
+                cast_controller: self.cast_controller,
+                phase_status: self.phase_status,
+                cast_variant_paid: self.cast_variant_paid,
+                cast_timing_permission: self.cast_timing_permission,
+                cost_x_paid: self.cost_x_paid,
+                cast_spell_keywords: self.cast_spell_keywords.clone(),
+                mana_spent_to_cast: self.mana_spent_to_cast,
+                colors_spent_to_cast: self.colors_spent_to_cast.clone(),
+                mana_spent_to_cast_amount: self.mana_spent_to_cast_amount,
+                kickers_paid: self.kickers_paid.clone(),
+                additional_cost_payment_count: self.additional_cost_payment_count,
+                additional_cost_payments: self.additional_cost_payments.clone(),
+                cast_cost_paid_object: self.cast_cost_paid_object.clone(),
+            }),
             power: self.power,
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same
@@ -2522,6 +2570,9 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{
+        TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantInstanceRef,
+    };
     use crate::types::counter::parse_counter_type;
     use crate::types::triggers::TriggerMode;
 
@@ -2557,6 +2608,48 @@ mod tests {
         assert!(obj.abilities.is_empty());
         assert!(obj.color.is_empty());
         assert!(obj.entered_battlefield_turn.is_none());
+    }
+
+    #[test]
+    fn zone_change_snapshot_keeps_exact_trigger_source_context_in_sync() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(7),
+            },
+            TriggerDefinition::new(TriggerMode::ChangesZone),
+        );
+        object.trigger_definitions = vec![entry.clone()].into();
+
+        let mut record =
+            object.snapshot_for_zone_change(object.id, Some(Zone::Battlefield), Zone::Graveyard);
+        let source = record
+            .trigger_source_context()
+            .expect("live zone-change snapshots own a source context");
+        assert_eq!(
+            source.identity.reference,
+            ObjectIncarnationRef::from_object(&object)
+        );
+        assert_eq!(source.card_id, CardId(100));
+        assert_eq!(source.trigger_entries, vec![entry]);
+
+        // Meld refreshes a record after snapshot construction. The source context
+        // must follow those final record projections rather than retaining stale
+        // pre-refresh controller/combat facts.
+        record.controller = PlayerId(1);
+        record.combat_status.attacking = true;
+        record.sync_trigger_source_context();
+        let source = record
+            .trigger_source_context()
+            .expect("synchronization preserves the source context");
+        assert_eq!(source.lki.controller, PlayerId(1));
+        assert!(source.combat_status.attacking);
     }
 
     #[test]

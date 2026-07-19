@@ -11307,10 +11307,10 @@ mod tests {
     fn analyze_token_coverage_treats_source_defined_pt_as_represented() {
         let summary = analyze_token_coverage();
 
-        assert_eq!(summary.total_tokens, 2844);
-        assert_eq!(summary.supported_tokens, 2844);
-        assert_eq!(summary.rules_text_tokens, 1479);
-        assert_eq!(summary.parsed_rules_text_tokens, 1479);
+        assert_eq!(summary.total_tokens, 2845);
+        assert_eq!(summary.supported_tokens, 2845);
+        assert_eq!(summary.rules_text_tokens, 1480);
+        assert_eq!(summary.parsed_rules_text_tokens, 1480);
         assert_eq!(summary.total_tokens - summary.supported_tokens, 0);
         assert!(!summary.top_gaps.iter().any(|gap| {
             gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL

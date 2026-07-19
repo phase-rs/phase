@@ -23,7 +23,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
-use crate::types::game_state::{DamageRecord, GameState, LinkedExileSnapshot};
+use crate::types::game_state::{
+    DamageRecord, GameState, LinkedExileSnapshot, TriggerSourceContext,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
@@ -37,13 +39,17 @@ use crate::types::zones::Zone;
 /// *entering* creature's paid colors, not the Archaic itself. Most callers
 /// resolve against the source only and go through `resolve_quantity`; the
 /// replacement pipeline threads a richer context via `resolve_quantity_with_ctx`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct QuantityContext {
     /// The object entering the battlefield, when in an ETB-scoped replacement.
     /// `None` outside that context.
     pub entering: Option<ObjectId>,
     /// The static ability source (always set).
     pub source: ObjectId,
+    /// Exact triggered-source authority, when this quantity is evaluated for a
+    /// triggered ability or its intervening-if. `source` remains attribution;
+    /// source-relative facts must use this context instead of rebinding it.
+    pub trigger_source: Option<TriggerSourceContext>,
     /// CR 613.4c: The per-recipient binding for "<subject> gets +N/+M for
     /// each X attached to it" Aura/Equipment statics. Set by the layer
     /// evaluator when the dynamic modification's filter contains
@@ -59,6 +65,111 @@ impl QuantityContext {
     /// against: the entering object when in ETB scope, else the static source.
     fn self_object(&self) -> ObjectId {
         self.entering.unwrap_or(self.source)
+    }
+}
+
+/// Reads the quantity source's public characteristics through a triggered
+/// source context when one exists. A later object with the same storage id is
+/// never a substitute for that context (CR 603.4 / CR 608.2h).
+fn source_lki_for_context(
+    state: &GameState,
+    ctx: &QuantityContext,
+) -> Option<crate::types::game_state::LKISnapshot> {
+    ctx.trigger_source
+        .as_ref()
+        .map(|source| source.source_read(state).lki())
+        .or_else(|| {
+            state
+                .objects
+                .get(&ctx.source)
+                .map(crate::game::game_object::GameObject::snapshot_public_characteristics)
+                .or_else(|| state.lki_cache.get(&ctx.source).cloned())
+        })
+}
+
+/// Returns a live source only when it is the exact observed trigger source.
+/// Non-triggered quantities retain their normal current-operation source read.
+fn source_object_for_context<'a>(
+    state: &'a GameState,
+    source_id: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
+) -> Option<&'a crate::game::game_object::GameObject> {
+    match trigger_source {
+        Some(source) => match source.source_read(state) {
+            crate::types::game_state::TriggerSourceRead::ExactLive(object) => Some(object),
+            crate::types::game_state::TriggerSourceRead::Latched(_) => None,
+        },
+        None => state.objects.get(&source_id),
+    }
+}
+
+/// Reads source-owned exile links from the same authority as all other
+/// triggered source facts. The live exile store is correct only when there is
+/// no exact trigger source context to preserve.
+fn linked_exile_for_context(
+    state: &GameState,
+    ctx: &QuantityContext,
+) -> Vec<crate::types::game_state::LinkedExileSnapshot> {
+    ctx.trigger_source
+        .as_ref()
+        .map(|source| source.linked_exile_snapshot.clone())
+        .unwrap_or_else(|| crate::game::players::linked_exile_cards_for_source(state, ctx.source))
+}
+
+/// Ordered same-turn exile references are source facts, not an ObjectId-keyed
+/// lookup once a triggered source has been captured.
+fn cards_exiled_this_turn_for_context(state: &GameState, ctx: &QuantityContext) -> Vec<ObjectId> {
+    ctx.trigger_source
+        .as_ref()
+        .map(|source| source.cards_exiled_this_turn.clone())
+        .unwrap_or_else(|| {
+            state
+                .cards_exiled_with_source_this_turn
+                .get(&ctx.source)
+                .cloned()
+                .unwrap_or_default()
+        })
+}
+
+fn source_chosen_player_for_context(state: &GameState, ctx: &QuantityContext) -> Option<PlayerId> {
+    source_lki_for_context(state, ctx).and_then(|lki| {
+        lki.chosen_attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                crate::types::ability::ChosenAttribute::Player(player) => Some(*player),
+                _ => None,
+            })
+    })
+}
+
+fn source_controller_for_context(state: &GameState, ctx: &QuantityContext) -> Option<PlayerId> {
+    source_lki_for_context(state, ctx).map(|lki| lki.controller)
+}
+
+fn source_defending_player_for_context(
+    state: &GameState,
+    ctx: &QuantityContext,
+) -> Option<PlayerId> {
+    match ctx.trigger_source.as_ref() {
+        Some(source) => source.combat_status.defending_player,
+        None => crate::game::combat::resolve_defending_player(state, ctx.source),
+    }
+}
+
+fn source_enchanted_player_for_context(
+    state: &GameState,
+    ctx: &QuantityContext,
+) -> Option<PlayerId> {
+    match ctx.trigger_source.as_ref() {
+        Some(source) => source
+            .source_read(state)
+            .attached_to()
+            .and_then(|target| target.as_player()),
+        None => state
+            .objects
+            .get(&ctx.source)
+            .and_then(|source| source.attached_to)
+            .and_then(|target| target.as_player()),
     }
 }
 
@@ -79,6 +190,7 @@ pub fn resolve_quantity(
         QuantityContext {
             entering: None,
             source: source_id,
+            trigger_source: None,
             recipient: None,
             scoped_player: None,
         },
@@ -103,6 +215,7 @@ pub fn resolve_quantity_with_recipient(
         QuantityContext {
             entering: None,
             source: source_id,
+            trigger_source: None,
             recipient: Some(recipient_id),
             scoped_player: None,
         },
@@ -386,6 +499,7 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
         let ctx = QuantityContext {
             entering: None,
             source: ability.source_id,
+            trigger_source: ability.trigger_source.clone(),
             recipient: None,
             scoped_player: ability.scoped_player,
         };
@@ -1101,7 +1215,7 @@ pub fn resolve_quantity_with_ctx(
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, ctx, &[], None, None),
         other => fold_compose(other, |inner| {
-            resolve_quantity_with_ctx(state, inner, controller, ctx)
+            resolve_quantity_with_ctx(state, inner, controller, ctx.clone())
         }),
     }
 }
@@ -1182,7 +1296,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
     state: &GameState,
     expr: &QuantityExpr,
     controller: PlayerId,
-    source_id: ObjectId,
+    source_context: Option<&TriggerSourceContext>,
     event: Option<&crate::types::events::GameEvent>,
 ) -> i32 {
     // CR 603.4 + CR 102.1: Derive the "scoped player" from the
@@ -1201,7 +1315,10 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         resolution_event.and_then(|e| crate::game::targeting::extract_player_from_event(e, state));
     let ctx = QuantityContext {
         entering: None,
-        source: source_id,
+        source: source_context
+            .map(|source| source.identity.reference.object_id)
+            .unwrap_or(ObjectId(0)),
+        trigger_source: source_context.cloned(),
         recipient: None,
         scoped_player,
     };
@@ -1475,6 +1592,7 @@ pub fn resolve_quantity_with_targets(
             QuantityContext {
                 entering: None,
                 source: ability.source_id,
+                trigger_source: ability.trigger_source.clone(),
                 recipient: None,
                 scoped_player: ability.scoped_player,
             },
@@ -1526,6 +1644,7 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
             QuantityContext {
                 entering: None,
                 source: ability.source_id,
+                trigger_source: ability.trigger_source.clone(),
                 recipient: Some(recipient_id),
                 scoped_player: ability.scoped_player,
             },
@@ -1560,6 +1679,7 @@ pub fn resolve_quantity_with_targets_slice(
             QuantityContext {
                 entering: None,
                 source: source_id,
+                trigger_source: None,
                 recipient: None,
                 scoped_player: None,
             },
@@ -1603,6 +1723,7 @@ pub(crate) fn resolve_quantity_scoped(
             QuantityContext {
                 entering: None,
                 source: source_id,
+                trigger_source: None,
                 recipient: None,
                 scoped_player: Some(scope_player),
             },
@@ -1777,6 +1898,10 @@ fn resolve_ref(
     // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
     // `FilterContext::recipient_id` so recipient-relative filter properties
     // resolve against the per-object recipient bound by the layer evaluator.
+    // Keep the exact source snapshot in an independent local. `FilterContext`
+    // borrows it for filter evaluation, while quantity branches still consume
+    // `ctx` when they recurse through player scopes.
+    let trigger_source = ctx.trigger_source.clone();
     let mut filter_ctx = match ability {
         // CR 109.5: "you"/"your" on a triggered ability refer to the ability's
         // (printed) controller. A quantity is a value sub-expression, not an effect
@@ -1790,7 +1915,10 @@ fn resolve_ref(
             a.original_controller.unwrap_or(a.controller),
         ),
         None => {
-            let mut fc = FilterContext::from_source_with_controller(source_id, controller);
+            let mut fc = trigger_source.as_ref().map_or_else(
+                || FilterContext::from_source_with_controller(source_id, controller),
+                |source| FilterContext::from_trigger_source_with_controller(source, controller),
+            );
             // CR 120.3: DamageEachPlayer binds ControllerRef::ScopedPlayer to
             // the current recipient while ControllerRef::You stays on `controller`.
             fc.scoped_iteration_player = ctx.scoped_player;
@@ -1825,7 +1953,14 @@ fn resolve_ref(
         // totals (deduped). Off-team this is byte-identical (singleton teams,
         // team_life_total == p.life). CR 810.9d confirms the per-team extremum.
         QuantityRef::LifeTotal { player: scope } => {
-            match resolve_single_player_scope(state, scope, controller, ctx, targets, ability) {
+            match resolve_single_player_scope(
+                state,
+                scope,
+                controller,
+                ctx.clone(),
+                targets,
+                ability,
+            ) {
                 Some(pid) => crate::game::players::team_life_total(state, pid),
                 None => resolve_per_team_life(state, scope, controller, ctx, targets, ability),
             }
@@ -2019,9 +2154,7 @@ fn resolve_ref(
                 }
             }
         }
-        QuantityRef::PlayerCount { filter } => {
-            resolve_player_count(state, filter, controller, source_id)
-        }
+        QuantityRef::PlayerCount { filter } => resolve_player_count(state, filter, controller, ctx),
         // CR 120.1 + CR 603.2c + CR 608.2c: "for each opponent dealt damage"
         // on a batched damage trigger counts DISTINCT damaged players carried by
         // the resolving trigger event batch. This intentionally does not read
@@ -2135,17 +2268,15 @@ fn resolve_ref(
         // than paying its mana cost") where `source_id` is the spell being
         // cast. Falls back to LKI for objects that have left their zone
         // mid-resolution. CR 202.3e: include X when on the stack.
-        QuantityRef::SelfManaValue => state
-            .objects
-            .get(&source_id)
-            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
-            .or_else(|| {
-                state
-                    .lki_cache
-                    .get(&source_id)
-                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
-            })
-            .unwrap_or(0),
+        QuantityRef::SelfManaValue => {
+            source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())
+                .map(|object| u32_to_i32_saturating(object.effective_mana_value()))
+                .or_else(|| {
+                    source_lki_for_context(state, &ctx)
+                        .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                })
+                .unwrap_or(0)
+        }
         // Aggregate over objects matching `filter` in its zone; id population
         // delegated to `object_count_matching_ids` (single source of truth for
         // zone selection + the `OtherThanTriggerObject` exclusion). Selvala-class
@@ -2272,27 +2403,36 @@ fn resolve_ref(
             crate::types::ability::DevotionColors::Fixed(colors) => u32_to_i32_saturating(
                 crate::game::devotion::count_devotion(state, controller, colors),
             ),
-            crate::types::ability::DevotionColors::ChosenColor => state
-                .objects
-                .get(&ctx.source)
-                .and_then(|obj| obj.chosen_color())
-                .or_else(|| {
-                    state
-                        .last_named_choice
-                        .as_ref()
-                        .and_then(|choice| match choice {
-                            crate::types::ability::ChoiceValue::Color(color) => Some(*color),
-                            _ => None,
-                        })
-                })
-                .map(|color| {
-                    u32_to_i32_saturating(crate::game::devotion::count_devotion(
-                        state,
-                        controller,
-                        &[color],
-                    ))
-                })
-                .unwrap_or(0),
+            crate::types::ability::DevotionColors::ChosenColor => {
+                source_lki_for_context(state, &ctx)
+                    .and_then(|lki| {
+                        lki.chosen_attributes
+                            .iter()
+                            .find_map(|attribute| match attribute {
+                                crate::types::ability::ChosenAttribute::Color(color) => {
+                                    Some(*color)
+                                }
+                                _ => None,
+                            })
+                    })
+                    .or_else(|| {
+                        state
+                            .last_named_choice
+                            .as_ref()
+                            .and_then(|choice| match choice {
+                                crate::types::ability::ChoiceValue::Color(color) => Some(*color),
+                                _ => None,
+                            })
+                    })
+                    .map(|color| {
+                        u32_to_i32_saturating(crate::game::devotion::count_devotion(
+                            state,
+                            controller,
+                            &[color],
+                        ))
+                    })
+                    .unwrap_or(0)
+            }
         },
         QuantityRef::TargetZoneCardCount { zone } => {
             let target_player = targets.iter().find_map(|t| {
@@ -2334,7 +2474,11 @@ fn resolve_ref(
                         for &obj_id in &state.exile {
                             if let Some(obj) = state.objects.get(&obj_id) {
                                 let owner_matches = count_scope_owner_matches(
-                                    state, scope, ctx, controller, obj.owner,
+                                    state,
+                                    scope,
+                                    ctx.clone(),
+                                    controller,
+                                    obj.owner,
                                 );
                                 if owner_matches {
                                     for ct in &obj.card_types.core_types {
@@ -2363,9 +2507,7 @@ fn resolve_ref(
                     }
                 },
                 CardTypeSetSource::ExiledBySource => {
-                    for linked in
-                        crate::game::players::linked_exile_cards_for_source(state, source_id)
-                    {
+                    for linked in linked_exile_for_context(state, &ctx) {
                         if let Some(obj) = state.objects.get(&linked.exiled_id) {
                             for ct in &obj.card_types.core_types {
                                 seen.insert(*ct);
@@ -2442,7 +2584,11 @@ fn resolve_ref(
                         for &obj_id in &state.exile {
                             if let Some(obj) = state.objects.get(&obj_id) {
                                 if count_scope_owner_matches(
-                                    state, scope, ctx, controller, obj.owner,
+                                    state,
+                                    scope,
+                                    ctx.clone(),
+                                    controller,
+                                    obj.owner,
                                 ) {
                                     obj_ids.push(obj_id);
                                 }
@@ -2462,9 +2608,7 @@ fn resolve_ref(
                     }
                 },
                 CardTypeSetSource::ExiledBySource => {
-                    for linked in
-                        crate::game::players::linked_exile_cards_for_source(state, source_id)
-                    {
+                    for linked in linked_exile_for_context(state, &ctx) {
                         obj_ids.push(linked.exiled_id);
                     }
                 }
@@ -2531,16 +2675,16 @@ fn resolve_ref(
         // CR 603.10a + CR 607.2a: Count cards linked as "exiled with" the
         // source. LTB triggers read the trigger-event snapshot; other contexts
         // read the live exile-link store.
-        QuantityRef::CardsExiledBySource => usize_to_i32_saturating(
-            crate::game::players::linked_exile_cards_for_source(state, source_id).len(),
-        ),
+        QuantityRef::CardsExiledBySource => {
+            usize_to_i32_saturating(linked_exile_for_context(state, &ctx).len())
+        }
         // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
         // ENGINE INVARIANT: The ordering is guaranteed by Vec::push in push_exiled_with_source_this_turn.
         QuantityRef::ExiledCardPower { index } => {
-            let exiled_cards = state.cards_exiled_with_source_this_turn.get(&source_id);
-            match exiled_cards.and_then(|cards| cards.get(*index as usize)) {
-                Some(&card_id) => {
-                    let card = state.objects.get(&card_id);
+            let exiled_cards = cards_exiled_this_turn_for_context(state, &ctx);
+            match exiled_cards.get(*index as usize) {
+                Some(card_id) => {
+                    let card = state.objects.get(card_id);
                     card.and_then(|obj| obj.power).unwrap_or(0)
                 }
                 None => 0,
@@ -2581,8 +2725,13 @@ fn resolve_ref(
                 ZoneRef::Exile => {
                     for &obj_id in &state.exile {
                         if let Some(obj) = state.objects.get(&obj_id) {
-                            let owner_matches =
-                                count_scope_owner_matches(state, scope, ctx, controller, obj.owner);
+                            let owner_matches = count_scope_owner_matches(
+                                state,
+                                scope,
+                                ctx.clone(),
+                                controller,
+                                obj.owner,
+                            );
                             if owner_matches
                                 && matches_zone_card_filter(
                                     state,
@@ -3170,11 +3319,9 @@ fn resolve_ref(
         // CR 500: Cumulative turns taken by this player.
         QuantityRef::TurnsTaken => player.map_or(0, |p| u32_to_i32_saturating(p.turns_taken)),
         // Chosen number stored on the source object via ChosenAttribute::Number.
-        QuantityRef::ChosenNumber => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| {
-                obj.chosen_attributes.iter().find_map(|a| match a {
+        QuantityRef::ChosenNumber => source_lki_for_context(state, &ctx)
+            .and_then(|lki| {
+                lki.chosen_attributes.iter().find_map(|a| match a {
                     crate::types::ability::ChosenAttribute::Number(n) => Some(*n as i32),
                     _ => None,
                 })
@@ -3188,15 +3335,20 @@ fn resolve_ref(
                 .attacker_declarations_this_turn
                 .iter()
                 .filter(|record| {
-                    count_scope_actor_matches(state, scope, ctx, controller, record.lki.controller)
-                        && filter.as_ref().is_none_or(|filter| {
-                            matches_target_filter_on_attack_declaration_record(
-                                state,
-                                record,
-                                filter,
-                                &filter_ctx,
-                            )
-                        })
+                    count_scope_actor_matches(
+                        state,
+                        scope,
+                        ctx.clone(),
+                        controller,
+                        record.lki.controller,
+                    ) && filter.as_ref().is_none_or(|filter| {
+                        matches_target_filter_on_attack_declaration_record(
+                            state,
+                            record,
+                            filter,
+                            &filter_ctx,
+                        )
+                    })
                 })
                 .count(),
         ),
@@ -3267,7 +3419,7 @@ fn resolve_ref(
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
-                    count_scope_actor_matches(state, actor, ctx, controller, record.actor)
+                    count_scope_actor_matches(state, actor, ctx.clone(), controller, record.actor)
                         && counters.matches(&record.counter_type)
                         && matches_target_filter_on_counter_added_record(
                             state,
@@ -3343,41 +3495,91 @@ fn resolve_ref(
         // by `finalize_cast` so it survives stack → battlefield. Falls back to
         // the resolving ability's `chosen_x` (for stack-resolution contexts
         // where the object hasn't landed on the battlefield yet).
-        QuantityRef::CostXPaid => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.cost_x_paid)
+        QuantityRef::CostXPaid => ctx
+            .trigger_source
+            .as_ref()
+            .map(|source| source.source_read(state).cost_x_paid())
+            .unwrap_or_else(|| {
+                state
+                    .objects
+                    .get(&source_id)
+                    .and_then(|object| object.cost_x_paid)
+            })
             .map(u32_to_i32_saturating)
             .or_else(|| chosen_x.map(u32_to_i32_saturating))
             .unwrap_or(0),
-        QuantityRef::KickerCount => state
-            .objects
-            .get(&ctx.self_object())
-            .map(|obj| usize_to_i32_saturating(obj.kickers_paid.len()))
+        QuantityRef::KickerCount => ctx
+            .trigger_source
+            .as_ref()
+            .filter(|_| ctx.entering.is_none())
+            .map(|source| usize_to_i32_saturating(source.source_read(state).kickers_paid().len()))
+            .or_else(|| {
+                state
+                    .objects
+                    .get(&ctx.self_object())
+                    .map(|object| usize_to_i32_saturating(object.kickers_paid.len()))
+            })
             .unwrap_or(0),
-        QuantityRef::AdditionalCostPaymentCount => state
-            .objects
-            .get(&ctx.self_object())
-            .map(|obj| u32_to_i32_saturating(obj.additional_cost_payment_count))
+        QuantityRef::AdditionalCostPaymentCount => ctx
+            .trigger_source
+            .as_ref()
+            .filter(|_| ctx.entering.is_none())
+            .map(|source| {
+                u32_to_i32_saturating(source.source_read(state).additional_cost_payment_count())
+            })
+            .or_else(|| {
+                state
+                    .objects
+                    .get(&ctx.self_object())
+                    .map(|object| u32_to_i32_saturating(object.additional_cost_payment_count))
+            })
             .unwrap_or(0),
         QuantityRef::AdditionalCostPaymentCountFor {
             origin,
             origin_ordinal,
-        } => state
-            .objects
-            .get(&ctx.self_object())
-            .map(|obj| {
+        } => ctx
+            .trigger_source
+            .as_ref()
+            .filter(|_| ctx.entering.is_none())
+            .map(|source| {
+                let payments = source.source_read(state).additional_cost_payments();
                 let count = origin_ordinal.map_or_else(
-                    || obj.instance_payment_count(*origin),
-                    |ordinal| obj.instance_payment_count_for_ordinal(*origin, ordinal),
+                    || {
+                        crate::types::ability::additional_cost_instance_payment_count(
+                            &payments, *origin,
+                        )
+                    },
+                    |ordinal| {
+                        crate::types::ability::additional_cost_instance_payment_count_for_ordinal(
+                            &payments, *origin, ordinal,
+                        )
+                    },
                 );
                 u32_to_i32_saturating(count)
             })
+            .or_else(|| {
+                state.objects.get(&ctx.self_object()).map(|object| {
+                    let count = origin_ordinal.map_or_else(
+                        || object.instance_payment_count(*origin),
+                        |ordinal| object.instance_payment_count_for_ordinal(*origin, ordinal),
+                    );
+                    u32_to_i32_saturating(count)
+                })
+            })
             .unwrap_or(0),
-        QuantityRef::ConvokedCreatureCount => state
-            .objects
-            .get(&ctx.self_object())
-            .map(|obj| usize_to_i32_saturating(obj.convoked_creatures.len()))
+        QuantityRef::ConvokedCreatureCount => ctx
+            .trigger_source
+            .as_ref()
+            .filter(|_| ctx.entering.is_none())
+            .map(|source| {
+                usize_to_i32_saturating(source.source_read(state).convoked_creatures().len())
+            })
+            .or_else(|| {
+                state
+                    .objects
+                    .get(&ctx.self_object())
+                    .map(|object| usize_to_i32_saturating(object.convoked_creatures.len()))
+            })
             .unwrap_or(0),
         // CR 603.12a: Number of times the controller paid the repeated optional
         // cost during THIS resolution. Resolution-local transient on the
@@ -3435,12 +3637,12 @@ fn resolve_ref(
                             .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
                             .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::DefendingPlayer) => {
-                            crate::game::combat::resolve_defending_player(state, ctx.source)
+                            source_defending_player_for_context(state, &ctx)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
                         // CR 613.1: Attachment controlled by the source's chosen player.
                         Some(ControllerRef::SourceChosenPlayer) => {
-                            crate::game::game_object::source_chosen_player(state, ctx.source)
+                            source_chosen_player_for_context(state, &ctx)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
                         // CR 608.2c + CR 109.4: Attachment controlled by a chosen player.
@@ -3453,15 +3655,8 @@ fn resolve_ref(
                         }
                         // CR 303.4b: Resolve enchanted player for quantity counting.
                         Some(ControllerRef::EnchantedPlayer) => {
-                            crate::game::filter::controller_ref_player(
-                                state,
-                                ctx.source,
-                                Some(controller),
-                                ability,
-                                // CR 303.4b: Resolve enchanted player for quantity counting.
-                                &ControllerRef::EnchantedPlayer,
-                            )
-                            .is_some_and(|pid| pid == snap.controller)
+                            source_enchanted_player_for_context(state, &ctx)
+                                .is_some_and(|pid| pid == snap.controller)
                         }
                         // CR 102.1: attachment controlled by the active player.
                         Some(ControllerRef::ActivePlayer) => snap.controller == state.active_player,
@@ -3511,13 +3706,11 @@ fn damage_source_controller_matches(
             .and_then(|ability| crate::game::ability_utils::parent_target_owner(ability, state))
             .is_some_and(|player| actual == player),
         ControllerRef::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, ctx.source)
-                .is_some_and(|player| actual == player)
+            source_defending_player_for_context(state, &ctx).is_some_and(|player| actual == player)
         }
         // CR 613.1: Damage source controlled by the source's chosen player.
         ControllerRef::SourceChosenPlayer => {
-            crate::game::game_object::source_chosen_player(state, ctx.source)
-                .is_some_and(|player| actual == player)
+            source_chosen_player_for_context(state, &ctx).is_some_and(|player| actual == player)
         }
         // CR 608.2c + CR 109.4: Damage source controlled by a chosen player.
         ControllerRef::ChosenPlayer { index } => ability
@@ -3528,15 +3721,9 @@ fn damage_source_controller_matches(
             triggering_event_player(state).is_some_and(|player| actual == player)
         }
         // CR 303.4b: Resolve enchanted player for quantity counting.
-        ControllerRef::EnchantedPlayer => crate::game::filter::controller_ref_player(
-            state,
-            ctx.source,
-            Some(controller),
-            ability,
-            // CR 303.4b: Resolve enchanted player for quantity counting.
-            &ControllerRef::EnchantedPlayer,
-        )
-        .is_some_and(|player| actual == player),
+        ControllerRef::EnchantedPlayer => {
+            source_enchanted_player_for_context(state, &ctx).is_some_and(|player| actual == player)
+        }
         // CR 102.1: damage source controlled by the active player (read live).
         ControllerRef::ActivePlayer => actual == state.active_player,
     }
@@ -3587,8 +3774,7 @@ fn scoped_players<'a>(
         CountScope::Controller | CountScope::Owner => p.id == controller,
         CountScope::ScopedPlayer => p.id == scoped_player,
         CountScope::SourceChosenPlayer => {
-            crate::game::game_object::source_chosen_player(state, ctx.source)
-                .is_some_and(|player| p.id == player)
+            source_chosen_player_for_context(state, &ctx).is_some_and(|player| p.id == player)
         }
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
@@ -3609,8 +3795,7 @@ fn count_scope_owner_matches(
         CountScope::Controller | CountScope::Owner => owner == controller,
         CountScope::ScopedPlayer => owner == ctx.scoped_player.unwrap_or(controller),
         CountScope::SourceChosenPlayer => {
-            crate::game::game_object::source_chosen_player(state, ctx.source)
-                .is_some_and(|player| owner == player)
+            source_chosen_player_for_context(state, &ctx).is_some_and(|player| owner == player)
         }
         CountScope::All => true,
         CountScope::Opponents => owner != controller,
@@ -3628,8 +3813,7 @@ fn count_scope_actor_matches(
         CountScope::Controller | CountScope::Owner => actor == controller,
         CountScope::ScopedPlayer => actor == ctx.scoped_player.unwrap_or(controller),
         CountScope::SourceChosenPlayer => {
-            crate::game::game_object::source_chosen_player(state, ctx.source)
-                .is_some_and(|player| actor == player)
+            source_chosen_player_for_context(state, &ctx).is_some_and(|player| actor == player)
         }
         CountScope::All => true,
         CountScope::Opponents => actor != controller,
@@ -3708,7 +3892,13 @@ fn resolve_damage_dealt_this_turn(
             && damage_record_matches_kind(record, damage_kind)
             && source_matches(record)
             && damage_record_target_matches(
-                state, record, controller, ctx, ability, target, filter_ctx,
+                state,
+                record,
+                controller,
+                ctx.clone(),
+                ability,
+                target,
+                filter_ctx,
             )
     });
 
@@ -3859,7 +4049,9 @@ fn object_for_scope<'a>(
     targets: &[TargetRef],
 ) -> Option<&'a crate::game::game_object::GameObject> {
     match scope {
-        ObjectScope::Source => state.objects.get(&ctx.source),
+        ObjectScope::Source => {
+            source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())
+        }
         ObjectScope::Target => targets.iter().find_map(|t| match t {
             TargetRef::Object(id) => state.objects.get(id),
             _ => None,
@@ -3873,7 +4065,7 @@ fn object_for_scope<'a>(
                     _ => None,
                 })
             })
-            .or_else(|| state.objects.get(&ctx.source)),
+            .or_else(|| source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())),
         // CR 603.4: an intervening-if condition is checked at trigger detection
         // (current_trigger_event is None then) and re-checked on resolution.
         // EventSource-scoped quantities must resolve at BOTH times — fall back to
@@ -3916,7 +4108,15 @@ fn object_id_for_scope(
     targets: &[TargetRef],
 ) -> Option<ObjectId> {
     match scope {
-        ObjectScope::Source => Some(ctx.source),
+        // An ordinary resolution retains the raw source id as an LKI lookup key
+        // after the source has left. A triggered resolution may use that id only
+        // while its captured incarnation remains exact; otherwise returning the
+        // id would let a later object rebind the old trigger.
+        ObjectScope::Source => match ctx.trigger_source.as_ref() {
+            Some(_) => source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())
+                .map(|object| object.id),
+            None => Some(ctx.source),
+        },
         ObjectScope::Target => targets.iter().find_map(|t| match t {
             TargetRef::Object(id) => Some(*id),
             _ => None,
@@ -3929,7 +4129,10 @@ fn object_id_for_scope(
                     _ => None,
                 })
             })
-            .or(Some(ctx.source)),
+            .or_else(|| {
+                source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())
+                    .map(|object| object.id)
+            }),
         // CR 603.4: an intervening-if condition is checked at trigger detection
         // (current_trigger_event is None then) and re-checked on resolution.
         // EventSource-scoped quantities must resolve at BOTH times — fall back to
@@ -4098,6 +4301,11 @@ fn resolve_counters_on_scope(
         // be zone-keyed because an empty `HashMap<CounterType, u32>` is
         // `Some({})`, not `None`.
         ObjectScope::Source | ObjectScope::EventSource => {
+            if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
+                return source_lki_for_context(state, &ctx)
+                    .map(|lki| counter_count_from_map(&lki.counters, counter_type))
+                    .unwrap_or(0);
+            }
             let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
                 return 0;
             };
@@ -4146,6 +4354,13 @@ fn resolve_object_color_count(
     ctx: QuantityContext,
     targets: &[TargetRef],
 ) -> i32 {
+    if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
+        return source_lki_for_context(state, &ctx)
+            .map(|lki| {
+                usize_to_i32_saturating(lki.colors.into_iter().collect::<HashSet<_>>().len())
+            })
+            .unwrap_or(0);
+    }
     let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
         return 0;
     };
@@ -4170,6 +4385,11 @@ fn resolve_object_name_word_count(
     ctx: QuantityContext,
     targets: &[TargetRef],
 ) -> i32 {
+    if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
+        return source_lki_for_context(state, &ctx)
+            .map(|lki| usize_to_i32_saturating(lki.name.split_whitespace().count()))
+            .unwrap_or(0);
+    }
     let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
         return 0;
     };
@@ -4188,6 +4408,15 @@ fn resolve_object_typeline_component_count(
     ctx: QuantityContext,
     targets: &[TargetRef],
 ) -> i32 {
+    if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
+        return source_lki_for_context(state, &ctx)
+            .map(|lki| {
+                usize_to_i32_saturating(
+                    lki.supertypes.len() + lki.card_types.len() + lki.subtypes.len(),
+                )
+            })
+            .unwrap_or(0);
+    }
     let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
         return 0;
     };
@@ -4220,6 +4449,11 @@ fn resolve_mana_symbols_in_mana_cost(
     ctx: QuantityContext,
     targets: &[TargetRef],
 ) -> i32 {
+    if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
+        return source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())
+            .map(|object| object.mana_cost.count_colored_pips(color))
+            .unwrap_or(0);
+    }
     object_for_scope(state, scope, ctx, targets)
         .map(|obj| obj.mana_cost.count_colored_pips(color))
         .unwrap_or(0)
@@ -4380,14 +4614,19 @@ where
         //     card's P/T. Read the live source in its current zone, falling back
         //     to LKI only if the object has left the game entirely.
         //
-        // `source_incarnation` is set exactly for triggered abilities (whose
+        // `trigger_source` is set exactly for triggered abilities (whose
         // source can change zones between firing and resolution) and `None` for
         // activated abilities and casts, so it distinguishes the battlefield
         // look-back case from the current-zone case. A bare `resolve_quantity`
         // call with no ability (statics, whose source is on the battlefield, and
         // direct unit reads) defaults to the look-back read.
         ObjectScope::Source => {
-            let expects_battlefield = ability.is_none_or(|a| a.source_incarnation.is_some());
+            if ctx.trigger_source.is_some() {
+                return source_lki_for_context(state, &ctx)
+                    .and_then(|lki| lki_extract(&lki))
+                    .unwrap_or(0);
+            }
+            let expects_battlefield = ability.is_none_or(|a| a.trigger_source.is_some());
             if expects_battlefield {
                 read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
             } else {
@@ -4586,17 +4825,15 @@ fn resolve_object_mana_value(
 ) -> i32 {
     match scope {
         // CR 202.3e: include cost_x_paid so on-stack spells report X's chosen value.
-        ObjectScope::Source => state
-            .objects
-            .get(&ctx.source)
-            .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
-            .or_else(|| {
-                state
-                    .lki_cache
-                    .get(&ctx.source)
-                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
-            })
-            .unwrap_or(0),
+        ObjectScope::Source => {
+            source_object_for_context(state, ctx.source, ctx.trigger_source.as_ref())
+                .map(|object| u32_to_i32_saturating(object.effective_mana_value()))
+                .or_else(|| {
+                    source_lki_for_context(state, &ctx)
+                        .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                })
+                .unwrap_or(0)
+        }
         ObjectScope::Target => targets
             .iter()
             .find_map(|t| match t {
@@ -4832,9 +5069,8 @@ fn resolve_single_player_scope(
                 })
             });
             object_id
-                .or(Some(ctx.source))
-                .and_then(|id| state.objects.get(&id))
-                .map(|obj| obj.controller)
+                .and_then(|id| state.objects.get(&id).map(|object| object.controller))
+                .or_else(|| source_controller_for_context(state, &ctx))
         }
         PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx),
         // CR 109.4: controller of the parent object target.
@@ -4843,9 +5079,7 @@ fn resolve_single_player_scope(
         }
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
-        PlayerScope::SourceChosenPlayer => {
-            crate::game::game_object::source_chosen_player(state, ctx.source)
-        }
+        PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx),
         // Aggregate scopes have no single-player reading.
         PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
         PlayerScope::AnyTurn => {
@@ -4910,9 +5144,8 @@ where
                 })
             });
             let recipient_controller = object_id
-                .or(Some(ctx.source))
-                .and_then(|id| state.objects.get(&id))
-                .map(|obj| obj.controller);
+                .and_then(|id| state.objects.get(&id).map(|object| object.controller))
+                .or_else(|| source_controller_for_context(state, &ctx));
             recipient_controller
                 .and_then(|pid| state.players.iter().find(|p| p.id == pid))
                 .map_or(0, &mut extract)
@@ -4927,11 +5160,9 @@ where
             .map_or(0, &mut extract),
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
-        PlayerScope::SourceChosenPlayer => {
-            crate::game::game_object::source_chosen_player(state, ctx.source)
-                .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-                .map_or(0, &mut extract)
-        }
+        PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx)
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
             state.players.iter().filter(|p| p.id != controller),
             *aggregate,
@@ -4964,6 +5195,20 @@ fn defending_player_for_quantity_context(
     // CR 508.5: prefer the single authority, which resolves the defending player of
     // the source's own attack or — for an Equipment/Aura whose source is not the
     // attacker — the attacker carried by the triggering event (CR 508.5a, per-attacker).
+    if let Some(source) = ctx.trigger_source.as_ref() {
+        let source_id = source.identity.reference.object_id;
+        return source
+            .combat_status
+            .defending_player
+            // Event-global read: the event's attacker/defender relation, keyed
+            // by the exact source identity, is authoritative for this trigger.
+            .or_else(|| {
+                defending_player_from_event(state.current_trigger_event.as_ref(), source_id)
+            })
+            .or_else(|| {
+                defending_player_from_event(detection_trigger_event().as_ref(), source_id)
+            });
+    }
     crate::game::combat::resolve_defending_player(state, ctx.source)
         // CR 508.5a 1v1 fallback: a batched multi-attacker trigger event has no single
         // attacking object to resolve individually, so use the event's defending player.
@@ -5226,8 +5471,9 @@ pub(crate) fn resolve_player_count(
     state: &GameState,
     filter: &PlayerFilter,
     controller: PlayerId,
-    source_id: ObjectId,
+    ctx: QuantityContext,
 ) -> i32 {
+    let source_id = ctx.source;
     // CR 104.3: eliminated players are excluded from the generic player loop
     // below (`!p.is_eliminated`), so count them on a dedicated path.
     if matches!(filter, PlayerFilter::HasLostTheGame) {
@@ -5339,7 +5585,19 @@ pub(crate) fn resolve_player_count(
                             )
                         }
                         PlayerFilter::OwnersOfCardsExiledBySource => {
-                            crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
+                            ctx.trigger_source.as_ref().map_or_else(
+                                || {
+                                    crate::game::players::owns_card_exiled_by_source(
+                                        state, p.id, source_id,
+                                    )
+                                },
+                                |source| {
+                                    source
+                                        .linked_exile_snapshot
+                                        .iter()
+                                        .any(|linked| linked.owner == p.id)
+                                },
+                            )
                         }
                         PlayerFilter::TriggeringPlayer => state
                             .current_trigger_event
@@ -6363,6 +6621,7 @@ mod tests {
                 QuantityContext {
                     entering: Some(entering),
                     source: static_source,
+                    trigger_source: None,
                     recipient: None,
                     scoped_player: None,
                 },
@@ -8143,16 +8402,19 @@ mod tests {
             attachments: vec![
                 AttachmentSnapshot {
                     object_id: ObjectId(301),
+                    identity: None,
                     controller: PlayerId(0),
                     kind: AttachmentKind::Aura,
                 },
                 AttachmentSnapshot {
                     object_id: ObjectId(302),
+                    identity: None,
                     controller: PlayerId(0),
                     kind: AttachmentKind::Aura,
                 },
                 AttachmentSnapshot {
                     object_id: ObjectId(303),
+                    identity: None,
                     controller: PlayerId(1),
                     kind: AttachmentKind::Aura,
                 },
@@ -10792,7 +11054,7 @@ mod tests {
     /// creature dying earlier this step. This is the counterpart to
     /// `resolve_source_power_prefers_lki_when_source_left_battlefield`: same
     /// off-battlefield source with a buffed LKI, but because the ability is
-    /// activated (`source_incarnation == None`) the live current-zone value wins.
+    /// activated (no `trigger_source`) the live current-zone value wins.
     /// Revert-failing: without the `expects_battlefield` gate the buffed LKI (3)
     /// leaks through and the activated graveyard ability over-reports.
     #[test]
@@ -10825,7 +11087,7 @@ mod tests {
                 scope: ObjectScope::Source,
             },
         };
-        // An activated ability has no `source_incarnation` — it functions from
+        // An activated ability has no `trigger_source` — it functions from
         // the current (graveyard) zone, so the live base power must win.
         let ability = ResolvedAbility::new(
             Effect::GainLife {
@@ -10837,8 +11099,8 @@ mod tests {
             PlayerId(0),
         );
         assert!(
-            ability.source_incarnation.is_none(),
-            "activated-ability fixture must have no source incarnation"
+            ability.trigger_source.is_none(),
+            "activated-ability fixture must have no trigger source"
         );
         assert_eq!(
             resolve_quantity_with_targets(&state, &power, &ability),
@@ -13326,13 +13588,13 @@ mod tests {
             state.current_trigger_event.is_none(),
             "detection path requires current_trigger_event to be None"
         );
-        let count = resolve_quantity_for_trigger_check(&state, &expr, p0, attacker, Some(&event));
+        let count = resolve_quantity_for_trigger_check(&state, &expr, p0, None, Some(&event));
         assert_eq!(count, 1, "P2 is P1's un-attacked opponent → count 1");
 
         // CONTROL: P1 attacks both P0 and P2 (every opponent attacked) → count 0.
         let (state, attacker) = build_state(&[p0, p2]);
         let event = attack_event(attacker, &[p0, p2]);
-        let count = resolve_quantity_for_trigger_check(&state, &expr, p0, attacker, Some(&event));
+        let count = resolve_quantity_for_trigger_check(&state, &expr, p0, None, Some(&event));
         assert_eq!(count, 0, "every opponent of P1 is attacked → count 0");
     }
 

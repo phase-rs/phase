@@ -4,7 +4,7 @@
 //! https://github.com/phase-rs/phase/issues/2376
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::game::triggers::{process_triggers, trigger_matcher};
+use engine::game::triggers::{process_triggers, trigger_matcher, trigger_source_context_for_latch};
 use engine::game::zones::create_object;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
@@ -124,10 +124,14 @@ fn spell_cast_matcher_accepts(
 ) -> bool {
     let trigger = &state.objects.get(&ascension).unwrap().trigger_definitions[trigger_idx];
     let matcher = trigger_matcher(trigger.definition.mode.clone()).expect("SpellCast matcher");
+    let source_context = trigger_source_context_for_latch(
+        state,
+        state.objects.get(&ascension).expect("Ascension source"),
+    );
     matcher(
         &spell_cast_event(spell_id),
         trigger.definition(),
-        ascension,
+        &source_context,
         state,
     )
 }

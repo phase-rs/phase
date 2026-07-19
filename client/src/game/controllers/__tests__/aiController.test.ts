@@ -107,6 +107,20 @@ function castOfferState(): GameState {
   });
 }
 
+function gollumNamedChoiceSource(gollumId: number) {
+  return {
+    prompt: {
+      identity: {
+        reference: { object_id: gollumId, incarnation: 0 },
+        expected_zone: "Battlefield",
+      },
+      controller: 1,
+      display_name: "Gollum, Scheming Guide",
+    },
+    binding: "ResolutionContext" as const,
+  };
+}
+
 /** Flush pending microtasks (promise `.then` chains). */
 async function flushMicrotasks() {
   for (let i = 0; i < 10; i++) {
@@ -460,7 +474,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
         player: 1,
         choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
         options: ["Land", "Nonland"],
-        source_id: gollumId,
+        source: gollumNamedChoiceSource(gollumId),
       },
     };
     const state = buildGameState({
@@ -509,7 +523,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
         player: 1,
         choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
         options: ["Land", "Nonland"],
-        source_id: gollumId,
+        source: gollumNamedChoiceSource(gollumId),
       },
     };
     const currentWaitingFor: WaitingFor = {
@@ -518,7 +532,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
         player: 1,
         choice_type: "Opponent",
         options: ["1"],
-        source_id: gollumId,
+        source: gollumNamedChoiceSource(gollumId),
       },
     };
     const scheduledState = buildGameState({

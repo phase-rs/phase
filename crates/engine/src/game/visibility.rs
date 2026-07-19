@@ -181,6 +181,30 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // Source-bound named choices carry complete source contexts in authoritative
+    // state. The client needs only the exact public prompt projection, never its
+    // LKI/links/cost facts, so strip the private context before serialization.
+    if let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        source,
+        persist_player,
+    } = &state.waiting_for
+    {
+        let mut source = source.clone();
+        if let Some(source) = source.as_mut() {
+            source.context = None;
+        }
+        filtered.waiting_for = WaitingFor::NamedChoice {
+            player: *player,
+            choice_type: choice_type.clone(),
+            options: options.clone(),
+            source,
+            persist_player: *persist_player,
+        };
+    }
+
     // CR 608.2d: While an `OpponentGuess` is pending, strip the secret the
     // guesser must not see so the round-trip can't be auto-won. Two redactions:
     //
@@ -200,22 +224,30 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     //     visible (re-hiding them would misreport which numbers were used up).
     if let WaitingFor::OpponentGuess {
         player,
-        ref options,
-        ref choice_type,
-        source_id,
-        proposition_truth: _,
-    } = state.waiting_for
+        options,
+        choice_type,
+        source,
+        ..
+    } = &state.waiting_for
     {
         filtered.waiting_for = WaitingFor::OpponentGuess {
-            player,
+            player: *player,
             options: options.clone(),
             choice_type: choice_type.clone(),
-            source_id,
+            source: source.clone(),
+            owner: None,
             proposition_truth: None,
         };
-        let is_controller = state.objects.get(&source_id).map(|o| o.controller) == Some(viewer);
+        let is_controller = source.prompt.controller == viewer;
         if !is_controller {
-            if let Some(obj) = filtered.objects.get_mut(&source_id) {
+            if let Some(obj) = filtered
+                .objects
+                .get_mut(&source.prompt.identity.reference.object_id)
+                .filter(|object| {
+                    ObjectIncarnationRef::from_object(object) == source.prompt.identity.reference
+                        && object.zone == source.prompt.identity.expected_zone
+                })
+            {
                 if let Some(pos) = obj
                     .chosen_attributes
                     .iter()
@@ -4700,13 +4732,25 @@ mod tests {
             "The Seventh Doctor".to_string(),
             Zone::Battlefield,
         );
+        let source_context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).unwrap(),
+        );
         state.waiting_for = WaitingFor::OpponentGuess {
             player: PlayerId(0),
             options: vec!["greater".to_string(), "not greater".to_string()],
             choice_type: ChoiceType::Labeled {
                 options: vec!["greater".to_string(), "not greater".to_string()],
             },
-            source_id: source,
+            source: crate::types::game_state::OpponentGuessSource {
+                prompt: crate::types::game_state::PromptSourceBinding::from_trigger_source(
+                    &source_context,
+                ),
+            },
+            owner: Some(crate::types::game_state::OpponentGuessOwner {
+                context: source_context,
+                committed_choice: None,
+            }),
             proposition_truth: Some(true),
         };
 
@@ -4753,6 +4797,10 @@ mod tests {
         // secret commit.
         state.objects.get_mut(&source).unwrap().chosen_attributes =
             vec![ChosenAttribute::Number(3), ChosenAttribute::Number(5)];
+        let source_context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).unwrap(),
+        );
         state.waiting_for = WaitingFor::OpponentGuess {
             player: PlayerId(0),
             options: (1..=5).map(|n| n.to_string()).collect(),
@@ -4761,7 +4809,15 @@ mod tests {
                 max: 5,
                 distinctness: NumberDistinctness::DistinctFromSourceHistory,
             },
-            source_id: source,
+            source: crate::types::game_state::OpponentGuessSource {
+                prompt: crate::types::game_state::PromptSourceBinding::from_trigger_source(
+                    &source_context,
+                ),
+            },
+            owner: Some(crate::types::game_state::OpponentGuessOwner {
+                context: source_context,
+                committed_choice: Some(ChosenAttribute::Number(5)),
+            }),
             proposition_truth: None,
         };
 
@@ -4783,6 +4839,21 @@ mod tests {
         let controller_attrs = &controller_view.objects[&source].chosen_attributes;
         assert!(controller_attrs.contains(&ChosenAttribute::Number(3)));
         assert!(controller_attrs.contains(&ChosenAttribute::Number(5)));
+
+        // A later same-id object is not the prompt source. It may have its own
+        // public chosen number, which must not be hidden by the old prompt.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::Number(5)];
+        let returned_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(
+            returned_view.objects[&source]
+                .chosen_attributes
+                .contains(&ChosenAttribute::Number(5)),
+            "a same-id higher incarnation must not be redacted as the prompt source"
+        );
     }
 
     #[test]

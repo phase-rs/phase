@@ -7202,6 +7202,26 @@ fn apply_action(
         });
     }
 
+    // CR 603.2 + CR 603.3b + CR 608.2g: a cast made during an unresolved
+    // effect can leave the reducer at that effect's next choice (not Priority).
+    // Park its SpellCast observers now; they are drained only when the parent
+    // resolution reaches a genuine priority boundary.
+    if let Some(waiting_for) =
+        engine_resolution_choices::park_cast_during_resolution_cast_observers(
+            state,
+            &mut events,
+            0,
+            &waiting_for,
+        )?
+    {
+        state.waiting_for = waiting_for.clone();
+        return Ok(ActionResult {
+            events,
+            waiting_for,
+            log_entries: vec![],
+        });
+    }
+
     // CR 704.3 / CR 800.4: SBAs may have ended the game during phase auto-advance (e.g.,
     // combat damage step) before we reach this point. state.waiting_for is the authoritative
     // result — written directly by eliminate_player → check_game_over. Guard against

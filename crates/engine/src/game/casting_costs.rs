@@ -1240,7 +1240,13 @@ pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
     events: &mut Vec<GameEvent>,
     waiting_for: WaitingFor,
 ) -> WaitingFor {
-    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+    // CR 603.3b + CR 608.2g: a terminal Ripple completion waits for the
+    // *current* final cast's SpellCast event to join the earlier parked casts.
+    // The ordinary post-announcement helper would otherwise drain B here,
+    // before the reducer's priority pipeline has collected C.
+    if !matches!(waiting_for, WaitingFor::Priority { .. })
+        || state.pending_resolution_completion.is_some()
+    {
         return waiting_for;
     }
     crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
@@ -8897,11 +8903,28 @@ fn handle_resolution_cast_success(
             if remaining_hits.is_empty() {
                 // CR 702.60a: after the last accepted hit, put the revealed
                 // cards not cast this way on the library bottom.
+                //
+                // This marker is installed before the replacement-aware batch
+                // because that batch can pause. The resumed cast must still
+                // collect its eventual SpellCast trigger with the earlier
+                // accepted hits, rather than drain them during the prompt.
+                state.pending_resolution_completion =
+                    Some(crate::types::game_state::PendingResolutionCompletion {
+                        player,
+                        source_id,
+                        final_cast: Some(cast_object),
+                    });
                 match crate::game::effects::cascade::shuffle_to_bottom(
                     state,
                     &exiled_misses,
                     source_id,
-                    None,
+                    Some(
+                        crate::types::game_state::BatchCompletion::RippleTerminalComplete {
+                            player,
+                            source_id,
+                            final_cast: Some(cast_object),
+                        },
+                    ),
                     events,
                 ) {
                     crate::game::zone_pipeline::BatchMoveResult::Done => None,

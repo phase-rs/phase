@@ -887,7 +887,11 @@ pub fn resolve_counter_match_for_removal(
             .counters
             .iter()
             .filter(|(_, &n)| n > 0)
-            .max_by_key(|(_, &n)| n)
+            // Issue #4878: `obj.counters` is a default-RandomState HashMap, so
+            // `max_by_key` alone would break ties by per-process hash-iteration
+            // order. Tie-break by CounterType's derived Ord for a deterministic
+            // choice when two or more types share the max count.
+            .max_by(|(ta, &na), (tb, &nb)| na.cmp(&nb).then_with(|| ta.cmp(tb)))
             .map(|(ty, _)| ty.clone()),
     }
 }
@@ -2510,6 +2514,38 @@ mod tests {
         assert_eq!(
             resolve_defined_or_targets(&state, &put_counter(1)),
             vec![obj1]
+        );
+    }
+
+    /// Issue #4878: `resolve_counter_match_for_removal`'s `CounterMatch::Any`
+    /// arm used to break count ties with a bare `max_by_key`, which falls back
+    /// to `obj.counters`' per-process HashMap (RandomState) iteration order —
+    /// a different `CounterType` could be selected for removal across
+    /// processes on an identical seed. The fix tie-breaks by `CounterType`'s
+    /// derived `Ord`, so a tied object always resolves to the same,
+    /// Ord-greatest type. Reverting to bare `max_by_key` makes this assertion
+    /// flip to "unspecified" (test would become flaky, not merely wrong).
+    #[test]
+    fn resolve_counter_match_for_removal_breaks_ties_by_counter_type_ord() {
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tied Counters Test".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.counters.insert(CounterType::Plus1Plus1, 2);
+        obj.counters.insert(CounterType::Minus1Minus1, 2);
+
+        // CounterType::Minus1Minus1 is declared after Plus1Plus1, so it is the
+        // Ord-greater of the two tied types and must win deterministically.
+        assert_eq!(
+            resolve_counter_match_for_removal(&state, id, &CounterMatch::Any),
+            Some(CounterType::Minus1Minus1)
         );
     }
 

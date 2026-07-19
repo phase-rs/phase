@@ -235,7 +235,7 @@ pub fn resolve(
     // staying in exile.
     if target_ids.is_empty()
         && matches!(target_filter, TargetFilter::SelfRef)
-        && ability.source_is_current(state)
+        && ability.self_ref_is_current(state)
     {
         target_ids = vec![ability.source_id];
     }
@@ -580,6 +580,17 @@ fn cast_stack_spell_copy_during_resolution(
         return Err(EffectError::InvalidParam(format!(
             "ParentTarget {copy_id:?} is not a stack spell copy"
         )));
+    }
+
+    // CR 113.2c + CR 601.2i + CR 608.2g: this copy is now being CAST, so
+    // snapshot its effective spell keywords before recording SpellCast. This
+    // mirrors `casting_costs::finalize_cast_with_phyrexian_choices_inner` and
+    // preserves the selected static-grant instances/provenance for cast-trigger
+    // synthesis (notably multiple Ripple grants) after the event is recorded.
+    let cast_spell_keywords =
+        crate::game::casting::effective_spell_keyword_instances(state, ability.controller, copy_id);
+    if let Some(copy) = state.objects.get_mut(&copy_id) {
+        copy.cast_spell_keywords = cast_spell_keywords;
     }
 
     let origin = obj.cast_from_zone.unwrap_or(Zone::Exile);
@@ -1498,7 +1509,10 @@ mod tests {
             siege_id,
             PlayerId(0),
         );
-        ability.set_source_incarnation_recursive(Some(captured_incarnation));
+        ability.set_test_trigger_source_recursive(
+            captured_incarnation,
+            state.objects[&siege_id].card_id,
+        );
 
         // CR 400.7j: mirror `resolve_top` — during resolution the resolving entry is
         // stashed in `state.resolving_stack_entry`, and the self-move re-latch reads
