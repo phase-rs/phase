@@ -1133,3 +1133,347 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
         "both the mana axis (E4) and the token axis (collapse) are cashed out"
     );
 }
+
+// ───────────── REVISION 2: one-shot-bootstrap tapped seed + convoke=None over-fire guard ─────────────
+//
+// The accepted object-growth loop can be DEMONSTRATED off a one-shot: the human convoked the
+// {B}{G} cost-reducer (Witherbloom) for the {G}, tapping it — it can't re-tap next cycle, so the
+// sustainable period taps a created Saproling instead. At the accept beat ZERO tapped Saprolings
+// exist on the live board, so `tapped_fodder_members` is ∅ → the ∞ pile rendered empty (the user's
+// bug). REVISION 2 seeds a representative tapped Saproling (∞ anchor) + a CR 702.51a optional-
+// convoke untapped remainder (W+1), gated on `period.taps_fodder && is_empty()` so a convoke=None
+// UNTAPPED-growth loop (which the `board_covers_modulo_fodder` `>=` cover also admits with an empty
+// tapped set) is NOT seeded.
+
+/// P0's UNTAPPED battlefield Saprolings — the working-set remainder (W) plus the CR 702.51a
+/// untapped remainder seed; correctly EXCLUDED from the tapped ∞ pile.
+fn p0_untapped_saprolings(state: &GameState) -> BTreeSet<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == P0 && !o.tapped && o.name == "Saproling")
+        })
+        .collect()
+}
+
+/// T-NEW-1 (REVISION 2): a convoke object-growth loop BOOTSTRAPPED off a one-shot leaves ZERO
+/// tapped fodder at accept, so pre-fix the ∞ pile renders empty (the user's bug). The accept-time
+/// seed mints one representative TAPPED Saproling (the ∞ anchor) and one UNTAPPED Saproling
+/// (CR 702.51a's optional-convoke capping cast → W+1), gated on `period.taps_fodder && is_empty()`.
+/// Drives the REAL cast → CR 732.2a offer → APNAP accept → phase-boundary collapse end to end.
+///
+/// REVERT-PROBES (documented + implementer-run, non-vacuous):
+///  - delete the `seed_representative_fodder(.., true)` tapped seed → step 3 pile EMPTY (the
+///    pre-fix bug) → the pile/oracle/derived/round-trip assertions FLIP.
+///  - delete the `seed_representative_fodder(.., false)` untapped seed → step 3 untapped count is
+///    5 not 6 → the W+1 assertion FLIPS.
+///
+/// Non-vacuity anchor = the step-1 offer + 0-tapped reach-guard, which holds in BOTH pre/post-fix
+/// (only the seeded pile differs), so the positive pile assertion cannot pass vacuously.
+#[test]
+fn real_4p_one_shot_bootstrap_seeds_tapped_infinite_pile_and_w_plus_1_untapped() {
+    let mut state: GameState = serde_json::from_str(&UNTAPPED_PRECAST_STATE)
+        .expect("the real untapped-precast 4p dump must deserialize into the current GameState");
+
+    // ── Setup mutation 1 (rules-neutral): untap Saproling 405 so ZERO tapped fodder exists — the
+    // "bootstrap tapped only the one-shot" start. MEASURED: 405 is the sole pre-tapped Saproling.
+    let sap405 = ObjectId(405);
+    assert_eq!(
+        state
+            .objects
+            .get(&sap405)
+            .map(|o| (o.name.as_str(), o.tapped)),
+        Some(("Saproling", true)),
+        "fixture precondition: 405 is a tapped Saproling (the one to untap)"
+    );
+    state.objects.get_mut(&sap405).unwrap().tapped = false;
+    assert!(
+        p0_tapped_vanilla_saprolings(&state).is_empty(),
+        "after untapping 405, P0 has ZERO tapped Saprolings (the one-shot-bootstrap start)"
+    );
+
+    // ── Setup mutation 2 (CR 702.51a-neutral HARNESS accommodation): flip Witherbloom(401)'s color
+    // to Green-first. The ENGINE pip-matches convoke color (a B/G creature legally pays a {G} pip
+    // regardless of order); only `GameRunner::convoke_with` picks `color.first()`, so Green-first
+    // lets the harness tap Witherbloom for the {G}. Both `color` and `base_color` are set so a
+    // `flush_layers` inside the cast pipeline does not revert it.
+    let witherbloom = ObjectId(401);
+    {
+        let w = state.objects.get_mut(&witherbloom).unwrap();
+        assert_eq!(w.name, "Witherbloom, the Balancer");
+        w.color = vec![ManaColor::Green, ManaColor::Black];
+        w.base_color = vec![ManaColor::Green, ManaColor::Black];
+    }
+
+    // ── Step 1: drive the REAL Sprout Swarm cast, convoking WITHERBLOOM (the non-fodder one-shot)
+    // for {G}. Reach-guards hold in BOTH pre/post-fix ⇒ the negative revert-probes are non-vacuous.
+    let sprout = ObjectId(402);
+    let mut runner = GameRunner::from_state(state);
+    let outcome = runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[witherbloom])
+        .commit()
+        .resolve();
+
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+        ),
+        "convoking the one-shot Witherbloom MUST surface the CR 732.2a offer, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        outcome
+            .state()
+            .objects
+            .get(&witherbloom)
+            .is_some_and(|w| w.tapped),
+        "reach-guard: the convoke tapped Witherbloom (the one-shot, unusable next cycle)"
+    );
+    assert!(
+        p0_tapped_vanilla_saprolings(outcome.state()).is_empty(),
+        "reach-guard: ZERO tapped Saprolings at the offer (the empty-pile bug config)"
+    );
+    assert_eq!(
+        count_battlefield_saprolings(outcome.state()),
+        5,
+        "reach-guard: the cast made a 5th (untapped) Saproling — W=5 untapped working set"
+    );
+
+    // ── Step 2: APNAP accept → materialize.
+    drive_all_accept(runner.state_mut());
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "after all accept, materialize hands priority back, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // ── Step 3 POSITIVE (the fix): the seed anchored a NON-empty tapped ∞ pile of exactly one P0
+    // tapped vanilla Saproling; and W+1 = 6 untapped Saprolings remain.
+    let oracle = p0_tapped_vanilla_saprolings(runner.state());
+    assert_eq!(
+        oracle.len(),
+        1,
+        "the accept-time seed minted exactly ONE representative tapped Saproling (the ∞ anchor)"
+    );
+    let pile = runner
+        .state()
+        .unbounded_loop_pile
+        .get(&P0)
+        .expect("the seeded object-growth loop must write a NON-empty ∞ pile (the fix)");
+    assert_eq!(
+        *pile, oracle,
+        "the ∞ pile is exactly the seeded tapped Saproling (non-circular name+vanilla oracle)"
+    );
+    // The seeded pile member is a tapped 1/1 green Saproling token.
+    let seed_id = *pile.iter().next().unwrap();
+    let seed = runner.state().objects.get(&seed_id).expect("seed present");
+    assert!(seed.is_token, "the seed is a token");
+    assert!(seed.tapped, "the seed is tapped (the ∞ anchor)");
+    assert_eq!(
+        (seed.power, seed.toughness),
+        (Some(1), Some(1)),
+        "seed is a 1/1"
+    );
+    assert_eq!(seed.color, vec![ManaColor::Green], "seed is green");
+    // W+1 untapped remainder (CR 702.51a optional-convoke capping cast).
+    assert_eq!(
+        p0_untapped_saprolings(runner.state()).len(),
+        6,
+        "the untapped remainder seed leaves W+1 = 6 untapped Saprolings (revert → 5)"
+    );
+
+    // derive_views projects the pile; it survives a serde round-trip.
+    let derived_set: BTreeSet<ObjectId> = derive_views(runner.state(), Some(P0))
+        .unbounded_pile
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        derived_set, oracle,
+        "derive_views().unbounded_pile equals the seeded pile"
+    );
+    let json = serde_json::to_string(runner.state()).expect("serialize post-accept");
+    let reloaded: GameState = serde_json::from_str(&json).expect("reload post-accept");
+    assert_eq!(
+        reloaded.unbounded_loop_pile.get(&P0),
+        Some(&oracle),
+        "the seeded ∞ pile survives a serde round-trip (post-fix saves reload it)"
+    );
+
+    // ── Step 4 BOUNDARY lock-in: name N=5 at the phase boundary → steady-state board is 6 untapped
+    // + (1 seed + 5 minted) = 6 tapped Saprolings + Witherbloom tapped, cashed out, no re-prompt.
+    drive_priority_to_next_boundary(runner.state_mut());
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+                if player == P0
+        ),
+        "the phase boundary must prompt P0 for the LoopCollapse count, got {:?}",
+        runner.state().waiting_for
+    );
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SubmitPayAmount { amount: 5 },
+    )
+    .expect("P0 submits the finite loop-collapse count");
+    assert_eq!(
+        p0_untapped_saprolings(runner.state()).len(),
+        6,
+        "post-boundary: W+1 = 6 untapped Saprolings preserved"
+    );
+    assert_eq!(
+        p0_tapped_vanilla_saprolings(runner.state()).len(),
+        6,
+        "post-boundary: 6 tapped Saprolings (1 accept seed + 5 boundary mint)"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&witherbloom)
+            .is_some_and(|w| w.tapped),
+        "post-boundary: Witherbloom (the one-shot) stays tapped"
+    );
+    assert!(
+        !runner.state().unbounded_resources.contains_key(&P0),
+        "collapsing the token loop cashes out the ∞ TokensCreated axis"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "after the mint the boundary fixpoint restores Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    drive_priority_to_next_boundary(runner.state_mut());
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::LoopCollapse,
+                ..
+            }
+        ),
+        "the cashed-out loop must NOT re-prompt at the next boundary, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// T-NEW-2 (REVISION 2 — the BLOCKER-1 discriminator): a convoke=None UNTAPPED-growth loop must
+/// NOT seed. Build-fresh Sprout Swarm with Convoke STRIPPED and `mana_cost = base_mana_cost = {1}`
+/// so Witherbloom's affinity for creatures fully covers base{1}+buyback{3}={4} with {0} mana and
+/// no convoke — a period that creates a Saproling UNTAPPED and taps nothing. The
+/// `board_covers_modulo_fodder` `>=` untapped cover admits this growth, so it reaches
+/// `materialize_object_growth_shortcut` with an EMPTY tapped-fodder set — the buggy `is_empty()`-
+/// only guard would over-fire and mint 2 spurious tokens. The sound `period.taps_fodder` axis is
+/// FALSE here → NO seed.
+///
+/// REVERT-PROBE #3 (documented + implementer-run, non-vacuous): replace Edit B's guard with the
+/// buggy `is_empty()`-only guard → the seed fires → `unbounded_loop_pile[P0]` becomes `Some` (1
+/// tapped seed), `p0_tapped_vanilla_saprolings` non-empty, and the post-accept Saproling count is
+/// `pre + 2` → every POSITIVE assertion FLIPS. Non-vacuity anchor = the offer +
+/// `convoke_tappable_count == 0` reach-guard, which holds in BOTH guard variants (only the seed
+/// differs).
+#[test]
+fn build_fresh_convoke_none_untapped_growth_does_not_seed_tapped_pile() {
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::ManaCost;
+
+    let Some(db) = shared_card_db() else {
+        return; // card DB unavailable in this environment — skip like the other DB-backed tests.
+    };
+
+    let state = bootstrap_4p_game(db);
+    let mut runner = GameRunner::from_state(state);
+
+    // Object-growth board on P0, but a NON-convoke maker: Witherbloom (tapped; still grants affinity
+    // — a tapped creature is still controlled, CR 702.41a) + 4 Saproling fodder + a Sprout Swarm
+    // whose Convoke keyword is stripped and whose cost is pure generic {1} (so affinity covers
+    // base{1}+buyback{3}={4} for {0} mana, no convoke tap).
+    let witherbloom = place_card(runner.state_mut(), P0, WITHERBLOOM, Zone::Battlefield, db);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&witherbloom)
+        .unwrap()
+        .tapped = true;
+    let _fodder: Vec<ObjectId> = (0..4)
+        .map(|_| create_saproling(runner.state_mut(), P0))
+        .collect();
+    let sprout = place_card(runner.state_mut(), P0, SPROUT_SWARM, Zone::Hand, db);
+    {
+        let o = runner.state_mut().objects.get_mut(&sprout).unwrap();
+        o.keywords.retain(|k| !matches!(k, Keyword::Convoke));
+        o.base_keywords.retain(|k| !matches!(k, Keyword::Convoke));
+        o.mana_cost = ManaCost::generic(1);
+        o.base_mana_cost = ManaCost::generic(1);
+    }
+    // Flush layers so Witherbloom's affinity static is live and the stripped keyword/cost stick.
+    flush_layers(runner.state_mut());
+
+    let sap_before_cast = count_battlefield_saprolings(runner.state());
+    assert_eq!(sap_before_cast, 4, "4 fodder Saprolings before the cast");
+
+    // Cast: no convoke, no mana seeded — affinity covers the whole {4} generic.
+    let outcome = runner.cast(sprout).accept_optional().commit().resolve();
+
+    // REACH-GUARD (positive, holds in BOTH guard variants ⇒ the negatives are non-vacuous): the
+    // offer FIRES for a NON-convoke period (empty decision schema, zero convoke-tappable), and the
+    // cast resolved making one more UNTAPPED Saproling.
+    match outcome.final_waiting_for() {
+        WaitingFor::LoopShortcut {
+            proposer, schema, ..
+        } if *proposer == P0 => {
+            assert!(
+                schema.points.is_empty(),
+                "a non-convoke period carries no per-iteration decision points"
+            );
+            assert_eq!(
+                schema.convoke_tappable_count, 0,
+                "a non-convoke period has zero convoke-tappable creatures (the discriminator input)"
+            );
+        }
+        other => panic!("expected the CR 732.2a offer to P0, got {other:?}"),
+    }
+    assert_eq!(
+        count_battlefield_saprolings(outcome.state()),
+        sap_before_cast + 1,
+        "reach-guard: the cast made exactly one more Saproling (untapped-growth)"
+    );
+    assert!(
+        p0_tapped_vanilla_saprolings(outcome.state()).is_empty(),
+        "reach-guard: the untapped-growth cast tapped NO Saproling"
+    );
+
+    // Accept → materialize.
+    let sap_pre_accept = count_battlefield_saprolings(runner.state());
+    drive_all_accept(runner.state_mut());
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "after all accept, materialize hands priority back, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // POSITIVE (the fix): `period.taps_fodder == false` → NO seed fires.
+    assert!(
+        !runner.state().unbounded_loop_pile.contains_key(&P0),
+        "a convoke=None untapped-growth loop must NOT anchor a tapped ∞ pile (no seed)"
+    );
+    assert!(
+        p0_tapped_vanilla_saprolings(runner.state()).is_empty(),
+        "no representative tapped Saproling is minted for an untapped-growth loop"
+    );
+    assert_eq!(
+        count_battlefield_saprolings(runner.state()),
+        sap_pre_accept,
+        "the Saproling count is UNCHANGED across accept — no spurious seed mint (buggy guard → +2)"
+    );
+}

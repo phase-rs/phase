@@ -1795,13 +1795,24 @@ fn derived_fodder_class(
     after.objects.get(&id).cloned()
 }
 
-/// CR 732.2a / CR 111.10: re-derive the reproduced fodder class of the accepted
+/// The reproduced fodder class of one accepted object-growth period, plus whether that
+/// period's per-cycle cost TAPS a fodder member. CR 702.51a: a convoke/tap-cost period taps a
+/// fodder each cycle → the ∞ pile is genuinely TAPPED; a mana-paid period creates the fodder
+/// untapped (CR 110.5b) and taps nothing → untapped-growth. Both measured on the SAME
+/// clone-drive that derives the class.
+struct PeriodFodder {
+    class: crate::game::game_object::GameObject,
+    taps_fodder: bool,
+}
+
+/// CR 732.2a / CR 111.1: re-derive the reproduced fodder class of the accepted
 /// object-growth period by driving ONE iteration of `last_loop_action_sequence` on a
-/// clone. `None` when the sequence is empty or the period reproduces no single new
-/// battlefield object (a multi-activation mana engine → no fodder pile to display).
-/// Mirrors the detection drive: same `SimulationProbeGuard` re-entrancy guard, same
-/// `drive_loop_sequence_iteration`, same `derived_fodder_class` single-new-object rule.
-/// Called at materialize (with the sequence still intact) to snapshot the ∞ pile.
+/// clone, and measure whether that period taps a fodder member. `None` when the sequence is
+/// empty or the period reproduces no single new battlefield object (a multi-activation mana
+/// engine → no fodder pile to display). Mirrors the detection drive: same
+/// `SimulationProbeGuard` re-entrancy guard, same `drive_loop_sequence_iteration`, same
+/// `derived_fodder_class` single-new-object rule. Called at materialize (with the sequence
+/// still intact) to snapshot the ∞ pile and its tapped-growth axis.
 ///
 /// The accept beat's `waiting_for` is `RespondToShortcut`, NOT `Priority`, so the recast
 /// cannot proceed from `state` as-is — seed a `Priority{controller}` window on the driven
@@ -1812,7 +1823,7 @@ fn derived_fodder_class(
 /// THROWAWAY clones (`state.clone()` → `before.clone()`); live `state.waiting_for` is never
 /// touched, so this class-derivation cannot corrupt the real accept flow (INV-1, mirrors
 /// `try_offer_object_growth_shortcut`).
-fn current_period_fodder_class(state: &GameState) -> Option<crate::game::game_object::GameObject> {
+fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
     let seq = state.last_loop_action_sequence.clone();
     if seq.is_empty() {
         return None;
@@ -1830,7 +1841,16 @@ fn current_period_fodder_class(state: &GameState) -> Option<crate::game::game_ob
     before.waiting_for = WaitingFor::Priority { player: controller };
     let mut after = before.clone();
     drive_loop_sequence_iteration(&mut after, &seq, 0, &expected_defs).ok()?;
-    derived_fodder_class(&before, &after)
+    let class = derived_fodder_class(&before, &after)?;
+    // CR 702.51a: the period taps a fodder iff the driven tapped-fodder multiset GREW across the
+    // one-period drive. `select_convoke_taps` sorts fodder (`is_token`) FIRST, so a convoke/
+    // tap-cost period taps a reproduced fodder → this grows; a mana-paid untapped-growth period
+    // taps nothing → this is FALSE. This is exactly the tapped-growth axis the
+    // `board_covers_modulo_fodder` `>=` untapped cover (resource.rs) does not distinguish.
+    let taps_fodder = crate::analysis::resource::tapped_fodder_members(&after, controller, &class)
+        .len()
+        > crate::analysis::resource::tapped_fodder_members(&before, controller, &class).len();
+    Some(PeriodFodder { class, taps_fodder })
 }
 
 /// CR 732.2a: detect an object-growth recast loop by driving TWO iterations on a clone;
@@ -2036,22 +2056,56 @@ fn materialize_object_growth_shortcut(
     // CR 732.2a / CR 110.1: snapshot the ∞ pile — the proposer's tapped fodder-class members —
     // for `DerivedViews::unbounded_pile`. Re-derive the fodder class HERE (the sequence is still
     // intact; the `.clear()` below wipes it) by driving one period on a clone. A mana-engine loop
-    // reproduces no token ⇒ `current_period_fodder_class` is `None` ⇒ no pile (correct).
-    if let Some(class) = current_period_fodder_class(state) {
-        let pile =
-            crate::analysis::resource::tapped_fodder_members(state, proposal.proposer, &class);
-        state.register_unbounded_loop_pile(proposal.proposer, pile);
+    // reproduces no token ⇒ `current_period_fodder` is `None` ⇒ no pile (correct).
+    if let Some(period) = current_period_fodder(state) {
+        let class = &period.class;
         // CR 732.2a / CR 707.2: Part 2 — capture the fodder's copiable profile NOW,
         // while the recast sequence is still intact (`.clear()` below wipes it and
-        // `current_period_fodder_class` derives from it). At the next phase/step
-        // boundary the loop controller names a finite N and N tapped copy-tokens are
-        // minted from this profile (the deferred shortcut count). Stored as
-        // CopiableValues, NOT an ObjectId: the board is not frozen accept→boundary
-        // (the controller acts at priority in between), and a token's oracle_id is
-        // empty so a ResidualPermanent could not recreate it. A mana-engine loop has
-        // no fodder class (`None`) → no stash → no boundary prompt (the intended
-        // mana-negative discriminator).
-        let profile = crate::game::printed_cards::intrinsic_copiable_values(&class);
+        // `current_period_fodder` derives from it). At the next phase/step boundary the
+        // loop controller names a finite N and N tapped copy-tokens are minted from this
+        // profile (the deferred shortcut count). Stored as CopiableValues, NOT an ObjectId:
+        // the board is not frozen accept→boundary (the controller acts at priority in
+        // between), and a token's oracle_id is empty so a ResidualPermanent could not
+        // recreate it. A mana-engine loop has no fodder class (`None`) → no stash → no
+        // boundary prompt (the intended mana-negative discriminator).
+        let profile = crate::game::printed_cards::intrinsic_copiable_values(class);
+        // CR 702.51a (convoke optional) + CR 732.2a: seed the ∞ pile's tapped anchor AND the
+        // W+1 untapped remainder ONLY when the certified period actually TAPS a fodder each
+        // cycle (`period.taps_fodder`) AND the live board has no tapped fodder yet (a one-shot
+        // bootstrap tapped a creature OUTSIDE the fodder class, e.g. convoking the {B}{G}
+        // cost-reducer for {G}). `board_covers_modulo_fodder`'s `>=` untapped cover
+        // (resource.rs) admits pure untapped-partition growth, so a mana-paid untapped-growth
+        // loop also reaches here with an empty tapped-fodder set — `is_empty()` alone
+        // over-fires; `period.taps_fodder == false` there → no spurious seed. The untapped seed
+        // is CR 702.51a's optional-convoke final cast (pay {G} from mana, make a Saproling
+        // without tapping one → +1 untapped); it is excluded from the ∞ pile because
+        // `tapped_fodder_members` filters `o.tapped`.
+        if period.taps_fodder
+            && crate::analysis::resource::tapped_fodder_members(state, proposal.proposer, class)
+                .is_empty()
+        {
+            seed_representative_fodder(
+                state,
+                result,
+                proposal.proposer,
+                &profile,
+                /*tapped=*/ true,
+            );
+            seed_representative_fodder(
+                state,
+                result,
+                proposal.proposer,
+                &profile,
+                /*tapped=*/ false,
+            );
+        }
+        // Re-read AFTER the mint so the pile names the freshly-seeded tapped anchor (if any);
+        // `register_unbounded_loop_pile` is a no-op on the still-empty set for the untapped
+        // (non-seeded) case, preserving pre-existing untapped-growth behavior. The untapped
+        // remainder seed is EXCLUDED here (`tapped_fodder_members` filters `o.tapped`).
+        let pile =
+            crate::analysis::resource::tapped_fodder_members(state, proposal.proposer, class);
+        state.register_unbounded_loop_pile(proposal.proposer, pile);
         state.register_pending_materialization(proposal.proposer, Box::new(profile));
     }
     state.loop_detect_ring.clear();
@@ -2061,6 +2115,50 @@ fn materialize_object_growth_shortcut(
         player: living_priority_seat(state),
     };
     result.waiting_for = state.waiting_for.clone();
+}
+
+/// CR 732.2a / CR 111.1 / CR 110.5b / CR 707.2: when an accepted convoke/tap-cost object-growth
+/// loop was DEMONSTRATED by tapping a creature OUTSIDE the reproduced fodder class (e.g. convoking
+/// the {B}{G} cost-reducer for {G}), no tapped fodder member exists on the live board yet. Mint
+/// ONE representative fodder token from the sustainable period's captured copiable profile — the
+/// SAME copy-token mint the boundary collapse uses (single token authority) — so Part-1's
+/// `unbounded_loop_pile`/`∞` badge has a live anchor (`tapped: true`) and CR 702.51a's mana-paid
+/// capping cast's untapped remainder is realized (`tapped: false`). CR 111.1: the mint creates a
+/// token. CR 110.5b: a permanent enters untapped unless told otherwise — `tapped` names that
+/// status directly. CR 707.2: copiable values carry name/P-T/color/abilities but NOT tapped
+/// status, so `CopyTokenSpec.tapped` sets it explicitly. The untapped working set is untouched (a
+/// new token is added; no existing fodder is tapped), so the finite remainder is preserved.
+fn seed_representative_fodder(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    owner: PlayerId,
+    profile: &crate::types::ability::CopiableValues,
+    tapped: bool,
+) {
+    let batch = crate::types::game_state::PendingCopyTokenBatch {
+        owner,
+        count: 1,
+        copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
+            values: Box::new(profile.clone()),
+            display_source: crate::game::game_object::DisplaySource::Token,
+            printed_ref: None,
+            token_image_ref: None,
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+            tapped,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(0),
+            controller: owner,
+        }),
+    };
+    crate::game::effects::token_copy::drive_copy_token_batches(
+        state,
+        VecDeque::from([batch]),
+        EffectKind::CopyTokenOf,
+        ObjectId(0),
+        &mut result.events,
+    );
 }
 
 /// Immutable data from a `WaitingFor::LoopShortcut` offer, grouped for declaration handling.

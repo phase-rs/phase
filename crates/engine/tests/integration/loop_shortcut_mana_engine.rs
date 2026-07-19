@@ -516,7 +516,7 @@ fn mana_engine_accept_marks_infinite_mana_independent_of_count() {
 /// DESIGN STEP 4 (∞-pile) — MANA-ENGINE PAIRED NEGATIVE: accepting a MANA loop marks the
 /// `Mana(_)` axis (reach-guard proving the accept genuinely materialized) but writes NO
 /// `unbounded_loop_pile` — a mana engine reproduces no fodder token, so
-/// `current_period_fodder_class` returns `None` and no pile is snapshotted. This proves the
+/// `current_period_fodder` returns `None` and no pile is snapshotted. This proves the
 /// fodder gate in `materialize_object_growth_shortcut` discriminates object-growth from mana.
 ///
 /// DISCRIMINATING: the Mana-axis assertion is the positive reach-guard (the accept ran and
