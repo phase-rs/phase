@@ -9,7 +9,7 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ChosenAttribute, ControllerRef,
+    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
@@ -4825,11 +4825,7 @@ fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &Resolve
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutChosenCounter { .. } => {
-            !state.objects.get(&ability.source_id).is_some_and(|src| {
-                src.chosen_attributes
-                    .iter()
-                    .any(|attr| matches!(attr, ChosenAttribute::Counter(_)))
-            })
+            choose_counter_kind::chosen_counter_kind(state).is_none()
         }
         // CR 122.1: "you may remove a <kind> counter from <object>. If you do, X"
         // with zero matching counters cannot be performed — removing a counter
@@ -6422,6 +6418,10 @@ pub fn resolve_ability_chain(
     // across unrelated ability resolutions.
     if depth == 0 {
         state.last_revealed_ids.clear();
+        // CR 608.2c + CR 122.1: `ChooseCounterKind` overwrites this before
+        // every instruction, and a new top-level resolution cannot inherit a
+        // prior resolution's "that kind" if no such instruction is reached.
+        state.chosen_counter_kind_this_resolution = None;
         // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
         // `apply_parent_chain_context` already consumes this at the very next
         // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets

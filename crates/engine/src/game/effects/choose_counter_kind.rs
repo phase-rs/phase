@@ -32,14 +32,28 @@ pub fn resolve(
         return Err(EffectError::MissingParam("ChooseCounterKind".to_string()));
     }
 
-    // CR 608.2d: Each (per-`repeat_for`-iteration) choice starts fresh — clear any
-    // counter kind chosen for a PREVIOUS object so that when THIS object has no
-    // counters (the choice is skipped), the following `PutChosenCounter` reads
-    // no chosen kind and no-ops, rather than inheriting a stale prior kind.
-    if let Some(src) = state.objects.get_mut(&ability.source_id) {
+    let (mut source, persist_player) = crate::game::effects::choose::named_choice_authority(
+        state,
+        ability,
+        true,
+        &ChoiceType::CounterKind {
+            options: Vec::new(),
+        },
+    );
+
+    // CR 608.2d: Each (per-`repeat_for`-iteration) choice starts fresh — clear
+    // the explicit resolution result before the zero, auto, and interactive
+    // branches. This prevents a departed exact source or a previous iteration
+    // from supplying a stale "that kind" to the following PutChosenCounter.
+    state.chosen_counter_kind_this_resolution = None;
+    if let Some(src) = source
+        .as_ref()
+        .and_then(|source| source.source_mut_exact_for_resolution(state))
+    {
         src.chosen_attributes
             .retain(|a| !matches!(a, ChosenAttribute::Counter(_)));
     }
+    state.last_named_choice = None;
 
     // CR 122.1: Enumerate the distinct counter kinds currently on the RESOLVED
     // target object(s). Both shapes bind the object into `ability.targets`: the
@@ -88,12 +102,6 @@ pub fn resolve(
     // CR 608.2d: a single legal option is auto-selected — no interactive prompt.
     if kinds.len() == 1 {
         let only = kinds[0].as_str().into_owned();
-        let (mut source, persist_player) = crate::game::effects::choose::named_choice_authority(
-            state,
-            ability,
-            true,
-            &choice_type,
-        );
         crate::game::effects::choose::bind_named_choice(
             state,
             &choice_type,
@@ -107,8 +115,6 @@ pub fn resolve(
 
     // CR 608.2d: two or more kinds → surface the shared interactive choice seam.
     let options: Vec<String> = kinds.iter().map(|k| k.as_str().into_owned()).collect();
-    let (source, persist_player) =
-        crate::game::effects::choose::named_choice_authority(state, ability, true, &choice_type);
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
         choice_type,
@@ -118,6 +124,14 @@ pub fn resolve(
     };
     events.push(resolved());
     Ok(())
+}
+
+/// CR 608.2c + CR 122.1: Read the counter kind selected by the immediately
+/// preceding counter-kind instruction. This dedicated resolution result is the
+/// only authority: a source object, its LKI, and `last_named_choice` may all
+/// describe older state once an iteration has advanced or the source left.
+pub(crate) fn chosen_counter_kind(state: &GameState) -> Option<CounterType> {
+    state.chosen_counter_kind_this_resolution.clone()
 }
 
 #[cfg(test)]
@@ -213,12 +227,20 @@ mod tests {
             a,
             crate::types::ability::ChosenAttribute::Counter(CounterType::Stun)
         )));
+        assert_eq!(
+            state.chosen_counter_kind_this_resolution,
+            Some(CounterType::Stun),
+            "auto-selection records the same explicit resolution result as an interactive answer"
+        );
     }
 
     /// CR 608.2d: An object with no counters is skipped (no prompt, no bind).
     #[test]
     fn zero_kinds_is_noop() {
         let mut state = GameState::new_two_player(1);
+        // A prior iteration or departed source may have selected this kind. The
+        // zero-kind branch must clear it before the following put can observe it.
+        state.chosen_counter_kind_this_resolution = Some(CounterType::Stun);
         let obj = crate::game::zones::create_object(
             &mut state,
             crate::types::identifiers::CardId(1),
@@ -233,6 +255,10 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         assert!(!matches!(state.waiting_for, WaitingFor::NamedChoice { .. }));
+        assert!(
+            state.chosen_counter_kind_this_resolution.is_none(),
+            "zero legal kinds clears the current-resolution counter result"
+        );
     }
 
     /// CR 714.2 + CR 608.2d + CR 122.1 + CR 122.6: Runtime proof of the composed

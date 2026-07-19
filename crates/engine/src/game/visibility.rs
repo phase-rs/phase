@@ -227,7 +227,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         options,
         choice_type,
         source,
-        proposition_truth: _,
         ..
     } = &state.waiting_for
     {

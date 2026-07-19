@@ -179,6 +179,31 @@ mod trigger_occurrence_tests {
             .0;
         assert_eq!(instance, TriggerGrantInstanceRef(1));
     }
+
+    #[test]
+    fn abandoning_a_recipient_retires_grants_without_rewinding_the_allocator() {
+        let producer = TriggerGrantProducerKey::Granted {
+            origin: static_origin(),
+            output_index: 0,
+        };
+        let mut state = TriggerOccurrenceState::default();
+        let first = state
+            .reconcile_grant_instances(vec![(producer.clone(), ())])
+            .unwrap()[0]
+            .0;
+
+        state.retire_all_grants();
+        assert_eq!(state.active_grants().count(), 0);
+
+        let replacement = state
+            .reconcile_grant_instances(vec![(producer, ())])
+            .unwrap()[0]
+            .0;
+        assert!(
+            replacement.0 > first.0,
+            "an abandoned recipient must not resurrect a retired grant generation"
+        );
+    }
 }
 
 /// CR 400.1 + CR 608.2c: Which player's zone supplies cards for a direct
@@ -19010,6 +19035,13 @@ impl TriggerOccurrenceState {
     pub fn retire_absent_grants(&mut self, live_instances: &[TriggerGrantInstanceRef]) {
         self.active_grants
             .retain(|active| live_instances.contains(&active.instance));
+    }
+
+    /// Retires every active producer while preserving the monotonic allocator.
+    /// A player-left-game transition abandons the recipient permanently; a
+    /// future allocation must never resurrect one of its former grants.
+    pub fn retire_all_grants(&mut self) {
+        self.active_grants.clear();
     }
 
     pub fn active_grants(

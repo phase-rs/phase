@@ -397,9 +397,15 @@ pub struct ActiveTriggerDefinition<'a> {
 /// two-point check (at placement and at resolution) handled by the trigger
 /// pipeline. Helper consumers still need that check at those checkpoints.
 pub fn active_trigger_definitions<'a>(
-    _state: &'a GameState,
+    state: &'a GameState,
     obj: &'a GameObject,
 ) -> Box<dyn Iterator<Item = ActiveTriggerDefinition<'a>> + 'a> {
+    // CR 800.4a: objects owned by a player who left the game have left with
+    // that player. They remain serialized in the Exile zone for the terminal
+    // game snapshot, but cannot continue contributing trigger occurrences.
+    if !crate::game::players::is_alive(state, obj.owner) {
+        return Box::new(std::iter::empty());
+    }
     if obj.is_phased_out() {
         return Box::new(std::iter::empty());
     }
@@ -565,6 +571,18 @@ mod tests {
         obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
             cause: crate::game::game_object::PhaseOutCause::Directly,
         };
+        assert_eq!(active_trigger_definitions(&state, &obj).count(), 0);
+    }
+
+    #[test]
+    fn eliminated_owner_returns_no_active_triggers() {
+        let mut state = new_state();
+        state.players[0].is_eliminated = true;
+        let mut obj = make_obj(1, Zone::Exile);
+        obj.trigger_definitions =
+            vec![TriggerDefinition::new(TriggerMode::SpellCast).trigger_zones(vec![Zone::Exile])]
+                .into();
+
         assert_eq!(active_trigger_definitions(&state, &obj).count(), 0);
     }
 

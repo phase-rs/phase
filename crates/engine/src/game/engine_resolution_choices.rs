@@ -4986,6 +4986,14 @@ pub(super) fn handle_resolution_choice(
                     choice, options
                 )));
             }
+            if source
+                .as_ref()
+                .is_some_and(|source| !source.has_matching_context())
+            {
+                return Err(EngineError::InvalidAction(
+                    "NamedChoice has incoherent source authority".to_string(),
+                ));
+            }
 
             // CR 607.2d + CR 613.1: Persist the chosen attribute on the source
             // (Morophon buffs, Pithing Needle prohibitions, Serra's Emissary
@@ -5152,6 +5160,11 @@ pub(super) fn handle_resolution_choice(
                     "OpponentGuess is missing its private answer-time authority".to_string(),
                 )
             })?;
+            if !source.matches_owner(owner) {
+                return Err(EngineError::InvalidAction(
+                    "OpponentGuess has incoherent source authority".to_string(),
+                ));
+            }
             let outcome = if effects::opponent_guess::guess_is_correct(
                 &options,
                 &choice,

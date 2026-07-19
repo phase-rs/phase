@@ -613,10 +613,14 @@ pub struct PromptSourceBinding {
 impl PromptSourceBinding {
     pub fn from_trigger_source(context: &TriggerSourceContext) -> Self {
         Self {
-            identity: context.identity.clone(),
+            identity: context.identity,
             controller: context.lki.controller,
             display_name: context.lki.name.clone(),
         }
+    }
+
+    pub fn matches_trigger_source(&self, context: &TriggerSourceContext) -> bool {
+        self == &Self::from_trigger_source(context)
     }
 }
 
@@ -662,6 +666,15 @@ impl NamedChoiceSource {
             self.binding,
             NamedChoiceSourceBinding::ExactObjectAndResolution
         )
+    }
+
+    /// Validates the complete private authority carried by an authoritative
+    /// source-bound prompt. A filtered public projection deliberately omits the
+    /// context and is never accepted at the action boundary.
+    pub fn has_matching_context(&self) -> bool {
+        self.context
+            .as_ref()
+            .is_some_and(|context| self.prompt.matches_trigger_source(context))
     }
 
     /// Returns the exact prompt source when it is still in its observed zone, or
@@ -717,6 +730,15 @@ pub struct OpponentGuessOwner {
     pub context: TriggerSourceContext,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_choice: Option<ChosenAttribute>,
+}
+
+impl OpponentGuessSource {
+    /// The public projection and private owner must describe the same latched
+    /// source. This prevents a deserialized guess from pairing one source's
+    /// visibility/controller facts with another source's committed value.
+    pub fn matches_owner(&self, owner: &OpponentGuessOwner) -> bool {
+        self.prompt.matches_trigger_source(&owner.context)
+    }
 }
 
 /// Read-only authority for one triggered source. The projection branch exists
@@ -1962,7 +1984,14 @@ pub enum LogicalZoneChangeTerminalOutcome {
     Pending,
     Prevented,
     Remained,
-    Moved { occurrence_ordinal: usize },
+    Moved {
+        occurrence_ordinal: usize,
+    },
+    /// CR 800.4a: The object's owner left before this shared batch delivered
+    /// the member. This is terminal for the original logical action, but it is
+    /// not an ordinary replacement result and must not synthesize its original
+    /// `ZoneChanged` event or any settlement source authority.
+    AbandonedByPlayerLeft,
 }
 
 /// Terminal result of one attempted zone-move delivery before a logical owner
@@ -2283,6 +2312,61 @@ impl LogicalZoneChangeGroup {
         self.record_terminal_for_member(member, LogicalZoneChangeTerminalOutcome::Remained)
     }
 
+    /// CR 800.4a: Retire a member with no retained original occurrence because
+    /// its owner left the game. A shared batch retains its other members and
+    /// their original event authority; the abandoned member contributes neither
+    /// an occurrence nor a post-event source context to the original action.
+    pub fn record_abandoned_by_player_left(
+        &mut self,
+        member: ObjectIncarnationRef,
+    ) -> Result<(), String> {
+        let Some(index) = self
+            .prospective_battlefield_members
+            .iter()
+            .position(|candidate| candidate.identity == member)
+        else {
+            return Ok(());
+        };
+        match self.terminal_outcomes.get(index) {
+            Some(LogicalZoneChangeTerminalOutcome::Moved { .. })
+            | Some(LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft) => Ok(()),
+            Some(
+                LogicalZoneChangeTerminalOutcome::Pending
+                | LogicalZoneChangeTerminalOutcome::Prevented
+                | LogicalZoneChangeTerminalOutcome::Remained,
+            ) => {
+                self.terminal_outcomes[index] =
+                    LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft;
+                self.post_event_member_contexts[index] = None;
+                Ok(())
+            }
+            None => Err(format!(
+                "logical zone-change terminal slot {index} is missing"
+            )),
+        }
+    }
+
+    /// CR 800.4a: Retire latched trigger and suppression source contexts whose
+    /// owner left the game. These were captured before a paused delivery, so
+    /// they must not remain an authority solely because the shared owner later
+    /// completes for surviving members.
+    pub fn retire_contexts_owned_by(&mut self, player: PlayerId) {
+        let retained_latch = |latch: &LatchedBatchedTrigger| {
+            !latch
+                .observations
+                .iter()
+                .any(|observation| observation.source_context.lki.owner == player)
+        };
+        self.immediately_before_batched_triggers
+            .retain(retained_latch);
+        self.immediately_after_batched_triggers
+            .retain(retained_latch);
+        self.immediately_before_suppress_triggers
+            .retain(|suppress| suppress.source_context.lki.owner != player);
+        self.immediately_after_suppress_triggers
+            .retain(|suppress| suppress.source_context.lki.owner != player);
+    }
+
     /// Record the shared zone pipeline's terminal result for one originally
     /// announced member. A moved result is bound only when the owner's explicit
     /// delivery slice appends its exact `ZoneChanged` record; every no-event
@@ -2461,6 +2545,12 @@ impl LogicalZoneChangeGroup {
                         member.identity.object_id.0, member.identity.incarnation
                     )
                 })?,
+            LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
+                return Err(format!(
+                    "logical zone-change member {}:{} was abandoned when its owner left",
+                    member.identity.object_id.0, member.identity.incarnation
+                ));
+            }
             LogicalZoneChangeTerminalOutcome::Pending => {
                 return Err(format!(
                     "logical zone-change member {}:{} is not terminal",
@@ -2569,6 +2659,26 @@ impl LogicalZoneChangeGroup {
                 }
                 LogicalZoneChangeTerminalOutcome::Prevented
                 | LogicalZoneChangeTerminalOutcome::Remained => {}
+                LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
+                    if self
+                        .post_event_member_contexts
+                        .get(index)
+                        .is_some_and(Option::is_some)
+                    {
+                        return Err(format!(
+                            "abandoned logical zone-change member {}:{} has a post-event context",
+                            member.identity.object_id.0, member.identity.incarnation
+                        ));
+                    }
+                    if self.all_origin_occurrences.iter().any(|occurrence| {
+                        self.is_member_own_occurrence(member.identity, occurrence)
+                    }) {
+                        return Err(format!(
+                            "abandoned logical zone-change member {}:{} has an original occurrence",
+                            member.identity.object_id.0, member.identity.incarnation
+                        ));
+                    }
+                }
                 LogicalZoneChangeTerminalOutcome::Moved { occurrence_ordinal } => {
                     let occurrence = self.all_origin_occurrences.get(*occurrence_ordinal).ok_or_else(|| {
                         format!(
@@ -2611,7 +2721,8 @@ impl LogicalZoneChangeGroup {
                     Some((member.identity, *occurrence_ordinal))
                 }
                 LogicalZoneChangeTerminalOutcome::Prevented
-                | LogicalZoneChangeTerminalOutcome::Remained => None,
+                | LogicalZoneChangeTerminalOutcome::Remained
+                | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => None,
                 LogicalZoneChangeTerminalOutcome::Pending => unreachable!(
                     "validate_complete rejects pending logical zone-change member outcomes"
                 ),
@@ -11542,6 +11653,14 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_named_choice: Option<ChoiceValue>,
 
+    /// CR 608.2c + CR 122.1: The counter kind selected by the current
+    /// resolution's immediately preceding `ChooseCounterKind` instruction.
+    /// This is separate from `last_named_choice`: it is cleared before every
+    /// counter-kind instruction (including its zero-option path), so a later
+    /// `PutChosenCounter` cannot read a stale source or prior-iteration answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_counter_kind_this_resolution: Option<CounterType>,
+
     /// CR 609.7a-b: The most recently chosen damage source and its source
     /// filter. Set by `DamageSourceChoice`, consumed by prevention/replacement
     /// continuation effects, and then cleared.
@@ -13480,6 +13599,7 @@ impl GameState {
             pending_begin_game_abilities: Vec::new(),
             resolving_begin_game_abilities: false,
             last_named_choice: None,
+            chosen_counter_kind_this_resolution: None,
             last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
             all_card_names: Arc::from([]),
@@ -14021,6 +14141,10 @@ impl GameState {
         self.phase.hash(&mut h);
         self.active_player.hash(&mut h);
         self.priority_player.hash(&mut h);
+        // CR 608.2c + CR 122.1: This resolution-local result can authorize a
+        // following PutChosenCounter, so distinct live values must not share a
+        // loop pre-filter fingerprint.
+        self.chosen_counter_kind_this_resolution.hash(&mut h);
         self.stack.len().hash(&mut h);
         self.objects.len().hash(&mut h);
         // im::Vector<ObjectId>: Hash, ordered.
@@ -14592,6 +14716,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_begin_game_abilities: _,
         resolving_begin_game_abilities: _,
         last_named_choice: _,
+        chosen_counter_kind_this_resolution: _,
         last_chosen_damage_source: _,
         all_creature_types: _,
         all_card_names: _,
@@ -14921,6 +15046,8 @@ impl PartialEq for GameState {
             && self.resolving_begin_game_abilities == other.resolving_begin_game_abilities
             && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
+            && self.chosen_counter_kind_this_resolution
+                == other.chosen_counter_kind_this_resolution
             && self.last_revealed_ids == other.last_revealed_ids
             && self.private_look_ids == other.private_look_ids
             && self.private_look_player == other.private_look_player
@@ -15779,6 +15906,18 @@ mod tests {
             before,
             state.loop_fingerprint(),
             "advancing the RNG stream must change the loop fingerprint"
+        );
+    }
+
+    #[test]
+    fn loop_fingerprint_reflects_resolution_counter_choice() {
+        let mut state = GameState::new_two_player(7);
+        let before = state.loop_fingerprint();
+        state.chosen_counter_kind_this_resolution = Some(CounterType::Stun);
+        assert_ne!(
+            before,
+            state.loop_fingerprint(),
+            "a live counter-kind result can change a following resolution action"
         );
     }
 

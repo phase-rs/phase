@@ -2175,6 +2175,12 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
 
     for member_index in 0..group.prospective_battlefield_members.len() {
         let member = group.prospective_battlefield_members[member_index].identity;
+        if matches!(
+            group.terminal_outcomes[member_index],
+            LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft
+        ) {
+            continue;
+        }
         let source_context = group.settlement_member_source_context(member_index)?;
         for occurrence in &group.all_origin_occurrences {
             if group.is_member_own_occurrence(member, occurrence) {
