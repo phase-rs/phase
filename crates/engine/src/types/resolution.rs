@@ -1077,16 +1077,19 @@ mod tests {
     use crate::game::merge::MergeSide;
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
-        Effect, EffectKind, PostReplacementContinuation, QuantityExpr, RepeatContinuation,
-        TargetFilter,
+        AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CopyChooseScope, Effect,
+        EffectKind, ForEachCategoryAction, IterationCategory, PostReplacementContinuation,
+        QuantityExpr, RepeatContinuation, SpellContext, TargetFilter, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        DrainStatus, GameState, PendingBatchDeliveries, PendingCoinFlipKind,
-        PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
-        PendingCounterRemovalQueue, PendingMutateMerge, PendingProliferateActions,
-        PendingRepeatIteration, PendingRepeatUntil, PendingRepeatedOptionalPayment,
-        PostReplacementDrain, ResidentDrainPolicy, ZoneDeliveryExileTracking,
+        CopyChosenStage, DrainStatus, GameState, PendingBatchDeliveries, PendingChooseOneOf,
+        PendingCoinFlipKind, PendingCopyTokenResolution, PendingCounterAdditionQueue,
+        PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
+        PendingMutateMerge, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
+        PendingProliferateActions, PendingRepeatIteration, PendingRepeatUntil,
+        PendingRepeatedOptionalPayment, PendingVoteBallotIteration, PostReplacementDrain,
+        ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -1103,6 +1106,10 @@ mod tests {
             ObjectId(source_id),
             PlayerId(0),
         )
+    }
+
+    fn resolved_effect(source_id: u64, effect: Effect) -> ResolvedAbility {
+        ResolvedAbility::new(effect, Vec::new(), ObjectId(source_id), PlayerId(0))
     }
 
     fn continuation_frame(source_id: u64) -> ResolutionFrame {
@@ -1828,5 +1835,115 @@ mod tests {
         );
         assert!(copy_token.pending_copy_token_resolution.is_none());
         assert_reserializes_v2_only(copy_token);
+    }
+
+    #[test]
+    fn v1_choice_iteration_fixtures_resume_via_their_production_drains() {
+        let mut each_player_copy = GameState::new_two_player(130);
+        each_player_copy.pending_each_player_copy_chosen = Some(PendingEachPlayerCopyChosen {
+            stage: CopyChosenStage::AwaitingCounters,
+            player: PlayerId(0),
+            chosen: Vec::new(),
+            remaining_choices: Vec::new(),
+            choose_filter: TargetFilter::Controller,
+            min: 0,
+            max: 0,
+            copy_modifications: Vec::new(),
+            scale: None,
+            choose_scope: CopyChooseScope::Chooser,
+            source_id: ObjectId(130),
+            source_controller: PlayerId(0),
+            scoped_players: Vec::new(),
+            trigger_event: None,
+        });
+        let mut each_player_copy = restore_v1_fixture(each_player_copy);
+        crate::game::effects::each_player_copy_chosen::drain_pending(
+            &mut each_player_copy,
+            &mut Vec::new(),
+        );
+        assert!(each_player_copy.pending_each_player_copy_chosen.is_none());
+        assert_reserializes_v2_only(each_player_copy);
+
+        let mut choose_one_of = GameState::new_two_player(131);
+        choose_one_of.pending_choose_one_of = Some(PendingChooseOneOf {
+            controller: PlayerId(0),
+            source_id: ObjectId(131),
+            branches: Vec::new(),
+            parent_targets: Vec::new(),
+            context: SpellContext::default(),
+            replacement_applied: HashSet::new(),
+            remaining_players: Vec::new(),
+        });
+        let mut choose_one_of = restore_v1_fixture(choose_one_of);
+        crate::game::effects::choose_one_of::resume_pending(&mut choose_one_of, &mut Vec::new());
+        assert!(choose_one_of.pending_choose_one_of.is_none());
+        assert_reserializes_v2_only(choose_one_of);
+
+        let mut vote = GameState::new_two_player(132);
+        vote.pending_vote_ballot_iteration = Some(PendingVoteBallotIteration {
+            ability_template: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+            remaining_voters: Vec::new(),
+            source_id: ObjectId(132),
+            controller: PlayerId(0),
+        });
+        let mut vote = restore_v1_fixture(vote);
+        crate::game::effects::vote::drain_pending_vote_ballot_iteration(&mut vote, &mut Vec::new());
+        assert!(vote.pending_vote_ballot_iteration.is_none());
+        assert_reserializes_v2_only(vote);
+
+        let choose_from_zone = resolved_effect(
+            133,
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Graveyard,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::EachPlayer,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: true,
+                selection: CardSelectionMode::Chosen,
+                constraint: None,
+            },
+        );
+        let mut per_player = GameState::new_two_player(133);
+        per_player.pending_per_player_zone_choice = Some(PendingPerPlayerZoneChoice {
+            ability: Box::new(choose_from_zone),
+            remaining_players: Vec::new(),
+            accumulated: false,
+        });
+        let mut per_player = restore_v1_fixture(per_player);
+        crate::game::effects::choose_from_zone::drain_pending_per_player_zone_choice(
+            &mut per_player,
+            &[],
+            &mut Vec::new(),
+        );
+        assert!(per_player.pending_per_player_zone_choice.is_none());
+        assert_reserializes_v2_only(per_player);
+
+        let for_each_category = resolved_effect(
+            134,
+            Effect::ForEachCategory {
+                category: IterationCategory::Color,
+                chooser: Chooser::Controller,
+                action: ForEachCategoryAction::ExileFromPool {
+                    zone: Zone::Graveyard,
+                    up_to: true,
+                },
+            },
+        );
+        let mut per_category = GameState::new_two_player(134);
+        per_category.pending_per_category_zone_choice = Some(PendingPerCategoryZoneChoice {
+            ability: Box::new(for_each_category),
+            pool: Vec::new(),
+            remaining_member_filters: Vec::new(),
+        });
+        let mut per_category = restore_v1_fixture(per_category);
+        let _ = crate::game::effects::choose_from_zone::drain_pending_per_category_zone_choice(
+            &mut per_category,
+            &[],
+            &mut Vec::new(),
+        );
+        assert!(per_category.pending_per_category_zone_choice.is_none());
+        assert_reserializes_v2_only(per_category);
     }
 }
