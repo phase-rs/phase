@@ -344,7 +344,7 @@ pub(crate) fn begin_variable_speed_payment(
             max,
             distinctness: crate::types::ability::NumberDistinctness::Repeatable,
         },
-        source_id: None,
+        source: None,
         persist_player: None,
     }
 }

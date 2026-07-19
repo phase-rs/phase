@@ -598,6 +598,127 @@ impl TriggerSourceContext {
     }
 }
 
+/// Public, exact projection of a prompt's source authority.
+///
+/// The binding is captured when the prompt is raised.  Its identity is exact,
+/// while its controller and display name are latched presentation facts; none
+/// of these fields authorize a later lookup of a same-id object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSourceBinding {
+    pub identity: ObjectIdentityBinding,
+    pub controller: PlayerId,
+    pub display_name: String,
+}
+
+impl PromptSourceBinding {
+    pub fn from_trigger_source(context: &TriggerSourceContext) -> Self {
+        Self {
+            identity: context.identity.clone(),
+            controller: context.lki.controller,
+            display_name: context.lki.name.clone(),
+        }
+    }
+}
+
+/// The only source-authority modes for a named choice.
+///
+/// `ResolutionContext` updates the owned triggered-resolution projection but
+/// never writes a live object. `ExactObjectAndResolution` additionally permits
+/// persistence through that projection's exact identity and expected zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NamedChoiceSourceBinding {
+    ResolutionContext,
+    ExactObjectAndResolution,
+}
+
+/// Exact source authority carried by a source-bound `NamedChoice` prompt.
+///
+/// `context` is present in authoritative game state and omitted only from a
+/// viewer-filtered projection.  The action path always operates on the
+/// authoritative state and rejects a missing context rather than recovering it
+/// from an object ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedChoiceSource {
+    pub prompt: PromptSourceBinding,
+    pub binding: NamedChoiceSourceBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<TriggerSourceContext>,
+}
+
+impl NamedChoiceSource {
+    pub fn from_trigger_source(
+        context: TriggerSourceContext,
+        binding: NamedChoiceSourceBinding,
+    ) -> Self {
+        Self {
+            prompt: PromptSourceBinding::from_trigger_source(&context),
+            binding,
+            context: Some(context),
+        }
+    }
+
+    pub fn is_exact_object_and_resolution(&self) -> bool {
+        matches!(
+            self.binding,
+            NamedChoiceSourceBinding::ExactObjectAndResolution
+        )
+    }
+
+    /// Returns the exact prompt source when it is still in its observed zone, or
+    /// its exact successor recorded for the currently resolving source only.
+    ///
+    /// CR 400.7j permits the latter narrow case: after a spell's source has
+    /// moved to a public zone as part of its own resolution, the still-pending
+    /// resolution may find that successor. A later same-id object cannot match
+    /// the relatch's original/current incarnation pair.
+    pub fn source_mut_exact_for_resolution<'a>(
+        &self,
+        state: &'a mut GameState,
+    ) -> Option<&'a mut GameObject> {
+        let context = self.context.as_ref()?;
+        let identity = &context.identity;
+        let object_id = identity.reference.object_id;
+        let is_exact = state.objects.get(&object_id).is_some_and(|object| {
+            ObjectIncarnationRef::from_object(object) == identity.reference
+                && object.zone == identity.expected_zone
+        });
+        let is_resolution_successor =
+            state
+                .resolution_source_relatch
+                .as_ref()
+                .is_some_and(|relatch| {
+                    relatch.object_id == object_id
+                        && relatch.original_stamp == identity.reference.incarnation
+                        && state
+                            .objects
+                            .get(&object_id)
+                            .is_some_and(|object| object.incarnation == relatch.current_incarnation)
+                });
+        (is_exact || is_resolution_successor)
+            .then(|| state.objects.get_mut(&object_id))
+            .flatten()
+    }
+}
+
+/// Public exact projection for an opponent-guess prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpponentGuessSource {
+    pub prompt: PromptSourceBinding,
+}
+
+/// Private answer-time authority for an opponent guess.
+///
+/// This remains serialized in authoritative game state so a save can resume a
+/// guess after its source has left. Viewer filtering removes it, leaving the
+/// public `OpponentGuessSource` projection renderable without exposing the
+/// committed value or full source snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpponentGuessOwner {
+    pub context: TriggerSourceContext,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_choice: Option<ChosenAttribute>,
+}
+
 /// Read-only authority for one triggered source. The projection branch exists
 /// specifically so a departed source never falls back to a later object with
 /// the same storage id.
@@ -6333,12 +6454,43 @@ pub enum PersistedGameState {
     Trusted(Box<TrustedGameStateEnvelope>),
 }
 
+/// Rejects the old prompt shape before deserializing a persisted game.
+///
+/// A bare source ID cannot prove the source incarnation, its observed zone, or
+/// its latched facts. Reconstructing a source binding from a current object
+/// would therefore rebind a departed source to a later object that reused the
+/// ID. A null legacy `NamedChoice.source_id` remains safe: it was already the
+/// source-less resolution-only mode and deserializes as `source: None`.
+fn reject_legacy_raw_prompt_authority(value: &serde_json::Value) -> Result<(), String> {
+    let state = value.get("state").unwrap_or(value);
+    let Some(waiting_for) = state.get("waiting_for") else {
+        return Ok(());
+    };
+    let Some(kind) = waiting_for.get("type").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    if !matches!(kind, "NamedChoice" | "OpponentGuess") {
+        return Ok(());
+    }
+    let has_raw_source_id = waiting_for
+        .get("data")
+        .and_then(|data| data.get("source_id"))
+        .is_some_and(|source_id| !source_id.is_null());
+    if has_raw_source_id {
+        return Err(format!(
+            "legacy raw-ID {kind} persistence has no exact source authority"
+        ));
+    }
+    Ok(())
+}
+
 impl<'de> Deserialize<'de> for PersistedGameState {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
+        reject_legacy_raw_prompt_authority(&value).map_err(serde::de::Error::custom)?;
         if value.get("state").is_some() {
             serde_json::from_value(value)
                 .map(|envelope| Self::Trusted(Box::new(envelope)))
@@ -7074,10 +7226,11 @@ pub enum WaitingFor {
         player: PlayerId,
         choice_type: ChoiceType,
         options: Vec<String>,
-        /// The object that originated this choice. Persistable choice types store
-        /// their value there; transient prompts use this as source context.
+        /// Exact source authority when this choice needs one. Source-less
+        /// resolution-only choices remain `None` rather than fabricating a
+        /// current-object binding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        source_id: Option<ObjectId>,
+        source: Option<NamedChoiceSource>,
         /// CR 607.2d / CR 607.2m (by analogy): when set, this choice's answer is a
         /// PER-PLAYER persistent anchor label — the answer binds
         /// `ChosenAttribute::Label` onto `state.players[persist_player]`
@@ -7091,8 +7244,8 @@ pub enum WaitingFor {
     /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
     /// the defending player) guesses a committed value or proposition during
     /// resolution of an `Effect::OpponentGuess`. `player` is the guesser;
-    /// `source_id` lets the answer handler derive the controller and read the
-    /// committed `ChosenAttribute::Number`. This wait is a member of
+    /// `source` is its public exact projection and `owner` keeps the latched
+    /// controller/context/committed value for answer-time authority. This wait is a member of
     /// `waits_for_resolution_choice` — the branch chain is auto-stashed onto
     /// `pending_continuation` and re-evaluated on drain once the outcome is known
     /// (the deferred "If you do" / `NamedChoice` resolution pattern).
@@ -7100,7 +7253,9 @@ pub enum WaitingFor {
         player: PlayerId,
         options: Vec<String>,
         choice_type: ChoiceType,
-        source_id: ObjectId,
+        source: OpponentGuessSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<OpponentGuessOwner>,
         /// CR 608.2d: For a `GuessSubject::Proposition`, the proposition's truth
         /// resolved at the moment the guess was raised (when the resolving
         /// ability's targets are still in scope). The answer handler compares the
@@ -17815,6 +17970,68 @@ mod tests {
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn persisted_state_rejects_legacy_raw_id_prompt_authority() {
+        for kind in ["NamedChoice", "OpponentGuess"] {
+            let mut raw = serde_json::to_value(GameState::new_two_player(42))
+                .expect("serialize baseline raw state");
+            raw["waiting_for"] = serde_json::json!({
+                "type": kind,
+                "data": { "player": 0, "source_id": 91 },
+            });
+
+            for persisted in [
+                raw.clone(),
+                serde_json::json!({
+                    "state": raw,
+                }),
+            ] {
+                let error = serde_json::from_value::<PersistedGameState>(persisted)
+                    .expect_err("raw source IDs cannot recreate exact prompt authority");
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("legacy raw-ID {kind} persistence")),
+                    "expected explicit {kind} authority rejection, got {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn persisted_state_accepts_legacy_source_less_named_choice() {
+        let mut raw = serde_json::to_value(GameState::new_two_player(42))
+            .expect("serialize baseline raw state");
+        raw["waiting_for"] = serde_json::json!({
+            "type": "NamedChoice",
+            "data": {
+                "player": 0,
+                "choice_type": "Color",
+                "options": ["Red"],
+                "source_id": null,
+            },
+        });
+
+        for persisted in [
+            raw.clone(),
+            serde_json::json!({
+                "state": raw,
+            }),
+        ] {
+            let restored = serde_json::from_value::<PersistedGameState>(persisted)
+                .expect("legacy null source ID is the source-less choice mode")
+                .into_game_state();
+            assert!(matches!(
+                restored.waiting_for,
+                WaitingFor::NamedChoice {
+                    source: None,
+                    persist_player: None,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

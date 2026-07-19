@@ -3208,9 +3208,9 @@ fn thriving_grove_play_land_stays_tapped_after_color_choice() {
         result.waiting_for,
         WaitingFor::NamedChoice {
             choice_type: ChoiceType::Color { .. },
-            source_id: Some(id),
+            source: Some(source),
             ..
-        } if id == grove
+        } if source.prompt.identity.reference.object_id == grove
     ));
     assert!(
         state.objects.get(&grove).unwrap().tapped,
@@ -3530,6 +3530,15 @@ fn conjurers_ban_full_cast_resolve_blocks_named_land_and_spell() {
     let outcome = runner.cast(ban).choose_option("Forest").resolve();
     outcome.assert_hand_drawn(P0, 1);
     outcome.assert_zone(&[ban], Zone::Graveyard);
+    assert!(
+        runner.state().objects[&ban].chosen_attributes.contains(
+            &crate::types::ability::ChosenAttribute::CardName("Forest".to_string())
+        ),
+        "the exact resolving source must retain the chosen name after its stack exit; \
+         source={:?}, relatch={:?}",
+        runner.state().objects[&ban],
+        runner.state().resolution_source_relatch,
+    );
 
     // Land half: the specifically-named land is rejected...
     let forest_land_result = runner.act(GameAction::PlayLand {

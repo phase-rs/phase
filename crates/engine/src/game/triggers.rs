@@ -29338,12 +29338,11 @@ pub mod tests {
 
     /// Real-card Phase-0 baseline — Elvish Soultiller:
     /// "When this creature dies, choose a creature type. Shuffle all creature
-    /// cards of that type from your graveyard into your library."  The current
-    /// raw `NamedChoice.source_id` rebinds to a same-ID return and writes the
-    /// answer onto that new object. Phase 1 must carry the departed source
-    /// context instead: the returned Soultiller stays untouched.
+    /// cards of that type from your graveyard into your library." A
+    /// source-bound prompt carries the departed source context instead:
+    /// the returned Soultiller stays untouched.
     #[test]
-    fn phase0_elvish_soultiller_choice_same_id_return_mutates_return() {
+    fn elvish_soultiller_choice_same_id_return_does_not_mutate_return() {
         use crate::types::ability::ChoiceType;
 
         let mut state = setup();
@@ -29352,7 +29351,15 @@ pub mod tests {
             player: PlayerId(0),
             choice_type: ChoiceType::creature_type(),
             options: vec!["Elf".to_string()],
-            source_id: Some(soultiller),
+            source: Some(
+                crate::types::game_state::NamedChoiceSource::from_trigger_source(
+                    trigger_source_context_for_latch(
+                        &state,
+                        state.objects.get(&soultiller).unwrap(),
+                    ),
+                    crate::types::game_state::NamedChoiceSourceBinding::ResolutionContext,
+                ),
+            ),
             persist_player: None,
         };
 
@@ -29365,16 +29372,15 @@ pub mod tests {
                 choice: "Elf".to_string(),
             },
         )
-        .expect("current raw-ID named choice accepts the answer");
+        .expect("source-bound named choice accepts the answer");
 
         assert_eq!(
             state
                 .objects
                 .get(&soultiller)
                 .and_then(|object| object.chosen_creature_type()),
-            Some("Elf"),
-            "CURRENT (wrong) raw-ID outcome: the choice mutates the same-ID return; \
-             Phase 1 must bind it to the departed Soultiller context instead"
+            None,
+            "the departed source context must not mutate a same-ID return"
         );
     }
 

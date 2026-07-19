@@ -4963,7 +4963,7 @@ pub(super) fn handle_resolution_choice(
                 player,
                 options,
                 choice_type,
-                source_id,
+                mut source,
                 persist_player,
             },
             GameAction::ChooseOption { choice },
@@ -4992,13 +4992,22 @@ pub(super) fn handle_resolution_choice(
             // protection, Sewer Nemesis CDA, …), recompute layers for the
             // layer-affecting choice kinds, and record `last_named_choice`.
             // Single authority shared with the random `Effect::Choose` resolver.
-            effects::choose::bind_named_choice(
+            let source_id = source
+                .as_ref()
+                .map(|source| source.prompt.identity.reference.object_id);
+            let updated_context = effects::choose::bind_named_choice(
                 state,
                 &choice_type,
                 &choice,
-                source_id,
+                source.as_mut(),
                 persist_player,
             );
+            if let Some(context) = updated_context {
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain
+                        .update_trigger_source_context_in_resolution_segment(context);
+                }
+            }
             if choice_type.is_card_predicate_guess() {
                 events.push(GameEvent::CardPredicateGuessMade {
                     player_id: player,
@@ -5068,8 +5077,14 @@ pub(super) fn handle_resolution_choice(
                         }
                     };
                 }
-            } else if let Some(source) =
-                source_id.filter(|_| !state.deferred_entry_events.is_empty())
+            } else if let Some(source) = source
+                .as_ref()
+                .filter(|source| {
+                    source.is_exact_object_and_resolution()
+                        && source.prompt.identity.expected_zone == Zone::Battlefield
+                        && !state.deferred_entry_events.is_empty()
+                })
+                .map(|source| source.prompt.identity.reference.object_id)
             {
                 // CR 603.2 + CR 614.12a (#830): an "As it enters, choose …"
                 // replacement (Valgavoth's Lair, the Thriving lands) paused this
@@ -5117,7 +5132,8 @@ pub(super) fn handle_resolution_choice(
                 player: guesser,
                 options,
                 choice_type,
-                source_id,
+                source,
+                owner,
                 proposition_truth,
             },
             GameAction::ChooseOption { choice },
@@ -5131,12 +5147,16 @@ pub(super) fn handle_resolution_choice(
             }
 
             // (b) Correctness, resolved against the unfiltered GameState.
+            let owner = owner.as_ref().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "OpponentGuess is missing its private answer-time authority".to_string(),
+                )
+            })?;
             let outcome = if effects::opponent_guess::guess_is_correct(
-                state,
-                source_id,
                 &options,
                 &choice,
                 proposition_truth,
+                owner.committed_choice.as_ref(),
             ) {
                 GuessOutcome::Correct
             } else {
@@ -5145,10 +5165,10 @@ pub(super) fn handle_resolution_choice(
 
             // (c) Record the guessed value WITHOUT persisting it to the source.
             // "they lose life equal to the number they guessed" reads the
-            // guesser's value via `QuantityRef::Variable` -> `last_named_choice`;
-            // `source_id: None` sets `last_named_choice` without pushing a
-            // `ChosenAttribute::Number` (bind_named_choice gates the push on
-            // source_id.is_some()), keeping the source's committed-number history
+            // guesser's value via `QuantityRef::Variable` -> `last_named_choice`.
+            // Supplying no source binding records that value without pushing a
+            // `ChosenAttribute::Number` (only an exact-object binding can push),
+            // keeping the source's committed-number history
             // (which drives BOTH the DistinctFromSourceHistory exclusion AND the
             // last-committed read) guesser-free. Only meaningful for a committed
             // number guess; propositions carry no downstream guessed-value read.
@@ -5171,11 +5191,7 @@ pub(super) fn handle_resolution_choice(
             // the resolution continues under the controller (e.g. Seventh
             // Doctor's "you may cast it" CastOffer is to the controller). This
             // also clears the OpponentGuess wait so the drain's guard passes.
-            let controller = state
-                .objects
-                .get(&source_id)
-                .map(|o| o.controller)
-                .unwrap_or(state.active_player);
+            let controller = source.prompt.controller;
             set_priority(state, controller);
             super::engine::resume_pending_continuation_if_priority(state, events)
                 .expect("a settled guess choice must resume its continuation");
@@ -6940,6 +6956,20 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{ProhibitionScope, StaticMode};
 
+    fn resolution_choice_source(
+        state: &GameState,
+        object_id: ObjectId,
+    ) -> crate::types::game_state::NamedChoiceSource {
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            state,
+            state.objects.get(&object_id).unwrap(),
+        );
+        crate::types::game_state::NamedChoiceSource::from_trigger_source(
+            context,
+            crate::types::game_state::NamedChoiceSourceBinding::ResolutionContext,
+        )
+    }
+
     fn search_found_redirect(destination: Zone) -> ReplacementDefinition {
         let execute = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -8559,7 +8589,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source_id: Some(source_id),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let mut events = Vec::new();
@@ -8610,7 +8640,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source_id: Some(source_id),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let mut events = Vec::new();

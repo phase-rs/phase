@@ -2019,8 +2019,8 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
 /// CR 603.2 + CR 614.12a: When a permanent's battlefield entry pauses on a
 /// mid-entry player choice — `CopyTargetChoice` (enter as a copy), a
 /// `ChooseOneOfBranch` that `is_enters_counter_choice` (enter with your choice
-/// of counter), or a persisted `NamedChoice` whose `source_id` is the entering
-/// permanent (the "As it enters, choose a color/creature type/…" shape, e.g.
+/// of counter), or a persisted `NamedChoice` with an exact binding to the
+/// entering permanent (the "As it enters, choose a color/creature type/…" shape, e.g.
 /// Valgavoth's Lair) — clone any battlefield-entry `ZoneChanged` events for the
 /// entering source into `state.deferred_entry_events`. The original `events`
 /// vec is preserved so the frontend animates the entry as soon as the spell /
@@ -2061,16 +2061,16 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
         }) if is_enters_counter_choice(branches) => *source_id,
         // CR 603.2 + CR 614.12a: an "As it enters, choose …" replacement
         // (Valgavoth's Lair, the Thriving lands, Voice of All) pauses the entry
-        // on a persisted `NamedChoice` whose `source_id` is the entering
-        // permanent. Defer the entry event exactly like the copy/counter shapes
+        // on an exact-object `NamedChoice`. Defer the entry event exactly like
+        // the copy/counter shapes
         // so ETB observers fire against the post-choice object once the player
         // answers. The entry-event filter in the capture loop scopes this to the
         // entering source — a persisted `NamedChoice` with no matching entry
         // event in `events` (Pithing Needle naming) captures nothing.
         Some(WaitingFor::NamedChoice {
-            source_id: Some(source_id),
+            source: Some(source),
             ..
-        }) => *source_id,
+        }) if source.is_exact_object_and_resolution() => source.prompt.identity.reference.object_id,
         _ => return,
     };
     // CR 614.12b boundary (inherited from the CopyTargetChoice path, NOT expanded

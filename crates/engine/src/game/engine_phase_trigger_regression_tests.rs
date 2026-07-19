@@ -1542,7 +1542,7 @@ fn card_name_choice_validates_against_all_card_names() {
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
-        source_id: None,
+        source: None,
         persist_player: None,
     };
 
@@ -1560,7 +1560,7 @@ fn card_name_choice_validates_against_all_card_names() {
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
-        source_id: None,
+        source: None,
         persist_player: None,
     };
 
@@ -1582,7 +1582,7 @@ fn card_name_choice_is_case_insensitive() {
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
-        source_id: None,
+        source: None,
         persist_player: None,
     };
 
@@ -3021,7 +3021,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
 }
 
 #[test]
-fn choose_option_with_source_id_stores_chosen_attribute() {
+fn choose_option_with_exact_source_stores_chosen_attribute() {
     use crate::types::ability::ChoiceType;
     use crate::types::mana::ManaColor;
 
@@ -3034,7 +3034,7 @@ fn choose_option_with_source_id_stores_chosen_attribute() {
         Zone::Battlefield,
     );
 
-    // Set up NamedChoice with source_id (simulating persist=true Choose)
+    // Set up an exact-object prompt (simulating a persist=true Choose).
     state.waiting_for = WaitingFor::NamedChoice {
         player: PlayerId(0),
         choice_type: ChoiceType::color(),
@@ -3045,7 +3045,15 @@ fn choose_option_with_source_id_stores_chosen_attribute() {
             "Red".to_string(),
             "Green".to_string(),
         ],
-        source_id: Some(obj_id),
+        source: Some(
+            crate::types::game_state::NamedChoiceSource::from_trigger_source(
+                crate::game::triggers::trigger_source_context_for_latch(
+                    &state,
+                    state.objects.get(&obj_id).unwrap(),
+                ),
+                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution,
+            ),
+        ),
         persist_player: None,
     };
 
@@ -3106,11 +3114,15 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
         WaitingFor::NamedChoice {
             player,
             choice_type: crate::types::ability::ChoiceType::Labeled { ref options },
-            source_id,
+            source: Some(source),
             ..
         } => {
             assert_eq!(player, PlayerId(0));
-            assert_eq!(source_id, Some(siege_id));
+            assert_eq!(source.prompt.identity.reference.object_id, siege_id);
+            assert_eq!(
+                source.binding,
+                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+            );
             assert_eq!(options, &vec!["Temur".to_string(), "Sultai".to_string()]);
         }
         other => panic!("expected Glacierwood Siege anchor choice, got {other:?}"),
@@ -3142,7 +3154,7 @@ fn restricted_color_choice_rejects_excluded_color() {
             "Red".to_string(),
             "Green".to_string(),
         ],
-        source_id: None,
+        source: None,
         persist_player: None,
     };
 

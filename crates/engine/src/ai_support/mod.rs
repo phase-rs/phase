@@ -4746,7 +4746,7 @@ mod tests {
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },
             options: vec![],
-            source_id: None,
+            source: None,
             persist_player: None,
         };
 

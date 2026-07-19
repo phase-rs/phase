@@ -20995,6 +20995,26 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2c: Updates the owned source projection for the current
+    /// resolution segment without rebinding its source/controller or crossing
+    /// an independent sequential instruction.
+    pub fn update_trigger_source_context_in_resolution_segment(
+        &mut self,
+        source: TriggerSourceContext,
+    ) {
+        self.trigger_source = Some(source.clone());
+        if let Some(sub) = self
+            .sub_ability
+            .as_mut()
+            .filter(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)
+        {
+            sub.update_trigger_source_context_in_resolution_segment(source.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.update_trigger_source_context_in_resolution_segment(source);
+        }
+    }
+
     /// Install the exact definition occurrence over every continuation branch.
     pub fn set_trigger_definition_ref_recursive(&mut self, definition_ref: TriggerDefinitionRef) {
         self.trigger_definition_ref = Some(definition_ref.clone());

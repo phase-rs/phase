@@ -250,7 +250,7 @@ fn random_card_predicate_guess(
         player,
         choice_type,
         options,
-        source_id: Some(source_id),
+        source: Some(source),
         persist_player: _,
     } = &state.waiting_for
     else {
@@ -259,8 +259,7 @@ fn random_card_predicate_guess(
     if *player != ai_player || !choice_type.is_card_predicate_guess() {
         return None;
     }
-    let source = state.objects.get(source_id)?;
-    if source.controller == ai_player || options.is_empty() {
+    if source.prompt.controller == ai_player || options.is_empty() {
         return None;
     }
     let index = rng.random_range(0..options.len());
@@ -268,8 +267,8 @@ fn random_card_predicate_guess(
     tracing::info!(
         target: "phase_ai::choice",
         ai_player = ai_player.0,
-        source_id = source_id.0,
-        source_name = %source.name,
+        source_id = source.prompt.identity.reference.object_id.0,
+        source_name = %source.prompt.display_name,
         guess = %choice,
         "AI randomly guessed card predicate"
     );
@@ -3022,7 +3021,9 @@ mod tests {
     };
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
-    use engine::types::game_state::{StackEntry, StackEntryKind};
+    use engine::types::game_state::{
+        NamedChoiceSource, NamedChoiceSourceBinding, StackEntry, StackEntryKind,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
     use engine::types::phase::Phase;
@@ -3044,6 +3045,14 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn resolution_choice_source(state: &GameState, object_id: ObjectId) -> NamedChoiceSource {
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            state,
+            state.objects.get(&object_id).unwrap(),
+        );
+        NamedChoiceSource::from_trigger_source(context, NamedChoiceSourceBinding::ResolutionContext)
     }
 
     #[test]
@@ -5170,7 +5179,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source_id: Some(source_id),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
@@ -5212,7 +5221,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source_id: Some(source_id),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let mut rng = SmallRng::seed_from_u64(1);

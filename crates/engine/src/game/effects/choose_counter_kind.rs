@@ -88,12 +88,18 @@ pub fn resolve(
     // CR 608.2d: a single legal option is auto-selected — no interactive prompt.
     if kinds.len() == 1 {
         let only = kinds[0].as_str().into_owned();
+        let (mut source, persist_player) = crate::game::effects::choose::named_choice_authority(
+            state,
+            ability,
+            true,
+            &choice_type,
+        );
         crate::game::effects::choose::bind_named_choice(
             state,
             &choice_type,
             &only,
-            Some(ability.source_id),
-            None,
+            source.as_mut(),
+            persist_player,
         );
         events.push(resolved());
         return Ok(());
@@ -101,12 +107,14 @@ pub fn resolve(
 
     // CR 608.2d: two or more kinds → surface the shared interactive choice seam.
     let options: Vec<String> = kinds.iter().map(|k| k.as_str().into_owned()).collect();
+    let (source, persist_player) =
+        crate::game::effects::choose::named_choice_authority(state, ability, true, &choice_type);
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
         choice_type,
         options,
-        source_id: Some(ability.source_id),
-        persist_player: None,
+        source,
+        persist_player,
     };
     events.push(resolved());
     Ok(())

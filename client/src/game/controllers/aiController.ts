@@ -47,13 +47,12 @@ function choiceTypeKey(choiceType: string | Record<string, unknown>): string {
 function describeAiCardPredicateGuess(
   action: GameAction,
   waitingFor: WaitingFor | null | undefined,
-  gameState: GameState | null | undefined,
+  _gameState: GameState | null | undefined,
 ): string | null {
   if (action.type !== "ChooseOption" || waitingFor?.type !== "NamedChoice") return null;
   if (choiceTypeKey(waitingFor.data.choice_type) !== "CardPredicateGuess") return null;
 
-  const sourceId = waitingFor.data.source_id;
-  const sourceName = sourceId == null ? null : gameState?.objects?.[sourceId]?.name;
+  const sourceName = waitingFor.data.source?.prompt.display_name ?? null;
   return sourceName == null
     ? `guesses ${action.data.choice}`
     : `guesses ${action.data.choice} for ${sourceName}`;

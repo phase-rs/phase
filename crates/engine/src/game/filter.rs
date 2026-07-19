@@ -3691,8 +3691,15 @@ fn source_context_from_filter<'a>(
     let (lki, attached_to, saddled_by, convoked_creatures, linked_exile_snapshot) =
         if let Some(source) = trigger_source {
             let read = source.source_read(state);
+            let mut lki = read.lki().clone();
+            // A source-bound named choice writes its answer into the exact
+            // resolution context before its dependent instruction resolves.
+            // Keep that resolution-local choice even while the same source is
+            // still live; all other source facts continue to come from `read`.
+            lki.chosen_attributes
+                .clone_from(&source.lki.chosen_attributes);
             (
-                read.lki(),
+                lki,
                 read.attached_to(),
                 read.saddled_by(),
                 read.convoked_creatures(),

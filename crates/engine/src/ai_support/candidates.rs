@@ -1467,9 +1467,17 @@ pub fn candidate_actions_broad_with_probe(
             player,
             options,
             choice_type,
-            source_id,
+            source,
             ..
-        } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        } => named_choice_actions(
+            state,
+            *player,
+            options,
+            choice_type,
+            source
+                .as_ref()
+                .map(|source| source.prompt.display_name.as_str()),
+        ),
         // CR 608.2d: every printed guess is a legal candidate. Enumerated
         // uniformly here for legality + server validation; the AI's actual pick
         // is made by a hidden-info determinization pre-emption in
@@ -1494,14 +1502,8 @@ pub fn candidate_actions_broad_with_probe(
             player,
             options,
             choice_type,
-            pending_cast,
-        } => named_choice_actions(
-            state,
-            *player,
-            options,
-            choice_type,
-            Some(pending_cast.object_id),
-        ),
+            pending_cast: _,
+        } => named_choice_actions(state, *player, options, choice_type, None),
         // Alchemy spellbook draft: one candidate per card in the spellbook list.
         WaitingFor::SpellbookDraft {
             player, options, ..
@@ -4398,10 +4400,10 @@ fn named_choice_actions(
     player: PlayerId,
     options: &[String],
     choice_type: &ChoiceType,
-    source_id: Option<ObjectId>,
+    source_display_name: Option<&str>,
 ) -> Vec<CandidateAction> {
     if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
-        return card_name_choice_candidates(state, player, source_id)
+        return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()
             .map(|choice| {
                 candidate(
@@ -4429,7 +4431,7 @@ fn named_choice_actions(
 fn card_name_choice_candidates(
     state: &GameState,
     player: PlayerId,
-    source_id: Option<ObjectId>,
+    source_display_name: Option<&str>,
 ) -> Vec<String> {
     const MAX_CARD_NAME_CANDIDATES: usize = 24;
 
@@ -4458,10 +4460,8 @@ fn card_name_choice_candidates(
         choices.push(name.to_string());
     }
 
-    if let Some(source_id) = source_id {
-        if let Some(source) = state.objects.get(&source_id) {
-            push_name(&source.name, &legal_names, &mut seen, &mut choices);
-        }
+    if let Some(source_display_name) = source_display_name {
+        push_name(source_display_name, &legal_names, &mut seen, &mut choices);
     }
 
     let mut push_object_name = |id: ObjectId| {
@@ -5973,7 +5973,7 @@ mod tests {
     #[test]
     fn named_card_choice_uses_bounded_in_game_names() {
         let mut state = GameState::new_two_player(42);
-        let source = create_object(
+        let _source = create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
@@ -5994,7 +5994,7 @@ mod tests {
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
-            source_id: Some(source),
+            source: None,
             persist_player: None,
         };
 
