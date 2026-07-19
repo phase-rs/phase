@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use engine::game::engine::apply;
+use engine::game::engine::{apply, EngineError};
 use engine::game::turn_control;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -26,6 +26,80 @@ pub struct AiActionResult {
     pub log_entries: Vec<GameLogEntry>,
 }
 
+/// Which of `run_ai_actions`'s three break doors (see its doc comment) ended
+/// the batch before the safety cap. `None` means the loop ran out AI actions
+/// to take for a benign reason the caller already distinguishes elsewhere
+/// (hit `MAX_AI_ACTIONS_PER_SEQUENCE`, or the very first iteration found no
+/// actor at all — that case is folded into `NoActor` below instead, so `None`
+/// in practice only means "hit the safety cap").
+///
+/// Diagnostic surface for phase#6080 (the driver-stall family): today the only
+/// signal at these break points is a `tracing::error`/`tracing::warn` that no
+/// harness subscriber captures. Exposing the reason as typed data lets a
+/// caller like `ai_commander` print it instead of installing a subscriber.
+#[derive(Debug, Clone)]
+pub enum AiActionsBreakReason {
+    /// No acting player was found for the current `waiting_for`, or none of
+    /// the acting players maps (via `turn_control::authorized_submitter_for_player`)
+    /// to an AI-controlled seat.
+    NoActor,
+    /// `choose_action_with_session` returned `None` for `player` — the AI
+    /// policy stack produced no legal action for a decision it was asked to
+    /// make.
+    ChooseActionNone { player: PlayerId },
+    /// `apply()` rejected `player`'s chosen `action`. Boxed: `GameAction` and
+    /// `EngineError` are large relative to the other variants (clippy
+    /// `large_enum_variant`), and this variant is a diagnostic path taken
+    /// only when a batch breaks early, not a hot allocation.
+    ApplyFailed {
+        player: PlayerId,
+        action: Box<GameAction>,
+        error: EngineError,
+    },
+}
+
+/// Outcome of a `run_ai_actions` batch.
+///
+/// `Deref`s to `Vec<AiActionResult>` so the many existing callers that only
+/// care about the actions taken (`.is_empty()`, `.len()`, indexing, iterating
+/// by reference) are source-compatible; only diagnostic consumers need
+/// `break_reason`.
+pub struct AiActionsRun {
+    pub results: Vec<AiActionResult>,
+    pub break_reason: Option<AiActionsBreakReason>,
+}
+
+impl std::ops::Deref for AiActionsRun {
+    type Target = Vec<AiActionResult>;
+    fn deref(&self) -> &Vec<AiActionResult> {
+        &self.results
+    }
+}
+
+impl IntoIterator for AiActionsRun {
+    type Item = AiActionResult;
+    type IntoIter = std::vec::IntoIter<AiActionResult>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.results.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a AiActionsRun {
+    type Item = &'a AiActionResult;
+    type IntoIter = std::slice::Iter<'a, AiActionResult>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.results.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut AiActionsRun {
+    type Item = &'a mut AiActionResult;
+    type IntoIter = std::slice::IterMut<'a, AiActionResult>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.results.iter_mut()
+    }
+}
+
 /// Run AI actions on the game state until the next actor is human or the game is over.
 ///
 /// Returns one `AiActionResult` per AI action taken, preserving granularity for
@@ -44,8 +118,9 @@ pub fn run_ai_actions(
     ai_configs: &HashMap<PlayerId, AiConfig>,
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
-) -> Vec<AiActionResult> {
+) -> AiActionsRun {
     let mut results = Vec::new();
+    let mut break_reason = None;
 
     for _ in 0..MAX_AI_ACTIONS_PER_SEQUENCE {
         // CR 723.5: Under turn control (Mindslaver, Emrakul), the authorized
@@ -60,6 +135,7 @@ pub fn run_ai_actions(
             .find(|player| ai_players.contains(player));
 
         let Some(actor) = actor else {
+            break_reason = Some(AiActionsBreakReason::NoActor);
             break;
         };
 
@@ -67,6 +143,11 @@ pub fn run_ai_actions(
             Some(c) => c,
             None => {
                 tracing::warn!(player = ?actor, "AI seat has no config — stopping AI loop");
+                // No dedicated break-reason variant: a missing config is a
+                // caller wiring bug (every AI seat must be registered), not
+                // one of the three doors phase#6080 instruments. Falls back
+                // to the closest existing category.
+                break_reason = Some(AiActionsBreakReason::NoActor);
                 break;
             }
         };
@@ -75,6 +156,7 @@ pub fn run_ai_actions(
             Some(a) => a,
             None => {
                 tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");
+                break_reason = Some(AiActionsBreakReason::ChooseActionNone { player: actor });
                 break;
             }
         };
@@ -93,6 +175,11 @@ pub fn run_ai_actions(
             }
             Err(e) => {
                 tracing::error!(player = ?actor, error = %e, "AI action apply failed — stopping");
+                break_reason = Some(AiActionsBreakReason::ApplyFailed {
+                    player: actor,
+                    action: Box::new(action),
+                    error: e,
+                });
                 break;
             }
         }
@@ -105,5 +192,8 @@ pub fn run_ai_actions(
         );
     }
 
-    results
+    AiActionsRun {
+        results,
+        break_reason,
+    }
 }

@@ -180,6 +180,10 @@ fn main() {
     let mut aborted = false;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+    // phase#6080: the reason the most recent `run_ai_actions` batch broke
+    // early (one of its three break doors), so a stall can be diagnosed from
+    // the game output alone instead of a `tracing::error` no harness captures.
+    let mut last_break_reason = None;
 
     loop {
         let mut results = run_ai_actions(
@@ -190,6 +194,7 @@ fn main() {
             &ai_session,
         );
         if results.is_empty() {
+            last_break_reason = results.break_reason;
             break;
         }
         if dump_log_path.is_some() {
@@ -238,6 +243,7 @@ fn main() {
     println!("Turns played: {}", state.turn_number);
     println!();
 
+    let mut stalled = false;
     match &state.waiting_for {
         WaitingFor::GameOver { winner } => {
             println!(
@@ -246,6 +252,39 @@ fn main() {
             );
         }
         other => {
+            stalled = true;
+            // phase#6080: an empty AI-action batch while parked on anything
+            // but GameOver is a driver stall, not a normal game end (the
+            // family of p0-softlock issues #5250/#4345/#5958/#6172/#3886/
+            // #3919/#3233). Print a machine-readable line with enough context
+            // to reproduce (waiting_for variant, turn, active/priority
+            // player, pending-cast summary) plus which break door fired, then
+            // exit with a distinct code — the caller must not silently treat
+            // this as a completed game.
+            println!(
+                "STALL: waiting_for={} turn={} active=P{} priority=P{} pending_cast={}",
+                other.variant_name(),
+                state.turn_number,
+                state.active_player.0,
+                state.priority_player.0,
+                state
+                    .pending_cast
+                    .as_ref()
+                    .map(|pc| format!(
+                        "object={:?} card={:?} variant={:?}",
+                        pc.object_id, pc.card_id, pc.casting_variant
+                    ))
+                    .unwrap_or_else(|| "none".to_string()),
+            );
+            match &last_break_reason {
+                Some(reason) => println!("STALL: break_reason={reason:?}"),
+                None => println!(
+                    "STALL: break_reason=unknown (run_ai_actions batch was non-empty; \
+                     stall detected on a later empty batch this process did not observe)"
+                ),
+            }
+            // Preserved verbatim: pod-lab's runner.py classifies outcomes by
+            // matching this exact substring in stdout — do not reword it.
             println!("Game did NOT reach GameOver. waiting_for = {other:?}");
         }
     }
@@ -285,6 +324,12 @@ fn main() {
 
     if aborted {
         std::process::exit(2);
+    }
+    // Distinct from a clean exit (0) and an action-cap abort (2): a stall
+    // must never be mistaken for either by a caller keying off exit status
+    // alone (phase#6080).
+    if stalled {
+        std::process::exit(3);
     }
 }
 
