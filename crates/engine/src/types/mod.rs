@@ -66,9 +66,10 @@ pub use proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
 pub use replay::{RecordedAction, ReplayHeader, ReplayLog};
 pub use resolution::{
-    ChangeZoneFrame, DirectChoiceGate, FrameGate, FrameKind, MultiDrawFrame, OptionalEffectFrame,
-    PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack,
-    ResolutionStackError,
+    AbilityContinuationFrame, ChangeZoneFrame, DirectChoiceGate, FrameGate, FrameKind,
+    MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame,
+    ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
+    RESOLUTION_STATE_WIRE_VERSION,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
