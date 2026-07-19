@@ -1073,11 +1073,14 @@ fn validate_shipped_post_replacement_draw_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::types::ability::{
         Effect, EffectKind, PostReplacementContinuation, QuantityExpr, TargetFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        DrainStatus, GameState, PendingCoinFlipKind, PostReplacementDrain, ResidentDrainPolicy,
+        DrainStatus, GameState, PendingCoinFlipKind, PendingProliferateActions,
+        PendingRepeatedOptionalPayment, PostReplacementDrain, ResidentDrainPolicy,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -1164,6 +1167,46 @@ mod tests {
             draw_sequences,
             pending_connive_reentry: None,
         })
+    }
+
+    fn restore_v1_fixture(state: GameState) -> GameState {
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        let wire: ResolutionStateWire =
+            serde_json::from_value(v1).expect("v1 fixture converts through the wire");
+        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        assert_eq!(
+            v2["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(v2.get("resolution_frames").is_some());
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                v2.get(*field).is_none(),
+                "v2 fixture must not write legacy field {field}"
+            );
+        }
+
+        serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("v2 fixture restores for the legacy runtime action path")
+            .into_game_state()
+    }
+
+    fn assert_reserializes_v2_only(state: GameState) {
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("resumed fixture serializes as v2");
+        assert_eq!(
+            v2["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(v2.get("resolution_frames").is_some());
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                v2.get(*field).is_none(),
+                "resumed v2 fixture must not write legacy field {field}"
+            );
+        }
     }
 
     #[test]
@@ -1522,5 +1565,94 @@ mod tests {
                 player: PlayerId(0),
             })
             .expect("a non-draw paused drain remains an independent post-replacement frame");
+    }
+
+    #[test]
+    fn v1_direct_choice_fixtures_resume_on_the_real_action_path() {
+        let mut repeated = GameState::new_two_player(100);
+        repeated.pending_repeated_optional_payment =
+            Some(Box::new(PendingRepeatedOptionalPayment {
+                payment_unit: Box::new(resolved_draw(100)),
+                reflexive: Box::new(resolved_draw(101)),
+                remaining: 0,
+            }));
+        repeated.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: ObjectId(100),
+            description: None,
+            may_trigger_key: None,
+        };
+        let mut repeated = restore_v1_fixture(repeated);
+        apply_as_current(
+            &mut repeated,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("repeated-payment fixture resumes through the real optional-choice action");
+        assert!(repeated.pending_repeated_optional_payment.is_none());
+        assert_reserializes_v2_only(repeated);
+
+        let mut optional = GameState::new_two_player(102);
+        optional.pending_optional_effect = Some(Box::new(resolved_draw(102)));
+        optional.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: ObjectId(102),
+            description: None,
+            may_trigger_key: None,
+        };
+        let mut optional = restore_v1_fixture(optional);
+        apply_as_current(
+            &mut optional,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("optional-effect fixture resumes through the real optional-choice action");
+        assert!(optional.pending_optional_effect.is_none());
+        assert_reserializes_v2_only(optional);
+
+        let mut coin = GameState::new_two_player(103);
+        coin.pending_coin_flip = Some(PendingCoinFlip {
+            source_id: ObjectId(103),
+            controller: PlayerId(0),
+            flipper: PlayerId(0),
+            targets: Vec::new(),
+            win_effect: None,
+            lose_effect: None,
+            kind: PendingCoinFlipKind::Single,
+        });
+        coin.waiting_for = WaitingFor::CoinFlipKeepChoice {
+            player: PlayerId(0),
+            results: vec![true, false],
+            keep_count: 1,
+        };
+        let mut coin = restore_v1_fixture(coin);
+        apply_as_current(
+            &mut coin,
+            GameAction::SelectCoinFlips {
+                keep_indices: vec![0],
+            },
+        )
+        .expect("coin-flip fixture resumes through the real keep-choice action");
+        assert!(coin.pending_coin_flip.is_none());
+        assert_reserializes_v2_only(coin);
+
+        let mut proliferate = GameState::new_two_player(104);
+        proliferate.pending_proliferate_actions = Some(PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(104),
+            remaining: 0,
+        });
+        proliferate.waiting_for = WaitingFor::ProliferateChoice {
+            player: PlayerId(0),
+            eligible: Vec::new(),
+        };
+        let mut proliferate = restore_v1_fixture(proliferate);
+        apply_as_current(
+            &mut proliferate,
+            GameAction::SelectTargets {
+                targets: Vec::new(),
+            },
+        )
+        .expect("proliferate fixture resumes through the real target-choice action");
+        assert!(proliferate.pending_proliferate_actions.is_none());
+        assert_reserializes_v2_only(proliferate);
     }
 }
