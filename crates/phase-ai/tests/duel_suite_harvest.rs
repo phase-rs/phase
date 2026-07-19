@@ -17,7 +17,7 @@
 //! The `harvest.rs` inline unit tests cover the `GameHarvester` gating / flush /
 //! finish semantics at the building-block level (no card data required).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
@@ -48,11 +48,11 @@ fn is_meta_line(line: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(line).is_ok_and(|v| v.get("meta").is_some())
 }
 
-fn harvest_opts(games: usize, base_seed: u64, harvest_path: &PathBuf) -> SuiteOptions {
+fn harvest_opts(games: usize, base_seed: u64, harvest_path: &Path) -> SuiteOptions {
     let mut opts = SuiteOptions::new(AiDifficulty::Medium, games, base_seed);
     opts.output_path = PathBuf::from("target/duel-suite-harvest-report.json");
     opts.filter = Some(RED_MIRROR.to_string());
-    opts.harvest_output = Some(harvest_path.clone());
+    opts.harvest_output = Some(harvest_path.to_path_buf());
     opts
 }
 
