@@ -162,14 +162,10 @@ fn main() {
     // detect silent-skip drift (a resolved count short of the pre-resolution
     // one) without needing engine internals.
     println!("Resolved deck sizes (post name-resolution, 0-indexed by seat):");
-    for (i, seat) in [
-        &payload.player,
-        &payload.opponent,
-        &payload.ai_decks[0],
-        &payload.ai_decks[1],
-    ]
-    .into_iter()
-    .enumerate()
+    for (i, seat) in [&payload.player, &payload.opponent]
+        .into_iter()
+        .chain(payload.ai_decks.iter())
+        .enumerate()
     {
         let main_count: u32 = seat.main_deck.iter().map(|e| e.count).sum();
         let commander_count: u32 = seat.commander.iter().map(|e| e.count).sum();

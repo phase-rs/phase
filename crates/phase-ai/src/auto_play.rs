@@ -26,7 +26,7 @@ pub struct AiActionResult {
     pub log_entries: Vec<GameLogEntry>,
 }
 
-/// Which of `run_ai_actions`'s three break doors (see its doc comment) ended
+/// Which of `run_ai_actions`'s four break doors (see its doc comment) ended
 /// the batch before the safety cap. `None` means the loop ran out AI actions
 /// to take for a benign reason the caller already distinguishes elsewhere
 /// (hit `MAX_AI_ACTIONS_PER_SEQUENCE`, or the very first iteration found no
@@ -39,18 +39,29 @@ pub struct AiActionResult {
 /// caller like `ai_commander` print it instead of installing a subscriber.
 #[derive(Debug, Clone)]
 pub enum AiActionsBreakReason {
-    /// No acting player was found for the current `waiting_for`, or none of
-    /// the acting players maps (via `turn_control::authorized_submitter_for_player`)
-    /// to an AI-controlled seat.
+    /// No AI seat can currently act. Two causes are still folded together
+    /// here: `WaitingFor::acting_players()` returned empty (`GameOver`, or an
+    /// empty pending set), or it returned one or more players and none of
+    /// their `turn_control::authorized_submitter_for_player` mappings is in
+    /// `ai_players` (a human seat, or a human turn-decision controller).
+    /// Deliberately carries no `PlayerId`: the first cause has no player at
+    /// all, and the simultaneous-decision variants (`MulliganDecision`,
+    /// `OpeningHandBottomCards`) can pend several at once, so naming one
+    /// would be arbitrary. A missing AI *configuration* is `MissingAiConfig`.
     NoActor,
+    /// `player` is in `ai_players` but has no entry in `ai_configs`. Distinct
+    /// from `NoActor`: an actor *was* found and *is* AI-controlled, so the
+    /// remedy is caller wiring (register a config for this seat), not "wait
+    /// for a human" or "the game ended".
+    MissingAiConfig { player: PlayerId },
     /// `choose_action_with_session` returned `None` for `player` — the AI
     /// policy stack produced no legal action for a decision it was asked to
     /// make.
     ChooseActionNone { player: PlayerId },
-    /// `apply()` rejected `player`'s chosen `action`. Boxed: `GameAction` and
-    /// `EngineError` are large relative to the other variants (clippy
-    /// `large_enum_variant`), and this variant is a diagnostic path taken
-    /// only when a batch breaks early, not a hot allocation.
+    /// `apply()` rejected `player`'s chosen `action`. `action` is boxed because
+    /// `GameAction` is large relative to the other variants (clippy
+    /// `large_enum_variant`); `EngineError` is four small variants (largest
+    /// payload a `String`) and needs no box.
     ApplyFailed {
         player: PlayerId,
         action: Box<GameAction>,
@@ -143,11 +154,7 @@ pub fn run_ai_actions(
             Some(c) => c,
             None => {
                 tracing::warn!(player = ?actor, "AI seat has no config — stopping AI loop");
-                // No dedicated break-reason variant: a missing config is a
-                // caller wiring bug (every AI seat must be registered), not
-                // one of the three doors phase#6080 instruments. Falls back
-                // to the closest existing category.
-                break_reason = Some(AiActionsBreakReason::NoActor);
+                break_reason = Some(AiActionsBreakReason::MissingAiConfig { player: actor });
                 break;
             }
         };

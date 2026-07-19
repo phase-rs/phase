@@ -268,8 +268,9 @@ fn run_ai_actions_non_empty_batch_carries_break_reason() {
     // phase#6080 follow-up (PR #6194 review): `run_ai_actions` can complete
     // one or more actions and *still* stop on a break door (here: P1 is
     // nominally AI-controlled via `ai_players` but has no entry in
-    // `ai_configs` — a caller wiring gap distinct from the ordinary "no
-    // actor" case). The old `ai_commander` driver only checked
+    // `ai_configs`). That door reports `MissingAiConfig { player }`: an actor
+    // was found and is AI-controlled, so it is a caller wiring gap, not the
+    // `NoActor` stall. The old `ai_commander` driver only checked
     // `break_reason` when the returned batch was empty, so this exact
     // shape (non-empty batch + Some(break_reason)) got silently discarded.
     // This asserts `run_ai_actions` reports it, and that `driver_step` — the
@@ -320,8 +321,12 @@ fn run_ai_actions_non_empty_batch_carries_break_reason() {
         "P0's DeclareBlockers action should have applied before the batch stopped"
     );
     assert!(
-        matches!(results.break_reason, Some(AiActionsBreakReason::NoActor)),
-        "expected NoActor once priority reaches P1's missing config"
+        matches!(
+            results.break_reason,
+            Some(AiActionsBreakReason::MissingAiConfig { player: P1 })
+        ),
+        "expected MissingAiConfig(P1): P1 is an AI seat with no ai_configs entry, \
+         which is not the same stall as NoActor"
     );
 
     let step = driver_step(results);
