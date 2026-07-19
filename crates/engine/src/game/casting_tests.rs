@@ -39227,7 +39227,8 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     // (3) WGD entered → fire + resolve its ETB (exile all other permanents you
     // control). CR 400.7: the Aura, the plain land, and Piranha Marsh are exiled;
     // WGD itself is exempt ("all OTHER permanents").
-    crate::game::triggers::process_triggers(&mut state, &etb_ev);
+    let mut trigger_events = Vec::new();
+    let _ = crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut trigger_events);
     assert_eq!(
         state.stack.len(),
         1,

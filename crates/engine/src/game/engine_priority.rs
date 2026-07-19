@@ -75,6 +75,17 @@ pub(crate) fn run_post_action_pipeline_from(
                     .collect()
             })
             .unwrap_or_default();
+        // A completed logical owner has already collected its segment and
+        // settlement contexts into the existing deferred queue. The owner is
+        // intentionally gone before the trailing completion event, so use those
+        // exact queued occurrences to keep the generic scan from rediscovering
+        // them while still allowing every unrelated event through.
+        let deferred_logical_zone_events: Vec<_> = state
+            .deferred_triggers
+            .iter()
+            .flat_map(|context| context.trigger_events.iter())
+            .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .collect();
         let unconsumed_events = triggers::filter_consumed_trigger_events(
             &events[event_start..],
             &consumed_trigger_events,
@@ -85,6 +96,7 @@ pub(crate) fn run_post_action_pipeline_from(
                 !matches!(event, GameEvent::PhaseChanged { .. })
                     && !state.deferred_entry_events.contains(event)
                     && !retained_logical_zone_events.contains(event)
+                    && !deferred_logical_zone_events.contains(event)
             })
             .cloned()
             .collect();

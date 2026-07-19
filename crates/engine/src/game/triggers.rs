@@ -16,9 +16,9 @@ use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     AutoMayChoice, DelayedTrigger, DistributionUnit, GameState, LatchedBatchedTrigger,
-    LatchedSuppressTrigger, LogicalZoneChangeGroup, MayTriggerAutoChoiceKey, MayTriggerOrigin,
-    StackEntry, StackEntryKind, TargetSelectionConstraint, TriggerObservationTime,
-    TriggerSourceContext, WaitingFor,
+    LatchedSuppressTrigger, LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome,
+    MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
+    TargetSelectionConstraint, TriggerObservationTime, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::WardCost;
@@ -670,7 +670,6 @@ fn latch_logical_zone_change_group_immediately_before(
         .expect("a new logical zone-change group is latched exactly once");
 }
 
-#[allow(dead_code)] // Wired to true ChangeZone completion in Phase 1b step 15.
 fn trigger_observes_zone_change(
     trigger: &TriggerDefinition,
     from: &Option<Zone>,
@@ -700,7 +699,6 @@ fn trigger_observes_zone_change(
     origin_matches && destination_matches(trigger.destination, &trigger.destination_constraint)
 }
 
-#[allow(dead_code)] // Wired to true ChangeZone completion in Phase 1b step 15.
 fn zone_is_visible_to_all_players(zone: Zone) -> bool {
     !matches!(zone, Zone::Hand | Zone::Library)
 }
@@ -708,7 +706,6 @@ fn zone_is_visible_to_all_players(zone: Zone) -> bool {
 /// CR 603.10 + CR 603.10a: Classify the only zone-change observations that
 /// look back before an event. Everything else is observed immediately after it.
 /// This is intentionally the single classifier for the logical-group latches.
-#[allow(dead_code)] // Consumed by settlement after its Step-13 collector migration.
 pub(crate) fn trigger_observation_time(
     trigger: &TriggerDefinition,
     event: &GameEvent,
@@ -756,7 +753,6 @@ pub(crate) fn trigger_observation_time(
 /// only the definitions and suppressors that can observe an ordinary retained
 /// occurrence. The caller owns the completion boundary; this helper never
 /// attempts to infer it from a current object or a partial delivery slice.
-#[allow(dead_code)] // True completion invokes this once in Phase 1b step 15.
 pub(crate) fn latch_logical_zone_change_group_immediately_after(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,
@@ -858,7 +854,6 @@ enum TriggerSource<'a> {
 pub(crate) enum LogicalZoneTriggerCollection<'a> {
     Ordinary,
     Segment(&'a LogicalZoneChangeGroup),
-    #[allow(dead_code)] // Step 15 wires final completion into this settlement pass.
     Settlement(&'a LogicalZoneChangeGroup),
 }
 
@@ -2055,12 +2050,103 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
     Ok(())
 }
 
+/// Complete the one logical zone-change owner after its final delivery slice.
+///
+/// CR 603.10 observes ordinary triggers only after the final layer flush, while
+/// CR 603.10a uses each departed member's record-owned pre-event authority.
+/// This is the sole completion seam: it appends the final segment, latches the
+/// post-event authority, stamps only derived battlefield departures, and runs
+/// settlement exactly once before the caller emits its trailing completion.
+pub(crate) fn complete_logical_zone_trigger_collection(
+    state: &mut GameState,
+    group: &mut LogicalZoneChangeGroup,
+    final_events: &mut [GameEvent],
+) -> Result<(), String> {
+    append_and_collect_logical_zone_trigger_segment(state, group, final_events)?;
+    latch_logical_zone_change_group_immediately_after(state, group);
+
+    let post_event_members: Vec<_> = group
+        .prospective_battlefield_members
+        .iter()
+        .zip(&group.terminal_outcomes)
+        .filter_map(|(member, outcome)| {
+            matches!(
+                outcome,
+                LogicalZoneChangeTerminalOutcome::Prevented
+                    | LogicalZoneChangeTerminalOutcome::Remained
+            )
+            .then_some(member.identity)
+        })
+        .collect();
+    for member in post_event_members {
+        let source = state.objects.get(&member.object_id).ok_or_else(|| {
+            format!(
+                "logical zone-change member {}:{} is absent at post-event settlement",
+                member.object_id.0, member.incarnation
+            )
+        })?;
+        if ObjectIncarnationRef::from_object(source) != member || source.zone != Zone::Battlefield {
+            return Err(format!(
+                "logical zone-change member {}:{} cannot rebind its post-event source",
+                member.object_id.0, member.incarnation
+            ));
+        }
+        let source_context = trigger_source_context_for_latch(state, source);
+        group.latch_post_event_member_context(member, source_context)?;
+    }
+
+    group.stamp_battlefield_departures()?;
+    for event in final_events {
+        let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            record,
+        } = event
+        else {
+            continue;
+        };
+        let Some(GameEvent::ZoneChanged {
+            record: retained_record,
+            ..
+        }) = group
+            .all_origin_occurrences
+            .iter()
+            .map(|occurrence| &occurrence.event)
+            .find(|retained| {
+                matches!(
+                    retained,
+                    GameEvent::ZoneChanged {
+                        object_id: retained_id,
+                        from: retained_from,
+                        to: retained_to,
+                        record: retained_record,
+                    } if retained_id == object_id
+                        && retained_from == from
+                        && retained_to == to
+                        && retained_record
+                            .trigger_source_context()
+                            .map(|context| context.identity.reference)
+                            == record
+                                .trigger_source_context()
+                                .map(|context| context.identity.reference)
+                )
+            })
+        else {
+            continue;
+        };
+        record.co_departed = retained_record.co_departed.clone();
+    }
+    let settlement = collect_logical_zone_trigger_settlement(state, group)?;
+    state.deferred_triggers.extend(settlement);
+    Ok(())
+}
+
 /// Collect the one final observer pass owned by a completed logical zone-change
 /// group. Segment collection already admitted each moved member's own
 /// event-subject trigger, so settlement replays a member only over the other
 /// retained occurrences. Batched definitions use the carrier latches below;
 /// they are never rediscovered through the current live trigger surface.
-#[allow(dead_code)] // Step 15 calls this once after final delivery and latching.
 pub(crate) fn collect_logical_zone_trigger_settlement(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
@@ -2125,7 +2211,6 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
 /// The source context and suppressor set are selected per occurrence at the
 /// CR 603.10 observation time, but one definition still produces one pending
 /// context containing every admitted occurrence.
-#[allow(dead_code)] // Reached by the Step-15 settlement entry point.
 fn collect_latched_batched_zone_triggers(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
@@ -28891,6 +28976,57 @@ pub mod tests {
         assert!(
             collect_logical_zone_trigger_settlement(&mut state, &group).is_err(),
             "settlement fails closed without an exact post-event context"
+        );
+    }
+
+    #[test]
+    fn logical_zone_completion_owns_exact_moved_prevented_and_remained_outcomes() {
+        let mut state = setup();
+        let moved = make_creature(&mut state, PlayerId(0), "Moved member", 2, 2);
+        let prevented = make_creature(&mut state, PlayerId(0), "Prevented member", 2, 2);
+        let remained = make_creature(&mut state, PlayerId(0), "Remained member", 2, 2);
+        let mut group =
+            allocate_logical_zone_change_group(&mut state, &[moved, prevented, remained]);
+
+        let mut final_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, moved, Zone::Graveyard, &mut final_events);
+        group
+            .record_delivery_completion(moved, crate::types::game_state::ZoneMoveCompletion::Moved)
+            .expect("the moved member waits for its retained record");
+        group
+            .record_delivery_completion(
+                prevented,
+                crate::types::game_state::ZoneMoveCompletion::Prevented,
+            )
+            .expect("the prevented member has an explicit terminal result");
+        group
+            .record_delivery_completion(
+                remained,
+                crate::types::game_state::ZoneMoveCompletion::Remained,
+            )
+            .expect("the no-move member has an explicit terminal result");
+
+        complete_logical_zone_trigger_collection(&mut state, &mut group, &mut final_events)
+            .expect("the one completion seam settles every prospective member");
+
+        assert!(matches!(
+            group.terminal_outcomes.as_slice(),
+            [
+                LogicalZoneChangeTerminalOutcome::Moved { .. },
+                LogicalZoneChangeTerminalOutcome::Prevented,
+                LogicalZoneChangeTerminalOutcome::Remained,
+            ]
+        ));
+        assert!(group.post_event_member_contexts[0].is_none());
+        assert!(group.post_event_member_contexts[1].is_some());
+        assert!(group.post_event_member_contexts[2].is_some());
+        assert_eq!(
+            group
+                .battlefield_departures()
+                .expect("only the retained battlefield departure is derived")
+                .len(),
+            1,
+            "prevention and a completed no-move do not fabricate departures"
         );
     }
 

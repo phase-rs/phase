@@ -527,6 +527,7 @@ fn batch_or_drain_observer_triggers(
     events: &mut Vec<GameEvent>,
     event_slice_start: usize,
     event_slice_end: usize,
+    zone_changes_are_logically_owned: bool,
 ) -> Option<ResolutionChoiceOutcome> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         // B1: this action settled. Merge this slice's observer triggers into
@@ -535,7 +536,11 @@ fn batch_or_drain_observer_triggers(
         // `deferred_triggers` and are lost when ordering runs (issue #1793).
         let trigger_events: Vec<GameEvent> = events[event_slice_start..event_slice_end]
             .iter()
-            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .filter(|ev| {
+                !matches!(ev, GameEvent::PhaseChanged { .. })
+                    && (!zone_changes_are_logically_owned
+                        || !matches!(ev, GameEvent::ZoneChanged { .. }))
+            })
             .cloned()
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
@@ -550,7 +555,11 @@ fn batch_or_drain_observer_triggers(
         // Park this move's observer triggers for a later settle.
         let trigger_events: Vec<GameEvent> = events[event_slice_start..event_slice_end]
             .iter()
-            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .filter(|ev| {
+                !matches!(ev, GameEvent::PhaseChanged { .. })
+                    && (!zone_changes_are_logically_owned
+                        || !matches!(ev, GameEvent::ZoneChanged { .. }))
+            })
             .cloned()
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
@@ -3873,6 +3882,7 @@ pub(super) fn handle_resolution_choice(
                     events,
                     events_before_effect,
                     events_after_move,
+                    false,
                 ) {
                     return Ok(outcome);
                 }
@@ -4062,6 +4072,7 @@ pub(super) fn handle_resolution_choice(
                             events,
                             events_before_sacrifice,
                             events_after_sacrifice,
+                            false,
                         ) {
                             return Ok(outcome);
                         }
@@ -4156,6 +4167,7 @@ pub(super) fn handle_resolution_choice(
                                 events,
                                 events_before_sacrifice,
                                 events_after_sacrifice,
+                                false,
                             ) {
                                 return Ok(outcome);
                             }
@@ -4227,10 +4239,13 @@ pub(super) fn handle_resolution_choice(
                                 ctx.source_id,
                             );
                         let delivery_start = events.len();
-                        match effects::change_zone::process_one_zone_move(
+                        match effects::change_zone::process_one_zone_move_with_terminal(
                             state, &ctx, *card_id, events,
                         ) {
-                            effects::change_zone::ZoneMoveResult::Done => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+                                logical_zone_change_group
+                                    .record_delivery_completion(*card_id, completion)
+                                    .expect("EffectZoneChoice member records its exact terminal outcome");
                                 // CR 118.3: When this is a cost-payment exile (e.g., Mimeoplasm),
                                 // populate the exile-link index map so the continuation can
                                 // reference exiled cards by position (ExiledCardByIndex, ExiledCardPower).
@@ -4240,7 +4255,7 @@ pub(super) fn handle_resolution_choice(
                                     );
                                 }
                             }
-                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
@@ -4290,7 +4305,7 @@ pub(super) fn handle_resolution_choice(
                                     state.waiting_for.clone(),
                                 ));
                             }
-                            effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(choice_player) => {
                                 // CR 614.12b + CR 614.1c + CR 614.13: stash the
                                 // unprocessed cards so the drain in
                                 // `effects/mod.rs::drain_pending_change_zone_iteration`
@@ -4308,7 +4323,14 @@ pub(super) fn handle_resolution_choice(
                                         paused_current: Some(
                                             state
                                                 .pending_zone_change_delivery_from_replacement()
-                                                .or(anticipated_pause)
+                                                .or_else(|| {
+                                                    anticipated_pause.map(|mut boundary| {
+                                                        boundary.append_delivery_events(
+                                                            &events[delivery_start..],
+                                                        );
+                                                        boundary
+                                                    })
+                                                })
                                                 .expect("zone-change pause must retain its exact boundary"),
                                         ),
                                         remaining: chosen_ids[i + 1..].to_vec(),
@@ -4352,6 +4374,12 @@ pub(super) fn handle_resolution_choice(
                             }
                         }
                     }
+                    crate::game::triggers::complete_logical_zone_trigger_collection(
+                        state,
+                        &mut logical_zone_change_group,
+                        &mut events[logical_group_event_start..],
+                    )
+                    .expect("completed EffectZoneChoice owns every terminal member outcome");
                 }
                 EffectKind::Tap => {
                     for &card_id in &chosen {
@@ -4624,10 +4652,13 @@ pub(super) fn handle_resolution_choice(
                                 ctx.source_id,
                             );
                         let delivery_start = events.len();
-                        match effects::change_zone::process_one_zone_move(
+                        match effects::change_zone::process_one_zone_move_with_terminal(
                             state, &ctx, *card_id, events,
                         ) {
-                            effects::change_zone::ZoneMoveResult::Done => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+                                logical_zone_change_group
+                                    .record_delivery_completion(*card_id, completion)
+                                    .expect("cost-payment zone move records its exact terminal outcome");
                                 // CR 118.3: Populate the exile-link index map for cost-payment exile
                                 if dest_zone == Zone::Exile {
                                     super::exile_links::push_exiled_with_source_this_turn(
@@ -4635,7 +4666,7 @@ pub(super) fn handle_resolution_choice(
                                     );
                                 }
                             }
-                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
@@ -4683,7 +4714,7 @@ pub(super) fn handle_resolution_choice(
                                     state.waiting_for.clone(),
                                 ));
                             }
-                            effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(choice_player) => {
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
@@ -4696,7 +4727,14 @@ pub(super) fn handle_resolution_choice(
                                         paused_current: Some(
                                             state
                                                 .pending_zone_change_delivery_from_replacement()
-                                                .or(anticipated_pause)
+                                                .or_else(|| {
+                                                    anticipated_pause.map(|mut boundary| {
+                                                        boundary.append_delivery_events(
+                                                            &events[delivery_start..],
+                                                        );
+                                                        boundary
+                                                    })
+                                                })
                                                 .expect("zone-change pause must retain its exact boundary"),
                                         ),
                                         remaining: chosen_ids[i + 1..].to_vec(),
@@ -4734,6 +4772,12 @@ pub(super) fn handle_resolution_choice(
                             }
                         }
                     }
+                    crate::game::triggers::complete_logical_zone_trigger_collection(
+                        state,
+                        &mut logical_zone_change_group,
+                        &mut events[logical_group_event_start..],
+                    )
+                    .expect("completed cost-payment zone move owns every terminal member outcome");
                     let events_after_move = events.len();
                     // CR 614.12a: this `EffectZoneChoice` was the interactive payment of an
                     // optional `MayCost` replacement's accept (e.g. Mimeoplasm's
@@ -4753,6 +4797,7 @@ pub(super) fn handle_resolution_choice(
                             events,
                             events_before_effect,
                             events_after_move,
+                            true,
                         ) {
                             return Ok(outcome);
                         }
@@ -4848,22 +4893,25 @@ pub(super) fn handle_resolution_choice(
                 EffectKind::Sacrifice | EffectKind::ChangeZone | EffectKind::BounceAll
             );
             if moves_permanents {
-                // CR 603.10a: the chosen permanents left the battlefield together
-                // in this single resolution event, so co-departing
-                // leaves-the-battlefield observers among them (Blood Artist among
-                // the sacrificed group) observe each other. Stamp only the
-                // sub-slice this handler produced — never the whole events vector —
-                // so earlier sequential departures in this resolution aren't grouped
-                // with these.
-                super::zones::mark_simultaneous_departures(
-                    &mut events[events_before_effect..events_after_move],
-                    &super::zones::departed_subset(state, &chosen),
-                );
+                if matches!(effect_kind, EffectKind::Sacrifice) {
+                    // CR 603.10a: the chosen permanents left the battlefield together
+                    // in this single resolution event, so co-departing
+                    // leaves-the-battlefield observers among them (Blood Artist among
+                    // the sacrificed group) observe each other. Stamp only the
+                    // sub-slice this handler produced — never the whole events vector —
+                    // so earlier sequential departures in this resolution aren't grouped
+                    // with these.
+                    super::zones::mark_simultaneous_departures(
+                        &mut events[events_before_effect..events_after_move],
+                        &super::zones::departed_subset(state, &chosen),
+                    );
+                }
                 if let Some(outcome) = batch_or_drain_observer_triggers(
                     state,
                     events,
                     events_before_effect,
                     events_after_move,
+                    true,
                 ) {
                     return Ok(outcome);
                 }
@@ -5200,7 +5248,7 @@ pub(super) fn handle_resolution_choice(
             // CR 603.2 + CR 701.54: RingTemptsYou observer triggers are batched
             // while ChooseRingBearer pauses spell resolution (issue #1017).
             if let Some(outcome) =
-                batch_or_drain_observer_triggers(state, events, events.len(), events.len())
+                batch_or_drain_observer_triggers(state, events, events.len(), events.len(), false)
             {
                 return Ok(outcome);
             }
@@ -5234,7 +5282,7 @@ pub(super) fn handle_resolution_choice(
             // "when you unlock"/"when you fully unlock" abilities; batch or
             // dispatch them now that the choice has resolved.
             if let Some(outcome) =
-                batch_or_drain_observer_triggers(state, events, events_before, events.len())
+                batch_or_drain_observer_triggers(state, events, events_before, events.len(), false)
             {
                 return Ok(outcome);
             }
@@ -5255,9 +5303,13 @@ pub(super) fn handle_resolution_choice(
             // CR 603.2 + CR 309.4c: RoomEntered from the chosen dungeon must dispatch
             // card triggers such as "Whenever you venture into the dungeon" (issue #1297).
             // The resolution-choice path does not run `run_post_action_pipeline`.
-            if let Some(outcome) =
-                batch_or_drain_observer_triggers(state, events, events_before_venture, events.len())
-            {
+            if let Some(outcome) = batch_or_drain_observer_triggers(
+                state,
+                events,
+                events_before_venture,
+                events.len(),
+                false,
+            ) {
                 return Ok(outcome);
             }
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -5287,9 +5339,13 @@ pub(super) fn handle_resolution_choice(
             {
                 state.waiting_for = waiting_for.clone();
             }
-            if let Some(outcome) =
-                batch_or_drain_observer_triggers(state, events, events_before_venture, events.len())
-            {
+            if let Some(outcome) = batch_or_drain_observer_triggers(
+                state,
+                events,
+                events_before_venture,
+                events.len(),
+                false,
+            ) {
                 return Ok(outcome);
             }
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {

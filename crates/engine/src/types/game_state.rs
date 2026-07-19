@@ -1844,6 +1844,21 @@ pub enum LogicalZoneChangeTerminalOutcome {
     Moved { occurrence_ordinal: usize },
 }
 
+/// Terminal result of one attempted zone-move delivery before a logical owner
+/// binds an actual `ZoneChanged` occurrence to its local ordinal.
+///
+/// `Prevented` is materially different from `Remained`: the former means a
+/// replacement prevented the proposed event, while the latter means the
+/// delivery completed without moving the original member. Both have no
+/// `ZoneChanged` occurrence, but CR 603.10 settlement must retain the exact
+/// distinction and use the same-incarnation post-event authority for either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ZoneMoveCompletion {
+    Moved,
+    Prevented,
+    Remained,
+}
+
 /// One actual zone-change record retained by a logical zone-change action.
 ///
 /// The ordinal is action-local, not the per-turn history index. This lets a
@@ -2145,6 +2160,32 @@ impl LogicalZoneChangeGroup {
     /// must retain the distinction.
     pub fn record_remained(&mut self, member: ObjectIncarnationRef) -> Result<(), String> {
         self.record_terminal_for_member(member, LogicalZoneChangeTerminalOutcome::Remained)
+    }
+
+    /// Record the shared zone pipeline's terminal result for one originally
+    /// announced member. A moved result is bound only when the owner's explicit
+    /// delivery slice appends its exact `ZoneChanged` record; every no-event
+    /// result is recorded immediately so completion cannot guess prevention
+    /// from an absent event.
+    pub fn record_delivery_completion(
+        &mut self,
+        object_id: ObjectId,
+        completion: ZoneMoveCompletion,
+    ) -> Result<(), String> {
+        let Some(member) = self
+            .prospective_battlefield_members
+            .iter()
+            .find(|member| member.identity.object_id == object_id)
+            .map(|member| member.identity)
+        else {
+            return Ok(());
+        };
+
+        match completion {
+            ZoneMoveCompletion::Moved => Ok(()),
+            ZoneMoveCompletion::Prevented => self.record_prevented(member),
+            ZoneMoveCompletion::Remained => self.record_remained(member),
+        }
     }
 
     fn record_terminal_for_member(
@@ -2544,6 +2585,10 @@ pub struct PendingZoneChangeDelivery {
     pub member: ObjectIncarnationRef,
     pub expected_event: ProposedEvent,
     pub delivery_events: Vec<GameEvent>,
+    /// Exact terminal classification of the paused delivery once it has
+    /// completed. It remains absent only while the original replacement or
+    /// as-enters prompt is unresolved.
+    pub terminal_completion: Option<ZoneMoveCompletion>,
     pub count: PausedZoneChangeDeliveryCount,
 }
 
@@ -2553,6 +2598,7 @@ impl PendingZoneChangeDelivery {
             member,
             expected_event,
             delivery_events: Vec::new(),
+            terminal_completion: None,
             count: PausedZoneChangeDeliveryCount::NeedsCount,
         }
     }
@@ -2563,6 +2609,36 @@ impl PendingZoneChangeDelivery {
 
     pub fn append_delivery_events(&mut self, events: &[GameEvent]) {
         self.delivery_events.extend_from_slice(events);
+        if self.terminal_completion.is_none()
+            && events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged { record, .. }
+                        if record
+                            .trigger_source_context()
+                            .is_some_and(|context| context.identity.reference == self.member)
+                )
+            })
+        {
+            self.terminal_completion = Some(ZoneMoveCompletion::Moved);
+        }
+    }
+
+    pub fn record_terminal_completion(
+        &mut self,
+        completion: ZoneMoveCompletion,
+    ) -> Result<(), String> {
+        if let Some(existing) = self.terminal_completion {
+            if existing != completion {
+                return Err(format!(
+                    "paused zone-change delivery {}:{} has conflicting terminal completions",
+                    self.member.object_id.0, self.member.incarnation
+                ));
+            }
+            return Ok(());
+        }
+        self.terminal_completion = Some(completion);
+        Ok(())
     }
 
     pub fn mark_counted(&mut self) {
@@ -12692,6 +12768,7 @@ impl GameState {
         member: ObjectIncarnationRef,
         expected_event: &ProposedEvent,
         delivery_events: &[GameEvent],
+        terminal_completion: ZoneMoveCompletion,
     ) -> bool {
         let mut owner_count = 0;
         if let Some(paused) = self
@@ -12701,6 +12778,9 @@ impl GameState {
             .filter(|paused| paused.captures(member, expected_event))
         {
             paused.append_delivery_events(delivery_events);
+            paused
+                .record_terminal_completion(terminal_completion)
+                .expect("one paused zone-change delivery has one terminal completion");
             owner_count += 1;
         }
         if let Some(paused) = self
@@ -12710,6 +12790,9 @@ impl GameState {
             .filter(|paused| paused.captures(member, expected_event))
         {
             paused.append_delivery_events(delivery_events);
+            paused
+                .record_terminal_completion(terminal_completion)
+                .expect("one paused zone-change delivery has one terminal completion");
             owner_count += 1;
         }
         assert!(

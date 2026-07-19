@@ -18,11 +18,11 @@ use crate::types::game_state::{
     BatchCompletion, ExileLinkKind, GameState, LiminalEntryKind, MergedCardComponentRoute,
     PendingBatchDeliveries, PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest,
     PendingCounterPostAction, PendingLiminalEntryResume, PendingZoneChangeDelivery,
-    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking, ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
@@ -621,6 +621,47 @@ pub(crate) enum ZoneMoveResult {
     NeedsAuraAttachmentChoice,
 }
 
+/// Exact completion information used by logical zone-change owners. The public
+/// result surface deliberately remains the established three-way enum; callers
+/// that do not own a logical group do not need terminal provenance.
+pub(crate) enum ZoneMoveTerminalResult {
+    Completed(ZoneMoveCompletion),
+    NeedsChoice(PlayerId),
+    NeedsAuraAttachmentChoice,
+}
+
+impl ZoneMoveTerminalResult {
+    pub(crate) fn into_zone_move_result(self) -> ZoneMoveResult {
+        match self {
+            Self::Completed(_) => ZoneMoveResult::Done,
+            Self::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+            Self::NeedsAuraAttachmentChoice => ZoneMoveResult::NeedsAuraAttachmentChoice,
+        }
+    }
+}
+
+/// Derive the only valid completed-delivery classification from an explicit
+/// slice and the pre-delivery incarnation. A redirect is still `Moved`; an
+/// accepted delivery with no exact `ZoneChanged` record is `Remained`.
+pub(crate) fn zone_move_completion_from_delivery(
+    member: ObjectIncarnationRef,
+    delivery_events: &[GameEvent],
+) -> ZoneMoveCompletion {
+    if delivery_events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged { record, .. }
+                if record
+                    .trigger_source_context()
+                    .is_some_and(|context| context.identity.reference == member)
+        )
+    }) {
+        ZoneMoveCompletion::Moved
+    } else {
+        ZoneMoveCompletion::Remained
+    }
+}
+
 pub(crate) enum ZoneDeliveryResult {
     Done,
     NeedsChoice(PlayerId),
@@ -638,11 +679,21 @@ pub(crate) fn move_object(
     req: ZoneMoveRequest,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    let Some(from_zone) = state.objects.get(&req.object_id).map(|o| o.zone) else {
+    move_object_with_terminal(state, req, events).into_zone_move_result()
+}
+
+pub(crate) fn move_object_with_terminal(
+    state: &mut GameState,
+    req: ZoneMoveRequest,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
+    let Some(object) = state.objects.get(&req.object_id) else {
         // The object no longer exists (already moved / ceased to exist); nothing
         // to do. The unconditional guards in `zones.rs` would no-op anyway.
-        return ZoneMoveResult::Done;
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     };
+    let from_zone = object.zone;
+    let member = ObjectIncarnationRef::from_object(object);
 
     // CR 111.8 + CR 603.2g (PLAN §8 Risk #11): Hoist the cheap object-level guards that
     // `zones::move_to_zone` enforces unconditionally to BEFORE the replacement
@@ -660,7 +711,7 @@ pub(crate) fn move_object(
         // CR 111.8: A token that has left the battlefield can't change zones; it
         // remains in place and ceases to exist at the next SBA (CR 111.7).
         if zones::token_is_outside_battlefield_and_stack(obj) {
-            return ZoneMoveResult::Done;
+            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
         }
         // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
         // permanent onto the battlefield — no entry event occurs, so no
@@ -668,7 +719,7 @@ pub(crate) fn move_object(
         // reject it as a no-op regardless), mirroring the `zones::move_to_zone`
         // no-op guard.
         if from_zone == Zone::Battlefield && req.to == Zone::Battlefield {
-            return ZoneMoveResult::Done;
+            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
         }
     }
 
@@ -735,8 +786,12 @@ pub(crate) fn move_object(
                     // Exhaustiveness arm: default placement.
                     LibraryPosition::RandomWithinTop { .. } => None,
                 };
+                let delivery_start = events.len();
                 zones::move_to_library_at_index(state, req.object_id, index, events);
-                return ZoneMoveResult::Done;
+                return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                    member,
+                    &events[delivery_start..],
+                ));
             }
             let source_id = req.source();
             let mut proposed =
@@ -746,6 +801,7 @@ pub(crate) fn move_object(
             }
             return match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
+                    let delivery_start = events.len();
                     match deliver_replaced_zone_change(
                         state,
                         event,
@@ -759,13 +815,17 @@ pub(crate) fn move_object(
                         Some(position),
                         events,
                     ) {
-                        ZoneDeliveryResult::Done => ZoneMoveResult::Done,
+                        ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
+                            zone_move_completion_from_delivery(member, &events[delivery_start..]),
+                        ),
                         ZoneDeliveryResult::NeedsChoice(player) => {
-                            ZoneMoveResult::NeedsChoice(player)
+                            ZoneMoveTerminalResult::NeedsChoice(player)
                         }
                     }
                 }
-                ReplacementResult::Prevented => ZoneMoveResult::Done,
+                ReplacementResult::Prevented => {
+                    ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented)
+                }
                 ReplacementResult::NeedsChoice(player) => {
                     // CR 616.1: park at the single unparked origin (mirrors
                     // `execute_zone_move`'s NeedsChoice arm) so the prompt surfaces.
@@ -783,7 +843,7 @@ pub(crate) fn move_object(
                     if let Some(pending) = state.pending_replacement.as_mut() {
                         pending.library_placement = Some(position);
                     }
-                    ZoneMoveResult::NeedsChoice(player)
+                    ZoneMoveTerminalResult::NeedsChoice(player)
                 }
             };
         }
@@ -814,20 +874,29 @@ pub(crate) fn move_object(
             applied.extend(seed_applied);
         }
         return match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => match deliver_replaced_zone_change(
-                state,
-                event,
-                source_id,
-                exile_links.duration.as_ref(),
-                track_exiled_by_source,
-                PostReplacementDrainOwner::DeliveryTail,
-                None,
-                events,
-            ) {
-                ZoneDeliveryResult::Done => ZoneMoveResult::Done,
-                ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
-            },
-            ReplacementResult::Prevented => ZoneMoveResult::Done,
+            ReplacementResult::Execute(event) => {
+                let delivery_start = events.len();
+                match deliver_replaced_zone_change(
+                    state,
+                    event,
+                    source_id,
+                    exile_links.duration.as_ref(),
+                    track_exiled_by_source,
+                    PostReplacementDrainOwner::DeliveryTail,
+                    None,
+                    events,
+                ) {
+                    ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
+                        zone_move_completion_from_delivery(member, &events[delivery_start..]),
+                    ),
+                    ZoneDeliveryResult::NeedsChoice(player) => {
+                        ZoneMoveTerminalResult::NeedsChoice(player)
+                    }
+                }
+            }
+            ReplacementResult::Prevented => {
+                ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented)
+            }
             ReplacementResult::NeedsChoice(player) => {
                 // CR 616.1: park the surfaced ordering prompt (mirrors the
                 // placement / `execute_zone_move` NeedsChoice arms). No
@@ -838,7 +907,7 @@ pub(crate) fn move_object(
                 // this is unreachable for the current pool — parked for
                 // correctness if a future to-Hand redirect surfaces a choice.
                 replacement::park_waiting_for(state, player);
-                ZoneMoveResult::NeedsChoice(player)
+                ZoneMoveTerminalResult::NeedsChoice(player)
             }
         };
     }
@@ -869,8 +938,12 @@ pub(crate) fn move_object(
         // pregame library goes through the placement arm, elimination's
         // battlefield departure wants the `mark_layers_full`).
         if matches!(req.cause, ZoneChangeCause::DebugCommand) {
+            let delivery_start = events.len();
             zones::move_to_zone(state, req.object_id, req.to, events);
-            return ZoneMoveResult::Done;
+            return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                member,
+                &events[delivery_start..],
+            ));
         }
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
         if let ProposedEvent::ZoneChange {
@@ -893,6 +966,7 @@ pub(crate) fn move_object(
             *applied = req.replacement_applied;
         }
         let approved = ApprovedZoneChange::seal(proposed);
+        let delivery_start = events.len();
         return match deliver(
             state,
             approved,
@@ -907,12 +981,14 @@ pub(crate) fn move_object(
             },
             events,
         ) {
-            ZoneDeliveryResult::Done => ZoneMoveResult::Done,
-            ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+            ZoneDeliveryResult::Done => ZoneMoveTerminalResult::Completed(
+                zone_move_completion_from_delivery(member, &events[delivery_start..]),
+            ),
+            ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveTerminalResult::NeedsChoice(player),
         };
     }
 
-    execute_zone_move_with_applied(
+    execute_zone_move_with_applied_terminal(
         state,
         req.object_id,
         from_zone,
@@ -2405,7 +2481,44 @@ pub(crate) fn execute_zone_move(
     enter_attached_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    execute_zone_move_with_applied(
+    execute_zone_move_with_terminal(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        events,
+    )
+    .into_zone_move_result()
+}
+
+pub(crate) fn execute_zone_move_with_terminal(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
+    execute_zone_move_with_applied_terminal(
         state,
         obj_id,
         from_zone,
@@ -2426,7 +2539,7 @@ pub(crate) fn execute_zone_move(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_zone_move_with_applied(
+fn execute_zone_move_with_applied_terminal(
     state: &mut GameState,
     obj_id: ObjectId,
     from_zone: Zone,
@@ -2443,7 +2556,14 @@ fn execute_zone_move_with_applied(
     enter_attached_to: Option<AttachTarget>,
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
-) -> ZoneMoveResult {
+) -> ZoneMoveTerminalResult {
+    let Some(member) = state
+        .objects
+        .get(&obj_id)
+        .map(ObjectIncarnationRef::from_object)
+    else {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    };
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
         *applied = replacement_applied;
@@ -2622,7 +2742,11 @@ fn execute_zone_move_with_applied(
                             &enchant_filter,
                         );
                         match legal_targets.as_slice() {
-                            [] => return ZoneMoveResult::Done,
+                            [] => {
+                                return ZoneMoveTerminalResult::Completed(
+                                    ZoneMoveCompletion::Remained,
+                                );
+                            }
                             [TargetRef::Object(id)] => {
                                 *attach_to =
                                     Some(crate::game::game_object::AttachTarget::Object(*id));
@@ -2639,6 +2763,7 @@ fn execute_zone_move_with_applied(
                 }
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
+                let delivery_start = events.len();
                 match deliver_replaced_zone_change(
                     state,
                     event,
@@ -2649,9 +2774,15 @@ fn execute_zone_move_with_applied(
                     library_placement,
                     events,
                 ) {
-                    ZoneDeliveryResult::Done => {}
+                    ZoneDeliveryResult::Done => {
+                        debug_assert_eq!(
+                            zone_move_completion_from_delivery(member, &events[delivery_start..]),
+                            ZoneMoveCompletion::Moved,
+                            "an Aura host choice follows a completed battlefield entry"
+                        );
+                    }
                     ZoneDeliveryResult::NeedsChoice(player) => {
-                        return ZoneMoveResult::NeedsChoice(player);
+                        return ZoneMoveTerminalResult::NeedsChoice(player);
                     }
                 }
                 state.waiting_for = WaitingFor::ReturnAsAuraTarget {
@@ -2669,8 +2800,9 @@ fn execute_zone_move_with_applied(
                         controller,
                     )),
                 };
-                return ZoneMoveResult::NeedsAuraAttachmentChoice;
+                return ZoneMoveTerminalResult::NeedsAuraAttachmentChoice;
             }
+            let delivery_start = events.len();
             match deliver_replaced_zone_change(
                 state,
                 event,
@@ -2683,12 +2815,17 @@ fn execute_zone_move_with_applied(
             ) {
                 ZoneDeliveryResult::Done => {}
                 ZoneDeliveryResult::NeedsChoice(player) => {
-                    return ZoneMoveResult::NeedsChoice(player);
+                    return ZoneMoveTerminalResult::NeedsChoice(player);
                 }
             }
-            ZoneMoveResult::Done
+            ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                member,
+                &events[delivery_start..],
+            ))
         }
-        ReplacementResult::Prevented => ZoneMoveResult::Done,
+        ReplacementResult::Prevented => {
+            ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented)
+        }
         ReplacementResult::NeedsChoice(player) => {
             // CR 616.1: `replace_event` sets only `pending_replacement` — the
             // wait-state was historically each caller's to set, and callers that
@@ -2708,7 +2845,7 @@ fn execute_zone_move_with_applied(
             // wait state is already set by the counter-pause / devour machinery
             // (`replacement_pause_delivery_result` reads it).
             replacement::park_waiting_for(state, player);
-            ZoneMoveResult::NeedsChoice(player)
+            ZoneMoveTerminalResult::NeedsChoice(player)
         }
     }
 }

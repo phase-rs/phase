@@ -290,6 +290,10 @@ pub(super) fn handle_replacement_choice(
                             paused.member,
                             &paused.expected_event,
                             &events[delivery_start..],
+                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                                paused.member,
+                                &events[delivery_start..],
+                            ),
                         );
                     }
                     if let Some(provenance) = parked_sacrifice_provenance {
@@ -1104,6 +1108,14 @@ pub(super) fn handle_replacement_choice(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                state.capture_paused_zone_change_delivery(
+                    paused.member,
+                    &paused.expected_event,
+                    &[],
+                    crate::types::game_state::ZoneMoveCompletion::Prevented,
+                );
+            }
             // CR 616.1f + CR 701.50a: a full-substitution applier (the Leader,
             // Super-Genius connive replacement) can park its OWN interactive
             // choice while running the replacing action. Two shapes occur:
