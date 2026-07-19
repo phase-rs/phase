@@ -336,38 +336,48 @@ fn main() {
         }
         other => {
             stalled = true;
-            // phase#6080: an empty AI-action batch while parked on anything
-            // but GameOver is a driver stall, not a normal game end (the
-            // family of p0-softlock issues #5250/#4345/#5958/#6172/#3886/
-            // #3919/#3233). Print a machine-readable line with enough context
-            // to reproduce (waiting_for variant, turn, active/priority
-            // player, pending-cast summary) plus which break door fired, then
-            // exit with a distinct code — the caller must not silently treat
-            // this as a completed game.
-            println!(
-                "STALL: waiting_for={} turn={} active=P{} priority=P{} pending_cast={}",
-                other.variant_name(),
-                state.turn_number,
-                state.active_player.0,
-                state.priority_player.0,
-                state
-                    .pending_cast
-                    .as_ref()
-                    .map(|pc| format!(
-                        "object={:?} card={:?} variant={:?}",
-                        pc.object_id, pc.card_id, pc.casting_variant
-                    ))
-                    .unwrap_or_else(|| "none".to_string()),
-            );
-            match &last_break_reason {
-                Some(reason) => println!("STALL: break_reason={reason:?}"),
-                None => println!(
-                    "STALL: break_reason=unknown (run_ai_actions batch was non-empty; \
-                     stall detected on a later empty batch this process did not observe)"
-                ),
+            // An action-cap abort already printed its own ABORT line above
+            // and is a distinct, already-diagnosed outcome — it must not
+            // also print the softlock STALL block below, which asserts
+            // `last_break_reason` is unknown (never set on the abort door)
+            // and would misreport an abort as an unexplained stall.
+            if !aborted {
+                // phase#6080: an empty AI-action batch while parked on
+                // anything but GameOver is a driver stall, not a normal game
+                // end (the family of p0-softlock issues #5250/#4345/#5958/
+                // #6172/#3886/#3919/#3233). Print a machine-readable line
+                // with enough context to reproduce (waiting_for variant,
+                // turn, active/priority player, pending-cast summary) plus
+                // which break door fired, then exit with a distinct code —
+                // the caller must not silently treat this as a completed
+                // game.
+                println!(
+                    "STALL: waiting_for={} turn={} active=P{} priority=P{} pending_cast={}",
+                    other.variant_name(),
+                    state.turn_number,
+                    state.active_player.0,
+                    state.priority_player.0,
+                    state
+                        .pending_cast
+                        .as_ref()
+                        .map(|pc| format!(
+                            "object={:?} card={:?} variant={:?}",
+                            pc.object_id, pc.card_id, pc.casting_variant
+                        ))
+                        .unwrap_or_else(|| "none".to_string()),
+                );
+                match &last_break_reason {
+                    Some(reason) => println!("STALL: break_reason={reason:?}"),
+                    None => println!(
+                        "STALL: break_reason=unknown (run_ai_actions batch was non-empty; \
+                         stall detected on a later empty batch this process did not observe)"
+                    ),
+                }
             }
             // Preserved verbatim: pod-lab's runner.py classifies outcomes by
             // matching this exact substring in stdout — do not reword it.
+            // Printed in both the abort and stall cases (kept identical
+            // deliberately, see comment above).
             println!("Game did NOT reach GameOver. waiting_for = {other:?}");
         }
     }
