@@ -30105,7 +30105,7 @@ pub mod tests {
         crate::game::engine::apply_as_current(
             &mut departed,
             GameAction::ChooseOption {
-                choice: "land".to_string(),
+                choice: "Land".to_string(),
             },
         )
         .expect("departed resolution-context choice accepts its answer");
