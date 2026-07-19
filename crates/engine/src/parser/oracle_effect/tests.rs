@@ -12206,6 +12206,110 @@ fn assassins_trophy_its_controller_may_search_chain() {
     );
 }
 
+/// CR 701.21a + CR 701.23a + CR 608.2c (issue #5977): The Hunger Tide Rises
+/// chapter IV — sacrifice any number, then search library and/or graveyard for
+/// a creature with CMC ≤ sacrificed count and put it onto the battlefield,
+/// then conditionally shuffle. Must lower to one multi-zone SearchLibrary with
+/// a single origin-None battlefield put-step — not a duplicate ParentTarget
+/// ChangeZone from a bare-`and` split on "and put it onto the battlefield".
+#[test]
+fn hunger_tide_rises_chapter_iv_sacrifice_search_put_chain() {
+    use crate::types::ability::{AbilityKind, Comparator, FilterProp, QuantityRef, ThisWayCause};
+
+    let def = parse_effect_chain(
+            "Sacrifice any number of creatures. Search your library and/or graveyard for a creature card with mana value less than or equal to the number of creatures sacrificed this way and put it onto the battlefield. If you search your library this way, shuffle.",
+            AbilityKind::Spell,
+        );
+
+    assert!(
+        matches!(&*def.effect, Effect::Sacrifice { .. }),
+        "top-level should be Sacrifice, got {:?}",
+        def.effect
+    );
+
+    let search = def
+        .sub_ability
+        .as_deref()
+        .expect("Sacrifice should chain SearchLibrary");
+    match &*search.effect {
+        Effect::SearchLibrary {
+            source_zones,
+            filter,
+            ..
+        } => {
+            assert_eq!(
+                *source_zones,
+                vec![Zone::Graveyard, Zone::Library],
+                "multi-zone tutor must search graveyard and library"
+            );
+            assert!(
+                matches!(
+                    filter,
+                    TargetFilter::Typed(typed)
+                        if typed.type_filters.contains(&TypeFilter::Creature)
+                            && typed.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::Cmc {
+                                    comparator: Comparator::LE,
+                                    value: QuantityExpr::Ref {
+                                        qty: QuantityRef::FilteredTrackedSetSize {
+                                            caused_by: Some(ThisWayCause::Sacrificed),
+                                            ..
+                                        }
+                                    }
+                                }
+                            ))
+                ),
+                "search filter must cap CMC at sacrificed-this-way count: {filter:?}"
+            );
+        }
+        other => panic!("expected SearchLibrary, got {other:?}"),
+    }
+
+    let put = search
+        .sub_ability
+        .as_deref()
+        .expect("SearchLibrary should chain battlefield put-step");
+    match &*put.effect {
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } => {
+            assert_eq!(
+                *origin, None,
+                "multi-zone search put must use origin None (card may be found in graveyard)"
+            );
+            assert_eq!(*destination, Zone::Battlefield);
+            assert_eq!(*target, TargetFilter::Any);
+        }
+        other => panic!("expected ChangeZone put-step, got {other:?}"),
+    }
+
+    assert!(
+        !matches!(
+            put.sub_ability.as_deref().map(|d| &*d.effect),
+            Some(Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                ..
+            })
+        ),
+        "must not duplicate the put-step with a stray ParentTarget ChangeZone"
+    );
+
+    let shuffle = put
+        .sub_ability
+        .as_deref()
+        .expect("put-step should chain conditional shuffle");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "expected Shuffle tail, got {:?}",
+        shuffle.effect
+    );
+}
+
 /// CR 608.2c + CR 117.3a + CR 701.23a + CR 603.7: Winds of
 /// Abandon — iterated subject-anchored search. The structure mirrors
 /// Assassin's Trophy but the search step carries `repeat_for:

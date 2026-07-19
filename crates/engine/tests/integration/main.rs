@@ -531,6 +531,7 @@ mod issue_5820_susan_foreman;
 mod issue_5821_psychic_paper_attach_choice;
 mod issue_583_vivi_ornitier_mana_source;
 mod issue_5972_tracked_set_token_cleanup;
+mod issue_5977_hunger_tide_chapter_iv;
 mod issue_5983_sothera_dies_edict;
 mod issue_5984_aloy_discover_on_attack;
 mod issue_5988_braids_arisen_nightmare;
