@@ -155,6 +155,28 @@ fn main() {
     };
     let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
 
+    // Post-resolution deck-count line (plan §3.9): `resolve_deck_list` silently
+    // skips any name the card database doesn't recognize, so the pre-resolution
+    // "main: N cards" print above can't prove a deck actually loaded full-size.
+    // Print the resolved per-seat counts too, so a harness parsing stdout can
+    // detect silent-skip drift (a resolved count short of the pre-resolution
+    // one) without needing engine internals.
+    println!("Resolved deck sizes (post name-resolution, 0-indexed by seat):");
+    for (i, seat) in [
+        &payload.player,
+        &payload.opponent,
+        &payload.ai_decks[0],
+        &payload.ai_decks[1],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let main_count: u32 = seat.main_deck.iter().map(|e| e.count).sum();
+        let commander_count: u32 = seat.commander.iter().map(|e| e.count).sum();
+        println!("  P{i}  main={main_count:>3}  commander={commander_count}");
+    }
+    println!();
+
     let mut state = GameState::new(FormatConfig::commander(), 4, seed);
     load_deck_into_state(&mut state, &payload);
 
