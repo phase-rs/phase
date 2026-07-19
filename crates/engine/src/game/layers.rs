@@ -1321,6 +1321,7 @@ fn evaluate_condition_with_context(
             | crate::types::ability::ObjectScope::Anaphoric
             // Never produced for a duration tap condition; fails safely.
             | crate::types::ability::ObjectScope::OtherRevealedCard
+            | crate::types::ability::ObjectScope::OwnedLinkedExileCard
             | crate::types::ability::ObjectScope::Demonstrative
             | crate::types::ability::ObjectScope::AmassedArmy => false,
         },

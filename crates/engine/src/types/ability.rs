@@ -5171,6 +5171,15 @@ pub enum ObjectScope {
     /// hand. Fail-closed to a null read (→ 0) when no "other" entry exists (empty
     /// library or an illegal target on resolution, CR 608.2b).
     OtherRevealedCard,
+    /// CR 607.2a + CR 108.3 + CR 202.3: The single source-linked exiled card
+    /// that the resolving ability's CONTROLLER OWNS — "the card you own exiled
+    /// this way". Resolved over `linked_exile_cards_for_source(state,
+    /// ability.source_id)` selecting `owner == ability.controller`. Distinct from
+    /// `OtherRevealedCard` (a per-resolution reveal-local, chosen by exclusion):
+    /// this is a source-persistent exile-pile member selected by ownership.
+    /// Mana-value-only referent today. NOTE: a THIRD set-member ObjectScope should
+    /// trigger a `SetMember { set, selector }` parameterization round.
+    OwnedLinkedExileCard,
 }
 
 /// Source set for counting distinct card types.

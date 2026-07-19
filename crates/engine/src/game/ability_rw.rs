@@ -2143,6 +2143,9 @@ fn legacy_object_scope(s: &ObjectScope) -> bool {
         // Per-resolution local surfaced by THIS ability's own reveal — not one of
         // the 12 retained legacy refs (mirrors the LastRevealed precedent).
         | ObjectScope::OtherRevealedCard
+        // Source-persistent exile-pile member read (not one of the retained
+        // legacy refs), mirroring the OtherRevealedCard precedent.
+        | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::EventTarget => false,
     }
 }
@@ -3537,6 +3540,11 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
             reads_board_of(kind)
         }
         ObjectScope::AmassedArmy => member_bound_read(),
+        // CR 607.2a: a source-persistent exile-pile member read across resolutions
+        // (not a per-resolution reveal-local like `OtherRevealedCard`). It must be
+        // member-bound so same-event ability ordering (`profiles_conflict` via
+        // `reads_member_bound`) does not fail open. Mirrors `AmassedArmy`.
+        ObjectScope::OwnedLinkedExileCard => member_bound_read(),
         ObjectScope::EventSource | ObjectScope::EventTarget => reads_event_live(),
         // §L7 precedent (CR 608.2c): a per-resolution local surfaced by THIS
         // ability's own reveal within the same resolution — observed by no

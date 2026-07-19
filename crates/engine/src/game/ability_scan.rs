@@ -2628,6 +2628,9 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // axis, like the demonstrative/anaphoric referents.
         ObjectScope::OtherRevealedCard => Axes::NONE,
         ObjectScope::AmassedArmy => Axes::NONE,
+        // CR 607.2a: source-persistent exile-pile member read — no event/sibling
+        // projected axis (mirrors AmassedArmy).
+        ObjectScope::OwnedLinkedExileCard => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,

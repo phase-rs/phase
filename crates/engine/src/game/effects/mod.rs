@@ -9304,6 +9304,7 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::EventSource
             | crate::types::ability::ObjectScope::CostPaidObject
             | crate::types::ability::ObjectScope::OtherRevealedCard
+            | crate::types::ability::ObjectScope::OwnedLinkedExileCard
             | crate::types::ability::ObjectScope::EventTarget
             | crate::types::ability::ObjectScope::AmassedArmy => false,
         },
@@ -9529,6 +9530,7 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::EventSource
                 | crate::types::ability::ObjectScope::CostPaidObject
                 | crate::types::ability::ObjectScope::OtherRevealedCard
+                | crate::types::ability::ObjectScope::OwnedLinkedExileCard
                 | crate::types::ability::ObjectScope::EventTarget
                 | crate::types::ability::ObjectScope::AmassedArmy => None,
             };

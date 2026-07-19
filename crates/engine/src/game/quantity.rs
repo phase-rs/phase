@@ -23,10 +23,11 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{DamageRecord, GameState, LinkedExileSnapshot};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// Scope information for quantity resolution.
 ///
@@ -243,6 +244,9 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             // CR 608.2c: the other revealer's card is a per-resolution referent,
             // resolved only at resolution time (never a static CDA read).
             | ObjectScope::OtherRevealedCard
+            // CR 607.2a: the source-linked exiled card is read from live exile
+            // links only at resolution time, never as a static CDA read.
+            | ObjectScope::OwnedLinkedExileCard
             | ObjectScope::Demonstrative
             | ObjectScope::AmassedArmy => true,
         }
@@ -277,6 +281,23 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
                 || quantity_expr_uses_resolution_only_object_scope(right)
         }
     }
+}
+
+/// CR 607.2a + CR 608.2c: Return the source-linked cards explicitly bound to
+/// this resolved ability. A nonempty result is the current materialized
+/// candidate set and is authoritative over the source's persistent exile pile.
+fn materialized_linked_exile_candidates(
+    ability: &ResolvedAbility,
+    linked: &[LinkedExileSnapshot],
+) -> Vec<ObjectId> {
+    ability
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) if linked.iter().any(|link| link.exiled_id == *id) => Some(*id),
+            TargetRef::Object(_) | TargetRef::Player(_) => None,
+        })
+        .collect()
 }
 
 /// CR 701.57c: True when `scope` is a resolution-only object scope whose referent
@@ -321,6 +342,25 @@ fn resolution_only_scope_referent_present(
         ObjectScope::OtherRevealedCard => {
             let own = ability.effect_context_object.as_ref().map(|s| s.object_id);
             state.last_revealed_ids.iter().any(|id| Some(*id) != own)
+        }
+        // CR 607.2a + CR 608.2c: A materialized current-resolution candidate set
+        // is authoritative, including when none of its cards has the required
+        // owner. Persistent linked-exile history is only a fallback when no
+        // current candidate set was supplied at all.
+        ObjectScope::OwnedLinkedExileCard => {
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let linked =
+                crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+            let current_candidates = materialized_linked_exile_candidates(ability, &linked);
+            if current_candidates.is_empty() {
+                return linked.iter().any(|link| link.owner == controller);
+            }
+            current_candidates.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Exile && obj.owner == controller)
+            })
         }
         ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
     }
@@ -3863,6 +3903,7 @@ fn object_for_scope<'a>(
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
         | ObjectScope::AmassedArmy => None,
     }
@@ -3916,6 +3957,7 @@ fn object_id_for_scope(
         ObjectScope::CostPaidObject
         | ObjectScope::Anaphoric
         | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
         | ObjectScope::AmassedArmy => None,
     }
@@ -4527,6 +4569,8 @@ where
         // toughness, so this is a fail-closed placeholder. Extend by mirroring the
         // `last_revealed_ids` by-exclusion read in `resolve_object_mana_value`.
         ObjectScope::OtherRevealedCard => 0,
+        // MV-only referent; no P/T semantics.
+        ObjectScope::OwnedLinkedExileCard => 0,
     }
 }
 
@@ -4726,6 +4770,37 @@ fn resolve_object_mana_value(
                     )
                 })
                 .unwrap_or(0)
+        }
+        // CR 607.2a + CR 108.3: mana value of the source-linked exiled card the
+        // ability's controller owns ("... than it" in "the card you own exiled
+        // this way and each other card exiled this way with lesser mana value
+        // than it").
+        ObjectScope::OwnedLinkedExileCard => {
+            let Some(ability) = ability else {
+                return 0;
+            };
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let linked =
+                crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+            // CR 607.2a + CR 608.2c: When a same-resolution linked-exile grant
+            // materializes candidate cards into `ability.targets`, that current
+            // set is authoritative. An owner miss resolves to no referent (0);
+            // it must not borrow an older owned card from the persistent pile.
+            let current_candidates = materialized_linked_exile_candidates(ability, &linked);
+            let current_mana_value = current_candidates.iter().find_map(|id| {
+                state.objects.get(id).and_then(|obj| {
+                    (obj.zone == Zone::Exile && obj.owner == controller)
+                        .then(|| u32_to_i32_saturating(obj.effective_mana_value()))
+                })
+            });
+            if current_candidates.is_empty() {
+                linked
+                    .iter()
+                    .find(|link| link.owner == controller)
+                    .map_or(0, |link| u32_to_i32_saturating(link.mana_value))
+            } else {
+                current_mana_value.unwrap_or(0)
+            }
         }
     }
 }
