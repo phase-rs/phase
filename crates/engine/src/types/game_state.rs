@@ -1130,6 +1130,16 @@ pub struct LoopActionContext {
     /// CR 702.51a: the convoke mode the recast injector's pin re-binds live each iteration
     /// (`None` when the recast pays no convoke cost, and always `None` for an `Activate`).
     pub convoke: Option<ConvokeMode>,
+    /// CR 732.2a (FIX-1): the fixed in-cycle player choices recorded during the demonstrated
+    /// iteration (tap-cost target, mana-color, proliferate target), replayed by the object-growth
+    /// detection drive via `build_recast_template` → `decision_template::resolve`. Round-trips via
+    /// serde for an offer-save KEPT by the conditional load migration (FIX-3); a save captured
+    /// outside an object-growth shortcut window drops the whole sequence on load and re-records the
+    /// pins from live play. Compared cross-cycle (element-wise `Vec` `PartialEq`) in the
+    /// object-growth cover gates; frozen byte-identical across the drive frames (accumulate is gated
+    /// `!in_simulation_probe()`), so a genuine loop's pins match.
+    #[serde(default)]
+    pub pins: Vec<crate::analysis::decision_template::PinnedDecision>,
 }
 
 /// Serde deserialize shim for `LoopActionContext`. Accepts BOTH the current nested shape
@@ -1148,6 +1158,10 @@ struct LoopActionContextRepr {
     from_zone: Option<Zone>, // pre-rename flat RecastContext shape
     #[serde(default)]
     uses_buyback: Option<BuybackUsage>,
+    /// CR 732.2a (FIX-1 + FIX-3): recorded fixed in-cycle choices. Round-trips for an offer-save
+    /// kept by the conditional load migration; `default` empty for pre-FIX-1 / pre-rename shapes.
+    #[serde(default)]
+    pins: Vec<crate::analysis::decision_template::PinnedDecision>,
 }
 
 impl From<LoopActionContextRepr> for LoopActionContext {
@@ -1162,17 +1176,21 @@ impl From<LoopActionContextRepr> for LoopActionContext {
             controller: r.controller,
             action,
             convoke: r.convoke,
+            // FIX-1 + FIX-3 (CONDITIONAL migration): the sequence deserializes normally, so an
+            // offer-save's recorded choices round-trip; pre-FIX-1 / pre-rename shapes default empty.
+            pins: r.pins,
         }
     }
 }
 
-/// Serde deserialize shim for `GameState::last_loop_action_sequence` (P7 v3 rename). Accepts
-/// BOTH the current array shape (`[LoopActionContext, ..]`) AND the pre-P7 single-object shape
-/// (a mid-loop save taken when the field was `Option<LoopActionContext>`, serialized as one
-/// object) — the latter maps to a 1-element vec. `null` / absent (the `#[serde(default)]` path)
-/// maps to an empty vec. Only affects deserialize; the serialized surface is always an array
+/// Serde deserialize shim for `GameState::last_loop_action_sequence`. Accepts BOTH the current
+/// array shape (`[LoopActionContext, ..]`) AND the pre-P7 single-object shape (a mid-loop save
+/// taken when the field was `Option<LoopActionContext>`, serialized as one object) — the latter
+/// maps to a 1-element vec. `null` / absent (the `#[serde(default)]` path) maps to an empty vec.
+/// Only affects deserialize; the serialized surface is always an array
 /// (`skip_serializing_if = "Vec::is_empty"`). Each element still flows through
-/// `LoopActionContextRepr`, so the even-older flat `RecastContext` element shape migrates too.
+/// `LoopActionContextRepr`, so the even-older flat `RecastContext` element shape (and FIX-1 `pins`)
+/// migrates too.
 fn deserialize_loop_action_sequence<'de, D>(
     deserializer: D,
 ) -> Result<Vec<LoopActionContext>, D::Error>
@@ -7021,6 +7039,29 @@ impl TrustedGameStateEnvelope {
     }
 }
 
+impl GameState {
+    /// CR 732.2a (FIX-3) load migration: `last_loop_action_sequence` is transient loop-detection
+    /// bookkeeping that re-accumulates from live play. On restore, DROP it UNLESS the save was
+    /// captured inside an object-growth shortcut proposal/response window
+    /// (`WaitingFor::LoopShortcut` / `RespondToShortcut`), where the pending accept→materialize
+    /// resolution still re-derives the ∞ pile from it (`current_period_fodder`). In every
+    /// other loaded state the only consumer is the live detection re-drive
+    /// (`try_offer_object_growth_shortcut`), which requires `Priority` + an empty stack and is only
+    /// HARMED by a stale loaded prefix (it re-drives from a pinless `seq[0]` and aborts — the Kilo
+    /// bug), so dropping is strictly safe. Called from `PersistedGameState::into_game_state`, the
+    /// single production restore chokepoint for both the server (`GameSession::from_persisted`) and
+    /// WASM (`decode_restored_game_state`) paths. Applies only at the load boundary, never during
+    /// live play (where a populated sequence at `Priority` is the legitimate detection signal).
+    pub fn migrate_transient_loop_sequence(&mut self) {
+        if !matches!(
+            self.waiting_for,
+            WaitingFor::LoopShortcut { .. } | WaitingFor::RespondToShortcut { .. }
+        ) {
+            self.last_loop_action_sequence.clear();
+        }
+    }
+}
+
 /// Decodes both current trusted snapshots and historical raw `GameState`
 /// snapshots. The raw form has no pre-cast route authority, so restoring it
 /// always drops any protocol wait before it reaches a live game session.
@@ -7101,14 +7142,18 @@ impl PersistedGameState {
 
     /// Restores the persisted form through the appropriate trust boundary.
     pub fn into_game_state(self) -> GameState {
-        match self {
+        let mut state = match self {
             Self::Raw(state) => {
                 let mut state = *state;
                 crate::game::precast_copy_shortcut::normalize_untrusted_restore(&mut state);
                 state
             }
             Self::Trusted(envelope) => (*envelope).into_game_state(),
-        }
+        };
+        // CR 732.2a (FIX-3): drop stale transient loop-detection bookkeeping on load unless the save
+        // sits in an object-growth shortcut window whose pending resolution still consumes it.
+        state.migrate_transient_loop_sequence();
+        state
     }
 }
 
@@ -12642,21 +12687,33 @@ pub struct GameState {
     /// it would recreate the identity-field loop leak Condition 2 fixes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_source_relatch: Option<ResolutionSourceRelatch>,
-    /// CR 732.2a (PR-7 Phase 4d-ii, P7 v3): the ordered SEQUENCE of loop-driving ACTIONS in the
-    /// current loop period — a buyback-paid permanent-creating recast (CR 601.2a) is a 1-element
-    /// sequence; a multi-activation engine (CR 602.2a — e.g. Basalt Monolith's mana beat then its
-    /// separate untap beat) accumulates one element per driving activation. EMPTY = unarmed. Set
-    /// at each driving beat, read at the post-resolution empty-stack `Priority` window. Transient:
-    /// deliberately EXCLUDED from `impl PartialEq for GameState` (a decision context, not durable
+    /// CR 732.2a (FIX-3, CONDITIONAL migration): TRANSIENT shortcut-OFFER bookkeeping — the ordered
+    /// SEQUENCE of loop-driving ACTIONS in the current loop period (a buyback-paid permanent-creating
+    /// recast, CR 601.2a, is a 1-element sequence; a multi-activation engine, CR 602.2a, accumulates
+    /// one element per driving activation), each carrying the fixed in-cycle player choices recorded
+    /// during the demonstrated iteration (FIX-1 `LoopActionContext.pins`). EMPTY = unarmed. Set at
+    /// each driving beat, read at the post-resolution empty-stack `Priority` window.
+    ///
+    /// Deserializes NORMALLY (so an offer-save's `pins` round-trip), but the PRODUCTION restore hook
+    /// `GameState::migrate_transient_loop_sequence` (called from `PersistedGameState::into_game_state`)
+    /// DROPS it on load UNLESS the save was captured inside an object-growth shortcut
+    /// proposal/response window (`WaitingFor::LoopShortcut` / `RespondToShortcut`), where the pending
+    /// accept→materialize resolution re-derives the ∞ pile from it (`current_period_fodder` →
+    /// `materialize_object_growth_shortcut`). Everywhere else the sole load-time consumer is the live
+    /// detection re-drive (`try_offer_object_growth_shortcut`, which requires `Priority` + an empty
+    /// stack); a stale loaded prefix can only ABORT that drive (the Kilo bug), so dropping is strictly
+    /// safe and the sequence re-accumulates from live play. This REPLACES Design A's blanket
+    /// `#[serde(skip)]`, which regressed the predecessor object-growth offer-saves by starving
+    /// accept→materialize of the pile. Pre-FIX-3 back-compat (`deserialize_loop_action_sequence`
+    /// single-object shape + the two key aliases) is preserved. Rules-neutral (no permanent, counter,
+    /// life, zone, priority, or stack state depends on it).
+    ///
+    /// Deliberately EXCLUDED from `impl PartialEq for GameState` (a decision context, not durable
     /// board state) and COMPARED explicitly only in the object-growth cover gates
-    /// (`analysis::resource::eq_except_growable` / `loop_states_equal_modulo_resources`,
+    /// (`analysis::resource::loop_states_equal_modulo_resources` + `eq_except_growable`,
     /// fail-closed — `Vec` `PartialEq` is order-sensitive, so a heterogeneous/reordered sequence
-    /// is caught). EMPTY in filtered/serialized snapshots (byte-preserving). Three-layer
-    /// back-compat: `deserialize_loop_action_sequence` accepts the pre-P7 single-object shape (an
-    /// old `Option<LoopActionContext>` value) as a 1-element vec; `#[serde(alias)]` migrates the
-    /// old `last_loop_action_context` / `last_recast_context` KEYS; and `LoopActionContext`'s
-    /// `#[serde(from = "LoopActionContextRepr")]` migrates the even-older flat `RecastContext`
-    /// element shape (`from_zone` + `uses_buyback`, no `action`).
+    /// is caught). The `pins` participate element-wise; frozen byte-identical across the drive
+    /// frames (accumulate is gated `!in_simulation_probe()`).
     #[serde(
         default,
         alias = "last_recast_context",
@@ -16732,6 +16789,7 @@ mod tests {
                 uses_buyback: BuybackUsage::Used,
             },
             convoke: None,
+            pins: Vec::new(),
         };
         let old = serde_json::json!({
             "card_id": serde_json::to_value(want.card_id).unwrap(),

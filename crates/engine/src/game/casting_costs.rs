@@ -8242,6 +8242,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
                         uses_buyback: crate::types::game_state::BuybackUsage::Used,
                     },
                     convoke,
+                    // FIX-1: a buyback recast pins its loop choices via `convoke`, not the
+                    // FIX-1 tap-cost/color/proliferate choices — recorded pinless.
+                    pins: Vec::new(),
                 })
                 .map(|ctx| vec![ctx])
                 .unwrap_or_default();

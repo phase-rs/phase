@@ -5253,6 +5253,9 @@ fn apply_trigger_order_template(
                 | PinnedDecision::Mode { .. }
                 | PinnedDecision::MayChoice { .. }
                 | PinnedDecision::UnlessBreak { .. }
+                // CR 608.2d: a mana-color pin is a CR 732.2a loop-choice template pin, never a
+                // CR 603.3b trigger-ordering pin.
+                | PinnedDecision::ManaColor { .. }
                 // CR 601.2h: a convoke cost-payment pin is a CR 732.2a loop-choice
                 // template pin, never a CR 603.3b trigger-ordering pin.
                 | PinnedDecision::ConvokeTaps { .. } => None,

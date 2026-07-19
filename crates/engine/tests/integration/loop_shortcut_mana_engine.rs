@@ -598,54 +598,107 @@ fn mana_engine_off_mode_is_byte_identical() {
     );
 }
 
-/// Finding C — the REAL rename means single-action loops are 1-element Vecs AND multi-action loops
-/// are 2+-element Vecs; both must serde round-trip, and a pre-P7 single-object save (old
-/// `Option<LoopActionContext>` shape under the old key) must migrate to a 1-element Vec.
+/// FIX-3 (CR 732.2a, CONDITIONAL load migration): `last_loop_action_sequence` deserializes NORMALLY
+/// (its `pins` round-trip — B2 restored), but the PRODUCTION restore hook
+/// `PersistedGameState::into_game_state` → `GameState::migrate_transient_loop_sequence` DROPS it on
+/// load UNLESS the save sits in an object-growth shortcut proposal/response window
+/// (`WaitingFor::LoopShortcut` / `RespondToShortcut`), whose pending accept→materialize resolution
+/// re-derives the ∞ pile from the sequence. This REPLACES the Design-A blanket `#[serde(skip)]`
+/// (always-drop) contract, which regressed the predecessor `combo_infinite_pile` offer-saves by
+/// starving accept→materialize of the pile.
+///
+/// DISCRIMINATING — the ONLY guard on the load migration + the B2 pins round-trip (the field is
+/// EXCLUDED from `impl PartialEq for GameState`). Parts (a) and (b) round-trip the SAME populated,
+/// PINNED sequence through the real production hook and differ ONLY in `waiting_for`, so the
+/// outcome FLIPS: a hook that ignored `waiting_for` (Design A, always-drop) fails (b); a hook that
+/// never dropped fails (a). Part (b) additionally asserts the pin survived (Design A dropped pins).
 #[test]
-fn loop_action_sequence_serde_round_trips_and_migrates() {
-    // (a) round-trip a 2-element sequence through the full GameState serde.
-    let mut state = GameState::new_two_player(1);
-    let step = |idx: usize| LoopActionContext {
+fn loop_action_sequence_conditional_load_migration() {
+    use engine::analysis::decision_template::{
+        DecisionSlot, PinnedDecision, ShortcutDecisionSchema,
+    };
+    use engine::analysis::loop_check::LoopCertificate;
+    use engine::analysis::resource::BoardDelta;
+    use engine::types::game_state::{PersistedGameState, YieldTarget};
+    use engine::types::mana::ManaColor;
+
+    let mana_color_pin = || PinnedDecision::ManaColor {
+        slot: DecisionSlot {
+            source: YieldTarget::ThisObject {
+                source_id: ObjectId(7),
+                incarnation: None,
+                trigger_description: None,
+            },
+            index: 1,
+        },
+        color: ManaColor::Blue,
+    };
+    let pinned_step = || LoopActionContext {
         card_id: CardId(4242),
         controller: P0,
         action: LoopAction::Activate {
             source_id: ObjectId(7),
-            ability_index: idx,
+            ability_index: 1,
         },
         convoke: None,
+        pins: vec![mana_color_pin()],
     };
-    state.last_loop_action_sequence = vec![step(0), step(1)];
-    let json = serde_json::to_string(&state).expect("serialize");
-    let back: GameState = serde_json::from_str(&json).expect("deserialize array shape");
+
+    // (a) captured at empty-stack `Priority` (NOT a shortcut window) → the production hook DROPS the
+    //     sequence. It deserializes NON-EMPTY first, proving the drop is the migration hook, not the
+    //     `#[serde(skip)]` derive (which Design A used and which regressed the predecessor tests).
+    let mut at_priority = GameState::new_two_player(1);
+    at_priority.waiting_for = WaitingFor::Priority { player: P0 };
+    at_priority.last_loop_action_sequence = vec![pinned_step(), pinned_step()];
+    let raw = serde_json::to_string(&at_priority).expect("serialize");
+    assert!(
+        raw.contains("last_loop_action_sequence"),
+        "a populated sequence IS serialized (skip_serializing_if only skips the EMPTY case)"
+    );
+    let deserialized: GameState = serde_json::from_str(&raw).expect("deserialize");
     assert_eq!(
-        back.last_loop_action_sequence,
-        vec![step(0), step(1)],
-        "the 2-element multi-action sequence round-trips byte-for-byte"
+        deserialized.last_loop_action_sequence.len(),
+        2,
+        "the sequence deserializes NORMALLY (len 2) — the drop is the load hook, not the derive"
+    );
+    let restored = PersistedGameState::Raw(Box::new(at_priority)).into_game_state();
+    assert!(
+        restored.last_loop_action_sequence.is_empty(),
+        "FIX-3: a Priority-captured save DROPS the transient sequence on load"
     );
 
-    // (b) migrate a pre-P7 single-object save: the old KEY `last_loop_action_context` holding a
-    // single object (not an array) must deserialize to a 1-element Vec.
-    let mut single = GameState::new_two_player(1);
-    single.last_loop_action_sequence = vec![step(3)];
-    let mut v: serde_json::Value = serde_json::to_value(&single).expect("to_value");
-    let obj = v.as_object_mut().unwrap();
-    // Extract the lone element and re-key it under the OLD name as a bare object.
-    let elem = obj
-        .remove("last_loop_action_sequence")
-        .and_then(|a| a.as_array().and_then(|arr| arr.first().cloned()))
-        .expect("the 1-element array");
-    obj.insert("last_loop_action_context".to_string(), elem);
-    let migrated: GameState =
-        serde_json::from_value(v).expect("deserialize pre-P7 single-object shape");
+    // (b) captured at a `LoopShortcut` offer window → the production hook KEEPS the sequence, and the
+    //     recorded pin round-trips (B2). SAME sequence as (a); ONLY `waiting_for` differs ⇒ the
+    //     keep/drop outcome flips, isolating the discriminator to `waiting_for`.
+    let mut at_offer = GameState::new_two_player(1);
+    at_offer.waiting_for = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: None,
+        certificate: LoopCertificate {
+            unbounded: vec![ResourceAxis::TokensCreated],
+            win_kind: WinKind::Advantage,
+            mandatory: false,
+            residual_board_delta: BoardDelta::default(),
+        },
+        schema: ShortcutDecisionSchema::default(),
+    };
+    at_offer.last_loop_action_sequence = vec![pinned_step()];
+    let json = serde_json::to_string(&at_offer).expect("serialize offer save");
+    let reloaded: GameState = serde_json::from_str(&json).expect("deserialize offer save");
+    let restored_offer = PersistedGameState::Raw(Box::new(reloaded)).into_game_state();
     assert_eq!(
-        migrated.last_loop_action_sequence,
-        vec![step(3)],
-        "a pre-P7 single-object save migrates to a 1-element Vec (key alias + one-or-many shim)"
+        restored_offer.last_loop_action_sequence.len(),
+        1,
+        "FIX-3: a LoopShortcut-captured offer-save KEEPS the sequence on load (accept→materialize needs it)"
+    );
+    assert_eq!(
+        restored_offer.last_loop_action_sequence[0].pins,
+        vec![mana_color_pin()],
+        "B2: the recorded pins round-trip for a kept offer-save (Design A's #[serde(skip)] dropped them)"
     );
 
-    // (c) a missing field deserializes to an empty Vec.
-    let mut empty = GameState::new_two_player(1);
-    empty.last_loop_action_sequence.clear();
+    // (c) an empty sequence is skipped on the wire and a missing field defaults to empty (UNCHANGED).
+    let empty = GameState::new_two_player(1);
     let json = serde_json::to_string(&empty).expect("serialize empty");
     assert!(
         !json.contains("last_loop_action_sequence"),

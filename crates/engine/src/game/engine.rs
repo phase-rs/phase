@@ -801,16 +801,37 @@ fn build_shortcut_schema(
                     kind: DecisionPointKind::ConvokeTaps { tappable },
                 })
             }
-            // No Stage-1 offer path reifies a targeted / modal / may / unless decision (targeted
-            // loops reach the offer only after the Stage-2 gate-relax). Fail-loud in dev,
-            // fail-safe (drop) in prod — no producer emits one yet.
-            PinnedDecision::Targets { .. }
-            | PinnedDecision::Mode { .. }
+            // FIX-1 (B1): reify the recorded fixed in-cycle choices. The drive replays these SAME
+            // pins via `decision_template::resolve` (CR 608.2b ByIdentity live re-binding), so the
+            // offer schema carries their read-side dual (one template = single source of truth).
+            // CR 608.2b: resolve each pinned target to its live legal `TargetRef` — the pinned
+            // identity IS the singleton legal set (a fixed declinable ∞ offer, no FE re-selection).
+            PinnedDecision::Targets { slot, targets } => {
+                let legal_targets: Vec<crate::types::ability::TargetRef> = targets
+                    .iter()
+                    .filter_map(|t| {
+                        crate::analysis::decision_template::resolve_target_ref(t, slot, 0, state)
+                    })
+                    .collect();
+                Some(DecisionPoint {
+                    slot: slot.clone(),
+                    kind: DecisionPointKind::Targets { legal_targets },
+                })
+            }
+            // CR 608.2d: the latched mana color — a read-only fixed point (no legal set to bound).
+            PinnedDecision::ManaColor { slot, color } => Some(DecisionPoint {
+                slot: slot.clone(),
+                kind: DecisionPointKind::ManaColor { color: *color },
+            }),
+            // No Stage-1 offer path reifies a modal / may / unless decision (those loops reach the
+            // offer only after the Stage-2 gate-relax). Fail-loud in dev, fail-safe (drop) in prod
+            // — no producer emits one yet.
+            PinnedDecision::Mode { .. }
             | PinnedDecision::MayChoice { .. }
             | PinnedDecision::UnlessBreak { .. } => {
                 debug_assert!(
                     false,
-                    "Stage-1 schema builder: only ConvokeTaps is reified; Targets/Mode/MayChoice/UnlessBreak are Stage-2 producers"
+                    "Stage-1 schema builder: only ConvokeTaps/Targets/ManaColor are reified; Mode/MayChoice/UnlessBreak are Stage-2 producers"
                 );
                 None
             }
@@ -1517,6 +1538,108 @@ fn accumulate_loop_action_step(
     state.last_loop_action_sequence.push(step);
 }
 
+/// FIX-1 (CR 732.2a): append a recorded fixed in-cycle player choice (tap-cost target, mana
+/// color, or proliferate target) to the CURRENT loop-period step — the driving `Activate` step
+/// the choice belongs to (`last_mut`; the Relic activation for the Kilo loop, whose cost/trigger
+/// choices are all answered before the next driving activation appends a new step). Gated EXACTLY
+/// like the samplers (`samples() && !in_simulation_probe()`): #4603-Off never records, and the
+/// detection/materialize drive (under `SimulationProbeGuard`) REPLAYS pins without re-recording
+/// them — keeping the sequence byte-stable across the cover's `s_n`/`s_n1`/`s_n2` frames. No-op
+/// unless a period is accumulating for `controller` (there is no step to attach the pin to
+/// otherwise, and a mid-period controller mismatch is a different loop).
+fn record_loop_pin(
+    state: &mut GameState,
+    controller: PlayerId,
+    pin: crate::analysis::decision_template::PinnedDecision,
+) {
+    if !state.loop_detection.samples() || in_simulation_probe() {
+        return;
+    }
+    if let Some(step) = state.last_loop_action_sequence.last_mut() {
+        if step.controller == controller {
+            step.pins.push(pin);
+        }
+    }
+}
+
+/// FIX-1 (CR 608.2d): the WUBRG color of a `SingleColor` mana choice, for pinning an "add one mana
+/// of any color" loop-neutrality choice. `None` for a colorless single choice or a `Combination`
+/// (not this pinnable loop class — the drive then aborts unpinned at the `ChooseManaColor` beat,
+/// fail-safe: no false offer).
+fn pinnable_mana_color(
+    choice: &crate::types::game_state::ManaChoice,
+) -> Option<crate::types::mana::ManaColor> {
+    use crate::types::game_state::ManaChoice;
+    use crate::types::mana::{ManaColor, ManaType};
+    match choice {
+        ManaChoice::SingleColor(ManaType::White) => Some(ManaColor::White),
+        ManaChoice::SingleColor(ManaType::Blue) => Some(ManaColor::Blue),
+        ManaChoice::SingleColor(ManaType::Black) => Some(ManaColor::Black),
+        ManaChoice::SingleColor(ManaType::Red) => Some(ManaColor::Red),
+        ManaChoice::SingleColor(ManaType::Green) => Some(ManaColor::Green),
+        ManaChoice::SingleColor(ManaType::Colorless) | ManaChoice::Combination(_) => None,
+    }
+}
+
+/// FIX-1 (CR 400.7): a live-object identity source for a pin — `ThisObject` bound to the object's
+/// CURRENT incarnation, so a re-entered permanent (new incarnation) stops matching and the loop is
+/// correctly re-detected rather than falsely replayed. `None` if the object is absent.
+fn object_decision_source(
+    state: &GameState,
+    id: ObjectId,
+) -> Option<crate::types::game_state::YieldTarget> {
+    let o = state.objects.get(&id)?;
+    Some(crate::types::game_state::YieldTarget::ThisObject {
+        source_id: id,
+        incarnation: Some(o.incarnation),
+        trigger_description: None,
+    })
+}
+
+/// FIX-1 (CR 608.2b): the concrete targets of the recorded `Targets` pin whose slot source
+/// re-binds LIVE to `source_id` this iteration (the beat's cost / trigger source, e.g. the Relic
+/// cost source for a tap-cost pin or the Kilo trigger source for a proliferate pin). Resolving the
+/// WHOLE `template` means ANY pin that no longer resolves to a live legal object (a target left
+/// its zone) aborts the whole beat fail-closed — a broken loop never certifies. `Err(RecastAbort)`
+/// if no `Targets` pin's source matches `source_id`.
+fn pinned_targets_for_source(
+    template: &crate::analysis::decision_template::DecisionTemplate,
+    iteration: crate::analysis::decision_template::IterationIndex,
+    clone: &GameState,
+    source_id: ObjectId,
+) -> Result<Vec<crate::analysis::decision_template::ConcreteTarget>, RecastAbort> {
+    use crate::analysis::decision_template::{resolve, resolve_source, ConcreteDecision};
+    let decisions = resolve(template, iteration, clone).map_err(|_| RecastAbort)?;
+    for d in decisions {
+        if let ConcreteDecision::Targets { slot, targets } = d {
+            if resolve_source(&slot.source, clone) == Some(source_id) {
+                return Ok(targets);
+            }
+        }
+    }
+    Err(RecastAbort)
+}
+
+/// FIX-1 (CR 608.2d): the recorded mana color of the `ManaColor` pin whose slot source is
+/// `source_id` (the driving mana ability's source). `Err(RecastAbort)` if unpinned.
+fn pinned_mana_color_for_source(
+    template: &crate::analysis::decision_template::DecisionTemplate,
+    iteration: crate::analysis::decision_template::IterationIndex,
+    clone: &GameState,
+    source_id: ObjectId,
+) -> Result<crate::types::mana::ManaColor, RecastAbort> {
+    use crate::analysis::decision_template::{resolve, resolve_source, ConcreteDecision};
+    let decisions = resolve(template, iteration, clone).map_err(|_| RecastAbort)?;
+    for d in decisions {
+        if let ConcreteDecision::ManaColor { slot, color } = d {
+            if resolve_source(&slot.source, clone) == Some(source_id) {
+                return Ok(color);
+            }
+        }
+    }
+    Err(RecastAbort)
+}
+
 /// CR 601.2b + CR 608.2b + CR 400.7: drive ONE full recast iteration on the clone by
 /// answering each mid-cast prompt from `template` (the ConvokeTaps pin) + `ctx` (the
 /// buyback decision). Reuses the ENTIRE cast state machine via the INTERNAL `apply_action`
@@ -1647,7 +1770,10 @@ fn drive_loop_action_iteration(
                         | ConcreteDecision::Targets { .. }
                         | ConcreteDecision::Mode { .. }
                         | ConcreteDecision::MayChoice { .. }
-                        | ConcreteDecision::UnlessBreak { .. } => return Err(RecastAbort),
+                        | ConcreteDecision::UnlessBreak { .. }
+                        // CR 608.2d: a ManaColor pin is consumed at the `ChooseManaColor` beat
+                        // (E11), never at a convoke `ManaPayment` beat ⇒ fail-closed here.
+                        | ConcreteDecision::ManaColor { .. } => return Err(RecastAbort),
                     }
                 }
                 apply_action(clone, actor, GameAction::PassPriority, None)
@@ -1661,6 +1787,86 @@ fn drive_loop_action_iteration(
                 }
                 apply_action(clone, actor, GameAction::PassPriority, None)
                     .map_err(|_| RecastAbort)?;
+            }
+            // FIX-1 (E11) CR 605.1a + CR 608.2b: the driving mana ability's tap cost ("tap an
+            // untapped legendary creature you control") — replay the recorded tap-target pin,
+            // matched by the mana-ability COST SOURCE (from `resume`). Only a `TapCreatures` cost
+            // resuming a MANA ABILITY is a pinned loop cost; every other PayCost shape is unpinned
+            // for this class ⇒ falls to the fail-closed `_` below.
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                resume: CostResume::ManaAbility { mana_ability },
+                ..
+            } => {
+                let cost_source = mana_ability.source_id;
+                let targets = pinned_targets_for_source(template, iteration, clone, cost_source)?;
+                let cards: Vec<ObjectId> = targets
+                    .into_iter()
+                    .map(|t| match t {
+                        crate::analysis::decision_template::ConcreteTarget::Object(id) => Ok(id),
+                        // A tap cost taps OBJECTS; a player pin here is malformed ⇒ fail-closed.
+                        crate::analysis::decision_template::ConcreteTarget::Player(_) => {
+                            Err(RecastAbort)
+                        }
+                    })
+                    .collect::<Result<_, _>>()?;
+                apply_action(clone, actor, GameAction::SelectCards { cards }, None)
+                    .map_err(|_| RecastAbort)?;
+            }
+            // FIX-1 (E11) CR 608.2d: "add one mana of any color" — replay the recorded color pin
+            // (matched by the mana-ability source), fixing the loop's mana-neutrality color (Blue
+            // to pay Freed's `{U}`). A resolving-effect color choice is not a pinned mana-ability
+            // loop cost ⇒ fail-closed.
+            WaitingFor::ChooseManaColor { context, .. } => {
+                let source = match &context {
+                    crate::types::game_state::ManaChoiceContext::ManaAbility(p) => p.source_id,
+                    crate::types::game_state::ManaChoiceContext::ResolvingEffect(_) => {
+                        return Err(RecastAbort)
+                    }
+                };
+                let color = pinned_mana_color_for_source(template, iteration, clone, source)?;
+                apply_action(
+                    clone,
+                    actor,
+                    GameAction::ChooseManaColor {
+                        choice: crate::types::game_state::ManaChoice::SingleColor(color.into()),
+                        count: 1,
+                    },
+                    None,
+                )
+                .map_err(|_| RecastAbort)?;
+            }
+            // FIX-1 (E11) CR 701.34a: the driving permanent's becomes-tapped proliferate trigger —
+            // replay the recorded proliferate-target pin, matched by the pending proliferate's
+            // trigger source id (Kilo). Replaying the RECORDED selection (never "all eligible")
+            // keeps an opponent's counters/poison out of the growth ⇒ no loss axis introduced.
+            WaitingFor::ProliferateChoice { .. } => {
+                let prolif_source = clone
+                    .pending_proliferate_actions
+                    .as_ref()
+                    .map(|p| p.source_id)
+                    .ok_or(RecastAbort)?;
+                let targets = pinned_targets_for_source(template, iteration, clone, prolif_source)?;
+                let target_refs: Vec<crate::types::ability::TargetRef> = targets
+                    .into_iter()
+                    .map(|t| match t {
+                        crate::analysis::decision_template::ConcreteTarget::Object(id) => {
+                            crate::types::ability::TargetRef::Object(id)
+                        }
+                        crate::analysis::decision_template::ConcreteTarget::Player(p) => {
+                            crate::types::ability::TargetRef::Player(p)
+                        }
+                    })
+                    .collect();
+                apply_action(
+                    clone,
+                    actor,
+                    GameAction::SelectTargets {
+                        targets: target_refs,
+                    },
+                    None,
+                )
+                .map_err(|_| RecastAbort)?;
             }
             // CR 732.2a "no conditional actions": any other prompt (target / mode / X /
             // may) is unpinned for this recast class ⇒ fail-closed abort.
@@ -1708,16 +1914,19 @@ fn build_recast_template(
         card_id: ctx.card_id,
         trigger_description: None,
     };
-    let decisions = if ctx.convoke.is_some() {
-        vec![PinnedDecision::ConvokeTaps {
+    // FIX-1 (B2#8): the recorded fixed in-cycle choices (tap-cost target, mana color, proliferate
+    // target) drive the replay; a convoke recast additionally carries its live-rebinding
+    // ConvokeTaps pin. `build_shortcut_schema` reifies this SAME list (one template, single source
+    // of truth — CR 608.2b live re-binding).
+    let mut decisions = ctx.pins.clone();
+    if ctx.convoke.is_some() {
+        decisions.push(PinnedDecision::ConvokeTaps {
             slot: DecisionSlot {
                 source: source.clone(),
                 index: 0,
             },
-        }]
-    } else {
-        vec![]
-    };
+        });
+    }
     crate::analysis::decision_template::DecisionTemplate {
         owner: ctx.controller,
         decisions,
@@ -1979,8 +2188,18 @@ fn try_offer_object_growth_shortcut(
             )
         }
         None => {
-            crate::analysis::resource::loop_states_equal_modulo_resources(&cs_n, &cs_n1)
-                && crate::analysis::resource::loop_states_equal_modulo_resources(&cs_n1, &cs_n2)
+            // FIX-2 (CR 732.2a / CR 104.4b): the multi-activation / pure-counter class returns
+            // EQUAL modulo projected resources OR covers modulo preserved-`Generic` counter growth
+            // (Pentad charge, One Ring burden — the whole preserved-`Generic` family, not one
+            // card). The base `loop_states_equal_modulo_resources` PRESERVES `Generic` counters, so
+            // a +1-charge/cycle loop is UNEQUAL there; the counter-growth cover accepts it. Sound:
+            // the offer is declinable and never crowns a `GameOver` (the cover's own doc,
+            // `resource.rs`), and is deliberately NOT wired into any Path-A/Path-B lethal seam.
+            let cover = |a: &GameState, b: &GameState| {
+                crate::analysis::resource::loop_states_equal_modulo_resources(a, b)
+                    || crate::analysis::resource::loop_states_cover_modulo_counter_growth(a, b)
+            };
+            cover(&cs_n, &cs_n1) && cover(&cs_n1, &cs_n2)
         }
     };
     if !cover_ok {
@@ -3756,6 +3975,10 @@ fn apply_action(
                                     ability_index,
                                 },
                                 convoke: None,
+                                // FIX-1: the driving-action step is recorded pinless here; the
+                                // fixed in-cycle choices (tap-cost/color/proliferate) are appended
+                                // to this step's `pins` at their own apply arms via `record_loop_pin`.
+                                pins: Vec::new(),
                             };
                             accumulate_loop_action_step(state, step);
                         }
@@ -3836,6 +4059,8 @@ fn apply_action(
                                     ability_index,
                                 },
                                 convoke: None,
+                                // FIX-1: pinless at capture; fixed choices appended at their apply arms.
+                                pins: Vec::new(),
                             };
                             if continuing {
                                 accumulate_loop_action_step(state, step);
@@ -4591,14 +4816,44 @@ fn apply_action(
                 // CR 605.1a: mana-ability tap costs are always fixed-count; the
                 // aggregate form never resumes a mana ability.
                 PayCostKind::TapCreatures { .. } => {
-                    engine_casting::handle_tap_creatures_for_mana_ability(
+                    let wf = engine_casting::handle_tap_creatures_for_mana_ability(
                         state,
                         *count,
                         choices,
                         pending_mana_ability,
                         &chosen,
                         &mut events,
-                    )?
+                    )?;
+                    // FIX-1 (CR 605.1a + CR 608.2b): record the tap-cost target choice on the
+                    // current loop-period step so the object-growth detection drive can replay
+                    // "tap this legendary (Kilo) for the Relic mana ability". Slot source = the
+                    // mana-ability cost source (distinct from the proliferate pin's Kilo source);
+                    // `index: 0` (the color pin on the same source takes `index: 1`).
+                    if let Some(source) =
+                        object_decision_source(state, pending_mana_ability.source_id)
+                    {
+                        let targets: Vec<crate::analysis::decision_template::TargetPin> = chosen
+                            .iter()
+                            .filter_map(|&id| {
+                                object_decision_source(state, id)
+                                    .map(crate::analysis::decision_template::TargetPin::ByIdentity)
+                            })
+                            .collect();
+                        if !targets.is_empty() {
+                            record_loop_pin(
+                                state,
+                                *player,
+                                crate::analysis::decision_template::PinnedDecision::Targets {
+                                    slot: crate::analysis::decision_template::DecisionSlot {
+                                        source,
+                                        index: 0,
+                                    },
+                                    targets,
+                                },
+                            );
+                        }
+                    }
+                    wf
                 }
                 PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
                     state,
@@ -4809,6 +5064,28 @@ fn apply_action(
                         chosen.clone(),
                         &mut events,
                     )?;
+                    // FIX-1 (CR 608.2d): record the fixed mana-color choice on the current
+                    // loop-period step (slot `index: 1` — distinct from the tap-cost `Targets`
+                    // pin at `index: 0` on the SAME mana-ability source) so the object-growth
+                    // detection drive replays the exact color that keeps the loop mana-neutral
+                    // (Blue → Freed's `{U}`). Only a WUBRG `SingleColor` choice is pinnable.
+                    if let Some(color) = pinnable_mana_color(&chosen) {
+                        if let Some(source) =
+                            object_decision_source(state, pending_mana_ability.source_id)
+                        {
+                            record_loop_pin(
+                                state,
+                                pending_mana_ability.player,
+                                crate::analysis::decision_template::PinnedDecision::ManaColor {
+                                    slot: crate::analysis::decision_template::DecisionSlot {
+                                        source,
+                                        index: 1,
+                                    },
+                                    color,
+                                },
+                            );
+                        }
+                    }
                     // CR 605.3a: one color choice may bulk-activate the player's
                     // other identical, choice-free mana sources (their remaining
                     // Treasures, etc.) with the same color. Sibling cost/mana
@@ -7039,6 +7316,38 @@ fn apply_action(
                 .as_ref()
                 .map(|pending| pending.source_id)
                 .unwrap_or(ObjectId(0));
+            // FIX-1 (CR 701.34a): record the proliferate-target choice on the current loop-period
+            // step so the object-growth detection drive replays the EXACT permanent(s) grown
+            // (Pentad's charge) — never "all eligible", which could grow an opponent's
+            // counters/poison and introduce a loss axis. Slot source = the trigger source (Kilo);
+            // `index: 0` (distinct source from the Relic tap-cost/color pins).
+            if let Some(source) = object_decision_source(state, completion_source) {
+                let target_pins: Vec<crate::analysis::decision_template::TargetPin> = targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        crate::types::ability::TargetRef::Object(id) => object_decision_source(
+                            state, *id,
+                        )
+                        .map(crate::analysis::decision_template::TargetPin::ByIdentity),
+                        crate::types::ability::TargetRef::Player(pl) => {
+                            Some(crate::analysis::decision_template::TargetPin::Player(*pl))
+                        }
+                    })
+                    .collect();
+                if !target_pins.is_empty() {
+                    record_loop_pin(
+                        state,
+                        p,
+                        crate::analysis::decision_template::PinnedDecision::Targets {
+                            slot: crate::analysis::decision_template::DecisionSlot {
+                                source,
+                                index: 0,
+                            },
+                            targets: target_pins,
+                        },
+                    );
+                }
+            }
             if !effects::proliferate::resume_pending_proliferate_actions(state, &mut events) {
                 return Ok(ActionResult {
                     events,
@@ -10452,6 +10761,324 @@ mod stage2_injector_tests {
             shortcut_drive_period(Some(&oversized)),
             MAX_SHORTCUT_CYCLES,
             "RoundRobin(MAX+5) clamps to MAX_SHORTCUT_CYCLES"
+        );
+    }
+}
+
+/// FIX-1 interruptibility (memory: combo-interruptibility-acceptance-criterion) — the Kilo loop's
+/// CR 732.2a offer must FLIP off when the loop is defused. Driven from the REAL 4p dump through the
+/// public `apply()` boundary (recording live), then the offer is re-derived at the private
+/// `try_offer_object_growth_shortcut` seam (the plan's sanctioned private-fn revert-probe form).
+#[cfg(test)]
+mod kilo_interruptibility_tests {
+    use super::*;
+    use crate::analysis::decision_template::{PinnedDecision, TargetPin};
+    use crate::types::ability::TargetRef;
+    use crate::types::game_state::{ManaChoice, PayCostKind, YieldTarget};
+    use crate::types::mana::{ManaColor, ManaType};
+
+    const P0: PlayerId = PlayerId(0);
+    const KILO: ObjectId = ObjectId(402);
+    const FREED: ObjectId = ObjectId(403);
+    const RELIC: ObjectId = ObjectId(404);
+    const PENTAD: ObjectId = ObjectId(405);
+    const RELIC_TAP_MANA: usize = 1;
+    const FREED_UNTAP: usize = 1;
+
+    fn load_migrated_dump() -> GameState {
+        use crate::types::game_state::PersistedGameState;
+        use std::io::Read;
+        let gz: &[u8] = include_bytes!("../../tests/fixtures/kilo_freed_relic_pentad_4p.json.gz");
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(gz)
+            .read_to_string(&mut json)
+            .expect("fixture inflates");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+        // Route through the REAL production restore chokepoint so the FIX-3 migration hook
+        // (`migrate_transient_loop_sequence`) drops the dump's 6 stale pinless steps on load —
+        // exactly as the integration helper does. Deserializing directly would bypass the hook,
+        // leaving the stale prefix so the live drive yields an 8-step (not 2-step) sequence.
+        let raw: GameState =
+            serde_json::from_value(envelope["gameState"].clone()).expect("gameState deserializes");
+        PersistedGameState::Raw(Box::new(raw)).into_game_state()
+    }
+
+    fn beat_actor(state: &GameState) -> PlayerId {
+        match &state.waiting_for {
+            WaitingFor::Priority { player }
+            | WaitingFor::PayCost { player, .. }
+            | WaitingFor::ChooseManaColor { player, .. }
+            | WaitingFor::ProliferateChoice { player, .. } => *player,
+            WaitingFor::LoopShortcut { proposer, .. } => *proposer,
+            other => panic!("unexpected beat: {other:?}"),
+        }
+    }
+
+    /// Drive ONE full live cycle via the public boundary, recording the pinned period.
+    fn drive_one_live_cycle(state: &mut GameState) {
+        apply(
+            state,
+            P0,
+            GameAction::ActivateAbility {
+                source_id: RELIC,
+                ability_index: RELIC_TAP_MANA,
+            },
+        )
+        .expect("activate Relic mana ability");
+        let mut freed_activated = false;
+        for _ in 0..200 {
+            let actor = beat_actor(state);
+            match state.waiting_for.clone() {
+                WaitingFor::LoopShortcut { .. } => return,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::TapCreatures { .. },
+                    ..
+                } => {
+                    apply(state, actor, GameAction::SelectCards { cards: vec![KILO] })
+                        .expect("tap Kilo");
+                }
+                WaitingFor::ChooseManaColor { .. } => {
+                    apply(
+                        state,
+                        actor,
+                        GameAction::ChooseManaColor {
+                            choice: ManaChoice::SingleColor(ManaType::Blue),
+                            count: 1,
+                        },
+                    )
+                    .expect("choose Blue");
+                }
+                WaitingFor::ProliferateChoice { .. } => {
+                    apply(
+                        state,
+                        actor,
+                        GameAction::SelectTargets {
+                            targets: vec![TargetRef::Object(PENTAD)],
+                        },
+                    )
+                    .expect("proliferate Pentad");
+                }
+                WaitingFor::Priority { .. } => {
+                    if state.stack.is_empty() {
+                        if freed_activated {
+                            return;
+                        }
+                        freed_activated = true;
+                        apply(
+                            state,
+                            P0,
+                            GameAction::ActivateAbility {
+                                source_id: FREED,
+                                ability_index: FREED_UNTAP,
+                            },
+                        )
+                        .expect("activate Freed untap");
+                    } else {
+                        apply(state, actor, GameAction::PassPriority).expect("pass priority");
+                    }
+                }
+                other => panic!("unexpected beat: {other:?}"),
+            }
+        }
+        panic!("drive did not settle");
+    }
+
+    /// Matched pair: with the loop intact the offer re-derives (`Some`); removing Freed (Kilo can
+    /// no longer untap, the cycle is no longer mana-neutral) means the recorded `Activate 403#1`
+    /// step's ability definition can no longer be resolved (its object is gone), so `try_offer`
+    /// aborts at the pre-drive ability-def resolution ⇒ `None`. Pass-vs-defuse FLIPS the outcome.
+    #[test]
+    fn freed_removed_defuses_the_offer() {
+        let mut driven = load_migrated_dump();
+        drive_one_live_cycle(&mut driven);
+        assert_eq!(
+            driven.last_loop_action_sequence.len(),
+            2,
+            "the live cycle recorded the clean 2-step pinned period"
+        );
+
+        // Re-derive the empty-stack priority window the offer fires from (the recorded period is
+        // intact; the board is a valid loop state — Kilo untapped, mana-neutral).
+        let mut intact = driven.clone();
+        intact.waiting_for = WaitingFor::Priority { player: P0 };
+        assert!(intact.stack.is_empty(), "settled to an empty stack");
+        assert!(
+            try_offer_object_growth_shortcut(&intact).is_some(),
+            "undefused: the intact loop re-derives the CR 732.2a offer"
+        );
+
+        // Defuse: remove Freed AFTER recording. The re-drive can no longer re-find/re-activate it.
+        let mut defused = intact.clone();
+        defused.objects.remove(&FREED);
+        defused.battlefield.retain(|id| *id != FREED);
+        assert!(
+            try_offer_object_growth_shortcut(&defused).is_none(),
+            "defused (Freed removed): the re-drive aborts ⇒ NO offer — the outcome flips"
+        );
+    }
+
+    /// Reset a driven state (which settles at `LoopShortcut`) back to the empty-stack priority
+    /// window the offer re-derives from, so `try_offer_object_growth_shortcut` can be probed
+    /// directly (the plan's sanctioned private-fn revert-probe form). The board is the valid
+    /// post-cycle loop state (Kilo untapped, mana-neutral).
+    fn at_priority_window(mut state: GameState) -> GameState {
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        assert!(
+            state.stack.is_empty(),
+            "the driven cycle settled to an empty stack"
+        );
+        state
+    }
+
+    /// Hostile fixture — two-legendary identity binding (memory: verify-the-seam-not-the-line).
+    /// The tap-cost pin stores the EXACT tapped `ObjectId` (`TargetPin::ByIdentity`), so with two
+    /// legal untapped legendary creatures on the board the detection re-drive must re-bind to the
+    /// RECORDED Kilo (402), NOT the decoy. Positive: record tapping Kilo ⇒ offer. Revert-probe
+    /// (FLIP, run in-test): repoint ONLY the tap-cost pin's identity to the decoy (an equally-legal
+    /// legendary) on the SAME board + recording ⇒ the re-drive taps the decoy, whose becomes-tapped
+    /// proliferate trigger (source = decoy) has NO matching pin (the proliferate pin is keyed to
+    /// Kilo 402) ⇒ `RecastAbort` ⇒ NO offer. If replay ignored the pin identity (re-bound to "any
+    /// legal legendary" or always Kilo) this mutation would NOT change the outcome — so the flip
+    /// proves the recorded identity is load-bearing.
+    #[test]
+    fn tap_pin_rebinds_to_recorded_legendary_not_a_decoy() {
+        let mut state = load_migrated_dump();
+
+        // Add a SECOND untapped legendary creature P0 controls (a Kilo clone with a fresh id) so
+        // the Relic tap cost has two legal choices the identity binding must disambiguate.
+        let decoy_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut decoy = state.objects[&KILO].clone();
+        decoy.id = decoy_id;
+        // Distinct name: CR 704.5j (the legend rule) would otherwise force a ChooseLegend SBA
+        // between two same-named legends — we want two co-existing legal legendary tap targets.
+        decoy.name = "Decoy Legend".to_string();
+        decoy.base_name = "Decoy Legend".to_string();
+        decoy.attachments = Vec::new(); // the clone is NOT the Freed-enchanted creature
+        decoy.tapped = false;
+        state.objects.insert(decoy_id, decoy);
+        state.battlefield.push_back(decoy_id);
+
+        drive_one_live_cycle(&mut state);
+        assert_eq!(
+            state.last_loop_action_sequence.len(),
+            2,
+            "reach-guard: the live cycle recorded the clean 2-step pinned period"
+        );
+
+        // Positive: the recorded ByIdentity(Kilo 402) tap pin re-binds to Kilo on replay ⇒ offer.
+        let intact = at_priority_window(state.clone());
+        assert!(
+            try_offer_object_growth_shortcut(&intact).is_some(),
+            "two legal legendaries present + recorded Kilo ⇒ the offer fires"
+        );
+
+        // Revert-probe (FLIP): repoint ONLY the tap-cost pin (its slot source resolves to Relic
+        // 404) to the decoy. Board, recording, and the proliferate pin (keyed to Kilo 402) are all
+        // unchanged.
+        let mut repointed = intact.clone();
+        let mut mutated = false;
+        for step in repointed.last_loop_action_sequence.iter_mut() {
+            for pin in step.pins.iter_mut() {
+                if let PinnedDecision::Targets { slot, targets } = pin {
+                    if matches!(&slot.source, YieldTarget::ThisObject { source_id, .. } if *source_id == RELIC)
+                    {
+                        *targets = vec![TargetPin::ByIdentity(YieldTarget::ThisObject {
+                            source_id: decoy_id,
+                            incarnation: None,
+                            trigger_description: None,
+                        })];
+                        mutated = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            mutated,
+            "reach-guard: the tap-cost pin (slot source Relic) was found + repointed"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&repointed).is_none(),
+            "repointing the tap pin to the decoy FLIPS the offer OFF ⇒ recorded identity is load-bearing"
+        );
+    }
+
+    /// Hostile fixture — wrong-color drive. The `ManaColor` pin latches the color the player
+    /// produced (Blue, to pay Freed's `{U}`, CR 608.2d). Positive: Blue ⇒ mana-neutral cycle ⇒
+    /// offer. Revert-probe (FLIP, run in-test): relatch the color to Red on the SAME recording ⇒
+    /// the re-drive produces Red, Freed's `{U}` untap is unpayable ⇒ the second step aborts ⇒ NO
+    /// offer. The latched color value is load-bearing.
+    #[test]
+    fn mana_color_pin_replays_recorded_color() {
+        let mut state = load_migrated_dump();
+        drive_one_live_cycle(&mut state);
+        let state = at_priority_window(state);
+
+        // Positive: the latched Blue color pays Freed's {U} ⇒ offer.
+        assert!(
+            try_offer_object_growth_shortcut(&state).is_some(),
+            "the recorded Blue mana-color pin completes the mana-neutral cycle ⇒ offer"
+        );
+
+        // Revert-probe (FLIP): relatch the color to Red.
+        let mut wrong = state.clone();
+        let mut mutated = false;
+        for step in wrong.last_loop_action_sequence.iter_mut() {
+            for pin in step.pins.iter_mut() {
+                if let PinnedDecision::ManaColor { color, .. } = pin {
+                    *color = ManaColor::Red;
+                    mutated = true;
+                }
+            }
+        }
+        assert!(
+            mutated,
+            "reach-guard: the ManaColor pin was found + relatched"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&wrong).is_none(),
+            "a Red mana-color pin cannot pay Freed's {{U}} ⇒ the drive aborts ⇒ NO offer"
+        );
+    }
+
+    /// Synthetic positive/negative drive-replay reach-guard (plan §7 unit c). The SAME recorded
+    /// 2-step period is driven WITH pins (offer) and WITHOUT (abort). The `len()==2` anchor holds
+    /// in BOTH variants, so the negative's None is a drive-abort at the unpinned
+    /// `PayCost{TapCreatures}`, NOT a vacuous "no sequence to drive" upstream short-circuit
+    /// (memory: discriminator-vacuous-if-upstream-conjunct-dominates).
+    #[test]
+    fn drive_replay_requires_the_recorded_pins() {
+        let mut state = load_migrated_dump();
+        drive_one_live_cycle(&mut state);
+        let state = at_priority_window(state);
+
+        // Anchor (holds in BOTH variants): the recorded 2-step period is present.
+        assert_eq!(
+            state.last_loop_action_sequence.len(),
+            2,
+            "reach-guard anchor: the recorded period exists ⇒ any None is a drive-abort, not a missing seq"
+        );
+
+        // Positive: the recorded pins drive the replay to completion ⇒ offer.
+        assert!(
+            try_offer_object_growth_shortcut(&state).is_some(),
+            "with the recorded pins the replay completes ⇒ offer"
+        );
+
+        // Negative: strip the pins from the SAME period ⇒ the replay hits the unpinned tap cost ⇒
+        // abort ⇒ NO offer. The anchor proves the None is the drive-abort, not an empty sequence.
+        let mut unpinned = state.clone();
+        for step in unpinned.last_loop_action_sequence.iter_mut() {
+            step.pins.clear();
+        }
+        assert_eq!(
+            unpinned.last_loop_action_sequence.len(),
+            2,
+            "reach-guard anchor: the period is still present in the negative variant"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&unpinned).is_none(),
+            "without the pins the drive aborts at the unpinned tap cost ⇒ NO offer"
         );
     }
 }

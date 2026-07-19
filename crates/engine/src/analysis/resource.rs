@@ -6099,6 +6099,7 @@ mod tests {
                 },
             },
             convoke: Some(crate::types::game_state::ConvokeMode::Convoke),
+            pins: Vec::new(),
         }
     }
 
@@ -6164,6 +6165,7 @@ mod tests {
                 ability_index,
             },
             convoke: None,
+            pins: Vec::new(),
         }
     }
 

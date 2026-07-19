@@ -2503,6 +2503,7 @@ export type DecisionPointKind =
   | { Targets: { legal_targets: TargetRef[] } }
   | { ConvokeTaps: { tappable: ObjectId[] } }
   | { Mode: { available_modes: number[] } }
+  | { ManaColor: { color: ManaColor } }
   | "MayChoice"
   | "UnlessBreak";
 
