@@ -560,6 +560,7 @@ mod issue_5983_sothera_dies_edict;
 mod issue_5984_aloy_discover_on_attack;
 mod issue_5988_braids_arisen_nightmare;
 mod issue_5989_ardyn_exile_copy;
+mod issue_5991_malfegor_discard_sacrifice;
 mod issue_5992_golem_artisan;
 mod issue_5996_planetarium_look_cast;
 mod issue_5997_malcolm_treasure_trigger;

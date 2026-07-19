@@ -4218,6 +4218,17 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         // empty set to 0 — a fully-supported-looking card that exiles nothing.
         Effect::ExileTop { count, .. } => quantity_hits_tracked(count),
         Effect::Incubate { count } => quantity_hits_tracked(count),
+        // CR 608.2c + CR 701.21a + CR 701.17a: a sacrifice count that reduces
+        // the chain tracked set is a CONSUMER of that set (Malfegor: "each
+        // opponent sacrifices a creature of their choice for each card
+        // discarded this way", issue #5991). Same class as the `ExileTop`
+        // arm above (Kylox) and the `repeat_for` check below (Seasoned
+        // Pyromancer, #740): without this arm, the preceding discard/
+        // destroy/mill never published its affected ids, so
+        // `FilteredTrackedSetSize { caused_by: Discarded }` read an empty or
+        // stale set and resolved to 0 — a fully-supported-looking card that
+        // forces no sacrifice at all.
+        Effect::Sacrifice { count, .. } => quantity_hits_tracked(count),
         Effect::Token {
             count,
             power,
