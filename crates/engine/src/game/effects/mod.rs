@@ -4811,6 +4811,18 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // `Play` also permits lands, so this cast-only feasibility probe does
             // not apply to that mode.
             if matches!(mode, CardPlayMode::Cast) {
+                if first_object_target(&ability.targets)
+                    .and_then(|id| state.objects.get(&id))
+                    .is_some_and(|object| {
+                        object
+                            .card_types
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Land)
+                    })
+                {
+                    return true;
+                }
+
                 let mut simulated = state.clone();
                 return cast_from_zone::resolve(&mut simulated, ability, &mut Vec::new()).is_err();
             }

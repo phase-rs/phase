@@ -12,11 +12,13 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const PLANETARIUM_TRIGGER: &str = "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn.";
 const LOOK_CAST_WITH_INDEPENDENT_TAIL: &str = "Whenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. You gain 1 life.";
+const BESEECH_THE_MIRROR: &str = "Bargain (You may sacrifice an artifact, enchantment, or token as you cast this spell.)\nSearch your library for a card, exile it face down, then shuffle. If this spell was bargained, you may cast the exiled card without paying its mana cost if that spell's mana value is 4 or less. Put the exiled card into your hand if it wasn't cast this way.";
 
 fn reach_planetarium_cast_offer() -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
@@ -212,6 +214,63 @@ fn planetarium_land_top_does_not_offer_an_impossible_cast() {
         runner.state().players[0].life,
         starting_life + 1,
         "the independent sequential tail must resolve after the infeasible cast declines"
+    );
+}
+
+/// CR 702.166a + CR 608.2d + CR 305.1: Beseech's bargained cast instruction
+/// cannot offer a land as a spell. Its printed not-cast fallback moves the land
+/// to hand without leaking the lingering permission used for castable cards.
+#[test]
+fn beseech_bargained_land_skips_cast_offer_and_runs_hand_fallback() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+    }
+    let bargain_artifact = scenario
+        .add_creature(P0, "Bargain Artifact", 1, 1)
+        .as_artifact()
+        .id();
+    let found_land = scenario
+        .add_spell_to_library_top(P0, "Beseech Found Land", false)
+        .as_land()
+        .id();
+    let beseech = scenario
+        .add_spell_to_hand(P0, "Beseech the Mirror", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            generic: 1,
+        })
+        .from_oracle_text_with_keywords(&["bargain"], BESEECH_THE_MIRROR)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(beseech)
+        .accept_optional()
+        .sacrifice_with(&[bargain_artifact])
+        .search_first_legal()
+        .resolve();
+
+    outcome.assert_zone(&[bargain_artifact, beseech], Zone::Graveyard);
+    outcome.assert_zone(&[found_land], Zone::Hand);
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Beseech's impossible land cast must not leave an optional prompt pending"
+    );
+    assert!(
+        outcome.state().pending_optional_effect.is_none(),
+        "the infeasible cast must be auto-declined rather than offered"
+    );
+    assert!(
+        outcome.state().objects[&found_land]
+            .casting_permissions
+            .is_empty(),
+        "auto-declining the land cast must not leak an exile-cast permission"
     );
 }
 
