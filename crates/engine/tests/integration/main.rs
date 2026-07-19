@@ -529,6 +529,7 @@ mod issue_581_mystic_remora_cumulative_upkeep;
 mod issue_5820_susan_foreman;
 mod issue_5821_psychic_paper_attach_choice;
 mod issue_583_vivi_ornitier_mana_source;
+mod issue_5983_sothera_dies_edict;
 mod issue_5984_aloy_discover_on_attack;
 mod issue_5988_braids_arisen_nightmare;
 mod issue_5996_planetarium_look_cast;

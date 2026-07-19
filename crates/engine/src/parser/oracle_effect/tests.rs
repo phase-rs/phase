@@ -40936,6 +40936,39 @@ fn put_zone_change_any_number_from_hand_sets_resolution_choice_count() {
         .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })));
 }
 
+/// CR 115.1 + CR 109.5 (issue #5983): Sothera's dies edict — "each opponent
+/// chooses a creature they control and exiles it" names no "target" keyword, so
+/// each opponent's pick happens at resolution (EffectZoneChoice) after
+/// `player_scope` rebinding, not as a stack-time target on the caster.
+#[test]
+fn each_opponent_chooses_creature_to_exile_uses_resolution_timing() {
+    use crate::types::ability::PlayerFilter;
+
+    let def = parse_effect_chain(
+        "Each opponent chooses a creature they control and exiles it.",
+        AbilityKind::Spell,
+    );
+
+    assert!(matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+}
+
+/// CR 115.1 boundary: battlefield exile WITH "target" still requires stack-time
+/// selection — pins the keyword-presence axis against issue #5983's carve-out.
+#[test]
+fn exile_target_creature_from_battlefield_uses_stack_timing() {
+    let def = parse_effect_chain("Exile target creature.", AbilityKind::Spell);
+    assert!(matches!(&*def.effect, Effect::ChangeZone { .. }));
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+}
+
 #[test]
 fn worldsouls_rage_puts_lands_from_hand_or_graveyard() {
     let def = parse_effect_chain(
