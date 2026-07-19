@@ -2668,9 +2668,9 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::SpellsCastThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. }
-        | QuantityRef::AttackedThisTurn { filter, .. } => filter
-            .as_ref()
-            .is_some_and(|f| target_filter_reads_life_total(f)),
+        | QuantityRef::AttackedThisTurn { filter, .. } => {
+            filter.as_ref().is_some_and(target_filter_reads_life_total)
+        }
 
         // CR 120.1 + CR 120.9: damage-history read routes BOTH legs — the source
         // filter AND the recipient filter — never just one.
@@ -2786,9 +2786,9 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
         PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => true,
         // CR 120.9: the damage-history player set can restrict by a source
         // `TargetFilter`; route it.
-        PlayerFilter::OpponentDealtDamage { source, .. } => source
-            .as_ref()
-            .is_some_and(|f| target_filter_reads_life_total(f)),
+        PlayerFilter::OpponentDealtDamage { source, .. } => {
+            source.as_ref().is_some_and(target_filter_reads_life_total)
+        }
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
         PlayerFilter::AllExcept { exclude } => player_filter_reads_life(exclude),
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
@@ -2847,7 +2847,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         // Multi-target group constraint carries an OPTIONAL reference filter.
         FilterProp::SharesQuality { reference, .. } => reference
             .as_ref()
-            .is_some_and(|f| target_filter_reads_life_total(f)),
+            .is_some_and(target_filter_reads_life_total),
         // Quantity-bearing props route their `QuantityExpr` threshold.
         FilterProp::Counters { count: value, .. }
         | FilterProp::Cmc { value, .. }
@@ -2959,9 +2959,9 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
             filters.iter().any(target_filter_reads_life_total)
         }
         TargetFilter::TrackedSetFiltered { filter, .. } => target_filter_reads_life_total(filter),
-        TargetFilter::ChosenDamageSource { filter } => filter
-            .as_ref()
-            .is_some_and(|f| target_filter_reads_life_total(f)),
+        TargetFilter::ChosenDamageSource { filter } => {
+            filter.as_ref().is_some_and(target_filter_reads_life_total)
+        }
         // Payload-free / player-reference / stack-reference / anaphoric filters —
         // none carry a nested walked payload and none read the life family.
         // Enumerated explicitly (no wildcard).
@@ -3021,9 +3021,9 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
 fn static_condition_reads_life(condition: &StaticCondition) -> bool {
     match condition {
         // Presence gate: the filter is optional.
-        StaticCondition::IsPresent { filter } => filter
-            .as_ref()
-            .is_some_and(|f| target_filter_reads_life_total(f)),
+        StaticCondition::IsPresent { filter } => {
+            filter.as_ref().is_some_and(target_filter_reads_life_total)
+        }
         // Count/threshold gate — either operand may read life
         // (Serra Ascendant class: "if you have 30 or more life").
         StaticCondition::QuantityComparison { lhs, rhs, .. } => {
@@ -3107,14 +3107,14 @@ fn static_definition_reads_life_total(def: &StaticDefinition) -> bool {
         && (def
             .affected
             .as_ref()
-            .is_some_and(|filter| target_filter_reads_life_total(filter))
+            .is_some_and(target_filter_reads_life_total)
             || def
                 .condition
                 .as_ref()
-                .is_some_and(|condition| static_condition_reads_life(condition))
+                .is_some_and(static_condition_reads_life)
             || def.modifications.iter().any(|modification| {
                 continuous_modification_dynamic_quantity(modification)
-                    .is_some_and(|quantity| quantity_expr_reads_life(quantity))
+                    .is_some_and(quantity_expr_reads_life)
             }))
 }
 
