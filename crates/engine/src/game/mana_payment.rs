@@ -4609,6 +4609,10 @@ mod tests {
                 "{color:?} seeded on enable"
             );
         }
+        assert!(
+            state.debug_infinite_mana.contains(&p0),
+            "SetInfiniteMana enable must record the CR 500.5 debug carve-out marker"
+        );
 
         apply_debug_action(
             &mut state,
@@ -4621,6 +4625,10 @@ mod tests {
         )
         .expect("disable infinite mana");
         assert!(!state.unbounded_resources.contains_key(&p0));
+        assert!(
+            !state.debug_infinite_mana.contains(&p0),
+            "SetInfiniteMana disable must remove the marker"
+        );
     }
 
     /// Mana byte-preservation regression (PR-6 lead item #2 + plan tests 2/3).

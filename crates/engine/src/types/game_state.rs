@@ -11389,6 +11389,17 @@ pub struct GameState {
     #[serde(default)]
     pub debug_permitted: BTreeSet<PlayerId>,
 
+    /// CR 500.5 debug carve-out: players whose `Mana(_)` axes in `unbounded_resources`
+    /// come from the developer `DebugAction::SetInfiniteMana` toggle, NOT a detected/accepted
+    /// loop. Their unspent mana is EXEMPT from the CR 500.5 end-of-step empty (a documented
+    /// debug-only departure); a loop-backed `Mana(_)` axis (absent from this set) drains and
+    /// de-realizes at the boundary. Written ONLY by `SetInfiniteMana` (insert on enable, remove
+    /// on disable). INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same family as `unbounded_resources`): debug/annotation state, not
+    /// rules state for equality.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub debug_infinite_mana: BTreeSet<PlayerId>,
+
     /// Per-controller set of resource axes a detected/forced unbounded loop pumps,
     /// the engine-authoritative source for the `∞` HUD projection (`derive_views`)
     /// and the byte-preserved infinite-mana refill/keep gates. The infinite-mana
@@ -11397,7 +11408,9 @@ pub struct GameState {
     /// which the `mana_payment::refill_infinite_mana` top-up and the
     /// `turns` end-of-step keep gate read (CR 500.5 suppressed for that player
     /// only — a debug-only departure from the rules). Written ONLY through
-    /// `mark_unbounded_loop` / `clear_unbounded_loop`.
+    /// `mark_unbounded_loop` (the sole write authority) and cleared through
+    /// `clear_unbounded_loop` (whole-player), `clear_unbounded_token_loop`
+    /// (token-axis-scoped), and `clear_unbounded_mana_loop` (mana-axis-scoped).
     ///
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same family as `static_gate_truth` /
@@ -11405,8 +11418,9 @@ pub struct GameState {
     /// state for equality. CR 104.4b/CR 732.2a loop detection (`loop_states_equal`)
     /// and AI-search position dedup compare two states reached at different times;
     /// a populated live state must still compare equal to the empty-`unbounded_resources`
-    /// ring snapshots, or loop detection yields false negatives. (`debug_infinite_mana`
-    /// relied on this same exclusion implicitly; it is now explicit.)
+    /// ring snapshots, or loop detection yields false negatives. The sibling
+    /// `debug_infinite_mana` set (the CR 500.5 debug carve-out) is excluded from
+    /// equality for the same reason.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_resources: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
 
@@ -14509,6 +14523,7 @@ impl GameState {
             objects_that_dealt_damage: HashSet::new(),
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
+            debug_infinite_mana: BTreeSet::new(),
             unbounded_resources: BTreeMap::new(),
             unbounded_loop_enablers: BTreeMap::new(),
             unbounded_loop_pile: BTreeMap::new(),
@@ -15300,6 +15315,29 @@ impl GameState {
         self.pending_unbounded_materialization.remove(&controller);
         self.unbounded_loop_pile.remove(&controller);
     }
+
+    /// CR 500.5 + CR 106.4: end a loop-backed ∞-mana capability at a step/phase boundary — an
+    /// AXIS-SCOPED clear, not the whole-player `clear_unbounded_loop`. Removes every
+    /// `ResourceAxis::Mana(_)` axis from `unbounded_resources`. If that empties the player's axis
+    /// set, drop the player key AND its `unbounded_loop_enablers` entry IN LOCKSTEP (CR 104.4b / CR 110.1):
+    /// enablers track the PRESENCE of any unbounded axis, and the `zones.rs` defuse hook
+    /// (`apply_zone_exit_cleanup`, `:534`–`:544`) whole-clears a controller's capability when ANY
+    /// enabler leaves. Leaving enablers orphaned (no backing axis) is a landmine — a later
+    /// `SetInfiniteMana` re-marks that controller, then the stale enabler leaving mis-fires
+    /// `clear_unbounded_loop`, silently killing the debug toggle. If a coexisting NON-Mana axis
+    /// remains (e.g. a Path-C `{Mana, Counter}` cover, or a `TokensCreated` loop mid-collapse),
+    /// KEEP the enablers — they still back the surviving axis. Mana carries no
+    /// `unbounded_loop_pile` / `pending_unbounded_materialization` (a mana engine reproduces no
+    /// fodder), so — unlike `clear_unbounded_token_loop` — this touches only the axis + enabler maps.
+    pub fn clear_unbounded_mana_loop(&mut self, controller: PlayerId) {
+        if let Some(axes) = self.unbounded_resources.get_mut(&controller) {
+            axes.retain(|a| !matches!(a, ResourceAxis::Mana(_)));
+            if axes.is_empty() {
+                self.unbounded_resources.remove(&controller);
+                self.unbounded_loop_enablers.remove(&controller); // CR 104.4b / CR 110.1 lockstep-iff-empty
+            }
+        }
+    }
 }
 
 /// PR-3 (Option C): max retained CR 732.2a loop-detection snapshots. A determinate
@@ -15512,6 +15550,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         prepaid_mulligan_bottoms: _,
         debug_mode: _,
         debug_permitted: _,
+        debug_infinite_mana: _,
         unbounded_resources: _,
         unbounded_loop_enablers: _,
         unbounded_loop_pile: _,
@@ -17430,6 +17469,175 @@ mod tests {
         assert!(
             !state.unbounded_loop_enablers.contains_key(&PlayerId(0)),
             "an empty enabler set must not create an entry"
+        );
+    }
+
+    /// T-C (CR 500.5 mana boundary drain): `clear_unbounded_mana_loop` is AXIS-SCOPED —
+    /// it removes ONLY the `Mana(_)` axes and PRESERVES any coexisting non-Mana axis
+    /// (e.g. a `TokensCreated` loop mid-collapse) together with its token-associated
+    /// `unbounded_loop_pile` / `pending_unbounded_materialization` state. Mirrors the
+    /// symmetric `clear_unbounded_token_loop_preserves_coexisting_mana_axis` guard: end
+    /// the mana loop and nothing else (build for the class, not the single-combo case).
+    ///
+    /// REVERT-PROBE (discriminating): swap `retain(!Mana)` for `clear()` or an
+    /// unconditional `unbounded_resources.remove(&controller)` → the coexisting
+    /// `TokensCreated` axis / pile / stash vanish → assertion (1) FLIPS.
+    #[test]
+    fn clear_unbounded_mana_loop_preserves_coexisting_token_axis() {
+        use crate::analysis::resource::ResourceAxis;
+        use crate::types::mana::ManaType;
+
+        let mut state = GameState::new_two_player(7);
+        // One controller can hold both a mana loop and a token loop at once
+        // (`mark_unbounded_loop` set-UNIONs axes).
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::Mana(ManaType::Colorless),
+                ResourceAxis::TokensCreated,
+            ],
+        );
+        state.register_pending_materialization(PlayerId(0), dummy_copiable_profile("Saproling"));
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
+        // Non-vacuity: the pre-state really holds both axes + pile + stash.
+        assert_eq!(
+            state.unbounded_resources.get(&PlayerId(0)),
+            Some(&BTreeSet::from([
+                ResourceAxis::Mana(ManaType::Colorless),
+                ResourceAxis::TokensCreated,
+            ])),
+            "fixture precondition: P0 holds both a Mana axis and a TokensCreated axis"
+        );
+        assert!(
+            state
+                .pending_unbounded_materialization
+                .contains_key(&PlayerId(0)),
+            "fixture precondition: token stash present"
+        );
+        assert!(
+            state.unbounded_loop_pile.contains_key(&PlayerId(0)),
+            "fixture precondition: token ∞ pile present"
+        );
+
+        state.clear_unbounded_mana_loop(PlayerId(0));
+
+        // (1) DISCRIMINATOR: the coexisting token axis + its associated state SURVIVE.
+        assert_eq!(
+            state.unbounded_resources.get(&PlayerId(0)),
+            Some(&BTreeSet::from([ResourceAxis::TokensCreated])),
+            "clear_unbounded_mana_loop must remove ONLY the Mana axis, preserving TokensCreated"
+        );
+        assert!(
+            state
+                .pending_unbounded_materialization
+                .contains_key(&PlayerId(0)),
+            "the token materialization stash must be untouched by the mana-axis clear"
+        );
+        assert!(
+            state.unbounded_loop_pile.contains_key(&PlayerId(0)),
+            "the token ∞ pile must be untouched by the mana-axis clear"
+        );
+    }
+
+    /// T-C sibling: `clear_unbounded_mana_loop` drops the player key entirely when
+    /// `Mana(_)` was the ONLY axis (the common single-loop mana engine, e.g. Basalt +
+    /// Power Artifact — its recorded axis set is exactly `{Mana(Colorless)}`).
+    #[test]
+    fn clear_unbounded_mana_loop_drops_key_when_only_mana() {
+        use crate::analysis::resource::ResourceAxis;
+        use crate::types::mana::ManaType;
+
+        let mut state = GameState::new_two_player(7);
+        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::Mana(ManaType::Colorless)]);
+        assert!(
+            state.unbounded_resources.contains_key(&PlayerId(0)),
+            "fixture precondition: P0 flagged with a lone Mana axis"
+        );
+
+        state.clear_unbounded_mana_loop(PlayerId(0));
+
+        assert!(
+            !state.unbounded_resources.contains_key(&PlayerId(0)),
+            "with Mana the only axis, the player key must be dropped entirely"
+        );
+    }
+
+    /// T-E (blocker #1, CR 110.1 enabler lockstep-iff-empty): when clearing the Mana
+    /// axis empties the player's axis set, `clear_unbounded_mana_loop` must ALSO drop
+    /// the `unbounded_loop_enablers` entry in lockstep — an orphaned enabler (no backing
+    /// axis) is a landmine: a later `SetInfiniteMana` re-marks the controller, then the
+    /// stale enabler leaving the battlefield mis-fires the `zones.rs` defuse hook
+    /// (`clear_unbounded_loop`), silently killing the debug toggle. But when a coexisting
+    /// NON-Mana axis survives (a Path-C `{Mana, Counter}` cover), the enablers still back
+    /// that axis and MUST be preserved. MEASURED: PROBE_LOCKSTEP_A/B.
+    ///
+    /// REVERT-PROBE (discriminating): drop the `unbounded_loop_enablers.remove(&controller)`
+    /// line → case (a) leaves the enabler entry orphaned → assertion (a2) FLIPS.
+    #[test]
+    fn clear_unbounded_mana_loop_drops_enablers_in_lockstep() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
+        use crate::types::mana::ManaType;
+
+        // Case (a): mana-only → clearing the Mana axis empties the set → axis AND
+        // enablers both drop.
+        let mut a = GameState::new_two_player(7);
+        a.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::Mana(ManaType::Colorless)]);
+        a.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(7)]));
+        // Non-vacuity: the enabler entry really exists pre-clear.
+        assert!(
+            a.unbounded_loop_enablers.contains_key(&PlayerId(0)),
+            "case (a) precondition: P0 has an enabler entry"
+        );
+
+        a.clear_unbounded_mana_loop(PlayerId(0));
+
+        assert!(
+            !a.unbounded_resources.contains_key(&PlayerId(0)),
+            "case (a1): the lone Mana axis is cleared, dropping the player key"
+        );
+        assert!(
+            !a.unbounded_loop_enablers.contains_key(&PlayerId(0)),
+            "case (a2) DISCRIMINATOR: enablers drop in lockstep when the last axis goes (CR 110.1)"
+        );
+
+        // Case (b): mixed `{Mana, Counter}` cover → the Counter axis survives → the
+        // enablers still back it and MUST be preserved.
+        let mut b = GameState::new_two_player(7);
+        b.mark_unbounded_loop(
+            PlayerId(0),
+            &[
+                ResourceAxis::Mana(ManaType::Colorless),
+                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+            ],
+        );
+        b.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(7)]));
+        // Non-vacuity: both axes + the enabler entry exist pre-clear.
+        assert_eq!(
+            b.unbounded_resources.get(&PlayerId(0)),
+            Some(&BTreeSet::from([
+                ResourceAxis::Mana(ManaType::Colorless),
+                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+            ])),
+            "case (b) precondition: P0 holds both a Mana axis and a Counter axis"
+        );
+        assert!(
+            b.unbounded_loop_enablers.contains_key(&PlayerId(0)),
+            "case (b) precondition: P0 has an enabler entry"
+        );
+
+        b.clear_unbounded_mana_loop(PlayerId(0));
+
+        assert_eq!(
+            b.unbounded_resources.get(&PlayerId(0)),
+            Some(&BTreeSet::from([ResourceAxis::Counter(
+                CounterClass::Plus1Plus1,
+                ObjectClass::Creature
+            )])),
+            "case (b1): the coexisting Counter axis survives the mana-axis clear"
+        );
+        assert!(
+            b.unbounded_loop_enablers.contains_key(&PlayerId(0)),
+            "case (b2): enablers are PRESERVED — they still back the surviving Counter axis"
         );
     }
 

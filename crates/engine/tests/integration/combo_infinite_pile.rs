@@ -876,3 +876,192 @@ fn real_4p_basalt_mana_loop_boundary_does_not_prompt_collapse() {
         state.waiting_for
     );
 }
+
+/// T-A (CR 500.5, PRIMARY): a LOOP-backed infinite-colorless mana axis (Basalt Monolith +
+/// Power Artifact — NOT the debug toggle, so P0 is absent from `debug_infinite_mana`) DRAINS
+/// and DE-REALIZES at the next step/phase boundary. The keep-gate (E3) now reads the explicit
+/// debug marker, not "has a Mana axis", so a non-debug player is `Drop`ped; the queue-empty
+/// axis-clear (E4) removes the Mana axis so `refill_infinite_mana` can't re-seed it.
+///
+/// REVERT-PROBE (two independent flips):
+///  - Revert E3 (keep-gate back to the `Mana(_)` scan) → P0's pool is KEPT → the
+///    `colorless == 0` assertion FLIPS (MEASURED baseline M2: 100→100).
+///  - Revert E4 (drop the boundary axis-clear) → the pool empties but the axis persists →
+///    the end-of-`apply` `refill_infinite_mana` re-seeds it → both the `unbounded_resources[P0]
+///    == None` assertion (axis still present) and the `colorless == 0` assertion (re-seeded)
+///    FLIP.
+///
+/// Non-vacuity: the reach-guard asserts P0 IS flagged (`Mana(Colorless)`) and the pool is
+/// actually seeded (`colorless > 0`) before the drive — the 100→0 delta is real (MEASURED M3).
+#[test]
+fn real_4p_basalt_mana_loop_boundary_drains_and_derealizes() {
+    use engine::analysis::resource::ResourceAxis;
+    use engine::game::mana_payment::refill_infinite_mana;
+    use engine::types::mana::ManaType;
+
+    let mut state: GameState = serde_json::from_str(&BASALT_INFINITE_COLORLESS_STATE)
+        .expect("the real Basalt+Power Artifact dump must deserialize into the current GameState");
+
+    // Precondition: P0's only unbounded axis is the LOOP-backed Mana(Colorless), and P0 is
+    // NOT debug-toggled — the discriminator that makes it drain rather than persist.
+    assert_eq!(
+        state.unbounded_resources.get(&P0),
+        Some(&BTreeSet::from([ResourceAxis::Mana(ManaType::Colorless)])),
+        "fixture precondition: P0's only unbounded axis is Mana(Colorless)"
+    );
+    assert!(
+        !state.debug_infinite_mana.contains(&P0),
+        "fixture precondition: the loop-backed axis is NOT the debug toggle"
+    );
+
+    // Seed the pool so the drain has a real 100→0 delta (MEASURED M3).
+    refill_infinite_mana(&mut state);
+    let p0_idx = state
+        .players
+        .iter()
+        .position(|p| p.id == P0)
+        .expect("P0 present in the loaded state");
+    // Reach-guard (non-vacuity): the pool is actually full of colorless before the boundary.
+    assert!(
+        state.players[p0_idx]
+            .mana_pool
+            .count_color(ManaType::Colorless)
+            > 0,
+        "reach-guard: refill seeded P0's colorless pool (the drain delta is non-vacuous)"
+    );
+
+    drive_priority_to_next_boundary(&mut state);
+
+    // (1) DRAIN: the loop-backed pool empties at the CR 500.5 boundary (E3 keep-gate false).
+    assert_eq!(
+        state.players[p0_idx]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        0,
+        "a loop-backed (non-debug) ∞-mana pool must DRAIN at the step/phase boundary (CR 500.5)"
+    );
+    // (2) DE-REALIZE: the Mana axis is cleared so refill cannot re-seed it (E4).
+    assert_eq!(
+        state.unbounded_resources.get(&P0),
+        None,
+        "the loop-backed ∞-mana axis must be de-realized at the boundary (E4 axis-clear)"
+    );
+}
+
+/// T-D (CR 500.5 + CR 732.2a, ORDERING — E4 placed BEFORE the token-collapse check):
+/// a controller who holds BOTH a loop-backed ∞-mana axis AND an accepted token loop at the
+/// same boundary must have the mana axis DRAINED+cleared while the token loop STILL collapses.
+/// Because E4 clears the mana axis before the token pause returns, the intervening
+/// boundary-crossing `apply()` (and the later `SubmitPayAmount` `apply()`) run
+/// `refill_infinite_mana` with NO mana axis present — so the just-drained pool is not re-seeded.
+///
+/// LIVE test (reviewer #4): the base is the REAL 4p Basalt dump (P0 already `{Mana(Colorless)}`);
+/// the token loop is grafted via the engine's OWN single-authority writers
+/// (`mark_unbounded_loop` and `register_pending_materialization`) — the standard Part-2 accept
+/// footprint — NOT synthetic scaffolding. The two-pass boundary it exercises is the real
+/// production path.
+///
+/// REVERT-PROBE: move E4 to AFTER the `next_apnap_player_with_pending_materialization` check →
+/// the Mana axis is still live when the boundary-crossing `apply()` runs `refill_infinite_mana`
+/// → `colorless > 0` at the prompt → the drain assertion (2) FLIPS.
+#[test]
+fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
+    use engine::analysis::resource::ResourceAxis;
+    use engine::game::mana_payment::refill_infinite_mana;
+    use engine::types::ability::CopiableValues;
+    use engine::types::card_type::CardType;
+    use engine::types::mana::{ManaCost, ManaType};
+
+    let mut state: GameState = serde_json::from_str(&BASALT_INFINITE_COLORLESS_STATE)
+        .expect("the real Basalt+Power Artifact dump must deserialize into the current GameState");
+
+    // Precondition: P0 already carries the LOOP-backed Mana(Colorless) axis, non-debug.
+    assert_eq!(
+        state.unbounded_resources.get(&P0),
+        Some(&BTreeSet::from([ResourceAxis::Mana(ManaType::Colorless)])),
+        "fixture precondition: P0's only unbounded axis is Mana(Colorless)"
+    );
+    assert!(
+        !state.debug_infinite_mana.contains(&P0),
+        "fixture precondition: the mana axis is loop-backed, not the debug toggle"
+    );
+
+    // Graft a token loop onto the real dump via the engine's single-authority writers — this is
+    // the standard Part-2 accept footprint (a TokensCreated axis + a materialization stash).
+    state.mark_unbounded_loop(P0, &[ResourceAxis::TokensCreated]);
+    let profile = Box::new(CopiableValues {
+        name: "Saproling".to_string(),
+        mana_cost: ManaCost::default(),
+        color: vec![ManaColor::Green],
+        card_types: CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Saproling".to_string()],
+        },
+        power: Some(1),
+        toughness: Some(1),
+        loyalty: None,
+        keywords: vec![],
+        abilities: std::sync::Arc::default(),
+        trigger_definitions: std::sync::Arc::default(),
+        replacement_definitions: std::sync::Arc::default(),
+        static_definitions: std::sync::Arc::default(),
+    });
+    state.register_pending_materialization(P0, profile);
+
+    // Seed so the drain has a real delta.
+    refill_infinite_mana(&mut state);
+    let p0_idx = state
+        .players
+        .iter()
+        .position(|p| p.id == P0)
+        .expect("P0 present in the loaded state");
+    assert!(
+        state.players[p0_idx]
+            .mana_pool
+            .count_color(ManaType::Colorless)
+            > 0,
+        "reach-guard: P0's colorless pool is seeded before the boundary (drain non-vacuous)"
+    );
+
+    drive_priority_to_next_boundary(&mut state);
+
+    // (1) TOKEN half still LIVE: the boundary surfaces the LoopCollapse prompt for P0.
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+                if player == P0
+        ),
+        "the coexisting token loop must still prompt LoopCollapse at the boundary, got {:?}",
+        state.waiting_for
+    );
+    // (2) MANA half DRAINED before the token pause (the E4-ordering DISCRIMINATOR): E4 cleared
+    //     the axis BEFORE the token check, so the end-of-apply refill saw no Mana axis and did
+    //     not re-seed the just-drained pool.
+    assert_eq!(
+        state.players[p0_idx]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        0,
+        "the loop-backed mana axis must be drained+cleared BEFORE the token pause (no refill re-seed)"
+    );
+
+    // Resolve the token collapse.
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 3 })
+        .expect("P0 submits the finite loop-collapse count");
+
+    // (3) After the SubmitPayAmount apply()'s own end-of-action refill, mana stays 0 (the axis
+    //     was already gone) and the token axis is cashed out — both loops ended.
+    assert_eq!(
+        state.players[p0_idx]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        0,
+        "mana stays drained after the LoopCollapse submit — no refill re-seed"
+    );
+    assert!(
+        !state.unbounded_resources.contains_key(&P0),
+        "both the mana axis (E4) and the token axis (collapse) are cashed out"
+    );
+}

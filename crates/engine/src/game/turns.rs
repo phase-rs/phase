@@ -312,6 +312,28 @@ pub(super) fn drain_pending_phase_transition_progress(
             // Queue empty. Copy `next_phase` out first, releasing the `progress`
             // borrow (NLL) so the collapse pass below can re-borrow `state`.
             let next_phase = progress.next_phase;
+            // CR 500.5 + CR 106.4 + CR 104.4b: de-realize every LOOP-backed ∞-mana axis as this
+            // step/phase ends. The per-player drain above already emptied these pools (keep-gate
+            // false for non-debug players); clearing the axis stops `refill_infinite_mana` from
+            // re-seeding it on the next action. Debug-toggle players (`debug_infinite_mana`) are
+            // EXCLUDED — their mana persists. Placed BEFORE the token-collapse check so that when a
+            // controller holds BOTH a mana axis and a token stash, the mana axis is cleared before
+            // the token pause returns — otherwise the intervening `LoopCollapse`-submit `apply()`
+            // would call `refill_infinite_mana` and re-seed the just-drained pool. Runs at true
+            // queue-empty, so it also covers any player whose drain paused on a step-end mana-handler
+            // ordering choice (CR 616.1).
+            let loop_mana_players: Vec<PlayerId> = state
+                .unbounded_resources
+                .iter()
+                .filter(|(pid, axes)| {
+                    !state.debug_infinite_mana.contains(*pid)
+                        && axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))
+                })
+                .map(|(pid, _)| *pid)
+                .collect();
+            for pid in loop_mana_players {
+                state.clear_unbounded_mana_loop(pid);
+            }
             // CR 732.2a: SECOND pass, after the CR 500.5 mana-empty APNAP drain
             // above — resolve any deferred object-growth (token) materializations
             // from accepted loop shortcuts, in APNAP turn order. A stash is present
@@ -384,15 +406,13 @@ pub(super) fn drain_pending_phase_transition_progress(
         // decisions. The `enumerate` runs over the full pool so `pool_index`
         // stays aligned with the retained expiry units that remain in
         // `mana_pool.mana`.
-        // Debug-only: CR 500.5 end-of-step empty is suppressed for a player with
-        // the infinite-mana toggle active — every non-expiry unit is dispositioned
-        // `Keep` instead of `Drop` so the pool survives the step transition. This
-        // is the partner of `mana_payment::refill_infinite_mana`; together they
-        // keep a flagged player's pool continuously full.
-        let keep_for_infinite_mana = state
-            .unbounded_resources
-            .get(&player_id)
-            .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_))));
+        // CR 500.5: unspent mana empties as a step/phase ends. The ONLY exemption is the developer
+        // `DebugAction::SetInfiniteMana` toggle (a documented debug departure). A loop-backed ∞-mana
+        // axis is NOT exempt — it drains here and is de-realized in the queue-empty pass below. Gate
+        // the keep-override on the explicit debug marker, never on "has a Mana axis" (a real loop
+        // sets one too — MEASURED identical footprint). This is the partner of
+        // `mana_payment::refill_infinite_mana`; together they keep a debug-flagged pool full.
+        let keep_for_infinite_mana = state.debug_infinite_mana.contains(&player_id);
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -3133,17 +3153,22 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
     }
 
-    /// PR-6: the infinite-mana keep gate is the partner of
+    /// T-B (CR 500.5): the infinite-mana keep gate is the partner of
     /// `mana_payment::refill_infinite_mana`. CR 500.5 normally empties a player's
-    /// pool as a step/phase ends; while that player's `unbounded_resources` names
-    /// any `Mana(_)` axis the engine dispositions their non-expiry units `Keep`
-    /// instead of `Drop`, so the pool survives the transition. A player NOT flagged
-    /// drains normally. RUNTIME test driving the live `advance_phase` empty-pool
-    /// pipeline (the production end-of-step seam this PR rewired).
+    /// pool as a step/phase ends; the ONLY exemption is the developer
+    /// `DebugAction::SetInfiniteMana` toggle, recorded in `GameState::debug_infinite_mana`.
+    /// A player in that set has their non-expiry units dispositioned `Keep` instead of
+    /// `Drop`, so the pool survives the transition. A player NOT in the set — even one
+    /// holding a loop-backed `Mana(_)` axis — drains normally. RUNTIME test driving the
+    /// live `advance_phase` empty-pool pipeline (the production end-of-step seam).
     ///
-    /// REVERT-PROBE: break the keep gate's `matches!(a, ResourceAxis::Mana(_))`
-    /// (so `keep_for_infinite_mana` is false) → P0's Blue mana drains → the
-    /// retention assertion fails.
+    /// MULTI-AUTHORITY (hostile) fixture: P0 is BOTH in `debug_infinite_mana` AND carries
+    /// the recorded `Mana(_)` axes — the debug marker dominates, so the pool is kept. This
+    /// is exactly the case the pre-fix "has a Mana axis" gate could not distinguish from a
+    /// real loop.
+    ///
+    /// REVERT-PROBE: drop the `debug_infinite_mana.insert(p0)` (so `keep_for_infinite_mana`
+    /// is false) → P0's Blue mana drains → the retention assertion (P0 == 1) FLIPS.
     #[test]
     fn advance_phase_keeps_mana_for_unbounded_mana_player() {
         use crate::game::mana_payment::INFINITE_MANA_AXES;
@@ -3152,8 +3177,11 @@ mod tests {
         let mut state = setup();
         state.phase = Phase::PreCombatMain;
 
-        // P0 has the infinite-mana toggle active (records the six Mana axes).
-        state.mark_unbounded_loop(state.players[0].id, &INFINITE_MANA_AXES);
+        let p0 = state.players[0].id;
+        // P0 is debug-toggled (SetInfiniteMana marks `debug_infinite_mana`) AND holds the
+        // recorded Mana axes — the multi-authority case: the debug marker dominates.
+        state.debug_infinite_mana.insert(p0);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
         state.players[0].mana_pool.add(ManaUnit::new(
             ManaType::Blue,
             ObjectId(11),
