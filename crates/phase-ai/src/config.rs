@@ -74,6 +74,19 @@ impl AiDifficulty {
     }
 }
 
+/// Every label [`AiDifficulty::from_label`] maps to a real difficulty rather
+/// than falling back to its unknown-label default (`Medium`).
+///
+/// **Single source of truth** — transports that must *validate* a label before
+/// accepting it (rather than silently downgrading it) reference this constant
+/// instead of restating the list, so a new arm in `from_label` cannot drift out
+/// of a caller's accepted set. Kept as an explicit list rather than derived
+/// from the enum so a hard-error message can name every accepted spelling;
+/// `accepted_difficulty_labels_round_trip_through_from_label` asserts the two
+/// stay in agreement.
+pub const ACCEPTED_DIFFICULTY_LABELS: &[&str] =
+    &["VeryEasy", "Easy", "Medium", "Hard", "VeryHard", "CEDH"];
+
 /// Platform the AI runs on (affects budget constraints).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -1314,6 +1327,17 @@ mod tests {
         );
         // Unknown labels fall back to Medium.
         assert_eq!(AiDifficulty::from_label("nonsense"), AiDifficulty::Medium);
+    }
+
+    #[test]
+    fn accepted_difficulty_labels_round_trip_through_from_label() {
+        for label in ACCEPTED_DIFFICULTY_LABELS {
+            assert_eq!(
+                &format!("{:?}", AiDifficulty::from_label(label)),
+                label,
+                "{label} does not round-trip through from_label"
+            );
+        }
     }
 
     #[test]

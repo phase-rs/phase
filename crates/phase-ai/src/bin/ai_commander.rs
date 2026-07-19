@@ -24,7 +24,9 @@ use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::{driver_step, run_ai_actions};
-use phase_ai::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
+use phase_ai::config::{
+    create_config_for_players, AiConfig, AiDifficulty, Platform, ACCEPTED_DIFFICULTY_LABELS,
+};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -206,9 +208,9 @@ fn main() {
 
     let ai_players: HashSet<PlayerId> = (0..4).map(|i| PlayerId(i as u8)).collect();
     // Effective per-seat difficulty is echoed (not just the table-wide
-    // --difficulty) so a harness can catch a --difficulty-pN typo the same
-    // way parse_difficulty already hard-fails an unrecognized label —
-    // silent drift onto the wrong tier is the phase#6080 failure class.
+    // --difficulty) so the resolved tier each seat actually plays at is an
+    // operator-visible artifact of the run — silent drift onto the wrong
+    // tier is the phase#6080 failure class.
     println!("Per-seat difficulty (0-indexed by seat):");
     let mut ai_configs: HashMap<PlayerId, AiConfig> = HashMap::new();
     for (i, override_diff) in seat_difficulty.iter().enumerate() {
@@ -438,15 +440,6 @@ fn read_dump_env(key: &str) -> Option<String> {
         })
         .expect("invalid Unicode in dump-destination env var")
 }
-
-/// Every label `AiDifficulty::from_label` (the crate's single-authority
-/// label parser) maps to a real difficulty rather than falling back to its
-/// own unknown-label default (`Medium`). Kept as an explicit list rather than
-/// derived from the enum so a hard-error message can name every accepted
-/// spelling; a new arm added to `from_label` must be mirrored here to be
-/// reachable from this binary's `--difficulty` flag.
-const ACCEPTED_DIFFICULTY_LABELS: &[&str] =
-    &["VeryEasy", "Easy", "Medium", "Hard", "VeryHard", "CEDH"];
 
 /// Parses a `--difficulty` value. Delegates the actual label→enum mapping to
 /// `AiDifficulty::from_label` (the crate's single authority — see its doc
