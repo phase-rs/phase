@@ -41,6 +41,7 @@ use super::proposed_event::{
     AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec,
 };
 use super::replacements::ReplacementEvent;
+use super::resolution::ResolutionStateWire;
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
@@ -6827,11 +6828,71 @@ pub(crate) struct PrecastShortcutBreakpoint {
 
 /// Trusted-persistence-only envelope for runtime data that must never cross a
 /// raw or public `GameState` serialization boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TrustedGameStateEnvelope {
     state: GameState,
-    #[serde(default)]
     precast_shortcut_runtime: PrecastShortcutRuntime,
+}
+
+fn decode_persisted_resolution_state(mut value: serde_json::Value) -> Result<GameState, String> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+    // Historical persistence payloads predate the explicit resolution-state
+    // discriminator. This outer persistence boundary, which already knows it
+    // is reading an old raw GameState shape, gives them the legacy-only v1
+    // marker before the first GameState decode. ResolutionStateWire itself
+    // continues to reject missing/unknown discriminators.
+    object
+        .entry("resolution_state_version".to_string())
+        .or_insert_with(|| serde_json::Value::from(1));
+    serde_json::from_value::<ResolutionStateWire>(value)
+        .map(ResolutionStateWire::into_game_state)
+        .map_err(|error| error.to_string())
+}
+
+impl Serialize for TrustedGameStateEnvelope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut value = serde_json::Map::new();
+        value.insert(
+            "state".to_string(),
+            serde_json::to_value(ResolutionStateWire::from_game_state(self.state.clone()))
+                .map_err(serde::ser::Error::custom)?,
+        );
+        value.insert(
+            "precast_shortcut_runtime".to_string(),
+            serde_json::to_value(&self.precast_shortcut_runtime)
+                .map_err(serde::ser::Error::custom)?,
+        );
+        serde_json::Value::Object(value).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| serde::de::Error::custom("trusted state must be a JSON object"))?;
+        let state = object
+            .remove("state")
+            .ok_or_else(|| serde::de::Error::custom("trusted state is missing state"))?;
+        let precast_shortcut_runtime = match object.remove("precast_shortcut_runtime") {
+            Some(runtime) => serde_json::from_value(runtime).map_err(serde::de::Error::custom)?,
+            None => PrecastShortcutRuntime::default(),
+        };
+        let state = decode_persisted_resolution_state(state).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            state,
+            precast_shortcut_runtime,
+        })
+    }
 }
 
 impl TrustedGameStateEnvelope {
@@ -6857,11 +6918,24 @@ impl TrustedGameStateEnvelope {
 /// Decodes both current trusted snapshots and historical raw `GameState`
 /// snapshots. The raw form has no pre-cast route authority, so restoring it
 /// always drops any protocol wait before it reaches a live game session.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum PersistedGameState {
     Raw(Box<GameState>),
     Trusted(Box<TrustedGameStateEnvelope>),
+}
+
+impl Serialize for PersistedGameState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Raw(state) => {
+                ResolutionStateWire::from_game_state((**state).clone()).serialize(serializer)
+            }
+            Self::Trusted(envelope) => envelope.serialize(serializer),
+        }
+    }
 }
 
 /// Rejects the old prompt shape before deserializing a persisted game.
@@ -6906,7 +6980,7 @@ impl<'de> Deserialize<'de> for PersistedGameState {
                 .map(|envelope| Self::Trusted(Box::new(envelope)))
                 .map_err(serde::de::Error::custom)
         } else {
-            serde_json::from_value(value)
+            decode_persisted_resolution_state(value)
                 .map(|state| Self::Raw(Box::new(state)))
                 .map_err(serde::de::Error::custom)
         }
@@ -19095,6 +19169,47 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn persisted_state_decodes_v1_at_the_boundary_and_rewrites_v2_only() {
+        let mut legacy = GameState::new_two_player(43);
+        legacy.legacy_pending_multi_draw = Some(PendingMultiDraw {
+            player: PlayerId(0),
+            remaining: 2,
+            accumulated: 1,
+        });
+
+        let v1 = serde_json::to_value(legacy).expect("legacy state serializes without a marker");
+        assert!(v1.get("resolution_state_version").is_none());
+        assert!(v1.get("pending_multi_draw").is_some());
+
+        let restored = serde_json::from_value::<PersistedGameState>(v1)
+            .expect("persistence boundary supplies the v1 discriminator");
+        let resumed = restored.clone().into_game_state();
+        assert!(resumed.legacy_pending_multi_draw.is_none());
+        assert_eq!(
+            resumed.draw_sequences.active().map(|frame| frame.remaining),
+            Some(2)
+        );
+
+        let raw_v2 = serde_json::to_value(restored).expect("restored raw state serializes");
+        assert_eq!(
+            raw_v2["resolution_state_version"],
+            serde_json::Value::from(2)
+        );
+        assert!(raw_v2.get("resolution_frames").is_some());
+        assert!(raw_v2.get("pending_multi_draw").is_none());
+
+        let trusted_v2 = serde_json::to_value(PersistedGameState::capture(resumed))
+            .expect("trusted state serializes");
+        let trusted_state = &trusted_v2["state"];
+        assert_eq!(
+            trusted_state["resolution_state_version"],
+            serde_json::Value::from(2)
+        );
+        assert!(trusted_state.get("resolution_frames").is_some());
+        assert!(trusted_state.get("pending_multi_draw").is_none());
     }
 
     #[test]
