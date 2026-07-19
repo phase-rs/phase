@@ -1204,14 +1204,47 @@ enum CounterGrowthDisposition {
     Consumed,
 }
 
-/// CR 122.1: classify how a cycle drives PRESERVED `Generic` object counters. This
-/// `match` IS the per-`CounterType` classification table for the counter-growth
-/// cover — it is WILDCARD-FREE by construction, so a new `CounterType` variant
-/// will not compile until it is explicitly classified here (mirrors
-/// `CounterType::is_monotone_loop_resource`, which governs the projection). Kept in
-/// lockstep with that partition: monotone counters are `project_out_resources`'d
-/// away, the non-`Generic` preserved counters gate SBAs/durations and so must
-/// compare strict-equal, and only `Generic` is a pure pumped marker.
+/// CR 122.1: is `ct` a PRESERVED `Generic` object counter — the ONLY growable axis
+/// of the counter-growth cover (charge / burden / oil / quest)? This `match` IS the
+/// SINGLE-SOURCE per-`CounterType` classification table, WILDCARD-FREE by
+/// construction, so a new `CounterType` variant will not compile until it is
+/// explicitly classified here. Shared by BOTH `classify_generic_counter_growth` (the
+/// ω-cover direction gate) and `grown_generic_counter_targets` (the display
+/// re-derivation) so the two can never drift out of lockstep. Kept in lockstep with
+/// `CounterType::is_monotone_loop_resource`, which governs the projection: monotone
+/// P/T / loyalty / defense counters are `project_out_resources`'d away, the
+/// non-`Generic` preserved counters gate SBAs/durations and so must compare
+/// strict-equal, and only `Generic` is a pure pumped marker.
+fn generic_counter_is_growable(ct: &CounterType) -> bool {
+    match ct {
+        // CR 122.1: a `Generic` marker is a pure pumped resource (charge /
+        // burden / oil / quest) — the only growable axis of this cover.
+        CounterType::Generic(_) => true,
+        // CR 122.1a + CR 613.4c / CR 306.5b / CR 310.4c: monotone P/T,
+        // loyalty, and defense counters are projected out of loop-equality
+        // by `project_out_resources`, so their growth is not this axis.
+        CounterType::Plus1Plus1
+        | CounterType::Minus1Minus1
+        | CounterType::PowerToughness { .. }
+        | CounterType::Loyalty
+        | CounterType::Defense => false,
+        // CR 122.1b/c/d, 702.62a/63a, 702.32a, 702.24a, 714.3: preserved
+        // but SBA-/duration-gating (keyword / stun / shield / time / fade /
+        // age / lore) — a loop that moves one is a real board change, so it
+        // must compare strict-equal, never be equalized away as "growth".
+        CounterType::Keyword(_)
+        | CounterType::Stun
+        | CounterType::Lore
+        | CounterType::Time
+        | CounterType::Fade
+        | CounterType::Age
+        | CounterType::Shield
+        | CounterType::Finality => false,
+    }
+}
+
+/// CR 122.1: classify how a cycle drives PRESERVED `Generic` object counters, using
+/// the wildcard-free `generic_counter_is_growable` partition.
 ///
 /// `Consumed` takes precedence over `StrictGrowth` (any decrease anywhere ⇒
 /// `Consumed`, even if a different counter grew) — fail-closed against a loop that
@@ -1229,32 +1262,7 @@ fn classify_generic_counter_growth(
             continue;
         };
         for ct in po.counters.keys().chain(co.counters.keys()) {
-            let growable = match ct {
-                // CR 122.1: a `Generic` marker is a pure pumped resource (charge /
-                // burden / oil / quest) — the only growable axis of this cover.
-                CounterType::Generic(_) => true,
-                // CR 122.1a + CR 613.4c / CR 306.5b / CR 310.4c: monotone P/T,
-                // loyalty, and defense counters are projected out of loop-equality
-                // by `project_out_resources`, so their growth is not this axis.
-                CounterType::Plus1Plus1
-                | CounterType::Minus1Minus1
-                | CounterType::PowerToughness { .. }
-                | CounterType::Loyalty
-                | CounterType::Defense => false,
-                // CR 122.1b/c/d, 702.62a/63a, 702.32a, 702.24a, 714.3: preserved
-                // but SBA-/duration-gating (keyword / stun / shield / time / fade /
-                // age / lore) — a loop that moves one is a real board change, so it
-                // must compare strict-equal, never be equalized away as "growth".
-                CounterType::Keyword(_)
-                | CounterType::Stun
-                | CounterType::Lore
-                | CounterType::Time
-                | CounterType::Fade
-                | CounterType::Age
-                | CounterType::Shield
-                | CounterType::Finality => false,
-            };
-            if !growable {
+            if !generic_counter_is_growable(ct) {
                 continue;
             }
             let (b, a) = (
@@ -1274,6 +1282,45 @@ fn classify_generic_counter_growth(
     } else {
         CounterGrowthDisposition::Stable
     }
+}
+
+/// CR 122.1 + CR 701.34a + CR 732.2a: the per-object `(ObjectId, CounterType)` pairs
+/// whose PRESERVED `Generic` counters STRICTLY GREW across one cycle (`current` vs
+/// `prior`) — the concrete DISPLAY targets of an accepted counter-growth loop
+/// (proliferate charge on Pentad Prism, burden on The One Ring). The offer
+/// certificate's unbounded axis is object-AGNOSTIC (`Counter(Other, Other)`), so the
+/// specific object id / counter type is NOT recoverable from the axis; this
+/// re-derives them by diffing each SHARED object's growable counters — the display
+/// analog of `classify_generic_counter_growth`, sharing its SAME wildcard-free
+/// `generic_counter_is_growable` partition (single-source, so they can't drift).
+///
+/// Iterates the CURRENT side only: strict growth requires `a > b >= 0`, so a grown
+/// counter is necessarily present in `current`'s map — this both captures every
+/// grown pair (no false negatives) and is duplicate-free (unlike a two-sided key
+/// chain). An object absent from `prior` is caught by the object-set cover, not this
+/// axis, so only SHARED objects contribute. DISPLAY-ONLY: the caller renders `∞`
+/// from these pairs without mutating the real counter count (CR 701.34a still adds a
+/// real counter each cycle; the `∞` is a render of the certified-unbounded loop).
+pub(crate) fn grown_generic_counter_targets(
+    prior: &GameState,
+    current: &GameState,
+) -> Vec<(ObjectId, CounterType)> {
+    let mut targets = Vec::new();
+    for (id, co) in current.objects.iter() {
+        let Some(po) = prior.objects.get(id) else {
+            continue;
+        };
+        for (ct, &a) in co.counters.iter() {
+            if !generic_counter_is_growable(ct) {
+                continue;
+            }
+            let b = po.counters.get(ct).copied().unwrap_or(0);
+            if a > b {
+                targets.push((*id, ct.clone()));
+            }
+        }
+    }
+    targets
 }
 
 /// CR 122.1: return a clone of `current` with every SHARED object's `Generic`

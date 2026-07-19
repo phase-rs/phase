@@ -11500,6 +11500,32 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_loop_pile: BTreeMap<PlayerId, BTreeSet<ObjectId>>,
 
+    /// CR 732.2a / CR 701.34a display state: for the winning controller of an
+    /// accepted COUNTER-growth loop shortcut (proliferate charge on Pentad Prism,
+    /// burden on The One Ring), the `(ObjectId, CounterType)` pairs whose preserved
+    /// `Generic` counters the certified-unbounded loop pumps each cycle. The
+    /// counter analog of `unbounded_loop_pile`: object-growth marks a per-OBJECT
+    /// pile, but the counter-growth cover's unbounded axis is object-agnostic
+    /// (`ResourceAxis::Counter(Other, Other)`), so this per-object channel is what
+    /// lets the frontend render `∞` on the specific pumped counter pill instead of
+    /// the literal count. Re-derived once at loop materialization (by driving one
+    /// period on a clone and diffing `Generic` counters) and projected to
+    /// `DerivedViews::unbounded_counters`. Written ONLY by
+    /// `register_unbounded_counter_targets`; cleared (in lockstep with
+    /// `unbounded_resources` / `unbounded_loop_pile`) by `clear_unbounded_loop`.
+    ///
+    /// DISPLAY-ONLY: the object's real counter count is NEVER mutated by this field —
+    /// CR 701.34a proliferate still adds a real counter each cycle; the `∞` is a
+    /// render of the certified-unbounded loop, not a literal count.
+    ///
+    /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same family as `unbounded_resources` /
+    /// `unbounded_loop_pile`): display state, not rules state for equality — a
+    /// populated live state must still compare equal to the empty-target ring
+    /// snapshots, or CR 104.4b / CR 732.2a loop detection yields false negatives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unbounded_counter_targets: BTreeMap<PlayerId, BTreeSet<(ObjectId, CounterType)>>,
+
     /// CR 732.2a / CR 707.2: for each controller that accepted an object-growth
     /// loop shortcut (Part 1 marks the `TokensCreated` ∞ axis and mints ZERO
     /// objects), the copiable profile of the fodder the period reproduces. Stored
@@ -14584,6 +14610,7 @@ impl GameState {
             unbounded_resources: BTreeMap::new(),
             unbounded_loop_enablers: BTreeMap::new(),
             unbounded_loop_pile: BTreeMap::new(),
+            unbounded_counter_targets: BTreeMap::new(),
             pending_unbounded_materialization: BTreeMap::new(),
             unimplemented_oracle_ids: BTreeSet::new(),
             pending_trigger_abandons: Vec::new(),
@@ -15315,6 +15342,25 @@ impl GameState {
         self.unbounded_loop_pile.insert(controller, pile);
     }
 
+    /// CR 732.2a / CR 701.34a: single write authority for `unbounded_counter_targets`
+    /// — only `game::engine::materialize_object_growth_shortcut` calls this, with the
+    /// winning controller's re-derived `(ObjectId, CounterType)` growth targets (the
+    /// per-object `∞` counter channel). Overwrites (idempotent re-registration). A
+    /// no-op for an empty set (a mana / token / object-growth loop pumps no `Generic`
+    /// counter → no per-object counter targets to display). Takes a `Vec` from the
+    /// re-derivation and collects to a `BTreeSet` (dedup + stable order for the wire).
+    pub fn register_unbounded_counter_targets(
+        &mut self,
+        controller: PlayerId,
+        targets: Vec<(ObjectId, CounterType)>,
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        self.unbounded_counter_targets
+            .insert(controller, targets.into_iter().collect());
+    }
+
     /// CR 732.2a / CR 707.2: single write authority for
     /// `pending_unbounded_materialization` — only
     /// `game::engine::materialize_object_growth_shortcut` calls this, at accept,
@@ -15350,6 +15396,7 @@ impl GameState {
         self.unbounded_resources.remove(&controller);
         self.unbounded_loop_enablers.remove(&controller); // keep the maps in lockstep
         self.unbounded_loop_pile.remove(&controller);
+        self.unbounded_counter_targets.remove(&controller); // display-only counter analog of the pile
         self.pending_unbounded_materialization.remove(&controller);
     }
 
@@ -15611,6 +15658,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         unbounded_resources: _,
         unbounded_loop_enablers: _,
         unbounded_loop_pile: _,
+        unbounded_counter_targets: _,
         pending_unbounded_materialization: _,
         unimplemented_oracle_ids: _,
         pending_trigger_abandons: _,
@@ -17352,6 +17400,46 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
             "the PR-0/PR-2 modulo path must exclude unbounded_loop_pile"
+        );
+    }
+
+    /// Sibling of `unbounded_loop_pile_excluded_from_loop_equality` — the new
+    /// `unbounded_counter_targets` field (the per-object `∞` counter-render channel)
+    /// follows the identical exclusion-by-omission discipline (never appears in the
+    /// `impl PartialEq` `&&` chain, `loop_states_equal`, `normalize_for_loop`, or the
+    /// `loop_fingerprint`): display state, not rules state for CR 104.4b / CR 732.2a
+    /// loop equality.
+    ///
+    /// REVERT-PROBE: add
+    /// `&& self.unbounded_counter_targets == other.unbounded_counter_targets` to the
+    /// manual `impl PartialEq for GameState` → all three assertions below fail.
+    #[test]
+    fn unbounded_counter_targets_excluded_from_loop_equality() {
+        use crate::analysis::resource::loop_states_equal_modulo_resources;
+
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.register_unbounded_counter_targets(
+            PlayerId(0),
+            vec![(ObjectId(1), CounterType::Generic("charge".into()))],
+        );
+        // Sanity: the populated field really does differ between the two states.
+        assert_ne!(
+            a.unbounded_counter_targets, b.unbounded_counter_targets,
+            "fixture must actually differ in unbounded_counter_targets"
+        );
+
+        assert!(
+            a == b,
+            "manual PartialEq must exclude unbounded_counter_targets (display state)"
+        );
+        assert!(
+            loop_states_equal(&a, &b),
+            "loop_states_equal (CR 104.4b/732.2a) must exclude unbounded_counter_targets"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "the PR-0/PR-2 modulo path must exclude unbounded_counter_targets"
         );
     }
 

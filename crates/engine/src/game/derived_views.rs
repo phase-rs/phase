@@ -23,6 +23,7 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::card::TokenImageRef;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -307,6 +308,20 @@ pub struct DerivedViews {
     /// viewer filtering. Empty (and omitted) when no object-growth loop is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unbounded_pile: Vec<ObjectId>,
+
+    /// CR 732.2a / CR 701.34a: the per-object `∞` COUNTER channel — for each
+    /// battlefield object, the counter types whose preserved `Generic` counters an
+    /// accepted counter-growth loop (proliferate charge on Pentad Prism, burden on
+    /// The One Ring) pumps unboundedly (projected from
+    /// `GameState::unbounded_counter_targets`, filtered to objects still on the
+    /// battlefield). The counter analog of `unbounded_pile`: object-growth marks whole
+    /// objects, but a counter-growth loop's unbounded axis is object-agnostic, so this
+    /// keys the specific pumped counter so the frontend renders `∞` (not `×N`) on that
+    /// counter pill and nothing else. Keyed by ObjectId; DISPLAY-only (the real counter
+    /// count is unchanged). Public board state — no viewer filtering. Empty (and
+    /// omitted) when no counter-growth loop is active — the dominant case.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unbounded_counters: HashMap<ObjectId, Vec<CounterType>>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -568,6 +583,24 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         for id in ids {
             if state.battlefield.contains(id) {
                 views.unbounded_pile.push(*id);
+            }
+        }
+    }
+
+    // CR 732.2a / CR 701.34a: project the accepted counter-growth loop's per-object ∞
+    // counter targets — the objects whose PRESERVED Generic counters (charge / burden)
+    // the certified-unbounded loop pumps each cycle — dropping any that have since left
+    // the battlefield (stale member). Display-only per-object channel mirroring
+    // `unbounded_pile`; the frontend renders `∞` (not `×N`) on any counter pill whose
+    // type is in this set. Runs in every format (BEFORE the Commander short-circuit).
+    for targets in state.unbounded_counter_targets.values() {
+        for (id, ct) in targets {
+            if state.battlefield.contains(id) {
+                views
+                    .unbounded_counters
+                    .entry(*id)
+                    .or_default()
+                    .push(ct.clone());
             }
         }
     }

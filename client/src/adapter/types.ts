@@ -2637,6 +2637,17 @@ export interface DerivedViews {
    * Mirrors `engine::game::derived_views::DerivedViews::unbounded_pile`.
    */
   unbounded_pile?: ObjectId[];
+  /**
+   * CR 732.2a / CR 701.34a: per-object `∞` counter channel — for each battlefield
+   * object (keyed by ObjectId-as-string), the counter-type keys whose preserved
+   * `Generic` counters an accepted counter-growth loop (proliferate charge, burden)
+   * pumps unboundedly. Each value string matches the object's `counters` map key
+   * (e.g. `"charge"`). The FE renders `∞` (not `×N`) on any counter pill whose type
+   * is in this set, and never re-derives which counters are unbounded. Empty/omitted
+   * when no counter-growth loop is active. Mirrors
+   * `engine::game::derived_views::DerivedViews::unbounded_counters`.
+   */
+  unbounded_counters?: Record<string, string[]>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

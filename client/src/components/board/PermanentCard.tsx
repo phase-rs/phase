@@ -75,6 +75,9 @@ const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
+// CR 732.2a / CR 701.34a: stable empty ref for the per-object ∞-counter selector so a
+// permanent with no unbounded counter (the dominant case) never re-renders on identity churn.
+const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
 
 /**
  * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
@@ -257,6 +260,14 @@ export const PermanentCard = memo(function PermanentCard({
     (s) =>
       s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
       ?? EMPTY_KEYWORD_BADGES,
+  );
+  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
+  // counter-growth loop) for this object. Values match the object's `counters` map keys
+  // (e.g. "charge"); the pill renders ∞ instead of ×N for any type in this set.
+  const unboundedCounterTypes = useGameStore(
+    (s) =>
+      s.gameState?.derived?.unbounded_counters?.[String(objectId)]
+      ?? EMPTY_UNBOUNDED_COUNTERS,
   );
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
@@ -904,6 +915,9 @@ export const PermanentCard = memo(function PermanentCard({
           <div className="absolute right-0.5 top-0.5 z-[60] flex flex-col items-end gap-0.5">
             {counters.map(([type, count]) => {
               const iconClass = counterIconClass(type);
+              // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
+              // counter unboundedly — render ∞ instead of the (still-finite) real count.
+              const isUnbounded = unboundedCounterTypes.includes(type);
               return (
                 <CounterTooltip key={type} type={type} count={count}>
                   <span
@@ -916,7 +930,7 @@ export const PermanentCard = memo(function PermanentCard({
                         label={formatCounterType(type)}
                       />
                     )}
-                    {formatCounterType(type)} x{count}
+                    {formatCounterType(type)} {isUnbounded ? "∞" : `x${count}`}
                   </span>
                 </CounterTooltip>
               );

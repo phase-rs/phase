@@ -293,3 +293,126 @@ fn kilo_reinjected_pinless_history_suppresses_offer() {
         state.waiting_for
     );
 }
+
+/// Drive the APNAP accept of the ∞ offer through the PUBLIC `apply()` boundary: P0 (the
+/// proposer) declares `Fixed(1)`, then every prompted opponent accepts in turn order until the
+/// protocol closes back to ordinary priority (CR 800.4a). `template: None` skips declare-time
+/// pin validation; the materialize re-derives from the intact `last_loop_action_sequence`.
+fn drive_all_accept(state: &mut GameState) {
+    use engine::analysis::decision_template::IterationCount;
+    use engine::analysis::loop_check::ShortcutResponse;
+    apply(
+        state,
+        P0,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1),
+            template: None,
+        },
+    )
+    .expect("P0 (proposer) declares the counter-growth shortcut");
+    while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+        apply(
+            state,
+            player,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        )
+        .expect("each living opponent accepts the ∞-charge shortcut");
+    }
+}
+
+/// DISPLAY-render acceptance (CR 732.2a / CR 701.34a): accepting the Kilo proliferate ∞-charge
+/// loop marks Pentad Prism's charge counter as an unbounded DISPLAY target — so the frontend
+/// renders `∞` on that pill — WITHOUT mutating the real charge count. Composite of the new
+/// field write (`register_unbounded_counter_targets`), the derived-view projection
+/// (`DerivedViews::unbounded_counters`), and the serde wire shape, all driven through the real
+/// accept pipeline from the real 4p dump.
+///
+/// REVERT-PROBE (measured, non-vacuous): deleting the `register_unbounded_counter_targets`
+/// write in `materialize_object_growth_shortcut` (or the `grown_generic_counter_targets`
+/// re-derivation) leaves `unbounded_counter_targets` empty ⇒ assertions (2) the field write,
+/// (3) the derived-view projection, and (4) the wire round-trip all FLIP to fail. The
+/// offer-fires reach-guard (1) and the `charge == Some(4)` rules-correctness anchor
+/// (display-only: the real count is untouched) HOLD BOTH WAYS.
+#[test]
+fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
+    use engine::game::derived_views::{derive_views, DerivedViews};
+    use engine::types::counter::CounterType;
+
+    let mut state = load_migrated_dump();
+    drive_one_live_cycle(&mut state);
+
+    // (1) Reach-guard (holds both ways under revert): the ∞-charge offer surfaced for P0. If
+    // this ever regresses, every downstream assertion is vacuous — so it gates them.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the CR 732.2a ∞-charge offer for P0, got {:?}",
+        state.waiting_for
+    );
+    let charge = CounterType::Generic("charge".into());
+    // Rules-correctness anchor: the REAL charge count at the offer (grew 3→4 this cycle).
+    assert_eq!(
+        state.objects[&PENTAD].counters.get(&charge).copied(),
+        Some(4),
+        "Pentad carries 4 real charge counters at the offer (grew 3→4 in the driven cycle)"
+    );
+
+    drive_all_accept(&mut state);
+
+    // The protocol closed cleanly back to ordinary priority (CR 800.4a).
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "after all accept, materialize hands priority back, got {:?}",
+        state.waiting_for
+    );
+
+    // (2) THE NEW WRITE (FLIPS on revert): accepting marks Pentad's charge as an unbounded
+    // (object, counter) DISPLAY target for P0 — object-agnostic axis re-derived to the concrete
+    // (405, charge) pair. This is the `register_unbounded_counter_targets` revert target.
+    let targets = state
+        .unbounded_counter_targets
+        .get(&P0)
+        .expect("accepting the counter-growth loop must write P0's ∞ counter targets");
+    assert!(
+        targets.contains(&(PENTAD, charge.clone())),
+        "the ∞ counter target is exactly (Pentad 405, charge), got {targets:?}"
+    );
+
+    // (RULES-CORRECTNESS, holds both ways) the DISPLAY mark does NOT mutate the real count —
+    // CR 701.34a proliferate added the real counter each live cycle; the ∞ is render-only.
+    assert_eq!(
+        state.objects[&PENTAD].counters.get(&charge).copied(),
+        Some(4),
+        "display-only: Pentad's REAL charge count is unchanged by the ∞ mark (CR 701.34a)"
+    );
+
+    // (3) DERIVED VIEW (FLIPS on revert): the projection surfaces Pentad's charge as ∞ for the
+    // FE, filtered to battlefield objects.
+    let views = derive_views(&state, None);
+    assert_eq!(
+        views.unbounded_counters.get(&PENTAD),
+        Some(&vec![charge.clone()]),
+        "derive_views projects (Pentad → [charge]) so the FE renders ∞ on the charge pill"
+    );
+
+    // (4) WIRE ROUND-TRIP (FLIPS on revert): the populated channel serializes, is present on
+    // the wire, and survives a round-trip; an EMPTY derived view omits it (skip_serializing_if).
+    let json = serde_json::to_string(&views).expect("derived views serialize");
+    assert!(
+        json.contains("unbounded_counters"),
+        "the populated ∞-counter channel is present on the wire"
+    );
+    let round: DerivedViews = serde_json::from_str(&json).expect("derived views round-trip");
+    assert_eq!(
+        round.unbounded_counters.get(&PENTAD),
+        Some(&vec![charge]),
+        "the ∞ counter channel survives a serde round-trip"
+    );
+    let empty_json =
+        serde_json::to_string(&DerivedViews::default()).expect("empty derived views serialize");
+    assert!(
+        !empty_json.contains("unbounded_counters"),
+        "the field is omitted (skip_serializing_if) when empty"
+    );
+}

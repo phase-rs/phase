@@ -2014,14 +2014,14 @@ struct PeriodFodder {
     taps_fodder: bool,
 }
 
-/// CR 732.2a / CR 111.1: re-derive the reproduced fodder class of the accepted
-/// object-growth period by driving ONE iteration of `last_loop_action_sequence` on a
-/// clone, and measure whether that period taps a fodder member. `None` when the sequence is
-/// empty or the period reproduces no single new battlefield object (a multi-activation mana
-/// engine → no fodder pile to display). Mirrors the detection drive: same
-/// `SimulationProbeGuard` re-entrancy guard, same `drive_loop_sequence_iteration`, same
-/// `derived_fodder_class` single-new-object rule. Called at materialize (with the sequence
-/// still intact) to snapshot the ∞ pile and its tapped-growth axis.
+/// CR 732.2a / CR 111.1: seed a `Priority{controller}` window and drive ONE iteration of
+/// `last_loop_action_sequence` on THROWAWAY clones, returning the `(before, after)` frames.
+/// The shared seed+drive kernel of the accept-time re-derivations — `current_period_fodder`
+/// (object-growth ∞ pile) and `current_period_counter_targets` (counter-growth ∞ targets)
+/// both diff these two frames. `None` when the sequence is empty. Mirrors the detection
+/// drive exactly: same `SimulationProbeGuard` re-entrancy guard (HELD across the drive so
+/// the injector's internal `apply_action` never recurses into the shortcut hooks), same
+/// `drive_loop_sequence_iteration`.
 ///
 /// The accept beat's `waiting_for` is `RespondToShortcut`, NOT `Priority`, so the recast
 /// cannot proceed from `state` as-is — seed a `Priority{controller}` window on the driven
@@ -2030,9 +2030,9 @@ struct PeriodFodder {
 /// INV (clone-only): takes `&GameState` (SHARED borrow) ⇒ a live write is TYPE-IMPOSSIBLE.
 /// The `Priority{controller}` seed and the drive both mutate `before`/`after`, which are
 /// THROWAWAY clones (`state.clone()` → `before.clone()`); live `state.waiting_for` is never
-/// touched, so this class-derivation cannot corrupt the real accept flow (INV-1, mirrors
+/// touched, so this cannot corrupt the real accept flow (INV-1, mirrors
 /// `try_offer_object_growth_shortcut`).
-fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
+fn drive_one_period_frames(state: &GameState) -> Option<(GameState, GameState)> {
     let seq = state.last_loop_action_sequence.clone();
     if seq.is_empty() {
         return None;
@@ -2044,12 +2044,28 @@ fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
         .collect();
     let _probe = SimulationProbeGuard::enter();
     // Seed + drive on THROWAWAY clones only (never `state`): `before` is the pre-drive frame,
-    // `after` the post-one-period frame; `derived_fodder_class` diffs the two clones.
+    // `after` the post-one-period frame; callers diff the two clones.
     let mut before = state.clone();
     priority::reset_priority(&mut before);
     before.waiting_for = WaitingFor::Priority { player: controller };
     let mut after = before.clone();
     drive_loop_sequence_iteration(&mut after, &seq, 0, &expected_defs).ok()?;
+    Some((before, after))
+}
+
+/// CR 732.2a / CR 111.1: re-derive the reproduced fodder class of the accepted
+/// object-growth period by driving ONE iteration of `last_loop_action_sequence` on a
+/// clone (`drive_one_period_frames`), and measure whether that period taps a fodder member.
+/// `None` when the sequence is empty or the period reproduces no single new battlefield
+/// object (a multi-activation mana engine → no fodder pile to display). Same
+/// `derived_fodder_class` single-new-object rule as the detection drive. Called at
+/// materialize (with the sequence still intact) to snapshot the ∞ pile and its tapped-growth
+/// axis. The post-drive `derived_fodder_class` / `tapped_fodder_members` inspections are pure
+/// (they never read the probe flag), so running them after the shared kernel's guard has
+/// dropped is behavior-preserving.
+fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
+    let controller = state.last_loop_action_sequence.first()?.controller;
+    let (before, after) = drive_one_period_frames(state)?;
     let class = derived_fodder_class(&before, &after)?;
     // CR 702.51a: the period taps a fodder iff the driven tapped-fodder multiset GREW across the
     // one-period drive. `select_convoke_taps` sorts fodder (`is_token`) FIRST, so a convoke/
@@ -2060,6 +2076,26 @@ fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
         .len()
         > crate::analysis::resource::tapped_fodder_members(&before, controller, &class).len();
     Some(PeriodFodder { class, taps_fodder })
+}
+
+/// CR 732.2a / CR 701.34a (proliferate): re-derive the per-object `(ObjectId, CounterType)`
+/// targets whose PRESERVED `Generic` counters strictly grew across one accepted
+/// counter-growth period — the DISPLAY-only `∞` counter channel. The offer certificate's
+/// unbounded axis is object-AGNOSTIC (`Counter(Other, Other)`), so the concrete object id /
+/// counter type is NOT recoverable from the axis; re-derive it the same way
+/// `current_period_fodder` derives the fodder class — drive ONE period on a clone (shared
+/// `drive_one_period_frames`) and diff `Generic` counters (`grown_generic_counter_targets`).
+/// Empty when the sequence is empty or the period grows no `Generic` counter (a mana / token
+/// / object-growth loop). General over the class (proliferate charge / One-Ring burden),
+/// never one card. DISPLAY-ONLY: the caller marks the pill to render `∞` without mutating the
+/// real counter count.
+fn current_period_counter_targets(
+    state: &GameState,
+) -> Vec<(ObjectId, crate::types::counter::CounterType)> {
+    let Some((before, after)) = drive_one_period_frames(state) else {
+        return Vec::new();
+    };
+    crate::analysis::resource::grown_generic_counter_targets(&before, &after)
 }
 
 /// CR 732.2a: detect an object-growth recast loop by driving TWO iterations on a clone;
@@ -2327,6 +2363,18 @@ fn materialize_object_growth_shortcut(
         state.register_unbounded_loop_pile(proposal.proposer, pile);
         state.register_pending_materialization(proposal.proposer, Box::new(profile));
     }
+    // CR 732.2a / CR 701.34a: snapshot the per-object ∞ COUNTER targets for DISPLAY
+    // (DerivedViews::unbounded_counters). Distinct from the object-growth ∞ pile above: a
+    // counter-growth loop's certified unbounded axis is object-agnostic (Counter(Other,
+    // Other)), so re-derive the concrete (object, counter) pairs by driving one period on a
+    // clone and diffing Generic counters — WHILE the recast sequence is still intact (the
+    // `.clear()` below wipes it). DISPLAY-ONLY: the object's real counter count is NOT mutated
+    // (CR 701.34a already added the real counter on each live cycle; this only marks the pill
+    // to render ∞). A mana / token / object-growth loop grows no Generic counter ⇒ empty ⇒
+    // no-op writer. Runs independently of `current_period_fodder` above (the Kilo counter loop
+    // reproduces no fodder object, so that block is skipped).
+    let counter_targets = current_period_counter_targets(state);
+    state.register_unbounded_counter_targets(proposal.proposer, counter_targets);
     state.loop_detect_ring.clear();
     state.last_loop_action_sequence.clear();
     priority::reset_priority(state);
