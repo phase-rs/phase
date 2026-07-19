@@ -7017,6 +7017,31 @@ fn apply_retarget(
         }
     }
 
+    // CR 115.7a: "each target can be changed only to another legal target." The
+    // `legal_new_targets` pool checked above is flat, so for a multi-slot node it
+    // cannot tell slot 0's legal set from slot 1's. Re-check positionally against
+    // the node's own per-slot filters before mutating the stack. Applies to both
+    // `Single` and `All`. It is NOT a blanket no-op for `Single`: alongside the
+    // two-surfaced-slot `Both`, `mana_multi_role` also admits the context-ref
+    // recipient `Both` (surfaced == 1, generic == 0), which is parser-reachable
+    // ("That player adds {R} for each card in target opponent's hand"). A
+    // `Single`-scope retarget (Bolt Bend, Redirect) of that shape therefore does
+    // run this per-slot validation — CR 115.7a-correct, and the reason the check
+    // is wired for both scopes rather than only `All`.
+    if let Some(ability) = state
+        .stack
+        .get(stack_entry_index)
+        .and_then(|entry| entry.ability())
+    {
+        if let Some(slot) =
+            crate::game::ability_utils::retarget_slot_violation(state, ability, &new_targets)
+        {
+            return Err(EngineError::InvalidAction(format!(
+                "Retarget: chosen target is not legal for target slot {slot}"
+            )));
+        }
+    }
+
     if stack_entry_index < state.stack.len() {
         if let Some(ability) = state.stack[stack_entry_index].ability_mut() {
             ability.targets = new_targets;

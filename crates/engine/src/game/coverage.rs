@@ -2828,8 +2828,21 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(e) = expiry {
                 d.push(("expiry".into(), format!("{e:?}")));
             }
-            if let Some(t) = target {
-                d.push(("target".into(), fmt_target(t)));
+            // CR 601.2c: `target` is a `ManaTargetRole`. Render each DECLARED
+            // role as its own labeled key so the sticky signature names the
+            // role, not just the filter — a recipient and a count source with
+            // the same filter are different parses and must not collapse to the
+            // same signature. Keys are emitted only when the role declares that
+            // filter, so a single-role mana emits exactly ONE key (as before)
+            // and unqualified manas emit none (#5507's byte-identical
+            // requirement).
+            if let Some(role) = target {
+                if let Some(f) = role.recipient() {
+                    d.push(("mana recipient".into(), fmt_target(f)));
+                }
+                if let Some(f) = role.count_source() {
+                    d.push(("mana count source".into(), fmt_target(f)));
+                }
             }
         }
         Effect::RevealHand {
@@ -10609,6 +10622,83 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+
+    /// Matrix row 19 — `parse_details` renders each DECLARED mana role under its
+    /// OWN key. Under the old role-blind rendering, Carpet of Flowers (count
+    /// source) and Belbe (recipient) produced indistinguishable `target:` keys
+    /// for opposite roles — the display-layer image of the bug being fixed.
+    ///
+    /// #5507's requirement is the `None` row: an unqualified mana must emit NO
+    /// target-ish key, byte-identical to before. Re-adding `..` to the Mana arm
+    /// (which #5507 exists to forbid) or collapsing both roles onto one `target`
+    /// key fails here.
+    #[test]
+    fn mana_role_parse_details_names_each_role_key() {
+        use crate::types::ability::{ManaProduction, ManaTargetRole, QuantityExpr, TargetFilter};
+
+        let mana = |target| Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target,
+        };
+        let keys = |effect: &Effect| -> Vec<String> {
+            effect_details(effect).into_iter().map(|(k, _)| k).collect()
+        };
+
+        // (1) `None` — 594 cards. Byte-identical: no target-ish key at all.
+        assert_eq!(
+            keys(&mana(None)),
+            vec!["mana".to_string()],
+            "an unqualified mana must emit only the production key (#5507)"
+        );
+
+        // (2) Recipient-only — the ten fixture recipients.
+        assert_eq!(
+            keys(&mana(Some(ManaTargetRole::Recipient {
+                recipient: TargetFilter::Player
+            }))),
+            vec!["mana".to_string(), "mana recipient".to_string()],
+        );
+
+        // (3) CountSource-only — Carpet of Flowers, Jeska's Will.
+        assert_eq!(
+            keys(&mana(Some(ManaTargetRole::CountSource {
+                count_source: TargetFilter::Player
+            }))),
+            vec!["mana".to_string(), "mana count source".to_string()],
+        );
+
+        // (4) Both — recipient key FIRST, matching declaration order.
+        assert_eq!(
+            keys(&mana(Some(ManaTargetRole::Both {
+                recipient: TargetFilter::Player,
+                count_source: TargetFilter::ScopedPlayer,
+            }))),
+            vec![
+                "mana".to_string(),
+                "mana recipient".to_string(),
+                "mana count source".to_string()
+            ],
+        );
+
+        // The point of the rename: opposite roles with the SAME filter must not
+        // produce the same signature.
+        assert_ne!(
+            effect_details(&mana(Some(ManaTargetRole::Recipient {
+                recipient: TargetFilter::Player
+            }))),
+            effect_details(&mana(Some(ManaTargetRole::CountSource {
+                count_source: TargetFilter::Player
+            }))),
+            "a recipient and a count source with the same filter are different \
+             parses and must not collapse to the same sticky signature"
+        );
+    }
+
     use std::sync::Arc;
 
     use super::*;

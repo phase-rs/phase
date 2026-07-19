@@ -7667,8 +7667,10 @@ fn jetfire_front_face_activated_ability() {
     );
     assert_eq!(
         *target,
-        Some(TargetFilter::Player),
-        "recipient must be the chosen target player"
+        Some(crate::types::ability::ManaTargetRole::Recipient {
+            recipient: TargetFilter::Player
+        }),
+        "recipient must be the chosen TARGET player role, not a count source"
     );
     assert_eq!(
         restrictions,

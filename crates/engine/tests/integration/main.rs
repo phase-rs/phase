@@ -587,6 +587,8 @@ mod mana_autotap_preference;
 mod mana_cost_reducers_issue_141;
 mod mana_drain_refund;
 mod mana_payment_preview;
+mod mana_role_fixture_migration;
+mod mana_target_recipient_and_count_source;
 mod maraxus_team_pump_anthem;
 mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;

@@ -150,6 +150,39 @@ fn legal_new_targets_for_stack_ability(
         );
     }
 
+    // CR 115.7 + CR 601.2c: A multi-role mana declares its recipient AND its
+    // count source as independent instances of "target"; both are legally
+    // retargetable. The standard branch below reads `Effect::target_filter()`,
+    // which returns only the FIRST DECLARED role filter and RETURNS
+    // UNCONDITIONALLY — so it must not run first here, or the second role would
+    // be silently unretargetable. Build the pool over ALL surfaced role filters
+    // instead. Placed like the Aura branch above for the same reason: this
+    // node's real target restriction is not the one the generic accessor
+    // reports.
+    //
+    // The pool is necessarily FLAT (`Vec<TargetRef>`, no slot structure), so it
+    // is a SUPERSET pre-filter for the UI/AI. Per-slot CR 115.7a legality is
+    // enforced at the assignment seam by `retarget_slot_violation`
+    // (`engine.rs::apply_retarget`). Single-role manas take
+    // `mana_multi_role == None` and are served entirely by the standard branch,
+    // exactly as before.
+    if let Some(role) = crate::types::ability::mana_multi_role(&stack_ability.effect) {
+        let options: Vec<TargetRef> = role
+            .surfaced_filters()
+            .flat_map(|(_slot, filter)| {
+                find_legal_targets(
+                    state,
+                    filter,
+                    stack_ability.controller,
+                    stack_ability.source_id,
+                )
+            })
+            .collect();
+        if !options.is_empty() {
+            return options;
+        }
+    }
+
     // CR 115.7: Standard targeted spell/ability — re-evaluate its own declared
     // target filter against current game state.
     if let Some(filter) = extract_target_filter(&stack_ability.effect) {

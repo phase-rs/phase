@@ -10094,7 +10094,9 @@ fn high_tide_delayed_trigger_that_player_binds_triggering_player() {
             ..
         } => assert_eq!(
             *recipient,
-            TargetFilter::TriggeringPlayer,
+            crate::types::ability::ManaTargetRole::Recipient {
+                recipient: TargetFilter::TriggeringPlayer
+            },
             "\"that player\" must bind to the triggering (tapping) player, not the caster"
         ),
         other => panic!("expected Mana with an explicit recipient, got {other:?}"),
@@ -10137,7 +10139,9 @@ fn bubbling_muck_delayed_trigger_taps_for_mana_class_general() {
         &*effect.effect,
         Effect::Mana {
             produced: ManaProduction::Fixed { colors, contribution: ManaContribution::Additional },
-            target: Some(TargetFilter::TriggeringPlayer),
+            target: Some(crate::types::ability::ManaTargetRole::Recipient {
+                recipient: TargetFilter::TriggeringPlayer
+            }),
             ..
         } if colors == &vec![ManaColor::Black]
     ));
@@ -16556,7 +16560,9 @@ fn phase_trigger_blinkmoth_urn_that_player_adds_mana_for_their_artifacts() {
         } => {
             assert_eq!(
                 *target,
-                Some(TargetFilter::ScopedPlayer),
+                Some(crate::types::ability::ManaTargetRole::Recipient {
+                    recipient: TargetFilter::ScopedPlayer
+                }),
                 "mana recipient must be the active player (ScopedPlayer)"
             );
             let QuantityExpr::Ref {

@@ -38,9 +38,9 @@ use crate::game::engine::{apply_as_current_for_simulation, SimulationProbeGuard}
 use crate::game::functioning_abilities::game_functioning_statics;
 use crate::game::{casting, keywords, turn_control};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, FilterProp, ParitySource,
-    ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility, StaticDefinition,
-    TargetFilter, TargetRef, TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, FilterProp,
+    ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility,
+    StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CardType;
@@ -967,6 +967,25 @@ fn resolved_ability_target_filters_safe(ability: &ResolvedAbility) -> bool {
             return false;
         }
     }
+    // CR 601.2c: A mana effect declares role-scoped target filters;
+    // `target_filter()` returns only the first. Scan them ALL here, or a POISON
+    // FilterProp in a non-first mana role filter would be silently treated as
+    // SAFE and its ChooseTarget candidates wrongly memoized. Memoization
+    // soundness is a conservative gate — over-scanning only costs a memo,
+    // under-scanning is a bug. `declared_filters()` (not `surfaced_filters()`):
+    // context-ref filters are conservatively POISON under
+    // `target_filter_all_props_safe`, the correct conservative direction here.
+    if let Effect::Mana {
+        target: Some(role), ..
+    } = &ability.effect
+    {
+        if !role
+            .declared_filters()
+            .all(|(_, f)| target_filter_all_props_safe(f))
+        {
+            return false;
+        }
+    }
     if let Some(sub) = &ability.sub_ability {
         if !resolved_ability_target_filters_safe(sub) {
             return false;
@@ -1244,6 +1263,82 @@ fn legality_equivalence_key(
 mod tests {
     use super::*;
     use crate::ai_support::candidate_actions;
+
+    /// Matrix rows 9a + 9b — the mana-role POISON scan is a PURE EXTENSION.
+    ///
+    /// `resolved_ability_target_filters_safe` reads `Effect::target_filter()`,
+    /// which returns only the FIRST declared role filter. For a `Both` role the
+    /// second filter would go unscanned and a POISON `FilterProp` inside it
+    /// would be wrongly treated as SAFE, wrongly memoizing `ChooseTarget`
+    /// candidates. Memoization soundness is a conservative gate: over-scanning
+    /// costs a memo, under-scanning is a bug.
+    ///
+    /// 9b is the paired over-application negative — no SINGLE-role verdict may
+    /// change. Fails if the arm is written with `any()`, with
+    /// `surfaced_filters()`, or so that it SHADOWS rather than supplements the
+    /// generic scan.
+    #[test]
+    fn mana_role_poison_scan_extends_without_tightening() {
+        use crate::types::ability::{
+            ManaProduction, ManaTargetRole, QuantityExpr, TargetFilter, TypedFilter,
+        };
+        use crate::types::identifiers::ObjectId;
+        use crate::types::player::PlayerId;
+
+        let poison = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+        );
+        let safe = TargetFilter::Player;
+        // Reach guard for the fixture itself: these must actually differ under
+        // the predicate, or every assertion below is vacuous.
+        assert!(!target_filter_all_props_safe(&poison));
+        assert!(target_filter_all_props_safe(&safe));
+
+        let ability = |role: Option<ManaTargetRole>| {
+            ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: role,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+
+        // 9a: POISON hiding in the NON-FIRST role is still caught.
+        assert!(
+            !resolved_ability_target_filters_safe(&ability(Some(ManaTargetRole::Both {
+                recipient: safe.clone(),
+                count_source: poison.clone(),
+            }))),
+            "a POISON filter in the second mana role must not be memoized as SAFE"
+        );
+
+        // 9b: single-role verdicts are untouched in BOTH directions.
+        assert!(resolved_ability_target_filters_safe(&ability(Some(
+            ManaTargetRole::Recipient {
+                recipient: safe.clone()
+            }
+        ))));
+        assert!(resolved_ability_target_filters_safe(&ability(Some(
+            ManaTargetRole::CountSource {
+                count_source: safe.clone()
+            }
+        ))));
+        assert!(!resolved_ability_target_filters_safe(&ability(Some(
+            ManaTargetRole::Recipient {
+                recipient: poison.clone()
+            }
+        ))));
+        assert!(resolved_ability_target_filters_safe(&ability(None)));
+    }
+
     use crate::types::game_state::{CastPaymentMode, CastingVariant, GameState, StackEntryKind};
 
     #[test]

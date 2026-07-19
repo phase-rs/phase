@@ -11,8 +11,8 @@ use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     AbilityKind, AbilityTag, Comparator, Duration, Effect, FilterProp, LinkedExileScope,
-    ManaContribution, ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
-    TypeFilter, TypedFilter,
+    ManaContribution, ManaProduction, ManaSpendRestriction, ManaTargetRole, ObjectScope,
+    QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
@@ -196,9 +196,19 @@ pub(super) fn try_parse_add_mana_effect_with_context(
         let synthetic = format!("add {rest}");
         let mut effect = try_parse_add_mana_effect_with_context(&synthetic, ctx)?;
         if let Effect::Mana { target, .. } = &mut effect {
-            if target.is_none() {
-                *target = Some(recipient);
-            }
+            // CR 601.2c: the inner "add …" clause may already have produced a
+            // COUNT SOURCE role (`for_each_clause_target_filter` /
+            // `apply_where_x_count_expression`). The subject is a second,
+            // independent instance of "target" — the RECIPIENT. Combine into
+            // `Both` rather than declining on `is_none()` (which dropped the
+            // recipient) or overwriting (which would drop the count source).
+            // `with_recipient` is the SINGLE authority for this combine and is
+            // shared with the subject-predicate stamping site in
+            // `parser/oracle_effect/mod.rs`.
+            *target = Some(match target.take() {
+                Some(role) => role.with_recipient(recipient),
+                None => ManaTargetRole::Recipient { recipient },
+            });
         }
         return Some(effect);
     }
@@ -411,7 +421,7 @@ pub(super) fn try_parse_add_mana_effect_with_context(
             // surface it on the returned `Effect::Mana::target` so the caller
             // attaches a player target slot. All other any-color variants have
             // no player target — `mana_target` defaults to `None`.
-            let mut mana_target: Option<TargetFilter> = None;
+            let mut mana_target: Option<ManaTargetRole> = None;
             let produced = if nom_on_lower(after_color.trim(), &after_lower, |i| {
                 value((), tag("that a land an opponent controls could produce")).parse(i)
             })
@@ -577,7 +587,7 @@ pub(super) fn try_parse_add_mana_effect_with_context(
             .parse(i)
         }) {
             let after_lower = after_color.trim().to_lowercase();
-            let mut mana_target: Option<TargetFilter> = None;
+            let mut mana_target: Option<ManaTargetRole> = None;
             let count = if let Some((dynamic_qty, target)) =
                 try_parse_any_color_for_each_suffix(after_lower.as_str())
             {
@@ -729,28 +739,32 @@ pub(super) fn try_parse_activate_only_condition(text: &str) -> Option<Effect> {
 /// CR 115.1 + CR 115.7: Detect a player target filter inside a for-each clause.
 ///
 /// When the for-each tail mentions "target opponent" or "target player", surface
-/// the corresponding `TargetFilter` so the wrapping ability can attach a player
-/// target slot. The actual count is resolved separately via `TargetZoneCardCount`
-/// or `TargetLifeTotal` against `ability.targets` at resolution time.
+/// the corresponding filter as a COUNT SOURCE role (CR 601.2c) so the wrapping
+/// ability can attach a player target slot. The actual count is resolved
+/// separately via `TargetZoneCardCount` or `TargetLifeTotal` against that role's
+/// own slot at resolution time.
+///
+/// The role is stamped HERE — at the point of grammatical knowledge — so no
+/// downstream consumer has to re-derive "recipient or count source" from the
+/// production's quantity shape.
 ///
 /// Returns `None` when the clause refers to a non-target subject (e.g. "Swamp
 /// you control" — Cabal Coffers' `ObjectCount`-class), in which case the parent
 /// `Effect::Mana` keeps `target: None`.
-fn for_each_clause_target_filter(for_each_rest: &str) -> Option<TargetFilter> {
+fn for_each_clause_target_filter(for_each_rest: &str) -> Option<ManaTargetRole> {
     use crate::types::ability::{ControllerRef, TypedFilter};
     let lower = for_each_rest.to_lowercase();
-    if nom_primitives::scan_contains(&lower, "target opponent") {
+    let count_source = if nom_primitives::scan_contains(&lower, "target opponent") {
         // CR 115.1: "target opponent" — same encoding as `parse_target` uses
         // (TypedFilter with `ControllerRef::Opponent`) so target legality and
         // multiplayer filtering reuse the existing opponent-only path.
-        Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::Opponent),
-        ))
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
     } else if nom_primitives::scan_contains(&lower, "target player") {
-        Some(TargetFilter::Player)
+        TargetFilter::Player
     } else {
-        None
-    }
+        return None;
+    };
+    Some(ManaTargetRole::CountSource { count_source })
 }
 
 /// CR 106.1: Detect a `for each [filter]` suffix on the "any color" branch and
@@ -772,7 +786,9 @@ fn for_each_clause_target_filter(for_each_rest: &str) -> Option<TargetFilter> {
 ///
 /// Returns `None` when no for-each suffix is present or the inner clause does
 /// not parse as a known quantity.
-fn try_parse_any_color_for_each_suffix(lower: &str) -> Option<(QuantityRef, Option<TargetFilter>)> {
+fn try_parse_any_color_for_each_suffix(
+    lower: &str,
+) -> Option<(QuantityRef, Option<ManaTargetRole>)> {
     let (rest, _) = preceded(
         nom::character::complete::multispace0::<_, OracleError<'_>>,
         tag("for each "),
@@ -894,7 +910,7 @@ fn parse_fixed_mana_group_list(text: &str) -> Option<Vec<ManaColor>> {
 pub(super) fn parse_mana_production_clause(
     text: &str,
     contribution: ManaContribution,
-) -> Option<(ManaProduction, Option<TargetFilter>)> {
+) -> Option<(ManaProduction, Option<ManaTargetRole>)> {
     if let Some(color_options) = parse_mana_color_set(text) {
         if color_options.len() > 1 {
             return Some((
@@ -1085,7 +1101,7 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
 pub(super) fn apply_where_x_count_expression(
     count: QuantityExpr,
     where_x_expression: Option<&str>,
-) -> Option<(QuantityExpr, Option<TargetFilter>)> {
+) -> Option<(QuantityExpr, Option<ManaTargetRole>)> {
     match (&count, where_x_expression) {
         (
             QuantityExpr::Ref {
@@ -1105,8 +1121,10 @@ pub(super) fn apply_where_x_count_expression(
     }
 }
 
-/// CR 115.1: Extract target player filters from where-X expressions.
-fn where_x_expression_target_filter(expression: &str) -> Option<TargetFilter> {
+/// CR 115.1 + CR 601.2c: Extract the COUNT SOURCE role from a where-X
+/// expression ("where X is the number of Islands target opponent controls" —
+/// Carpet of Flowers). The named player feeds the count, never the pool.
+fn where_x_expression_target_filter(expression: &str) -> Option<ManaTargetRole> {
     let lower = expression.to_ascii_lowercase();
     let clause = tag::<_, _, OracleError<'_>>("the number of ")
         .parse(lower.as_str())
@@ -3269,9 +3287,11 @@ mod tests {
             }
             other => panic!("expected AnyOneColor, got {other:?}"),
         }
-        let target = target.expect("target opponent should surface a player target filter");
-        let TargetFilter::Typed(typed) = target else {
-            panic!("expected Typed filter for target opponent, got {target:?}");
+        // CR 601.2c: the for-each clause names a COUNT SOURCE, never a recipient.
+        let role = target.expect("target opponent should surface a count-source role");
+        assert_eq!(role.recipient(), None, "for-each names no recipient");
+        let Some(TargetFilter::Typed(typed)) = role.count_source() else {
+            panic!("expected Typed count-source filter, got {role:?}");
         };
         assert_eq!(typed.controller, Some(ControllerRef::Opponent));
     }
@@ -3300,7 +3320,13 @@ mod tests {
                 }
             },
         );
-        assert_eq!(target, Some(TargetFilter::Player));
+        // CR 601.2c: "in target player's hand" is a COUNT SOURCE role.
+        assert_eq!(
+            target,
+            Some(ManaTargetRole::CountSource {
+                count_source: TargetFilter::Player
+            })
+        );
     }
 
     /// Cabal Coffers — "Add {B} for each Swamp you control" — must continue to
@@ -3409,10 +3435,13 @@ mod tests {
         }
         // CR 115.1: target must be the opponent player filter so the engine
         // surfaces a player target slot at cast/trigger time.
-        let target = target.expect("target opponent must surface a player target filter");
-        let TargetFilter::Typed(typed) = target else {
-            panic!("expected TargetFilter::Typed, got {target:?}");
+        // CR 601.2c: a count-source role, not a recipient.
+        let role = target.expect("target opponent must surface a count-source role");
+        assert_eq!(role.recipient(), None, "for-each names no recipient");
+        let Some(TargetFilter::Typed(typed)) = role.count_source() else {
+            panic!("expected Typed count-source filter, got {role:?}");
         };
+        let typed = typed.clone();
         assert_eq!(typed.controller, Some(ControllerRef::Opponent));
         // Sanity: this is a player target (no type filter).
         assert_eq!(
@@ -3499,8 +3528,12 @@ mod tests {
             typed.type_filters
         );
 
-        let Some(TargetFilter::Typed(target_typed)) = target else {
-            panic!("expected target opponent filter, got {target:?}");
+        // CR 601.2c (Carpet of Flowers): "the number of Islands target opponent
+        // controls" is a COUNT SOURCE, not a mana recipient.
+        let role = target.expect("target opponent must surface a count-source role");
+        assert_eq!(role.recipient(), None, "where-X names no recipient");
+        let Some(TargetFilter::Typed(target_typed)) = role.count_source() else {
+            panic!("expected Typed count-source filter, got {role:?}");
         };
         assert_eq!(target_typed.controller, Some(ControllerRef::Opponent));
     }
@@ -3898,7 +3931,12 @@ mod tests {
             .expect("subject-led mana clause must parse to Effect::Mana");
         match effect {
             Effect::Mana { target, .. } => {
-                assert_eq!(target, Some(TargetFilter::ScopedPlayer));
+                assert_eq!(
+                    target,
+                    Some(ManaTargetRole::Recipient {
+                        recipient: TargetFilter::ScopedPlayer
+                    })
+                );
             }
             other => panic!("expected Effect::Mana, got {other:?}"),
         }
@@ -3918,7 +3956,9 @@ mod tests {
             } => {
                 assert_eq!(
                     target,
-                    Some(TargetFilter::ScopedPlayer),
+                    Some(ManaTargetRole::Recipient {
+                        recipient: TargetFilter::ScopedPlayer
+                    }),
                     "recipient must be the scoped phase player"
                 );
                 assert!(
@@ -3955,7 +3995,9 @@ mod tests {
             } => {
                 assert_eq!(
                     target,
-                    Some(TargetFilter::Player),
+                    Some(ManaTargetRole::Recipient {
+                        recipient: TargetFilter::Player
+                    }),
                     "recipient must be the chosen TARGET player, not an anaphor"
                 );
                 assert_eq!(
