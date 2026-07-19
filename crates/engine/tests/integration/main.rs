@@ -653,6 +653,7 @@ mod msh_wave5a_group1_classifier;
 mod msh_wave5a_group2_conditions;
 mod multi_layer_continuous_effect;
 mod multi_upkeep_triggers_suspend;
+mod must_attack_player_attribution;
 mod mycoloth_upkeep_trigger;
 mod myrkul_crew_phase1_incarnation;
 mod mystic_forge_regression;

@@ -2605,9 +2605,36 @@ pub(crate) fn must_attack_players_for_creature(
     state: &GameState,
     obj: &GameObject,
 ) -> Vec<PlayerId> {
+    let mut players: Vec<PlayerId> = must_attack_player_directives_for_creature(state, obj)
+        .into_iter()
+        .map(|(player, _)| player)
+        .collect();
+    // CR 508.1d: players is a SET — a per-player requirement is obeyed by
+    // attacking that player once (CR 508.1d counts requirements), so multiple
+    // directives naming the same player collapse to one entry; otherwise
+    // `score_declaration` would double-count a single requirement and bias
+    // attack selection. Per-directing-source multiplicity lives in `sources`.
+    players.sort_unstable_by_key(|p| p.0);
+    players.dedup();
+    players
+}
+
+/// CR 508.1d + CR 611.2c: the (required player, directing carrier) pairs from
+/// every `MustAttackPlayer` static on `obj`. `source_object` names the object
+/// that grafted the requirement (ForceAttack / Encore / mass-coerce source);
+/// `None` for an intrinsic def → the creature itself is the carrier. Retains
+/// per-source multiplicity (two sources forcing the same player yield two
+/// pairs) so the source collector surfaces every directing id; the
+/// `must_attack_players_for_creature` projection dedups. Single authority: the
+/// players list and the source collector are both projections of this one scan
+/// (n6 invariant).
+pub(crate) fn must_attack_player_directives_for_creature(
+    state: &GameState,
+    obj: &GameObject,
+) -> Vec<(PlayerId, Option<ObjectId>)> {
     super::functioning_abilities::active_static_definitions(state, obj)
         .filter_map(|sd| match sd.mode {
-            StaticMode::MustAttackPlayer { player } => Some(player),
+            StaticMode::MustAttackPlayer { player } => Some((player, sd.source_object)),
             _ => None,
         })
         .collect()
@@ -2624,15 +2651,16 @@ fn has_local_must_attack(state: &GameState, obj: &GameObject) -> bool {
 /// CR 508.1d + CR 701.15b/c: sorted, deduped carriers of every must-attack cause
 /// on `obj`. Called by the producer ONLY when the enforcement bool already
 /// returned true (all exemptions cleared), so no exemption re-check is needed.
-/// `has_attackable_must_player` is precomputed by the producer (n6: the single
-/// `must_attack_players_for_creature` scan feeds both `players` and this).
+/// `attackable_must_player_carriers` is precomputed by the producer (n6: the
+/// single directives scan feeds both `players` and this) — one entry per
+/// attackable `MustAttackPlayer` directive, resolved to its directing object.
 /// Direct `goaded_by` designations contribute NO source (CR 701.15b, player-level).
 fn must_attack_sources_gated(
     state: &GameState,
     obj: &GameObject,
     obj_id: ObjectId,
     gates: &CombatStaticGates,
-    has_attackable_must_player: bool,
+    attackable_must_player_carriers: &[ObjectId],
 ) -> Vec<ObjectId> {
     let mut sources = Vec::new();
     // CR 508.1d: intrinsic generic MustAttack (Juggernaut) → carrier = the creature.
@@ -2651,18 +2679,15 @@ fn must_attack_sources_gated(
         crate::game::perf_counters::record_static_full_scan();
         sources.extend(goad_static_hits_for_creature(state, obj_id).map(|(_, src)| src));
     }
-    // CR 508.1d: MustAttackPlayer statics are local (`must_attack_players_for_creature`
-    // scans `active_static_definitions`) → carrier = the creature itself.
-    // DEFERRED: when the requirement was grafted by a directing object (Curse-style
-    // `GenericEffect`), that object's id is NOT recoverable here — the layers apply step
-    // pushes a bare `StaticDefinition` into `static_definitions`
-    // (layers.rs GrantStaticAbility/AddStaticMode) with no object carrier, and
-    // `StaticDefinition` records only `source_controller` (a PlayerId, CR 611.2c anchor).
-    // True directing-carrier attribution needs new provenance infra
-    // (`StaticDefinition.source_object` threaded through all graft sites) — out of scope.
-    if has_attackable_must_player {
-        sources.push(obj_id);
-    }
+    // CR 508.1d + CR 611.2c: MustAttackPlayer statics are grafted onto the
+    // creature by a directing object (ForceAttack / Encore / mass-coerce). The
+    // producer resolved each attackable requirement's carrier via
+    // `source_object` (unwrap_or(creature) for an intrinsic def). Attribute the
+    // DIRECTING object here; the creature is the fallback carrier. Per-source
+    // multiplicity is intended (two sources → two carriers); the trailing
+    // sort/dedup collapses only a carrier that is ALSO a goad/local carrier
+    // (same ObjectId).
+    sources.extend(attackable_must_player_carriers.iter().copied());
     sources.sort_unstable();
     sources.dedup();
     sources
@@ -4377,15 +4402,31 @@ pub fn attacker_constraints_for_active_player(
                 &gates,
             ) {
                 // CR 508.1d: specific-player requirements intersected with the
-                // currently attackable players; empty for generic / goad. n6: this
-                // single `must_attack_players_for_creature` scan feeds both the
-                // players list and the source collector's MustAttackPlayer arm.
-                let players: Vec<PlayerId> = must_attack_players_for_creature(state, obj)
-                    .into_iter()
-                    .filter(|p| attackable.contains(p))
+                // currently attackable players. n6: this single directives scan
+                // feeds BOTH the players list (CombatRequirement.players) and the
+                // source collector's carrier list — no second scan, no drift.
+                let directives = must_attack_player_directives_for_creature(state, obj);
+                // CR 508.1d: players is a SET — dedup so score_declaration counts
+                // one requirement per player even when two sources force the same
+                // player.
+                let mut players: Vec<PlayerId> = directives
+                    .iter()
+                    .filter(|(p, _)| attackable.contains(p))
+                    .map(|(p, _)| *p)
+                    .collect();
+                players.sort_unstable_by_key(|p| p.0);
+                players.dedup();
+                // CR 611.2c: resolve each attackable requirement's carrier — the
+                // directing object (`source_object`), or the creature itself for
+                // an intrinsic def. Multiplicity retained (multi-source
+                // attribution); the collector's tail dedups by ObjectId.
+                let attackable_carriers: Vec<ObjectId> = directives
+                    .iter()
+                    .filter(|(p, _)| attackable.contains(p))
+                    .map(|(_, src)| src.unwrap_or(obj_id))
                     .collect();
                 let sources =
-                    must_attack_sources_gated(state, obj, obj_id, &gates, !players.is_empty());
+                    must_attack_sources_gated(state, obj, obj_id, &gates, &attackable_carriers);
                 constraints.insert(obj_id, CombatRequirement::MustAttack { players, sources });
             }
         } else if creature_cant_attack_gated(state, obj_id, &gates) {
@@ -11362,6 +11403,87 @@ mod tests {
                 sources: vec![generic],
             }),
             "a generic must-attack creature surfaces an empty specific-player list"
+        );
+    }
+
+    /// CR 508.1d (Finding 1): two distinct directing sources forcing one creature
+    /// to attack the SAME player collapse to ONE requirement. The `players`
+    /// projection is a deduped set, so `score_declaration` (via the
+    /// `AttackDeclarationConstraints::build` push at combat.rs:3365) counts the
+    /// requirement once and does not bias attack selection toward the doubly-forced
+    /// player. REVERT-FAIL: dropping the `players.dedup()` in
+    /// `must_attack_players_for_creature` pushes two identical `MustAttackPlayer`
+    /// requirements, so `score_single(creature → P1)` returns 2 (not 1) and the
+    /// P1-vs-P2 tie breaks.
+    #[test]
+    fn must_attack_player_dedup_no_double_count() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+
+        // Baseline reach-guard: a single-source creature forced to attack P1 yields
+        // `players == [P1]` — the dedup path is exercised, not vacuous.
+        let baseline = create_creature(&mut state, PlayerId(0), "Singly Forced", 2, 2);
+        state
+            .objects
+            .get_mut(&baseline)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::MustAttackPlayer {
+                    player: PlayerId(1),
+                })
+                .affected(TargetFilter::SelfRef)
+                .source_object(ObjectId(9000)),
+            );
+        assert_eq!(
+            must_attack_players_for_creature(&state, state.objects.get(&baseline).unwrap()),
+            vec![PlayerId(1)],
+            "baseline: a single directive surfaces one player"
+        );
+
+        // The doubly-forced creature: two distinct sources force P1 (distinct
+        // `source_object` keeps the two defs from collapsing at the def level,
+        // mirroring the layer stamp for two distinct ForceAttack sources), one
+        // source forces P2.
+        let creature = create_creature(&mut state, PlayerId(0), "Doubly Forced", 2, 2);
+        let defs = &mut state.objects.get_mut(&creature).unwrap().static_definitions;
+        for src in [ObjectId(9001), ObjectId(9002)] {
+            defs.push(
+                StaticDefinition::new(StaticMode::MustAttackPlayer {
+                    player: PlayerId(1),
+                })
+                .affected(TargetFilter::SelfRef)
+                .source_object(src),
+            );
+        }
+        defs.push(
+            StaticDefinition::new(StaticMode::MustAttackPlayer {
+                player: PlayerId(2),
+            })
+            .affected(TargetFilter::SelfRef)
+            .source_object(ObjectId(9003)),
+        );
+
+        // Players projection is a deduped SET: [P1, P2], NOT [P1, P1, P2].
+        assert_eq!(
+            must_attack_players_for_creature(&state, state.objects.get(&creature).unwrap()),
+            vec![PlayerId(1), PlayerId(2)],
+            "two same-player directives collapse to one entry (CR 508.1d set semantics)"
+        );
+
+        let constraints = AttackDeclarationConstraints::build(&state);
+        let s_p1 = score_single(&constraints, creature, AttackTarget::Player(PlayerId(1)));
+        let s_p2 = score_single(&constraints, creature, AttackTarget::Player(PlayerId(2)));
+        assert_eq!(
+            s_p1, 1,
+            "attacking P1 obeys the single deduped P1 requirement exactly once"
+        );
+        assert_eq!(s_p2, 1, "attacking P2 obeys the single P2 requirement once");
+        assert_eq!(
+            s_p1, s_p2,
+            "no bias: the doubly-forced player is not double-counted (score tie)"
         );
     }
 

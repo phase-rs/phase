@@ -14670,6 +14670,70 @@ mod tests {
         );
     }
 
+    /// CR 104.4b + CR 611.2c + CR 400.7: a materialized `MustAttackPlayer`
+    /// static's `source_object` provenance is a layer-DERIVED characteristic that
+    /// `object_content_eq` deliberately omits (like the whole `static_definitions`
+    /// vec). Two states differing ONLY in a grafted requirement's directing-source
+    /// id — the shape a mandatory loop produces when it re-creates the forcing
+    /// object with a fresh CR 400.7 incarnation id each iteration — must confirm
+    /// as a repeat, else the CR 104.4b draw could never fire. Revert-failing:
+    /// adding `static_definitions` to `object_content_eq`'s allow-list makes the
+    /// two states differ and this assertion fails, reintroducing the hazard.
+    #[test]
+    fn loop_states_equal_ignores_static_source_object() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::StaticMode;
+
+        let mut a = GameState::new_two_player(7);
+        let mut object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        object.static_definitions.push(
+            StaticDefinition::new(StaticMode::MustAttackPlayer {
+                player: PlayerId(1),
+            })
+            .affected(TargetFilter::SelfRef)
+            .source_object(ObjectId(800)),
+        );
+        a.objects.insert(ObjectId(500), object);
+        a.battlefield.push_back(ObjectId(500));
+
+        // `b` is identical EXCEPT the grafted requirement's directing-source id (a
+        // fresh CR 400.7 incarnation of the forcing object).
+        let mut b = a.clone();
+        b.objects
+            .get_mut(&ObjectId(500))
+            .unwrap()
+            .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackPlayer {
+            player: PlayerId(1),
+        })
+        .affected(TargetFilter::SelfRef)
+        .source_object(ObjectId(801))]
+        .into();
+
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "states differing only in a grafted static's source_object must confirm as a repeat"
+        );
+
+        // Paired non-vacuity: a genuinely-compared field (goaded_by, CR 701.15c)
+        // DOES break equality — proving the comparator is live, not a constant true.
+        let mut c = a.clone();
+        c.objects
+            .get_mut(&ObjectId(500))
+            .unwrap()
+            .goaded_by
+            .insert(PlayerId(1));
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &c.normalize_for_loop()),
+            "a goaded_by difference must NOT confirm (the comparator is live)"
+        );
+    }
+
     /// CR 118.3a: the self-heal that fixes the reported "tap one mana → all
     /// select" bug. Mana that bypassed `add_mana_to_pool` (debug tooling, restored
     /// pre-stamping saves) carries the sentinel `pip_id 0`; `restamp_pool_pip_ids`

@@ -5254,6 +5254,21 @@ fn static_mode_uses_controller_relative_blocker_filter(
     }
 }
 
+/// CR 508.1d + CR 611.2c: True when a granted static mode belongs to the
+/// directing-source attribution class — modes whose consumers need to name
+/// the object that grafted the requirement (currently `MustAttackPlayer`,
+/// consumed by `combat::must_attack_player_directives_for_creature`). This
+/// gates the `source_object` stamp so ONLY these modes split into distinct
+/// defs per directing source; every other `AddStaticMode` mode keeps
+/// `source_object == None` and dedups unchanged (crew/keyword/evasion/…
+/// accumulating or presence consumers see byte-identical behavior). Mirrors
+/// `static_mode_uses_controller_relative_blocker_filter`; extend by adding a
+/// match arm when a new consumer needs another mode's directing source.
+fn static_mode_carries_directing_source(mode: &crate::types::statics::StaticMode) -> bool {
+    use crate::types::statics::StaticMode;
+    matches!(mode, StaticMode::MustAttackPlayer { .. })
+}
+
 /// CR 109.5: True when a `TargetFilter` constrains the controller of matched
 /// objects via a `ControllerRef` slot (any variant qualifies — none is a
 /// concrete-player anchor). Recurses through `And`/`Or`/`Not`, modeled on
@@ -6578,6 +6593,18 @@ fn apply_continuous_effect_filtered(
                 // resolves from the carrier.
                 if static_mode_uses_controller_relative_blocker_filter(&resolved_mode) {
                     def = def.source_controller(effect.controller);
+                }
+                // CR 611.2c: stamp the directing object so combat / future
+                // attribution consumers can name the object that grafted this
+                // static (the ForceAttack / Encore / mass-coerce source for a
+                // MustAttackPlayer requirement). Gated on the attribution-class
+                // predicate so only those modes split per source; every other
+                // mode stays None and dedups unchanged (see the census in the
+                // plan / the crew-delta scoped-stamp guard test). Mirrors the
+                // source_controller anchor above; re-stamped each pass to the
+                // effect's immutable source_id.
+                if static_mode_carries_directing_source(&resolved_mode) {
+                    def = def.source_object(effect.source_id);
                 }
                 // CR 611.2c + CR 509.1c: Idempotency is keyed on the FULL grafted
                 // definition, not just `mode`. Two different casters can install

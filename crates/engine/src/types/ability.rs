@@ -19394,6 +19394,27 @@ pub struct StaticDefinition {
     /// Piper, Marble Priest; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 508.1d + CR 611.2c: The object that grafted this static onto its
+    /// carrier (the ForceAttack/Encore/mass-coerce source for a
+    /// `MustAttackPlayer` requirement). Stamped at materialization from the
+    /// resolving continuous effect's `source_id`, but ONLY for static modes in
+    /// the directing-source attribution class (see
+    /// `static_mode_carries_directing_source` in game/layers.rs) — mirrors the
+    /// conditional `source_controller` stamp. `None` = either an intrinsic def
+    /// or a grafted mode outside that class → the carrier object is its own
+    /// source (combat attributes the creature itself).
+    ///
+    /// This is a stable *reference* captured at graft time, not a snapshot of
+    /// the source's characteristics; per CR 611.2c the requirement persists
+    /// after the source leaves the battlefield, so this id may reference a
+    /// departed object. Consumers (combat source collector, frontend badge)
+    /// tolerate a departed id — it is never dereferenced in the collector.
+    ///
+    /// Serde-defaulted so pre-existing serialized statics (all `None`)
+    /// round-trip unchanged; only ever `Some` on the derived (layer-rebuilt)
+    /// `static_definitions`, never on serialized `base_static_definitions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_object: Option<crate::types::identifiers::ObjectId>,
     /// CR 702.11e + CR 609.4 + CR 109.5: For an object-scoped `IgnoreHexproof`
     /// static (one carrying an `affected` filter), which players' spells and
     /// abilities receive the "as though it didn't have hexproof" targeting
@@ -19431,6 +19452,7 @@ impl StaticDefinition {
             description: None,
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         }
     }
@@ -19475,6 +19497,15 @@ impl StaticDefinition {
     /// field doc). Set at graft time by the `AddStaticMode` layer arm.
     pub fn source_controller(mut self, controller: crate::types::player::PlayerId) -> Self {
         self.source_controller = Some(controller);
+        self
+    }
+
+    /// CR 611.2c: Stamp the directing object as this grafted static's source
+    /// (see the `source_object` field doc). Set at graft time by the
+    /// `AddStaticMode` layer arm from `effect.source_id`, gated on
+    /// `static_mode_carries_directing_source`.
+    pub fn source_object(mut self, source: crate::types::identifiers::ObjectId) -> Self {
+        self.source_object = Some(source);
         self
     }
 
@@ -22673,6 +22704,7 @@ mod tests {
             description: Some("Other creatures you control get +1/+1.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
@@ -22965,6 +22997,7 @@ mod tests {
                 description: None,
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),

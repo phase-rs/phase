@@ -3399,6 +3399,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             description: Some("Assassin spells you cast have freerunning {B}{B}.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         };
         obj.static_definitions = vec![def].into();
@@ -11889,6 +11890,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 description: None,
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             }]
             .into();
@@ -14468,6 +14470,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             ),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         };
         obj.static_definitions = vec![def].into();
@@ -14584,6 +14587,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
             ),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         }]
         .into();
