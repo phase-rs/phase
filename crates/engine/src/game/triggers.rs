@@ -1627,6 +1627,54 @@ pub(crate) fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone
     }
 }
 
+/// CR 603.2 / CR 603.6a: can this observer's trigger event ever fire on the growing fodder
+/// class ENTERING the battlefield? Returns `true` iff it PROVABLY cannot — a scalar
+/// single-clause enters-the-battlefield trigger (`ChangesZone`/`ChangesZoneAll`,
+/// `destination == Battlefield`, no disjunctive `zone_change_clauses`) whose positive
+/// `valid_card` matcher excludes `class_member` (wrong subtype/type, `NonToken` vs a token, or
+/// a controller scope bound to a player other than the loop controller — CR 603.6a checks the
+/// entering permanent against the matcher). Matching is delegated verbatim to
+/// `trigger_matchers::valid_card_matches` (the SAME `matches_target_filter` +
+/// source-relative `FilterContext` path `match_changes_zone` uses at fire time), so no new
+/// subtype/controller logic is written here.
+///
+/// SOUNDNESS + ORDERING (GAP-1, load-bearing — do not reorder the callers): such a trigger never
+/// fires on the loop's per-cycle token creation because two invariants, checked IN ORDER inside
+/// `analysis::resource::loop_states_cover_modulo_fodder_growth`, guarantee the fodder is the ONLY
+/// class that changes across the covered cycle:
+///
+/// 1. the FIRST accept-time frame pair's single-new-battlefield-object is guaranteed by
+///    `game::engine::derived_fodder_class` (engine.rs:1996 — it returns `None` if more than one
+///    object entered the battlefield that cycle, so a `Some` fodder class means the fodder was
+///    the sole entrant); and
+/// 2. the SECOND cover frame pair's "only the fodder partition grows" is guaranteed SOLELY by
+///    `analysis::resource::board_covers_modulo_fodder` (resource.rs:1058), whose all-zones
+///    stable-partition content-equality is asserted at resource.rs:1145 — which PRECEDES the
+///    firewall call at resource.rs:1156. A reader/refactor must not reorder the
+///    `board_covers_modulo_fodder` gate after the firewall: the disjointness argument here
+///    relies on it having already proven that nothing but the fodder entered.
+///
+/// Therefore a matcher that provably excludes the fodder does not observe the loop and must not
+/// veto the CR 732.2a offer.
+///
+/// Fail-closed on every axis it cannot classify: a broad (`valid_card == None`), disjunctive
+/// (`zone_change_clauses` non-empty), non-battlefield-destination, or genuinely-matching observer
+/// returns `false` (it may observe the loop → the firewall keeps its conservative veto).
+pub(crate) fn etb_observer_provably_excludes_class(
+    def: &TriggerDefinition,
+    state: &GameState,
+    class_member: ObjectId,
+    source_id: ObjectId,
+) -> bool {
+    matches!(
+        def.mode,
+        TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll
+    ) && def.zone_change_clauses.is_empty()
+        && def.destination == Some(Zone::Battlefield)
+        && def.valid_card.is_some()
+        && !crate::game::trigger_matchers::valid_card_matches(def, state, class_member, source_id)
+}
+
 fn source_was_not_co_departed_into_zone(
     event: &GameEvent,
     source_id: ObjectId,

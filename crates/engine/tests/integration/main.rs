@@ -752,6 +752,7 @@ mod spikeshell_harrier_speed_superlative;
 mod split_offstack_mana_value;
 mod springheart_nantuko_bestow_landfall;
 mod springheart_realdb_repro;
+mod sprout_inalla_realistic_offer;
 mod squirming_emergence_mana_value_target;
 mod squirrel_mob_dynamic_pump;
 mod stack_object_keyword_grants;

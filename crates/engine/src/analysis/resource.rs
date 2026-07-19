@@ -966,7 +966,10 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     }
 
     // (3″) No live fire-time observer reads the growing class (§5.3a, S5).
-    if fire_time_conditions_read_growing_class(&cf) {
+    // `None` class context: the offline object-growth path (`detect_loop`) has no single fodder
+    // representative to gate ETB matchers against, so the firewall keeps its conservative veto on
+    // every observer (byte-identical to pre-gate behavior).
+    if fire_time_conditions_read_growing_class(&cf, None) {
         return false;
     }
 
@@ -1152,8 +1155,18 @@ pub(crate) fn loop_states_cover_modulo_fodder_growth(
         return false;
     }
 
-    // No live off-stack / on-stack observer reads the growing class.
-    if fire_time_conditions_read_growing_class(&cf) {
+    // No live off-stack / on-stack observer reads the growing class. Pass a representative fodder
+    // member so the firewall's block(1) can skip an ETB observer whose matcher provably excludes
+    // the fodder class (CR 603.6a). CR 110.5b: prefer an UNTAPPED member (models the just-entered
+    // fodder), deterministic id tiebreak; the id is projection-stable so it resolves against the
+    // flushed-current `cf` the firewall scans. `None` only if the fodder pile is empty in `cf`
+    // (impossible on the strict-growth fodder path) → conservative veto preserved.
+    let class_member = all_fodder
+        .iter()
+        .copied()
+        .filter(|id| cf.objects.contains_key(id))
+        .min_by_key(|id| (cf.objects[id].tapped, *id));
+    if fire_time_conditions_read_growing_class(&cf, class_member) {
         return false;
     }
     if cf.stack.iter().any(stack_entry_reads_growing_class) {
@@ -1527,7 +1540,10 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
 /// and scales with the growing class); (5) transient continuous effects; (5b)
 /// granted-keyword synthesized triggers; (6) the S3 belt over pending/delayed
 /// ability-body stores. Fail-closed on every surface it cannot classify.
-fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
+fn fire_time_conditions_read_growing_class(
+    state: &GameState,
+    class_member: Option<ObjectId>,
+) -> bool {
     use crate::game::ability_scan as scan;
     // (1) Trigger fire-time conditions (CR 603.4) AND effect bodies.
     for obj in state.objects.values() {
@@ -1547,6 +1563,32 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
             // already applies it.
             if !crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone) {
                 continue;
+            }
+            // CR 603.2 / CR 603.6a: an enters-the-battlefield observer whose entry matcher
+            // PROVABLY excludes the growing fodder `class_member` never fires on the loop's
+            // per-cycle token creation, so it does NOT observe the loop — skip it rather than
+            // veto. GAP-1 (soundness + ordering, load-bearing): this is sound only because the
+            // fodder is the ONLY class that changed across the covered cycle, guaranteed IN ORDER
+            // by (a) `game::engine::derived_fodder_class`'s single-new-battlefield-object rule
+            // (engine.rs:1996) on the FIRST accept-time frame pair, and (b)
+            // `board_covers_modulo_fodder`'s all-zones stable-partition content-equality
+            // (resource.rs:1058, asserted at resource.rs:1145) on the SECOND cover frame pair —
+            // which PRECEDES this firewall call (resource.rs:1156). Do not reorder that gate
+            // after the firewall. GAP-2 (block(1)-ONLY, deliberate FAIL-CLOSED residual): only
+            // this printed-trigger surface is gated. Block (5b)'s
+            // `granted_keyword_triggers_in_zone` (triggers.rs:440) CAN synthesize granted ETB
+            // triggers carrying matchers; a granted ETB observer disjoint from the fodder stays
+            // UN-gated and still conservatively vetoes. That is a scoping choice (fail-closed),
+            // not an impossibility claim — the other surfaces (statics/anthems that scale with
+            // |G| continuously, activated bodies that fire on activation, pending stores) do not
+            // fire on the fodder *entering* via a `valid_card` matcher, so gating them would be
+            // unsound.
+            if let Some(member) = class_member {
+                if crate::game::triggers::etb_observer_provably_excludes_class(
+                    def, state, member, obj.id,
+                ) {
+                    continue;
+                }
             }
             // The trigger CONDITION stays CONSERVATIVE: an intervening-if reads the
             // triggering EVENT (never a growing-class census in scope), so promoting
@@ -5576,7 +5618,7 @@ mod tests {
         state.objects.get_mut(&land).unwrap().abilities =
             Arc::new(vec![AbilityDefinition::new(AbilityKind::Activated, mana)]);
         assert!(
-            fire_time_conditions_read_growing_class(&state),
+            fire_time_conditions_read_growing_class(&state, None),
             "Gaea's Cradle mana ability reads |G| via its count (S5 LoopFirewall descent)"
         );
     }
@@ -5603,7 +5645,7 @@ mod tests {
         state.objects.get_mut(&src).unwrap().abilities =
             Arc::new(vec![AbilityDefinition::new(AbilityKind::Activated, mana)]);
         assert!(
-            fire_time_conditions_read_growing_class(&state),
+            fire_time_conditions_read_growing_class(&state, None),
             "a board-color mana aggregate self-asserts sibling ⇒ firewall vetoes"
         );
     }
@@ -5647,8 +5689,81 @@ mod tests {
             .static_definitions
             .push(StaticDefinition::continuous().modifications(vec![m]));
         assert!(
-            fire_time_conditions_read_growing_class(&state),
+            fire_time_conditions_read_growing_class(&state, None),
             "a projected-reading modification vetoes via the :1539 projected axis (M9)"
+        );
+    }
+
+    /// FIREWALL block(1) matched pair (CR 603.6a): the ETB-observer gate skips ONLY a
+    /// PROVABLY-disjoint observer, and only when a fodder-class representative is supplied.
+    ///
+    /// Non-vacuity / reach-guard: case (c) (`None`) proves the observer's sibling-reading execute
+    /// body alone trips the block(1) execute scan — so case (a)'s `false` is the GATE skipping the
+    /// observer, not a body that never vetoes. It also pins the object-growth (`None`) path
+    /// byte-identical. Revert-probe: hardcoding `etb_observer_provably_excludes_class` to `false`
+    /// (or deleting its body) flips (a) `false → true`; breaking `valid_card_matches` to always
+    /// `false` flips (b) `true → false`.
+    #[test]
+    fn etb_observer_gate_skips_only_provably_disjoint_observer() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+
+        // The P0 fodder Saproling creature-token id (the growing-class representative).
+        let member = ObjectId(900);
+        // Minimal state: a P1 ETB observer carrying `valid_card` + a firewall-flagged
+        // (sibling-reading) execute body, watching the battlefield, plus the P0 fodder member.
+        let build = |valid_card: TargetFilter| {
+            let mut state = GameState::new_two_player(7);
+            let m = inert_token(&mut state, 900, 0, "Saproling");
+            {
+                let o = state.objects.get_mut(&m).unwrap();
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.card_types.subtypes = vec!["Saproling".to_string()];
+                o.is_token = true;
+            }
+            let observer = inert_token(&mut state, 910, 1, "Eminence Observer");
+            let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(valid_card)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    sibling_reading_effect(),
+                ));
+            state
+                .objects
+                .get_mut(&observer)
+                .unwrap()
+                .trigger_definitions
+                .push(trig);
+            state
+        };
+
+        // "another nontoken Wizard you control" — triple-disjoint from the P0 Saproling token
+        // (subtype, controller You=P1, NonToken). Mirrors Inalla's Eminence matcher.
+        let disjoint = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Wizard".to_string())
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::NonToken, FilterProp::Another]),
+        );
+        // A broad "whenever a creature enters" matcher that DOES match the P0 Saproling.
+        let broad = TargetFilter::Typed(TypedFilter::creature());
+
+        // (c) REACH-GUARD (`None` ⇒ no class context): the disjoint observer's body vetoes,
+        // proving it reaches the block(1) execute scan; also pins the object-growth path.
+        assert!(
+            fire_time_conditions_read_growing_class(&build(disjoint.clone()), None),
+            "None class context: even a disjoint ETB observer keeps the conservative veto"
+        );
+        // (a) DISJOINT + `Some(member)`: the gate skips the observer ⇒ NOT vetoed.
+        assert!(
+            !fire_time_conditions_read_growing_class(&build(disjoint), Some(member)),
+            "a provably-disjoint ETB observer is skipped when a fodder representative is supplied"
+        );
+        // (b) MATCHING (broad matcher matches the fodder) + `Some(member)`: still vetoed — the
+        // gate only skips PROVABLY-disjoint observers.
+        assert!(
+            fire_time_conditions_read_growing_class(&build(broad), Some(member)),
+            "a broad ETB observer whose matcher matches the fodder still vetoes"
         );
     }
 
