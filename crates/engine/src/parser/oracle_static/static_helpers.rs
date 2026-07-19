@@ -543,7 +543,7 @@ pub(crate) fn try_parse_cost_modification(
         None
     };
 
-    let first_qualified_spell = match parse_first_qualified_spell_filter(lower) {
+    let nth_qualified_spell = match parse_nth_qualified_spell_filter(lower) {
         // CR 601.2f: A recognized "the first … spell <timing> costs …" subject
         // whose qualifier/timing can't be lowered to a filter + once-per-turn
         // gate (e.g. "the first kicked spell you cast each turn costs {1} less").
@@ -551,11 +551,15 @@ pub(crate) fn try_parse_cost_modification(
         // cost-modifier path would emit a filterless, conditionless reducer that
         // drops both the printed "first … each turn" restriction and the
         // qualifier, reducing every spell the controller casts.
-        FirstQualifiedSpell::UnsupportedQualifier => return None,
-        FirstQualifiedSpell::NotApplicable => None,
-        FirstQualifiedSpell::Supported(filter, timing) => Some((filter, timing)),
+        NthQualifiedSpell::UnsupportedQualifier => return None,
+        NthQualifiedSpell::NotApplicable => None,
+        NthQualifiedSpell::Supported {
+            filter,
+            timing,
+            ordinal,
+        } => Some((filter, timing, ordinal)),
     };
-    let first_qualified_spell_filter = first_qualified_spell.as_ref().map(|(filter, _)| filter);
+    let nth_qualified_spell_filter = nth_qualified_spell.as_ref().map(|(filter, _, _)| filter);
     let target_cost_filter = parse_cost_modifier_target_filter(lower);
 
     // Extract "from [zone(s)]" clause between player scope and "cost".
@@ -600,7 +604,7 @@ pub(crate) fn try_parse_cost_modification(
     let mut during_your_turn_scope = None;
     let spell_filter = if is_self_spell {
         parse_self_spell_target_cost_filter(lower)
-    } else if let Some(filter) = first_qualified_spell_filter.cloned() {
+    } else if let Some(filter) = nth_qualified_spell_filter.cloned() {
         Some(filter)
     // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     } else if let Some(cost_idx) = lower.find(" cost") {
@@ -875,8 +879,8 @@ pub(crate) fn try_parse_cost_modification(
     if is_self_spell {
         definition.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
     }
-    if let Some((filter, timing)) = first_qualified_spell.as_ref() {
-        definition.condition = Some(first_qualified_spell_condition(filter, timing));
+    if let Some((filter, timing, ordinal)) = nth_qualified_spell.as_ref() {
+        definition.condition = Some(nth_qualified_spell_condition(filter, timing, *ordinal));
     } else if let Some(during_your_turn_scope) = during_your_turn_scope {
         definition.condition = Some(during_your_turn_scope);
     }
