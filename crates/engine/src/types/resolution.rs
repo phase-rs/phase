@@ -98,8 +98,8 @@ pub enum ResolutionFrame {
     RepeatFor(PendingRepeatIteration),
     RepeatUntil(PendingRepeatUntil),
     RepeatedOptionalPayment(RepeatedOptionalPaymentFrame),
-    ChangeZone(ChangeZoneFrame),
-    BatchDelivery(PendingBatchDeliveries),
+    ChangeZone(Box<ChangeZoneFrame>),
+    BatchDelivery(Box<PendingBatchDeliveries>),
     CounterMoves(PendingCounterMoveQueue),
     CounterRemovals(PendingCounterRemovalQueue),
     CounterAdditions(PendingCounterAdditionQueue),
@@ -631,7 +631,7 @@ pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
 enum DrawAndPostConversion {
     Paired {
         parent: ResolutionFrame,
-        child: ResolutionFrame,
+        child: Box<ResolutionFrame>,
     },
     UnpairedDraw(ResolutionFrame),
     UnpairedPost(ResolutionFrame),
@@ -661,7 +661,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
         // proves the adjacency relationship, neither unpaired converter may run.
         match conversion {
             DrawAndPostConversion::Paired { parent, child } => frames
-                .install_adjacent_post_replacement_draw(parent, child)
+                .install_adjacent_post_replacement_draw(parent, *child)
                 .map_err(|error| error.to_string())?,
             DrawAndPostConversion::UnpairedDraw(frame) => frames.push_inner(frame),
             DrawAndPostConversion::UnpairedPost(frame) => frames.push_inner(frame),
@@ -692,13 +692,13 @@ fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStac
         frames.push_inner(ResolutionFrame::RepeatUntil(pending));
     }
     if state.pending_change_zone_iteration.is_some() || state.devour_eligible_snapshot.is_some() {
-        frames.push_inner(ResolutionFrame::ChangeZone(ChangeZoneFrame {
+        frames.push_inner(ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: state.pending_change_zone_iteration.clone(),
             devour_eligible_snapshot: state.devour_eligible_snapshot.clone(),
-        }));
+        })));
     }
     if let Some(pending) = state.pending_batch_deliveries.clone() {
-        frames.push_inner(ResolutionFrame::BatchDelivery(pending));
+        frames.push_inner(ResolutionFrame::BatchDelivery(Box::new(pending)));
     }
     if let Some(pending) = state.pending_counter_moves.clone() {
         frames.push_inner(ResolutionFrame::CounterMoves(pending));
@@ -806,7 +806,10 @@ fn classify_draw_and_post_replacement(
                         .to_string(),
                 );
             }
-            Some(DrawAndPostConversion::Paired { parent, child })
+            Some(DrawAndPostConversion::Paired {
+                parent,
+                child: Box::new(child),
+            })
         }
         (None, Some(draw)) => Some(DrawAndPostConversion::UnpairedDraw(draw)),
         (Some(post), None) => Some(DrawAndPostConversion::UnpairedPost(post)),
@@ -871,7 +874,7 @@ fn project_frames_into_legacy_state(
             }
             ResolutionFrame::BatchDelivery(pending) => set_once(
                 &mut projected.pending_batch_deliveries,
-                pending.clone(),
+                pending.as_ref().clone(),
                 "BatchDelivery",
             )?,
             ResolutionFrame::CounterMoves(pending) => set_once(
@@ -1177,7 +1180,7 @@ mod tests {
         logical_zone_change_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty logical group still needs its pre-delivery latch");
-        ResolutionFrame::ChangeZone(ChangeZoneFrame {
+        ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: Some(PendingChangeZoneIteration {
                 logical_zone_change_group,
                 paused_current: None,
@@ -1202,7 +1205,7 @@ mod tests {
                 effect_kind: EffectKind::ChangeZone,
             }),
             devour_eligible_snapshot: None,
-        })
+        }))
     }
 
     fn paused_post_replacement_frame() -> ResolutionFrame {
