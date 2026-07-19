@@ -8,6 +8,8 @@
 //! Usage:
 //!   cargo run --release --bin ai-commander -- client/public
 //!   cargo run --release --bin ai-commander -- client/public --seed 7 --difficulty Easy
+//!   cargo run --release --bin ai-commander -- client/public --difficulty Easy \
+//!       --difficulty-p2 VeryHard --action-cap 50000
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
@@ -26,7 +28,7 @@ use phase_ai::config::{create_config_for_players, AiConfig, AiDifficulty, Platfo
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
-const MAX_TOTAL_ACTIONS: usize = 200_000;
+const DEFAULT_ACTION_CAP: usize = 200_000;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -40,6 +42,10 @@ fn main() {
 
     let mut seed: u64 = 42;
     let mut difficulty = AiDifficulty::Easy;
+    // Per-seat override of `difficulty` (pod-lab gauntlet mixed-skill tables).
+    // `None` means "use the table-wide --difficulty for this seat".
+    let mut seat_difficulty: [Option<AiDifficulty>; 4] = [None; 4];
+    let mut action_cap: usize = DEFAULT_ACTION_CAP;
     let mut feed: String = "feeds/mtggoldfish-commander.json".to_string();
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
@@ -56,12 +62,29 @@ fn main() {
                     difficulty = parse_difficulty(v);
                 }
             }
+            "--action-cap" => {
+                if let Some(v) = args_iter.next() {
+                    action_cap = parse_action_cap(v);
+                }
+            }
             "--feed" => {
                 if let Some(v) = args_iter.next() {
                     feed = v.clone();
                 }
             }
-            _ => {}
+            other => {
+                // `--difficulty-p0` .. `--difficulty-p3`: single-seat override.
+                // Parameterized on seat index rather than four bespoke flags.
+                if let Some(idx_str) = other.strip_prefix("--difficulty-p") {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if let Some(slot) = seat_difficulty.get_mut(idx) {
+                            if let Some(v) = args_iter.next() {
+                                *slot = Some(parse_difficulty(v));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -182,11 +205,21 @@ fn main() {
     println!();
 
     let ai_players: HashSet<PlayerId> = (0..4).map(|i| PlayerId(i as u8)).collect();
-    let config = create_config_for_players(difficulty, Platform::Native, 4);
+    // Effective per-seat difficulty is echoed (not just the table-wide
+    // --difficulty) so a harness can catch a --difficulty-pN typo the same
+    // way parse_difficulty already hard-fails an unrecognized label —
+    // silent drift onto the wrong tier is the phase#6080 failure class.
+    println!("Per-seat difficulty (0-indexed by seat):");
     let mut ai_configs: HashMap<PlayerId, AiConfig> = HashMap::new();
-    for i in 0..4 {
-        ai_configs.insert(PlayerId(i as u8), config.clone());
+    for (i, override_diff) in seat_difficulty.iter().enumerate() {
+        let seat_diff = override_diff.unwrap_or(difficulty);
+        println!("  P{i}  difficulty={seat_diff:?}");
+        ai_configs.insert(
+            PlayerId(i as u8),
+            create_config_for_players(seat_diff, Platform::Native, 4),
+        );
     }
+    println!();
 
     let start = Instant::now();
     let dump_log_path = read_dump_env("PHASE_DUMP_LOG");
@@ -198,6 +231,11 @@ fn main() {
     let mut aborted = false;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+    // Tracks each seat's is_eliminated (the engine already flips this per
+    // CR 800.4 when a player leaves the game) so we print exactly one line
+    // per elimination event instead of re-announcing an already-eliminated
+    // seat every batch.
+    let mut was_eliminated = [false; 4];
     // phase#6080: the reason the most recent `run_ai_actions` batch broke
     // early (one of its three break doors), so a stall can be diagnosed from
     // the game output alone instead of a `tracing::error` no harness captures.
@@ -231,13 +269,31 @@ fn main() {
                 .map(|(i, p)| format!("P{i}:{}", p.life))
                 .collect();
             println!(
-                "Turn {:>2} (active P{})  actions={:>6}  {}",
+                "Turn {:>2} (active P{})  actions={:>6}  elapsed={:>6.1}s  {}",
                 state.turn_number,
                 state.active_player.0,
                 total_actions,
+                start.elapsed().as_secs_f64(),
                 snapshot.join(" ")
             );
             let _ = std::io::stdout().flush();
+        }
+
+        // Print one line the moment a seat's is_eliminated first flips, with
+        // turn + wall-clock context so a gauntlet harness can distinguish an
+        // expected early elimination from a stall or a perf regression
+        // without re-deriving it from the per-turn life snapshots above.
+        for (i, was) in was_eliminated.iter_mut().enumerate() {
+            if !*was && state.players[i].is_eliminated {
+                *was = true;
+                println!(
+                    "ELIMINATED: P{i}  turn={}  actions={:>6}  elapsed={:.1}s",
+                    state.turn_number,
+                    total_actions,
+                    start.elapsed().as_secs_f64()
+                );
+                let _ = std::io::stdout().flush();
+            }
         }
 
         // phase#6080 follow-up: a batch can complete one or more actions and
@@ -254,10 +310,10 @@ fn main() {
             break;
         }
 
-        if total_actions >= MAX_TOTAL_ACTIONS {
+        if total_actions >= action_cap {
             aborted = true;
             println!();
-            println!("ABORT: hit MAX_TOTAL_ACTIONS={MAX_TOTAL_ACTIONS}");
+            println!("ABORT: hit action cap={action_cap}");
             break;
         }
     }
@@ -404,4 +460,30 @@ fn parse_difficulty(s: &str) -> AiDifficulty {
         std::process::exit(1);
     }
     AiDifficulty::from_label(s)
+}
+
+/// Parses an `--action-cap` value. A garbled cap (non-numeric, zero) would
+/// either silently keep the built-in default or abort every game on the
+/// first batch — both are the same class of silent-poison failure
+/// `parse_difficulty` above guards against, so this hard-fails too rather
+/// than falling back.
+fn parse_action_cap(s: &str) -> usize {
+    match s.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n,
+        _ => {
+            eprintln!("error: --action-cap {s:?} must be a positive integer");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_action_cap_accepts_positive_integer() {
+        assert_eq!(parse_action_cap("50000"), 50000);
+        assert_eq!(parse_action_cap("  7 "), 7);
+    }
 }
