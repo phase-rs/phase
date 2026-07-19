@@ -6313,6 +6313,37 @@ fn cost_mod_leading_turn_scope_negated_and_affirmative() {
         "the negated leading clause must gate the self-spell branch too, got {:?}",
         def.condition,
     );
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones(),
+        "the leading scope must be peeled before self-spell detection so the modifier works from hand and stack",
+    );
+
+    // The leading scope must also reach the first-qualified branch before its
+    // grammar runs, then compose with (rather than replace) the first-spell gate.
+    let def = parse_static_line(
+        "During turns other than yours, the first spell you cast each turn costs {1} less to cast.",
+    )
+    .expect("first-spell cost reduction should parse");
+    let Some(StaticCondition::And { conditions }) = def.condition else {
+        panic!(
+            "leading turn scope and first-spell gate must compose, got {:?}",
+            def.condition
+        );
+    };
+    assert_eq!(conditions.len(), 2);
+    assert_eq!(
+        &conditions[0],
+        &StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        }
+    );
+    assert!(
+        matches!(&conditions[1], StaticCondition::QuantityComparison { .. }),
+        "the first-spell condition must survive alongside the leading scope: {:?}",
+        conditions,
+    );
 }
 
 #[test]

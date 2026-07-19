@@ -22,10 +22,13 @@ use engine::types::ability::StaticCondition;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 
 const GEYSER: &str = "During turns other than yours, spells you cast cost {1} less to cast.";
+const HURKYLS_FINAL_MEDITATION: &str =
+    "During turns other than yours, this spell costs {3} more to cast.";
 
 /// Begin casting P0's {2}-generic instant and return the total mana value of the
 /// battlefield-modified cost the engine resolved (surfaced at `TargetSelection`
@@ -62,6 +65,59 @@ fn scenario_with_geyser() -> (GameScenario, ObjectId) {
         .with_mana_cost(ManaCost::generic(2))
         .id();
     (scenario, spell_id)
+}
+
+/// Cast the real Hurkyl's Final Meditation self-cost static from hand and read
+/// the locked pending-cast cost at the mana-payment boundary. This is the
+/// production path that requires the static's self-spell active zones; a
+/// battlefield-only generic reducer cannot exercise it.
+fn hurkyls_pending_cost_mana_value(active_player: PlayerId) -> u32 {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell_id = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Hurkyl's Final Meditation",
+            true,
+            HURKYLS_FINAL_MEDITATION,
+        )
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![
+                ManaCostShard::Blue,
+                ManaCostShard::Blue,
+                ManaCostShard::Blue,
+            ],
+        })
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = active_player;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let card_id = runner.state().objects[&spell_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Hurkyl's Final Meditation should begin");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    runner
+        .state()
+        .pending_cast
+        .as_ref()
+        .expect("ManaPayment must retain the pending Hurkyl's cast")
+        .cost
+        .mana_value()
 }
 
 #[test]
@@ -108,5 +164,22 @@ fn geyser_reduces_during_turns_other_than_the_controllers() {
         resolved_cost_mana_value(&mut runner, spell_id),
         1,
         "during a turn that is not the controller's, the {{2}} spell is reduced to {{1}}",
+    );
+}
+
+/// CR 601.2f: Hurkyl's Final Meditation is a real self-spell cost modifier,
+/// not a battlefield reducer. Its `SelfRef` static must be active from hand
+/// while the engine locks the pending cast cost.
+#[test]
+fn hurkyls_final_meditation_self_cost_tracks_controller_turn() {
+    assert_eq!(
+        hurkyls_pending_cost_mana_value(P0),
+        7,
+        "on its controller's turn, Hurkyl's keeps its printed {{4}}{{U}}{{U}}{{U}} cost",
+    );
+    assert_eq!(
+        hurkyls_pending_cost_mana_value(P1),
+        10,
+        "on another player's turn, Hurkyl's self modifier adds {{3}} to the pending cast cost",
     );
 }
