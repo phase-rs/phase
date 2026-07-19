@@ -197,3 +197,98 @@ pub fn run_ai_actions(
         break_reason,
     }
 }
+
+/// Driver-relevant outcome of processing one `run_ai_actions` batch: how many
+/// actions to add to a caller's running total, and the break reason to stop
+/// and report at this batch boundary, if the batch carries one.
+///
+/// phase#6080 follow-up: a batch can complete one or more actions (`results`
+/// non-empty) and *still* carry a `break_reason` — e.g. it applies two
+/// actions, then the third choice is `ChooseActionNone` or the fourth
+/// `apply()` call fails. A driver that only inspects `break_reason` when
+/// `results.is_empty()` silently discards the diagnostic for exactly that
+/// case, loops again, and may report a misleading `NoActor`/unknown reason
+/// once a later, unrelated batch happens to come back empty. `driver_step`
+/// is the single place that decision is made, so callers (and tests) don't
+/// re-derive it ad hoc.
+pub struct DriverStep {
+    pub actions_taken: usize,
+    pub break_reason: Option<AiActionsBreakReason>,
+}
+
+/// Extracts the [`DriverStep`] for one batch. Callers should process
+/// `results`'s individual `AiActionResult`s (logging, animation, dumps)
+/// before or after calling this — it only reports the count/stop decision.
+pub fn driver_step(results: AiActionsRun) -> DriverStep {
+    DriverStep {
+        actions_taken: results.results.len(),
+        break_reason: results.break_reason,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_result(state: &GameState) -> AiActionResult {
+        AiActionResult {
+            action: GameAction::PassPriority,
+            state: state.clone(),
+            events: Vec::new(),
+            log_entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn driver_step_preserves_break_reason_from_non_empty_batch() {
+        // The exact regression: a batch that completed an action must not
+        // have its break_reason discarded just because `results` isn't
+        // empty.
+        let state = GameState::new_two_player(1);
+        let run = AiActionsRun {
+            results: vec![dummy_result(&state)],
+            break_reason: Some(AiActionsBreakReason::ChooseActionNone {
+                player: PlayerId(1),
+            }),
+        };
+        let step = driver_step(run);
+        assert_eq!(step.actions_taken, 1);
+        assert!(
+            matches!(
+                step.break_reason,
+                Some(AiActionsBreakReason::ChooseActionNone { .. })
+            ),
+            "break_reason from a non-empty batch must survive driver_step"
+        );
+    }
+
+    #[test]
+    fn driver_step_empty_batch_behavior_is_unchanged() {
+        // Existing behavior (empty batch + break reason) must still work.
+        let run = AiActionsRun {
+            results: Vec::new(),
+            break_reason: Some(AiActionsBreakReason::NoActor),
+        };
+        let step = driver_step(run);
+        assert_eq!(step.actions_taken, 0);
+        assert!(matches!(
+            step.break_reason,
+            Some(AiActionsBreakReason::NoActor)
+        ));
+    }
+
+    #[test]
+    fn driver_step_ordinary_batch_is_unaffected() {
+        // Ordinary caller path: batch completed actions and hit no break
+        // door (e.g. hit the safety cap) — driver_step must not fabricate a
+        // stop signal.
+        let state = GameState::new_two_player(1);
+        let run = AiActionsRun {
+            results: vec![dummy_result(&state), dummy_result(&state)],
+            break_reason: None,
+        };
+        let step = driver_step(run);
+        assert_eq!(step.actions_taken, 2);
+        assert!(step.break_reason.is_none());
+    }
+}

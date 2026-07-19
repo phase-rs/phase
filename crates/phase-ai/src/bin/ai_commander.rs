@@ -21,7 +21,7 @@ use engine::game::deck_loading::{
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::run_ai_actions;
+use phase_ai::auto_play::{driver_step, run_ai_actions};
 use phase_ai::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -215,10 +215,6 @@ fn main() {
             &mut ai_rng,
             &ai_session,
         );
-        if results.is_empty() {
-            last_break_reason = results.break_reason;
-            break;
-        }
         if dump_log_path.is_some() {
             for r in &mut results {
                 game_log.extend(std::mem::take(&mut r.log_entries));
@@ -229,7 +225,6 @@ fn main() {
                 actions_log.push(format!("{:?}", r.action));
             }
         }
-        total_actions += results.len();
 
         if state.turn_number != last_turn_reported {
             last_turn_reported = state.turn_number;
@@ -247,6 +242,20 @@ fn main() {
                 snapshot.join(" ")
             );
             let _ = std::io::stdout().flush();
+        }
+
+        // phase#6080 follow-up: a batch can complete one or more actions and
+        // still carry a break_reason (e.g. ApplyFailed/ChooseActionNone hits
+        // after earlier actions in the same batch applied cleanly). Capture
+        // that reason from EVERY batch — not only empty ones — and stop the
+        // driver at this batch boundary, after this batch's completed
+        // actions are already retained above, so the stall report below
+        // reflects the original break door instead of a later, unrelated one.
+        let step = driver_step(results);
+        total_actions += step.actions_taken;
+        if step.break_reason.is_some() {
+            last_break_reason = step.break_reason;
+            break;
         }
 
         if total_actions >= MAX_TOTAL_ACTIONS {
