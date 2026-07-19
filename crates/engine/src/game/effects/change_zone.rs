@@ -6260,7 +6260,7 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let events = enter_permanent_via_change_zone(&mut state, land, true);
+        let _events = enter_permanent_via_change_zone(&mut state, land, true);
         assert!(
             state.objects[&land].tapped,
             "land must enter tapped (enter_tapped replacement applied)"
@@ -6324,7 +6324,7 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let events = enter_permanent_via_change_zone(&mut state, land, false);
+        let _events = enter_permanent_via_change_zone(&mut state, land, false);
         assert!(!state.objects[&land].tapped, "land entered untapped");
 
         let mut trigger_events = Vec::new();

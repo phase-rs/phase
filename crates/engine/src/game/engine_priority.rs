@@ -63,18 +63,31 @@ pub(crate) fn run_post_action_pipeline_from(
         // retained ZoneChanged occurrences into deferred trigger contexts. Do
         // not rediscover those records through the generic post-action scan;
         // its batched definitions remain reserved for final settlement.
-        let retained_logical_zone_events: Vec<_> = state
-            .pending_change_zone_iteration
-            .as_ref()
-            .map(|pending| {
+        let mut retained_logical_zone_events = Vec::new();
+        if let Some(pending) = state.pending_change_zone_iteration.as_ref() {
+            retained_logical_zone_events.extend(
                 pending
                     .logical_zone_change_group
                     .all_origin_occurrences
                     .iter()
-                    .map(|occurrence| &occurrence.event)
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .map(|occurrence| &occurrence.event),
+            );
+            if let Some(paused_current) = pending.paused_current.as_ref() {
+                retained_logical_zone_events.extend(&paused_current.delivery_events);
+            }
+        }
+        if let Some(pending) = state.pending_batch_deliveries.as_ref() {
+            retained_logical_zone_events.extend(
+                pending
+                    .logical_zone_change_group
+                    .all_origin_occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.event),
+            );
+            if let Some(paused_current) = pending.paused_current.as_ref() {
+                retained_logical_zone_events.extend(&paused_current.delivery_events);
+            }
+        }
         // A completed logical owner has already collected its segment and
         // settlement contexts into the existing deferred queue. The owner is
         // intentionally gone before the trailing completion event, so use those

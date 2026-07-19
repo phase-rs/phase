@@ -2096,7 +2096,21 @@ pub(crate) fn complete_logical_zone_trigger_collection(
     }
 
     group.stamp_battlefield_departures()?;
-    for event in final_events {
+    sync_logical_zone_change_departure_stamps(group, final_events);
+    let settlement = collect_logical_zone_trigger_settlement(state, group)?;
+    state.deferred_triggers.extend(settlement);
+    Ok(())
+}
+
+/// Copy owner-derived CR 603.10a departure stamps onto any externally retained
+/// delivery output. A paused batch keeps earlier delivery events outside its
+/// final segment until it completes, but those events must expose the same
+/// derived `co_departed` projection as the owner's retained records.
+pub(crate) fn sync_logical_zone_change_departure_stamps(
+    group: &LogicalZoneChangeGroup,
+    events: &mut [GameEvent],
+) {
+    for event in events {
         let GameEvent::ZoneChanged {
             object_id,
             from,
@@ -2137,9 +2151,6 @@ pub(crate) fn complete_logical_zone_trigger_collection(
         };
         record.co_departed = retained_record.co_departed.clone();
     }
-    let settlement = collect_logical_zone_trigger_settlement(state, group)?;
-    state.deferred_triggers.extend(settlement);
-    Ok(())
 }
 
 /// Collect the one final observer pass owned by a completed logical zone-change

@@ -15,10 +15,11 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    BatchCompletion, ExileLinkKind, GameState, LiminalEntryKind, MergedCardComponentRoute,
-    PendingBatchDeliveries, PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest,
-    PendingCounterPostAction, PendingLiminalEntryResume, PendingZoneChangeDelivery,
-    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking, ZoneMoveCompletion,
+    BatchCompletion, ExileLinkKind, GameState, LiminalEntryKind, LogicalZoneChangeGroup,
+    MergedCardComponentRoute, PendingBatchDeliveries, PendingBatchZoneChangeCause,
+    PendingBatchZoneMoveRequest, PendingCounterPostAction, PendingLiminalEntryResume,
+    PendingZoneChangeDelivery, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
@@ -1024,26 +1025,28 @@ pub(crate) enum BatchMoveResult {
     NeedsChoice,
 }
 
+/// Internal batch-loop result carrying the one logical zone-change owner until
+/// its true completion. A pause moves that exact owner into
+/// `PendingBatchDeliveries`, rather than reconstructing a tail-only group.
+enum BatchDeliveryResult {
+    Done(Box<LogicalZoneChangeGroup>),
+    NeedsChoice,
+}
+
 /// CR 603.10a batch entry: move many objects to one destination through the
 /// pipeline as a single simultaneous departure batch (the mill / mass-bounce /
 /// SBA pattern). Each object runs through `move_object`, so per-object `Moved`
 /// redirects (Rest in Peace / Leyline of the Void class) fire on every one;
-/// after the batch completes, CR 603.10a co-departure is stamped over the
-/// attempted set. This is universally safe for non-battlefield origins such as
-/// a mill: `departed_subset` DOES include the milled cards (it filters on
-/// current zone != Battlefield, and a card now in a graveyard passes), but
-/// `mark_simultaneous_departures` only stamps `ZoneChanged` events whose
-/// `from` is `Some(Zone::Battlefield)` (the zones.rs event gate) — a
-/// library-origin move produces no such event, so nothing is stamped.
+/// after the batch completes, its logical owner derives the CR 603.10a
+/// co-departure set from exactly the originally announced battlefield members.
+/// Nonbattlefield batches such as a mill receive an owner with an empty
+/// prospective-member set while still retaining their exact event occurrences.
 ///
 /// On a mid-batch CR 616.1 ordering choice the surfaced prompt is parked and the
 /// undelivered tail is stashed in `state.pending_batch_deliveries`; the resume
-/// path drains it (`drain_pending_batch_deliveries`). The simultaneous-departure
-/// stamp is applied per delivered segment (the realistic single-redirect path
-/// never pauses, so the full batch is stamped together; only two simultaneous
-/// `Moved` redirects on one object can split a batch — no parsed card does, so
-/// the per-segment co-departure grouping in that doubly-rare case is acceptable
-/// and documented rather than threaded across the pause boundary).
+/// path drains it (`drain_pending_batch_deliveries`). The owner crosses that
+/// boundary unchanged, so its final settlement covers the whole batch rather
+/// than one delivered segment.
 pub(crate) fn move_objects_simultaneously(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
@@ -1076,30 +1079,26 @@ pub(crate) fn move_objects_simultaneously_then(
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let destination = reqs.first().map(|r| r.to);
-    match deliver_batch(state, reqs, events) {
-        BatchMoveResult::Done => {
-            finish_simultaneous_batch(
+    match deliver_batch(state, reqs, logical_zone_change_group, events) {
+        BatchDeliveryResult::Done(mut logical_zone_change_group) => {
+            crate::game::triggers::complete_logical_zone_trigger_collection(
                 state,
+                &mut logical_zone_change_group,
                 &mut events[event_start..],
-                zone_change_record_start,
-                &ids,
-            );
+            )
+            .expect("completed batch owns every terminal zone-change outcome");
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now, and surface a pause it raises to the enclosing caller.
             completion.map_or(BatchMoveResult::Done, |completion| {
                 run_batch_completion(state, completion, events)
             })
         }
-        BatchMoveResult::NeedsChoice => {
-            // Paused mid-pile. `deliver_batch` stashed the undelivered tail when
-            // it was non-empty; when the paused object was the LAST in the batch
-            // the tail is empty and nothing was stashed. Either way, ensure a
-            // pending record carries the completion so the drain runs it once the
-            // paused object's redirect resolves. `destination` is irrelevant for
-            // an empty tail (no object re-delivers), so the first request's
-            // destination is a safe placeholder.
+        BatchDeliveryResult::NeedsChoice => {
+            // `deliver_batch` always stashes the exact owner, including when the
+            // paused object was the last member and the undelivered tail is empty.
+            // Attach the completion to that same owner so its drain can run it
+            // once, after logical settlement.
             let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
-            pending.logical_zone_change_group = logical_zone_change_group;
             pending.completion = completion;
             pending.attempted = ids;
             pending.zone_change_record_start = zone_change_record_start;
@@ -1133,17 +1132,22 @@ pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: Batch
     ensure_batch_record(state, Zone::Graveyard).completion = Some(completion);
 }
 
-/// Return the live parked-batch record, creating an empty-tail one (the
-/// paused-on-last-card case) if `deliver_batch` did not stash a tail. Used only
-/// to hang a [`BatchCompletion`] off a paused batch.
+/// Return the live parked-batch record, creating an empty-tail one only for a
+/// standalone paused delivery that needs a [`BatchCompletion`]. A batch pause
+/// always arrives here with its original logical owner already stashed.
 fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut PendingBatchDeliveries {
     if state.pending_batch_deliveries.is_none() {
         let zone_change_record_start = state.zone_changes_this_turn.len();
+        let paused_current = state.pending_zone_change_delivery_from_replacement();
+        let announced_members = paused_current
+            .iter()
+            .map(|delivery| delivery.member.object_id)
+            .collect::<Vec<_>>();
         let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(state, &[]);
+            crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
         state.pending_batch_deliveries = Some(PendingBatchDeliveries {
             logical_zone_change_group,
-            paused_current: None,
+            paused_current,
             remaining: Vec::new(),
             destination,
             source_id: None,
@@ -1165,22 +1169,30 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
 }
 
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
-/// `move_object`; on a pause, parks the prompt and stashes the undelivered tail
-/// with each request's exact heterogeneous context. The enclosing action stamps
-/// its single co-departure/LKI set only after every request has settled.
+/// `move_object_with_terminal`; on a pause, parks the prompt and stashes the
+/// undelivered tail with each request's exact heterogeneous context. The exact
+/// same logical owner flows into the parked record, which settles only after
+/// every requested move has a terminal result.
 fn deliver_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
+    mut logical_zone_change_group: LogicalZoneChangeGroup,
     events: &mut Vec<GameEvent>,
-) -> BatchMoveResult {
+) -> BatchDeliveryResult {
+    let segment_start = events.len();
     let mut queue = reqs.into_iter();
     while let Some(req) = queue.next() {
         let destination = req.to;
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
         let delivery_start = events.len();
-        match move_object(state, req, events) {
-            ZoneMoveResult::Done => {}
-            ZoneMoveResult::NeedsChoice(_) => {
+        let object_id = req.object_id;
+        match move_object_with_terminal(state, req, events) {
+            ZoneMoveTerminalResult::Completed(completion) => {
+                logical_zone_change_group
+                    .record_delivery_completion(object_id, completion)
+                    .expect("batch member records its exact terminal outcome");
+            }
+            ZoneMoveTerminalResult::NeedsChoice(_) => {
                 // CR 616.1: `move_object` already parked the surfaced prompt
                 // (centralized park at its `replace_event` NeedsChoice arm);
                 // stash the rest of the batch so no object strands. The paused
@@ -1188,12 +1200,29 @@ fn deliver_batch(
                 // by the resume path.
                 let paused_current = state
                     .pending_zone_change_delivery_from_replacement()
-                    .or(anticipated_pause)
+                    .or_else(|| {
+                        anticipated_pause.map(|mut boundary| {
+                            boundary.append_delivery_events(&events[delivery_start..]);
+                            boundary
+                        })
+                    })
                     .expect("parked batch zone change must retain an exact boundary");
-                stash_batch_tail(state, queue.collect(), destination, Some(paused_current));
-                return BatchMoveResult::NeedsChoice;
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[segment_start..delivery_start],
+                )
+                .expect("paused batch retains its exact delivered segment");
+                stash_batch_tail(
+                    state,
+                    logical_zone_change_group,
+                    queue.collect(),
+                    destination,
+                    Some(paused_current),
+                );
+                return BatchDeliveryResult::NeedsChoice;
             }
-            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f: an aura-host choice flows through
                 // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
                 // resume path. No batch flow targets a battlefield aura entry
@@ -1217,25 +1246,24 @@ fn deliver_batch(
                     boundary.mark_counted();
                     boundary
                 });
-                stash_batch_tail(state, queue.collect(), destination, paused_current);
-                return BatchMoveResult::NeedsChoice;
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[segment_start..delivery_start],
+                )
+                .expect("paused Aura batch retains its exact delivered segment");
+                stash_batch_tail(
+                    state,
+                    logical_zone_change_group,
+                    queue.collect(),
+                    destination,
+                    paused_current,
+                );
+                return BatchDeliveryResult::NeedsChoice;
             }
         }
     }
-    BatchMoveResult::Done
-}
-
-fn finish_simultaneous_batch(
-    state: &mut GameState,
-    events: &mut [GameEvent],
-    zone_change_record_start: usize,
-    attempted: &[ObjectId],
-) {
-    let departed = zones::departed_subset(state, attempted);
-    zones::mark_simultaneous_departures(events, &departed);
-    let record_indices: Vec<_> =
-        (zone_change_record_start..state.zone_changes_this_turn.len()).collect();
-    zones::mark_simultaneous_departure_records(state, &record_indices, &departed);
+    BatchDeliveryResult::Done(Box::new(logical_zone_change_group))
 }
 
 /// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
@@ -1244,6 +1272,7 @@ fn finish_simultaneous_batch(
 /// compatibility but is not authoritative for newly parked actions.
 fn stash_batch_tail(
     state: &mut GameState,
+    logical_zone_change_group: LogicalZoneChangeGroup,
     tail: Vec<ZoneMoveRequest>,
     destination: Zone,
     paused_current: Option<PendingZoneChangeDelivery>,
@@ -1264,19 +1293,12 @@ fn stash_batch_tail(
         .first()
         .map_or_else(HashSet::new, |first| first.replacement_applied.clone());
     let remaining = tail.iter().map(|request| request.object_id).collect();
-    let announced_members = tail
-        .iter()
-        .map(|request| request.object_id)
-        .collect::<Vec<_>>();
     let requests = tail
         .into_iter()
         .map(ZoneMoveRequest::into_pending)
         .collect();
     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
-        logical_zone_change_group: crate::game::triggers::allocate_logical_zone_change_group(
-            state,
-            &announced_members,
-        ),
+        logical_zone_change_group,
         paused_current,
         remaining,
         destination,
@@ -1362,58 +1384,79 @@ fn anticipated_zone_change_delivery(
 /// parks WITH a completion that must fire once after the second park drains).
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.pending_batch_deliveries.take() {
-        let logical_zone_change_group = pending.logical_zone_change_group;
-        let completion = pending.completion;
-        let mut deferred_events = pending.deferred_events;
+        let PendingBatchDeliveries {
+            mut logical_zone_change_group,
+            paused_current,
+            remaining,
+            destination,
+            source_id,
+            enter_tapped,
+            exile_tracking,
+            library_placement,
+            completion,
+            replacement_applied,
+            requests,
+            attempted,
+            zone_change_record_start,
+            mut deferred_events,
+        } = pending;
         deferred_events.append(events);
-        let attempted = if pending.attempted.is_empty() {
-            pending.remaining.clone()
+        let attempted = if attempted.is_empty() {
+            remaining.clone()
         } else {
-            pending.attempted
+            attempted
         };
-        let zone_change_record_start = pending.zone_change_record_start;
-        let reqs: Vec<ZoneMoveRequest> = if pending.requests.is_empty() {
-            pending
-                .remaining
+        let reqs: Vec<ZoneMoveRequest> = if requests.is_empty() {
+            remaining
                 .into_iter()
                 .map(|obj_id| {
-                    let mut req = ZoneMoveRequest::effect(
-                        obj_id,
-                        pending.destination,
-                        pending.source_id.unwrap_or(obj_id),
-                    );
-                    req.mods.enter_tapped = pending.enter_tapped;
-                    req.exile_links.tracking = pending.exile_tracking;
-                    if let Some(position) = pending.library_placement.clone() {
+                    let mut req =
+                        ZoneMoveRequest::effect(obj_id, destination, source_id.unwrap_or(obj_id));
+                    req.mods.enter_tapped = enter_tapped;
+                    req.exile_links.tracking = exile_tracking;
+                    if let Some(position) = library_placement.clone() {
                         req = req.at_library_position(position);
                     }
-                    req.replacement_applied = pending.replacement_applied.clone();
+                    req.replacement_applied = replacement_applied.clone();
                     req
                 })
                 .collect()
         } else {
-            pending
-                .requests
+            requests
                 .into_iter()
                 .map(ZoneMoveRequest::from_pending)
                 .collect()
         };
-        let destination = pending.destination;
-        match deliver_batch(state, reqs, events) {
-            BatchMoveResult::Done => {
-                deferred_events.append(events);
-                finish_simultaneous_batch(
+        if let Some(paused_current) = paused_current {
+            crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                state,
+                &mut logical_zone_change_group,
+                &paused_current.delivery_events,
+            )
+            .expect("resumed batch retains its exact paused delivery");
+            let terminal_completion = paused_current
+                .terminal_completion
+                .expect("resumed batch delivery records its exact terminal completion");
+            logical_zone_change_group
+                .record_delivery_completion(paused_current.member.object_id, terminal_completion)
+                .expect("resumed batch member records its exact terminal outcome");
+        }
+        match deliver_batch(state, reqs, logical_zone_change_group, events) {
+            BatchDeliveryResult::Done(mut logical_zone_change_group) => {
+                crate::game::triggers::complete_logical_zone_trigger_collection(
                     state,
+                    &mut logical_zone_change_group,
+                    events,
+                )
+                .expect("completed batch drain owns every terminal zone-change outcome");
+                crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                    &logical_zone_change_group,
                     &mut deferred_events,
-                    zone_change_record_start,
-                    &attempted,
                 );
+                deferred_events.append(events);
                 events.append(&mut deferred_events);
-                // CR 603.10a + CR 616.1: the whole pile has now landed. Run the
-                // post-loop cleanup exactly once on true completion (it never ran
-                // inline because the loop paused). `Done` here is reachable only
-                // when `deliver_batch` did NOT re-park, so the completion fires at
-                // most once per batch.
+                // CR 603.10a + CR 616.1: logical settlement has completed before
+                // the one post-batch cleanup can run.
                 if let Some(completion) = completion {
                     // The parked/settled result is deliberately unused here: the
                     // drain's callers are state-mediated (engine_replacement
@@ -1426,14 +1469,11 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     let _ = run_batch_completion(state, completion, events);
                 }
             }
-            BatchMoveResult::NeedsChoice => {
-                // Re-parked on the next object's CR 616.1 choice;
-                // `deliver_batch` stashed a fresh tail (or, when the re-paused
-                // object was the last in the tail, stashed nothing — create an
-                // empty record). Re-attach the cleanup so it survives the next
-                // pause boundary and runs once the remaining tail finally drains.
+            BatchDeliveryResult::NeedsChoice => {
+                // `deliver_batch` already re-parked the exact same owner,
+                // including a pause on its final member. Re-attach only the
+                // completion and external output; never replace that owner.
                 let reparking = ensure_batch_record(state, destination);
-                reparking.logical_zone_change_group = logical_zone_change_group;
                 reparking.completion = completion;
                 reparking.attempted = attempted;
                 reparking.zone_change_record_start = zone_change_record_start;
@@ -2501,6 +2541,7 @@ pub(crate) fn execute_zone_move(
     .into_zone_move_result()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_zone_move_with_terminal(
     state: &mut GameState,
     obj_id: ObjectId,
@@ -3241,9 +3282,30 @@ mod w3_library_placement_tests {
             Some(LibraryPosition::Bottom),
             "the stashed tail must preserve bottom placement"
         );
+        let logical_group_id = state
+            .pending_batch_deliveries
+            .as_ref()
+            .expect("the first paused member retains a batch owner")
+            .logical_zone_change_group
+            .logical_group_id;
 
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
             .expect("decline first optional redirect");
+        let final_member_pause = state
+            .pending_batch_deliveries
+            .as_ref()
+            .expect("a pause on the final member still retains the batch owner");
+        assert_eq!(
+            final_member_pause
+                .logical_zone_change_group
+                .logical_group_id,
+            logical_group_id,
+            "a re-park must carry the original logical group rather than a tail-only owner"
+        );
+        assert!(
+            final_member_pause.remaining.is_empty() && final_member_pause.paused_current.is_some(),
+            "the final paused member retains an owner even with no undelivered tail"
+        );
         assert_eq!(
             state
                 .pending_replacement

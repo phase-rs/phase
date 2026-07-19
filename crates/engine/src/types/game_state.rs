@@ -3747,8 +3747,9 @@ pub struct PendingBatchDeliveries {
     /// Every object announced in the original simultaneous action.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempted: Vec<ObjectId>,
-    /// Index where this action's authoritative per-turn zone-change records
-    /// begin. Terminal completion stamps the entire range once.
+    /// Legacy per-turn record boundary retained for snapshot compatibility.
+    /// The logical owner now retains and stamps the authoritative occurrence
+    /// set across every pause boundary.
     #[serde(default)]
     pub zone_change_record_start: usize,
     /// Events produced by already-delivered members. They remain hidden until
@@ -12855,7 +12856,11 @@ impl GameState {
         let prospective_battlefield_members = announced_members
             .iter()
             .filter_map(|object_id| self.objects.get(object_id))
-            .filter(|object| object.zone == Zone::Battlefield)
+            .filter(|object| {
+                // CR 730.2: an absorbed component represents the merged
+                // permanent, not an independent battlefield member.
+                object.zone == Zone::Battlefield && self.battlefield.contains(&object.id)
+            })
             .map(|object| LogicalZoneChangeProspectiveMember {
                 identity: ObjectIncarnationRef::from_object(object),
             })
@@ -17384,6 +17389,7 @@ mod tests {
         hand.incarnation = 7;
         state.objects.insert(battlefield_id, battlefield);
         state.objects.insert(hand_id, hand);
+        state.battlefield.push_back(battlefield_id);
 
         let group = state.allocate_logical_zone_change_group(&[battlefield_id, hand_id]);
 
