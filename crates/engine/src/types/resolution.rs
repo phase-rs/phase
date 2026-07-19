@@ -296,6 +296,14 @@ impl ResolutionStack {
         self.frames.last()
     }
 
+    /// Returns only the immediate predecessor of the active frame.
+    ///
+    /// This is intentionally narrower than a frame search: the only Phase-2
+    /// parent/child relationship is the shipped paused-drain/draw adjacency.
+    pub fn active_predecessor(&self) -> Option<&ResolutionFrame> {
+        self.frames.get(self.frames.len().checked_sub(2)?)
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &ResolutionFrame> {
         self.frames.iter()
     }
@@ -592,7 +600,9 @@ enum DrawAndPostConversion {
     UnpairedPost(ResolutionFrame),
 }
 
-fn canonicalize_legacy_resolution_state(state: &GameState) -> Result<ResolutionStack, String> {
+pub(crate) fn canonicalize_legacy_resolution_state(
+    state: &GameState,
+) -> Result<ResolutionStack, String> {
     if state.pending_continuation.is_none() && state.pending_choose_zone_trigger_context.is_some() {
         return Err(
             "pending choose-from-zone trigger context has no continuation owner".to_string(),
@@ -1232,6 +1242,65 @@ mod tests {
             .expect("empty v2 fixture serializes");
         v2["resolution_frames"] = serde_json::to_value(frames).expect("fixture frames serialize");
         v2
+    }
+
+    #[test]
+    fn dispatcher_resumes_only_the_active_frame() {
+        let ResolutionFrame::MultiDraw(draw) = active_multi_draw_frame() else {
+            unreachable!("helper constructs a multi-draw frame")
+        };
+        let mut state = GameState::new_two_player(157);
+        state.draw_sequences = draw.draw_sequences.clone();
+        state.pending_continuation = Some(PendingContinuation::new(
+            Box::new(resolved_draw(157)),
+            &state,
+        ));
+
+        let mut frames = ResolutionStack::default();
+        frames.push_inner(continuation_frame(157));
+        frames.push_inner(ResolutionFrame::MultiDraw(draw));
+
+        crate::game::effects::resume_resolution_frames(&mut state, &frames, &mut Vec::new());
+
+        assert!(state.draw_sequences.is_empty());
+        assert!(
+            state.pending_continuation.is_some(),
+            "the dispatcher must not search below the active multi-draw frame"
+        );
+    }
+
+    #[test]
+    fn dispatcher_resumes_the_shipped_paused_draw_pair_without_popping_generically() {
+        let ResolutionFrame::PostReplacement(drains) = paused_post_replacement_frame() else {
+            unreachable!("helper constructs a post-replacement frame")
+        };
+        let ResolutionFrame::MultiDraw(draw) = active_multi_draw_frame() else {
+            unreachable!("helper constructs a multi-draw frame")
+        };
+        let mut state = GameState::new_two_player(158);
+        state.post_replacement_drains = drains.clone();
+        state.draw_sequences = draw.draw_sequences.clone();
+
+        let mut frames = ResolutionStack::default();
+        frames
+            .install_adjacent_post_replacement_draw(
+                ResolutionFrame::PostReplacement(drains),
+                ResolutionFrame::MultiDraw(draw),
+            )
+            .expect("fixture installs the shipped adjacent pair");
+
+        crate::game::effects::resume_resolution_frames(&mut state, &frames, &mut Vec::new());
+
+        assert!(state.draw_sequences.is_empty());
+        assert!(
+            state.post_replacement_drains.is_empty(),
+            "the draw authority, not a generic frame pop, retires the paused resident"
+        );
+        assert_eq!(
+            frames.len(),
+            2,
+            "the transitional dispatcher does not own frames"
+        );
     }
 
     fn resume_priority_fixture(mut state: GameState) -> GameState {

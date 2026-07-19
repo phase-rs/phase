@@ -94,7 +94,7 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
 /// THEN that creature connives" still runs the connive step — the prevention
 /// replaced only the draw). Returns the parked `WaitingFor` (ConniveDiscard /
 /// fresh ReplacementChoice) if `propose_connive` parked one, else `None`.
-fn drain_pending_connive_reentry(
+pub(crate) fn drain_pending_connive_reentry(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
@@ -2176,7 +2176,7 @@ fn apply_post_replacement_resolved_effect(
 /// CR 608.3: Complete post-resolution work for a permanent spell whose ETB
 /// went through the replacement pipeline and required a player choice.
 /// Applies cast_from_zone, aura attachment, and warp delayed triggers.
-fn apply_pending_spell_resolution(
+pub(crate) fn apply_pending_spell_resolution(
     state: &mut GameState,
     ctx: &crate::types::game_state::PendingSpellResolution,
     events: &mut Vec<GameEvent>,
