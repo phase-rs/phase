@@ -1085,7 +1085,7 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
         CastingVariant, CopyChosenStage, DrainStatus, GameState, PendingBatchDeliveries,
-        PendingChooseOneOf, PendingCoinFlipKind, PendingCopyTokenResolution,
+        PendingChooseOneOf, PendingCoinFlip, PendingCoinFlipKind, PendingCopyTokenResolution,
         PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMutateMerge,
         PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingProliferateActions,
@@ -1225,6 +1225,13 @@ mod tests {
                 "resumed v2 fixture must not write legacy field {field}"
             );
         }
+    }
+
+    fn v2_fixture_with_frames(state: GameState, frames: ResolutionStack) -> Value {
+        let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("empty v2 fixture serializes");
+        v2["resolution_frames"] = serde_json::to_value(frames).expect("fixture frames serialize");
+        v2
     }
 
     fn resume_priority_fixture(mut state: GameState) -> GameState {
@@ -2120,5 +2127,150 @@ mod tests {
         assert!(paired.draw_sequences.is_empty());
         assert!(paired.post_replacement_drains.is_empty());
         assert_reserializes_v2_only(paired);
+    }
+
+    #[test]
+    fn resolution_state_wire_rejects_translated_ambiguous_and_invalid_frame_shapes() {
+        let base = GameState::new_two_player(150);
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(base.clone()))
+            .expect("base v2 fixture serializes");
+
+        let mut v2_missing_frames = v2.clone();
+        v2_missing_frames
+            .as_object_mut()
+            .expect("v2 fixture is an object")
+            .remove("resolution_frames");
+        assert!(serde_json::from_value::<ResolutionStateWire>(v2_missing_frames).is_err());
+
+        let mut v2_with_legacy = v2.clone();
+        v2_with_legacy["pending_coin_flip"] = Value::Null;
+        assert!(serde_json::from_value::<ResolutionStateWire>(v2_with_legacy).is_err());
+
+        let mut v1_with_frames = serde_json::to_value(base.clone()).expect("v1 serializes");
+        v1_with_frames["resolution_state_version"] =
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        v1_with_frames["resolution_frames"] = Value::Array(Vec::new());
+        assert!(serde_json::from_value::<ResolutionStateWire>(v1_with_frames).is_err());
+
+        let mut invalid_version_type = v2.clone();
+        invalid_version_type["resolution_state_version"] = Value::from("two");
+        assert!(serde_json::from_value::<ResolutionStateWire>(invalid_version_type).is_err());
+
+        let mut multiple_direct = GameState::new_two_player(151);
+        multiple_direct.pending_coin_flip = Some(PendingCoinFlip {
+            source_id: ObjectId(151),
+            controller: PlayerId(0),
+            flipper: PlayerId(0),
+            targets: Vec::new(),
+            win_effect: None,
+            lose_effect: None,
+            kind: PendingCoinFlipKind::Single,
+        });
+        multiple_direct.pending_proliferate_actions = Some(PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(151),
+            remaining: 0,
+        });
+        let mut multiple_direct = serde_json::to_value(multiple_direct).expect("v1 serializes");
+        multiple_direct["resolution_state_version"] =
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        assert!(serde_json::from_value::<ResolutionStateWire>(multiple_direct).is_err());
+
+        let mut orphan_choose_context = GameState::new_two_player(152);
+        orphan_choose_context.pending_choose_zone_trigger_context = Some(ResolvingTriggerContext {
+            event: None,
+            events: Vec::new(),
+            match_count: None,
+            die_result: None,
+        });
+        let mut orphan_choose_context =
+            serde_json::to_value(orphan_choose_context).expect("v1 serializes");
+        orphan_choose_context["resolution_state_version"] =
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        assert!(serde_json::from_value::<ResolutionStateWire>(orphan_choose_context).is_err());
+
+        let mut orphan_optional_context = GameState::new_two_player(153);
+        orphan_optional_context.pending_optional_trigger_match_count = Some(1);
+        let mut orphan_optional_context =
+            serde_json::to_value(orphan_optional_context).expect("v1 serializes");
+        orphan_optional_context["resolution_state_version"] =
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        assert!(serde_json::from_value::<ResolutionStateWire>(orphan_optional_context).is_err());
+
+        let mut ambiguous_legacy_pair = GameState::new_two_player(154);
+        let ResolutionFrame::PostReplacement(ready_drains) = ({
+            let mut drains = PostReplacementDrainStack::default();
+            assert!(drains.install(
+                PostReplacementDrain::ready(PostReplacementContinuation::Resolved(Box::new(
+                    resolved_draw(154),
+                ))),
+                ResidentDrainPolicy::KeepResident,
+            ));
+            ResolutionFrame::PostReplacement(drains)
+        }) else {
+            unreachable!("fixture constructs a post-replacement frame")
+        };
+        let ResolutionFrame::MultiDraw(draw) = active_multi_draw_frame() else {
+            unreachable!("fixture constructs a multi-draw frame")
+        };
+        ambiguous_legacy_pair.post_replacement_drains = ready_drains;
+        ambiguous_legacy_pair.draw_sequences = draw.draw_sequences;
+        let mut ambiguous_legacy_pair =
+            serde_json::to_value(ambiguous_legacy_pair).expect("v1 serializes");
+        ambiguous_legacy_pair["resolution_state_version"] =
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        assert!(serde_json::from_value::<ResolutionStateWire>(ambiguous_legacy_pair).is_err());
+
+        let mut duplicate_draw = ResolutionStack::default();
+        duplicate_draw.push_inner(active_multi_draw_frame());
+        duplicate_draw.push_inner(active_multi_draw_frame());
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(
+                base.clone(),
+                duplicate_draw,
+            ))
+            .is_err()
+        );
+
+        let mut mismatched_gate = ResolutionStack::default();
+        mismatched_gate.push_inner(ResolutionFrame::CoinFlip(PendingCoinFlip {
+            source_id: ObjectId(155),
+            controller: PlayerId(0),
+            flipper: PlayerId(0),
+            targets: Vec::new(),
+            win_effect: None,
+            lose_effect: None,
+            kind: PendingCoinFlipKind::Single,
+        }));
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(
+                base.clone(),
+                mismatched_gate,
+            ))
+            .is_err()
+        );
+
+        let mut nonadjacent_pair = ResolutionStack::default();
+        nonadjacent_pair.push_inner(paused_post_replacement_frame());
+        nonadjacent_pair.push_inner(continuation_frame(156));
+        nonadjacent_pair.push_inner(active_multi_draw_frame());
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(
+                base.clone(),
+                nonadjacent_pair,
+            ))
+            .is_err()
+        );
+
+        let mut reordered_pair = ResolutionStack::default();
+        reordered_pair.push_inner(active_multi_draw_frame());
+        reordered_pair.push_inner(paused_post_replacement_frame());
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(
+                base,
+                reordered_pair,
+            ))
+            .is_err()
+        );
     }
 }
