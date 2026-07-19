@@ -1079,20 +1079,24 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CopyChooseScope, Effect,
         EffectKind, ForEachCategoryAction, IterationCategory, PostReplacementContinuation,
-        QuantityExpr, RepeatContinuation, SpellContext, TargetFilter, ZoneOwner,
+        QuantityExpr, RepeatContinuation, ReplacementDefinition, SpellContext, TargetFilter,
+        ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        CopyChosenStage, DrainStatus, GameState, PendingBatchDeliveries, PendingChooseOneOf,
-        PendingCoinFlipKind, PendingCopyTokenResolution, PendingCounterAdditionQueue,
-        PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
-        PendingMutateMerge, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
-        PendingProliferateActions, PendingRepeatIteration, PendingRepeatUntil,
-        PendingRepeatedOptionalPayment, PendingVoteBallotIteration, PostReplacementDrain,
+        CastingVariant, CopyChosenStage, DrainStatus, GameState, PendingBatchDeliveries,
+        PendingChooseOneOf, PendingCoinFlipKind, PendingCopyTokenResolution,
+        PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
+        PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMutateMerge,
+        PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingProliferateActions,
+        PendingRepeatIteration, PendingRepeatUntil, PendingRepeatedOptionalPayment,
+        PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
         ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{EtbTapState, Zone};
     use std::collections::VecDeque;
 
@@ -1945,5 +1949,176 @@ mod tests {
         );
         assert!(per_category.pending_per_category_zone_choice.is_none());
         assert_reserializes_v2_only(per_category);
+    }
+
+    #[test]
+    fn v1_remaining_resolution_frames_resume_via_shipped_authorities() {
+        let mut multi_draw = GameState::new_two_player(140);
+        let outer = multi_draw.draw_sequences.push(PlayerId(0), 0);
+        let inner = multi_draw.draw_sequences.push(PlayerId(0), 0);
+        let mut multi_draw = restore_v1_fixture(multi_draw);
+        let _ = crate::game::effects::draw::resume_draw_sequence(
+            &mut multi_draw,
+            inner,
+            &mut Vec::new(),
+        );
+        let _ = crate::game::effects::draw::resume_draw_sequence(
+            &mut multi_draw,
+            outer,
+            &mut Vec::new(),
+        );
+        assert!(multi_draw.draw_sequences.is_empty());
+        assert_reserializes_v2_only(multi_draw);
+
+        let mut connive = GameScenario::new();
+        let conniver = connive.add_creature(PlayerId(0), "Conniver", 1, 1).id();
+        let mut connive = connive.state;
+        connive.pending_connive_reentry = Some(PendingConniveReentry {
+            conniver: connive
+                .capture_connive_subject(conniver)
+                .expect("fixture conniver exists"),
+            count: 0,
+            applied: HashSet::new(),
+        });
+        let mut connive = restore_v1_fixture(connive);
+        let pending = connive
+            .pending_connive_reentry
+            .take()
+            .expect("v1 fixture restores the exact connive subject");
+        crate::game::effects::connive::propose_connive(
+            &mut connive,
+            pending.conniver,
+            pending.count,
+            pending.applied,
+            &mut Vec::new(),
+        )
+        .expect("connive fixture re-enters through the production proposer");
+        assert!(connive.pending_connive_reentry.is_none());
+        assert_reserializes_v2_only(connive);
+
+        let mut life = GameState::new_two_player(141);
+        life.pending_life_total_assignment = Some(PendingLifeTotalAssignment {
+            completion_player: PlayerId(0),
+            remaining: Vec::new(),
+            completion: None,
+        });
+        let mut life = restore_v1_fixture(life);
+        crate::game::effects::life::drain_pending_life_total_assignment(&mut life, &mut Vec::new());
+        assert!(life.pending_life_total_assignment.is_none());
+        assert_reserializes_v2_only(life);
+
+        let mut spell = GameState::new_two_player(142);
+        let spell_id = crate::game::zones::create_object(
+            &mut spell,
+            CardId(142),
+            PlayerId(0),
+            "Paused spell".to_string(),
+            Zone::Stack,
+        );
+        let bear = crate::game::zones::create_object(
+            &mut spell,
+            CardId(143),
+            PlayerId(0),
+            "Regenerating bear".to_string(),
+            Zone::Battlefield,
+        );
+        spell
+            .objects
+            .get_mut(&bear)
+            .expect("fixture bear exists")
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .regeneration_shield()
+            .description("Regenerate".to_string())]
+        .into();
+        spell.pending_spell_resolution = Some(PendingSpellResolution {
+            object_id: spell_id,
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: Vec::new(),
+            actual_mana_spent: 0,
+            kickers_paid: Vec::new(),
+            additional_cost_payment_count: 0,
+            additional_cost_payments: Vec::new(),
+            convoked_creatures: Vec::new(),
+        });
+        spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            proposed: ProposedEvent::Destroy {
+                object_id: bear,
+                source: None,
+                cant_regenerate: false,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: vec![ReplacementId {
+                source: bear,
+                index: 0,
+            }],
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        spell.waiting_for =
+            crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &spell);
+        let mut spell = restore_v1_fixture(spell);
+        apply_as_current(&mut spell, GameAction::ChooseReplacement { index: 0 })
+            .expect("spell fixture resumes through the real replacement action");
+        assert!(spell.pending_spell_resolution.is_none());
+        assert_reserializes_v2_only(spell);
+
+        let mut post_replacement = GameState::new_two_player(144);
+        assert!(post_replacement.post_replacement_drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Resolved(Box::new(
+                resolved_draw(144),
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        let mut post_replacement = restore_v1_fixture(post_replacement);
+        assert!(
+            crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                &mut post_replacement,
+                None,
+                None,
+                None,
+                &mut Vec::new(),
+            )
+            .is_none()
+        );
+        assert!(post_replacement.post_replacement_drains.is_empty());
+        assert_reserializes_v2_only(post_replacement);
+    }
+
+    #[test]
+    fn v1_paired_post_replacement_and_multi_draw_fixture_resumes_as_one_resident_pair() {
+        let ResolutionFrame::PostReplacement(drains) = paused_post_replacement_frame() else {
+            unreachable!("helper constructs a post-replacement frame")
+        };
+        let ResolutionFrame::MultiDraw(draw) = active_multi_draw_frame() else {
+            unreachable!("helper constructs a multi-draw frame")
+        };
+        let frame_id = draw
+            .draw_sequences
+            .active()
+            .expect("fixture draw frame is active")
+            .frame_id;
+        let mut paired = GameState::new_two_player(145);
+        paired.post_replacement_drains = drains;
+        paired.draw_sequences = draw.draw_sequences;
+        let mut paired = restore_v1_fixture(paired);
+        let _ = crate::game::effects::draw::resume_draw_sequence(
+            &mut paired,
+            frame_id,
+            &mut Vec::new(),
+        );
+        assert!(paired.draw_sequences.is_empty());
+        assert!(paired.post_replacement_drains.is_empty());
+        assert_reserializes_v2_only(paired);
     }
 }
