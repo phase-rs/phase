@@ -13582,6 +13582,113 @@ fn targeted_keyword_choice_grant_uses_target_only_then_choose_one_of() {
     }
 }
 
+/// Issue #5992: Golem Artisan's "{2}: Target artifact creature gains your choice
+/// of flying, trample, or haste until end of turn." A 3-way Oxford-comma choice
+/// list must yield a `ChooseOneOf` of THREE branches — the old binary
+/// `split_once_on(text, " or ")` path returned `None` here (falling through to
+/// `Unimplemented`). Also asserts `target.controller == None`: the real card has
+/// NO "you control" restriction on its target (the issue's paraphrase was wrong).
+#[test]
+fn golem_artisan_three_way_keyword_choice_grant_has_no_controller_restriction() {
+    let def = parse_effect_chain(
+        "Target artifact creature gains your choice of flying, trample, or haste until end of turn",
+        AbilityKind::Spell,
+    );
+
+    let Effect::TargetOnly {
+        target: TargetFilter::Typed(target),
+    } = &*def.effect
+    else {
+        panic!("expected TargetOnly head, got {:?}", def.effect);
+    };
+    // GAP-FIX: positively assert the target carries NO controller restriction —
+    // Golem Artisan targets ANY artifact creature, not just ones you control.
+    assert_eq!(target.controller, None);
+
+    let choice = def
+        .sub_ability
+        .as_deref()
+        .expect("targeted keyword choice must chain a choice prompt");
+    let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+        panic!("expected ChooseOneOf sub-ability, got {:?}", choice.effect);
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(branches.len(), 3);
+
+    for (branch, keyword) in [
+        (&branches[0], Keyword::Flying),
+        (&branches[1], Keyword::Trample),
+        (&branches[2], Keyword::Haste),
+    ] {
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*branch.effect
+        else {
+            panic!(
+                "expected keyword GenericEffect branch, got {:?}",
+                branch.effect
+            );
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(*target, None);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget)
+        );
+        assert!(static_abilities[0]
+            .modifications
+            .contains(&ContinuousModification::AddKeyword { keyword }));
+    }
+}
+
+/// Issue #5992 generality guard: a DIFFERENT real card with the same N-ary
+/// "your choice of" keyword-grant shape — Assassin Initiate,
+/// "{1}: This creature gains your choice of flying, deathtouch, or lifelink until
+/// end of turn." (verbatim Scryfall Oracle text). Self-referential (no target),
+/// so the `ChooseOneOf` is the head effect, but must still expand to 3 branches.
+#[test]
+fn assassin_initiate_three_way_keyword_choice_grant_is_generic() {
+    let def = parse_effect_chain(
+        "This creature gains your choice of flying, deathtouch, or lifelink until end of turn",
+        AbilityKind::Spell,
+    );
+
+    // No target restriction ("This creature") — the ChooseOneOf is the head.
+    let branches = match &*def.effect {
+        Effect::ChooseOneOf { chooser, branches } => {
+            assert_eq!(*chooser, PlayerFilter::Controller);
+            branches.clone()
+        }
+        other => panic!("expected ChooseOneOf head, got {other:?}"),
+    };
+    assert_eq!(branches.len(), 3);
+
+    let mut granted: Vec<Keyword> = branches
+        .iter()
+        .map(|branch| {
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*branch.effect
+            else {
+                panic!(
+                    "expected keyword GenericEffect branch, got {:?}",
+                    branch.effect
+                );
+            };
+            match &static_abilities[0].modifications[0] {
+                ContinuousModification::AddKeyword { keyword } => keyword.clone(),
+                other => panic!("expected AddKeyword modification, got {other:?}"),
+            }
+        })
+        .collect();
+    granted.sort_by_key(|k| format!("{k}"));
+    let mut expected = vec![Keyword::Flying, Keyword::Deathtouch, Keyword::Lifelink];
+    expected.sort_by_key(|k| format!("{k}"));
+    assert_eq!(granted, expected);
+}
+
 #[test]
 fn shared_target_tap_or_untap_uses_resolution_choice() {
     let def = parse_effect_chain("Tap or untap target permanent", AbilityKind::Spell);
