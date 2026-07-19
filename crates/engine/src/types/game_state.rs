@@ -18072,7 +18072,7 @@ mod tests {
 
         let mut duplicate_member = group.clone();
         duplicate_member.prospective_battlefield_members[1] =
-            duplicate_member.prospective_battlefield_members[0].clone();
+            duplicate_member.prospective_battlefield_members[0];
         rejects_on_wire(duplicate_member, "duplicate announced members");
         let mut misordered_occurrence = group.clone();
         misordered_occurrence.all_origin_occurrences[1].ordinal = 0;
