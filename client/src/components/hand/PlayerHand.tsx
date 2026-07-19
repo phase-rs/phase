@@ -63,6 +63,10 @@ export function PlayerHand() {
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
   const player = useGameStore((s) => s.gameState?.players[playerId]);
+  // Drag-end only ever needs the hand, so depend on that slice rather than the
+  // whole `player`: an unrelated player change (life, mana, counters) would
+  // otherwise rebuild the drag-end callback on every update.
+  const hand = player?.hand;
   const objects = useGameStore((s) => s.gameState?.objects);
   // Use dispatchAction (animation pipeline) instead of store dispatch
   const inspectObject = useUiStore((s) => s.inspectObject);
@@ -343,14 +347,14 @@ export function PlayerHand() {
       if (releasedInsideHand) {
         const targetSlot = hoveredSlotRef.current;
         hoveredSlotRef.current = null;
-        if (!player) return false;
+        if (!hand) return false;
         // Reorder is suppressed while a cast is in progress (`pendingObjectId`)
         // OR while the hand is sorted/filtered (`organizeActive`): in both cases
         // the displayed slot index doesn't map 1:1 onto `player.hand`, so
         // dispatching from a displayed slot would scramble the hand. The pure
         // helper returns null in those states (and for no-op moves).
         const nextOrder = computeReorderedHand(
-          player.hand,
+          hand,
           objectId as ObjectId,
           targetSlot,
           pendingObjectId != null || organizeActive,
@@ -376,7 +380,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player, playerId, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(
