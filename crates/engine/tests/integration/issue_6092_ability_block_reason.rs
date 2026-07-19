@@ -316,14 +316,12 @@ fn non_activated_ability_is_not_read_out() {
         .with_ability_definition(tap_nonmana_ability())
         .id();
     let mut runner = scenario.build();
-    for id in [needle] {
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&id)
-            .unwrap()
-            .chosen_attributes = vec![ChosenAttribute::CardName("Grim Monolith".to_string())];
-    }
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&needle)
+        .unwrap()
+        .chosen_attributes = vec![ChosenAttribute::CardName("Grim Monolith".to_string())];
     refresh_statics_and_derive(&mut runner);
 
     assert!(
