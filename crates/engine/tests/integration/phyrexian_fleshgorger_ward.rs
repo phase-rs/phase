@@ -29,7 +29,7 @@ fn fleshgorger_ward_prompts_for_its_power_at_resolution_and_charges_the_opponent
 
     runner.cast(murder).target_objects(&[fleshgorger]).commit();
 
-    // CR 702.21a + CR 608.2g: Ward reads the source's power as the trigger
+    // CR 702.21a + CR 608.2h: Ward reads the source's power as the trigger
     // resolves, not when the creature first became targeted.
     {
         let object = runner
