@@ -2786,9 +2786,9 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
         PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => true,
         // CR 120.9: the damage-history player set can restrict by a source
         // `TargetFilter`; route it.
-        PlayerFilter::OpponentDealtDamage { source, .. } => {
-            source.as_ref().is_some_and(target_filter_reads_life_total)
-        }
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(target_filter_reads_life_total),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
         PlayerFilter::AllExcept { exclude } => player_filter_reads_life(exclude),
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
@@ -2846,7 +2846,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::Targets { filter: f } => target_filter_reads_life_total(f),
         // Multi-target group constraint carries an OPTIONAL reference filter.
         FilterProp::SharesQuality { reference, .. } => reference
-            .as_ref()
+            .as_deref()
             .is_some_and(target_filter_reads_life_total),
         // Quantity-bearing props route their `QuantityExpr` threshold.
         FilterProp::Counters { count: value, .. }
@@ -2959,9 +2959,9 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
             filters.iter().any(target_filter_reads_life_total)
         }
         TargetFilter::TrackedSetFiltered { filter, .. } => target_filter_reads_life_total(filter),
-        TargetFilter::ChosenDamageSource { filter } => {
-            filter.as_ref().is_some_and(target_filter_reads_life_total)
-        }
+        TargetFilter::ChosenDamageSource { filter } => filter
+            .as_deref()
+            .is_some_and(target_filter_reads_life_total),
         // Payload-free / player-reference / stack-reference / anaphoric filters —
         // none carry a nested walked payload and none read the life family.
         // Enumerated explicitly (no wildcard).
