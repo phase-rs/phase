@@ -346,13 +346,35 @@ fn read_dump_env(key: &str) -> Option<String> {
         .expect("invalid Unicode in dump-destination env var")
 }
 
+/// Every label `AiDifficulty::from_label` (the crate's single-authority
+/// label parser) maps to a real difficulty rather than falling back to its
+/// own unknown-label default (`Medium`). Kept as an explicit list rather than
+/// derived from the enum so a hard-error message can name every accepted
+/// spelling; a new arm added to `from_label` must be mirrored here to be
+/// reachable from this binary's `--difficulty` flag.
+const ACCEPTED_DIFFICULTY_LABELS: &[&str] =
+    &["VeryEasy", "Easy", "Medium", "Hard", "VeryHard", "CEDH"];
+
+/// Parses a `--difficulty` value. Delegates the actual label→enum mapping to
+/// `AiDifficulty::from_label` (the crate's single authority — see its doc
+/// comment) so this binary's understanding of each label can never drift from
+/// every other transport that parses one. Unlike `from_label` itself, which
+/// silently downgrades an unrecognized label to `Medium`, an unrecognized
+/// label here is a hard startup error: silently running a garbled
+/// `--difficulty` value would poison an entire batch of games with a
+/// mislabeled skill tier with no indication anything went wrong (phase#6080
+/// diagnosis; pod-lab gauntlet plan §3.8/§4.5, whose local tier-echo guard
+/// exists precisely because this class of silent downgrade was possible).
 fn parse_difficulty(s: &str) -> AiDifficulty {
-    match s {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Easy,
+    if !ACCEPTED_DIFFICULTY_LABELS
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(s.trim()))
+    {
+        eprintln!(
+            "error: unrecognized --difficulty {s:?}; accepted values: {}",
+            ACCEPTED_DIFFICULTY_LABELS.join(", ")
+        );
+        std::process::exit(1);
     }
+    AiDifficulty::from_label(s)
 }
