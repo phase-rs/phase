@@ -32,7 +32,9 @@ jobs:
   rust-lint:
     name: Rust lint (fmt, clippy, parser gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Clippy can consume the former 15-minute ceiling on a cold hosted cache;
+    # retain a bounded job while leaving room for the remaining lint gates.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
