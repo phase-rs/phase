@@ -958,12 +958,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             }
         }
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
-        // members moved in THIS resume can be stamped as a co-departed group and
-        // their observer triggers collected. NOTE (no-field DEFERRED residual):
-        // members moved in a PRIOR pause segment (before this resume) cannot be
-        // grouped with these without a co_departed_group carrier field on
-        // PendingChangeZoneIteration — the cross-pause observation gap is
-        // documented by an ignored test. See plan STEP 4b.
+        // members moved in this resume join the logical co-departed group and
+        // their observer triggers are collected with earlier pause segments.
         let events_before_drain = events.len();
         for (i, obj_id) in remaining.iter().enumerate() {
             let per_obj_enter_counters =
@@ -1153,6 +1149,42 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             &mut events[events_before_drain..],
         )
         .expect("completed resumed ChangeZone owns every terminal member outcome");
+        // The resumed delivery preceded `events_before_drain`, so synchronize its
+        // completed-owner departure stamp alongside the final drain segment.
+        crate::game::triggers::sync_logical_zone_change_departure_stamps(
+            &logical_zone_change_group,
+            events,
+        );
+        // The completed logical owner already collected these exact zone-change
+        // occurrences. Claim every occurrence from this action that belongs to
+        // the owner, including the resumed delivery emitted before this drain,
+        // so a replacement choice returning to Priority cannot scan it again.
+        let mut unclaimed_owned_zone_events: Vec<_> = logical_zone_change_group
+            .all_origin_occurrences
+            .iter()
+            .map(|occurrence| occurrence.event.clone())
+            .collect();
+        state
+            .consumed_before_priority_trigger_events
+            .extend(events.iter().enumerate().filter_map(|(index, event)| {
+                matches!(event, GameEvent::ZoneChanged { .. })
+                    .then(|| {
+                        unclaimed_owned_zone_events
+                            .iter()
+                            .position(|owned| owned == event)
+                    })
+                    .flatten()
+                    .map(|owned_index| {
+                        unclaimed_owned_zone_events.remove(owned_index);
+                        crate::game::triggers::ConsumedTriggerEventOccurrence {
+                            event: event.clone(),
+                            occurrence: events[..index]
+                                .iter()
+                                .filter(|prior| *prior == event)
+                                .count(),
+                        }
+                    })
+            }));
         // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
         // the whole ChangeZone entry event is complete, so clear the pre-entry
         // Devour snapshot. NOT cleared on the `paused` break above (a further

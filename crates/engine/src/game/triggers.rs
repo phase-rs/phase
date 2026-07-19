@@ -29749,60 +29749,10 @@ pub mod tests {
         );
     }
 
-    /// CR 603.10a (DEFERRED cross-pause residual): when a mass
-    /// `ChangeZone` battlefield→hand batch pauses mid-batch on a per-permanent
-    /// `MayCost { Moved }` replacement choice, the pre-pause-moved members and
-    /// the post-pause-moved members are stamped as separate co-departed groups
-    /// (one `mark_simultaneous_departures` call per segment slice). An LTB
-    /// observer that left in the pre-pause segment therefore observes only its
-    /// own-segment co-departers, NOT the members that left after the pause —
-    /// because the pre-pause `ZoneChanged` events were already emitted in an
-    /// earlier `apply_action` (and its co-departed observer already collected
-    /// against the partial group), and the complete group is unknowable until
-    /// settle, when those events are gone.
-    ///
-    /// This is the SAME cross-action consumption gap as the Unit A
-    /// kicker-paused sub-case. This test drives the real cross-pause topology
-    /// and asserts the CURRENT (wrong) outcome so it flips into a regression
-    /// sentinel once the seam lands.
-    ///
-    /// # Unit B redesign sketch (next attempt starts here)
-    ///
-    /// 1. **Carrier**: add `accumulated_departures: Vec<GameEvent>`
-    ///    (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`) to
-    ///    `PendingChangeZoneIteration`. Seed/extend it at all three constructor
-    ///    sites (`change_zone.rs`, `engine_resolution_choices.rs`,
-    ///    `effects/mod.rs`) with this segment's battlefield-origin `ZoneChanged`
-    ///    events; add it to the destructure and the serde roundtrip test.
-    ///    (Full events, not just IDs — `collect_matching_triggers` needs concrete
-    ///    events to run the `ChangesZone` matcher per co-departer at settle.)
-    /// 2. **Suppress co-departed collection per-segment**: change the per-segment
-    ///    `collect_triggers_into_deferred` calls to a co-departed-SUPPRESSED
-    ///    variant (`collect_pending_triggers_excluding_co_departed`, or a
-    ///    `CollectScope` parameter), preserving the issue-#423 dies/ETB collection
-    ///    while leaving co-departed observers for the settle pass.
-    /// 3. **Settle-only complete-group collection** (in
-    ///    `drain_pending_change_zone_iteration`'s loop-completed branch, when
-    ///    `paused == false && waiting_for == Priority`): append the final
-    ///    segment's departures, `mark_simultaneous_departures` over
-    ///    `accumulated_departures` against the COMPLETE group, then a new
-    ///    `triggers::collect_co_departed_observers_only` runs ONLY the
-    ///    co-departed block over the accumulated events, pushing observer
-    ///    `PendingTriggerContext`s into `state.deferred_triggers` exactly once.
-    ///    The existing `drain_deferred_trigger_queue` then dispatches both.
-    /// 4. **Apply the SAME seam to Unit A's kicker-paused sub-case**: route the
-    ///    cost-sacrifice events through this accumulated-departures + settle
-    ///    collection seam when the cast pauses before Priority.
-    /// 5. **Verify against the CR 603.2 differential invariant** and the
-    ///    Scute-Swarm throughput benchmark after the `collect_pending_triggers`
-    ///    fork; verify issue-#423 and all shipped co-departed tests still pass.
+    /// CR 603.10a: a departing observer uses its pre-event information to
+    /// observe every member of this simultaneous event, even when replacement
+    /// choices split delivery across action boundaries.
     #[test]
-    #[ignore = "DEFERRED: cross-pause co-departed observation requires accumulating \
-                the per-segment ZoneChanged departure events on PendingChangeZoneIteration \
-                and a settle-only co-departed-observer collection pass (forking \
-                collect_pending_triggers to suppress the co-departed block per-segment). \
-                Multi-day; touches the CR 603.2 differential-scan invariant + issue-#423 \
-                deferred-queue contract. See this test's redesign sketch / plan Unit B."]
     fn ltb_observer_cross_pause_co_departed_deferred() {
         use crate::types::ability::{ReplacementDefinition, ReplacementMode};
         use crate::types::replacements::ReplacementEvent;
@@ -29857,9 +29807,9 @@ pub mod tests {
         crate::game::effects::change_zone::resolve_all(&mut state, &ability, &mut events)
             .expect("mass change-zone resolves (pausing on the first MayCost member)");
 
-        // Resolve each MayCost replacement choice (accept, index 0) until the
-        // batch settles. Each accept resumes `drain_pending_change_zone_iteration`,
-        // which stamps the resumed segment as its own co-departed group.
+        // Resolve each replacement choice (accept, index 0) until the batch
+        // settles. Keeping the real repeated-choice path proves the logical
+        // group preserves its authority across each pause/resume boundary.
         let mut guard = 0;
         while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) && guard < 10 {
             crate::game::engine::apply_as_current(
@@ -29869,23 +29819,19 @@ pub mod tests {
             .expect("accept the MayCost replacement");
             guard += 1;
         }
+        assert_eq!(
+            guard, 2,
+            "the scenario must cross two real replacement-choice action boundaries"
+        );
         // Order any same-controller co-departed observer triggers, then resolve.
         drain_order_triggers_with_identity(&mut state);
         resolve_stack_until_paused(&mut state);
 
         let _ = (member_a, member_b);
-        // CURRENT (wrong) outcome: the observer left in the pre-pause segment and
-        // observed only itself (life 20 + 1 = 21); the post-pause members were
-        // stamped into a separate co-departed group it never saw.
-        //
-        // Once the cross-pause seam lands (redesign sketch above), flip this to
-        // assert the observer fires once per co-departed member across the whole
-        // batch (itself + member_a + member_b = 3, life 20 + 3 = 23).
         assert_eq!(
-            state.players[0].life, 21,
-            "CURRENT (wrong) outcome: cross-pause batch under-observes — the \
-             pre-pause observer fires only for itself (life 21); expected 23 once \
-             the cross-pause co-departed seam lands"
+            state.players[0].life, 23,
+            "the pre-pause observer must fire once for every co-departing member \
+             across the complete logical group (life 20 + 3 = 23)"
         );
     }
 
