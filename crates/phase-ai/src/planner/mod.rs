@@ -180,11 +180,16 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
 
     // Pending state (resolution frames, replacements, triggers affect game
     // flow). The typed stack may retain an ability continuation below its
-    // active prompt, so hash its full ordered wire shape rather than inspecting
-    // a non-top frame.
-    let resolution_stack = serde_json::to_value(&state.resolution_stack)
-        .expect("resolution stack serializes for the planner cache key");
-    hash_json_value(&resolution_stack, &mut hasher);
+    // active prompt, so nonempty stacks hash their full ordered wire shape
+    // rather than inspecting a non-top frame. The overwhelmingly common empty
+    // stack stays allocation-free on this hot cache-key path.
+    let has_resolution_frames = !state.resolution_stack.is_empty();
+    has_resolution_frames.hash(&mut hasher);
+    if has_resolution_frames {
+        let resolution_stack = serde_json::to_value(&state.resolution_stack)
+            .expect("resolution stack serializes for the planner cache key");
+        hash_json_value(&resolution_stack, &mut hasher);
+    }
     state.pending_replacement.is_some().hash(&mut hasher);
     state.pending_trigger.is_some().hash(&mut hasher);
 

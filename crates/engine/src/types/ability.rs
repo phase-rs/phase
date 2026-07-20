@@ -9053,8 +9053,8 @@ impl LegacyUnlessCost {
 ///   populate, so the multiplier is unrecoverable here. Mapping the base alone
 ///   would silently undercharge (CR 118.1): a pre-Phase-4 save captured at a
 ///   `ChooseObjectsSelection` prompt persists the stashed
-///   `PayCost { ScaledMana }` sub-ability inside
-///   `GameState::pending_continuation` (Magnetic Mountain–class, ~2 cards).
+///   `PayCost { ScaledMana }` sub-ability inside an
+///   `AbilityContinuationFrame` (Magnetic Mountain–class, ~2 cards).
 ///   Mapping to `Unimplemented` makes the authority fail the payment, so the
 ///   CR 118.12 didn't-pay branch applies — rules-safer than charging `base`
 ///   for an N-object effect. `card-data.json` is regenerated with the modern

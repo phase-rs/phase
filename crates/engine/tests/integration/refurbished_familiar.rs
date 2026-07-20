@@ -167,7 +167,7 @@ fn refurbished_familiar_synchronous_draws_only_for_cant_opponent() {
 ///     for controller in-line.
 ///   - B (P2) = 2 cards → mandatory `Discard 1` falls through to the
 ///     interactive path (`discard.rs:203-216` / `WaitingFor::DiscardChoice`).
-///     The sub_ability is stashed in `state.pending_continuation` at
+///     The sub_ability is stashed in an `AbilityContinuationFrame` at
 ///     `effects/mod.rs:3226-3234`.
 ///
 /// After B submits `SelectCards` (`engine_resolution_choices.rs:1276-1402`),

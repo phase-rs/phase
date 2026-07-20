@@ -1,9 +1,8 @@
 //! Typed, serializable suspension frames for ability resolution.
 //!
-//! This module deliberately models only suspended resolution work. The legacy
-//! `GameState` slots remain the runtime authority until their individual Phase-3
-//! migrations; Phase 2 uses these payloads at the wire boundary without
-//! introducing a second mutable runtime owner.
+//! This module deliberately models only suspended resolution work. Migrated
+//! families use [`ResolutionStack`] as their runtime authority; unmigrated
+//! families remain in their legacy `GameState` slots until their Phase-3 turn.
 
 use std::collections::HashSet;
 
@@ -40,8 +39,9 @@ pub struct MultiDrawFrame {
 
 /// The persisted payload for a parked repeated optional-payment decision.
 ///
-/// The count is a separate legacy runtime register, but it is part of the
-/// same resolution lifetime and therefore travels with this frame on the wire.
+/// The count remains in a legacy runtime register until that family migrates,
+/// but it is part of the same resolution lifetime and therefore travels with
+/// this frame on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepeatedOptionalPaymentFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,8 +89,8 @@ pub struct PerCategoryZoneChoiceFrame {
 }
 
 /// The one place that states every serializable family of suspended
-/// resolution work. The variants intentionally mirror the exhaustive Phase-2
-/// census; a new pause family must be added here before it can cross the wire.
+/// resolution work. The variants intentionally mirror the exhaustive census;
+/// a new pause family must be added here before it can cross the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ResolutionFrame {
@@ -627,8 +627,8 @@ impl ResolutionStack {
 
     /// Returns only the immediate predecessor of the active frame.
     ///
-    /// This is intentionally narrower than a frame search: the only Phase-2
-    /// parent/child relationship is the shipped paused-drain/draw adjacency.
+    /// This is intentionally narrower than a frame search: it serves only the
+    /// paused-drain/draw adjacency.
     pub fn active_predecessor(&self) -> Option<&ResolutionFrame> {
         self.frames.get(self.frames.len().checked_sub(2)?)
     }
@@ -820,10 +820,10 @@ const LEGACY_RESOLUTION_STATE_WIRE_VERSION: u64 = 1;
 
 /// Versioned wire adapter for full game-state persistence and transport.
 ///
-/// `GameState` intentionally retains the legacy runtime slots until their
-/// Phase-3 migrations. This adapter is the only persistence seam that turns
-/// those slots into the typed stack: v1 reads legacy-only state, v2 reads
-/// frame-only state, and v2 writes no legacy resolution field.
+/// This adapter is the persistence seam between v1's legacy-only payloads and
+/// v2's typed frames. v1 decoding converts migrated family payloads into the
+/// runtime stack; v2 decoding restores those frames directly while retaining
+/// legacy slots solely for unmigrated families.
 #[derive(Debug, Clone)]
 pub struct ResolutionStateWire {
     state: GameState,
@@ -1000,11 +1000,11 @@ impl<'de> Deserialize<'de> for ResolutionStateWire {
     }
 }
 
-/// Checks the Phase-2 boundary invariants after a restore and after every
-/// public action. `ResolutionStack` is still a wire-only view in this phase.
-/// A serializable runtime state must therefore write no legacy family beside
-/// `resolution_frames`; valid in-flight trigger occurrences may intentionally
-/// be non-serializable and are checked only structurally at this boundary.
+/// Checks the Phase-3 runtime invariants after a restore and after every
+/// public action. Migrated families are authoritative in `ResolutionStack`;
+/// canonicalization combines those with unmigrated legacy families for the
+/// v2 wire boundary. Valid in-flight trigger occurrences may intentionally be
+/// non-serializable and are checked only structurally at this boundary.
 #[cfg(debug_assertions)]
 pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
     let frames = canonicalize_legacy_resolution_state(state)
