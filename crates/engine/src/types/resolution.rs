@@ -278,6 +278,8 @@ pub enum ResolutionStackError {
         expected: FrameKind,
         actual: FrameKind,
     },
+    #[error("child-stack boundary {child_stack_start} does not retain the ChangeZone owner being re-parked")]
+    MismatchedChangeZoneBoundaryOwner { child_stack_start: usize },
     #[error("top frame {frame:?} does not match waiting prompt {waiting_for}")]
     PromptMismatch {
         frame: FrameKind,
@@ -597,22 +599,28 @@ impl ResolutionStack {
     }
 
     /// Replace the exact ChangeZone owner at the captured child boundary or
-    /// immediately below it. This is the re-pause counterpart to
-    /// `replace_active_change_zone`: the owner remains in place while an
-    /// ETB-counter child owns the stack top.
+    /// immediately below it. The retained frame must own the same logical
+    /// group as `pending`, so a nested ChangeZone child is never overwritten.
+    /// This is the re-pause counterpart to `replace_active_change_zone`: the
+    /// owner remains in place while an ETB-counter child owns the stack top.
     pub fn replace_change_zone_parent_at_child_boundary(
         &mut self,
         pending: PendingChangeZoneIteration,
         child_stack_start: usize,
     ) -> Result<(), ResolutionStackError> {
+        let logical_group_id = pending.logical_zone_change_group.logical_group_id;
         if let Some(ResolutionFrame::ChangeZone(frame)) = self.frames.get(child_stack_start) {
-            let devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
-            self.frames[child_stack_start] =
-                ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
-                    pending: Some(pending),
-                    devour_eligible_snapshot,
-                }));
-            return Ok(());
+            if frame.pending.as_ref().is_some_and(|current| {
+                current.logical_zone_change_group.logical_group_id == logical_group_id
+            }) {
+                let devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
+                self.frames[child_stack_start] =
+                    ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+                        pending: Some(pending),
+                        devour_eligible_snapshot,
+                    }));
+                return Ok(());
+            }
         }
 
         let parent_index =
@@ -635,6 +643,13 @@ impl ResolutionStack {
                 actual: parent.kind(),
             });
         };
+        if !frame.pending.as_ref().is_some_and(|current| {
+            current.logical_zone_change_group.logical_group_id == logical_group_id
+        }) {
+            return Err(ResolutionStackError::MismatchedChangeZoneBoundaryOwner {
+                child_stack_start,
+            });
+        }
         let devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
         self.frames[parent_index] = ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: Some(pending),
@@ -2389,7 +2404,7 @@ mod tests {
         PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
         ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
@@ -3074,6 +3089,44 @@ mod tests {
                 .and_then(|frame| frame.choose_zone_trigger_context.clone()),
             Some(context)
         );
+    }
+
+    #[test]
+    fn change_zone_repark_keeps_a_distinct_nested_change_zone_child() {
+        let ResolutionFrame::ChangeZone(outer) = change_zone_frame(160) else {
+            unreachable!("helper constructs a ChangeZone frame")
+        };
+        let mut replacement = outer
+            .pending
+            .clone()
+            .expect("helper constructs a parked ChangeZone iteration");
+        replacement.source_id = ObjectId(162);
+
+        let ResolutionFrame::ChangeZone(mut child) = change_zone_frame(161) else {
+            unreachable!("helper constructs a ChangeZone frame")
+        };
+        child
+            .pending
+            .as_mut()
+            .expect("helper constructs a parked ChangeZone iteration")
+            .logical_zone_change_group
+            .logical_group_id = LogicalZoneChangeGroupId(161);
+
+        let mut stack = ResolutionStack::default();
+        stack.push_inner(ResolutionFrame::ChangeZone(outer));
+        stack.push_inner(ResolutionFrame::ChangeZone(child));
+
+        stack
+            .replace_change_zone_parent_at_child_boundary(replacement, 1)
+            .expect("the outer ChangeZone owner remains immediately below its child");
+
+        let frames = stack.iter().collect::<Vec<_>>();
+        assert!(matches!(
+            frames.as_slice(),
+            [ResolutionFrame::ChangeZone(outer), ResolutionFrame::ChangeZone(child)]
+                if outer.pending.as_ref().is_some_and(|pending| pending.source_id == ObjectId(162))
+                    && child.pending.as_ref().is_some_and(|pending| pending.source_id == ObjectId(161))
+        ));
     }
 
     #[test]
