@@ -84,6 +84,7 @@ export function CardTextboxPreview({
         src={src}
         alt=""
         draggable={false}
+        onError={() => setArtError(true)}
         className="absolute inset-x-0 top-0 w-full"
         style={{ transform: `translateY(-${top * 100}%)` }}
       />
