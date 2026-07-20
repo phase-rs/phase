@@ -247,6 +247,40 @@ impl ResolutionFrame {
         }
     }
 
+    /// Whether this frame resides in `GameState::resolution_stack` at runtime.
+    ///
+    /// The v2 wire also carries the remaining legacy resolution authorities as
+    /// frames. Those are projected back into their dedicated state fields on
+    /// decode, so they may follow an active stack-resident child in wire order.
+    const fn is_runtime_stack_resident(&self) -> bool {
+        match self {
+            Self::AbilityContinuation(_)
+            | Self::RepeatFor(_)
+            | Self::RepeatUntil(_)
+            | Self::RepeatedOptionalPayment(_)
+            | Self::ChangeZone(_)
+            | Self::BatchDelivery(_)
+            | Self::CounterMoves(_)
+            | Self::CounterRemovals(_)
+            | Self::CounterAdditions(_)
+            | Self::CopyToken(_)
+            | Self::EachPlayerCopyChosen(_)
+            | Self::ChooseOneOf(_)
+            | Self::VoteBallot(_)
+            | Self::PerPlayerZoneChoice(_)
+            | Self::PerCategoryZoneChoice(_)
+            | Self::OptionalEffect(_)
+            | Self::CoinFlip(_)
+            | Self::Proliferate(_)
+            | Self::MutateMerge(_) => true,
+            Self::MultiDraw(_)
+            | Self::ConniveReentry(_)
+            | Self::LifeTotalAssignment(_)
+            | Self::SpellResolution(_)
+            | Self::PostReplacement(_) => false,
+        }
+    }
+
     /// Parent continuations wake only after their child has completed. Direct
     /// choice frames are the prompt-owning family and will be checked against
     /// the concrete `WaitingFor` variant by the structural API.
@@ -1762,16 +1796,18 @@ impl ResolutionStack {
         }
 
         // A frame whose direct gate matches the current prompt is its sole
-        // action owner, so it must be the active stack top. A direct-choice
-        // parent may remain below an unrelated inner prompt, but it may not be
-        // buried below a continuation while its own action is pending.
+        // action owner within `GameState::resolution_stack`. The v2 wire may
+        // follow it with a legacy-resident parent, but no stack-resident frame
+        // may bury it before its action handler consumes the prompt.
         if let Some((index, frame)) = self.frames.iter().enumerate().find(|(_, frame)| {
             matches!(frame.gate(), FrameGate::DirectChoice(gate) if gate.matches(waiting_for))
         }) {
-            if index + 1 != self.frames.len() {
+            if self.frames.iter().skip(index + 1).any(|frame| {
+                frame.is_runtime_stack_resident()
+            }) {
                 return Err(ResolutionStackError::InvalidPayload {
                     frame: frame.kind(),
-                    message: "the direct-choice owner for the current prompt is not the active stack top".to_string(),
+                    message: "the direct-choice owner for the current prompt is buried below a runtime stack frame".to_string(),
                 });
             }
         }
@@ -2533,28 +2569,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     let mut frames = ResolutionStack::default();
 
     for frame in state.resolution_stack.iter() {
-        if !matches!(
-            frame,
-            ResolutionFrame::AbilityContinuation(_)
-                | ResolutionFrame::RepeatFor(_)
-                | ResolutionFrame::RepeatUntil(_)
-                | ResolutionFrame::ChangeZone(_)
-                | ResolutionFrame::BatchDelivery(_)
-                | ResolutionFrame::CounterMoves(_)
-                | ResolutionFrame::CounterRemovals(_)
-                | ResolutionFrame::CounterAdditions(_)
-                | ResolutionFrame::CopyToken(_)
-                | ResolutionFrame::EachPlayerCopyChosen(_)
-                | ResolutionFrame::ChooseOneOf(_)
-                | ResolutionFrame::VoteBallot(_)
-                | ResolutionFrame::PerPlayerZoneChoice(_)
-                | ResolutionFrame::PerCategoryZoneChoice(_)
-                | ResolutionFrame::RepeatedOptionalPayment(_)
-                | ResolutionFrame::OptionalEffect(_)
-                | ResolutionFrame::CoinFlip(_)
-                | ResolutionFrame::Proliferate(_)
-                | ResolutionFrame::MutateMerge(_)
-        ) {
+        if !frame.is_runtime_stack_resident() {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
                 frame.kind()
