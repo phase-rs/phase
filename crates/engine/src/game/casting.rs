@@ -1595,28 +1595,31 @@ fn granted_spell_keywords_for(
     let mut keywords = Vec::new();
     // CR 702.26b + CR 604.1: Functioning gate owned by
     // `battlefield_active_statics`; inline `def.condition` check removed.
-    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
-        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
-            continue;
-        };
+    if static_kind_present(state, StaticModeKind::CastWithKeyword) {
+        crate::game::perf_counters::record_spell_keyword_grant_scan();
+        for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
+            let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+                continue;
+            };
 
-        let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state_for(
-                state,
-                spell_obj,
-                origin_zone,
-                caster,
-                filter,
-                source_obj.id,
-                &state.all_creature_types,
-                fused,
-            )
-        });
-        if !matches {
-            continue;
+            let matches = def.affected.as_ref().is_none_or(|filter| {
+                super::filter::spell_object_matches_filter_from_state_for(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    source_obj.id,
+                    &state.all_creature_types,
+                    fused,
+                )
+            });
+            if !matches {
+                continue;
+            }
+
+            merge_spell_keyword(&mut keywords, keyword.clone(), false);
         }
-
-        merge_spell_keyword(&mut keywords, keyword.clone(), false);
     }
 
     // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
@@ -4591,6 +4594,7 @@ fn casting_variant_choice_set(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+    probe: Option<&PriorityCastProbe>,
 ) -> CastingVariantChoiceSet {
     let mut candidates = casting_variant_candidates(state, player, object_id);
     candidates.dedup();
@@ -4603,7 +4607,7 @@ fn casting_variant_choice_set(
         else {
             continue;
         };
-        if !can_cast_prepared_now(state, player, &prepared) {
+        if !can_cast_prepared_now_with_probe(state, player, &prepared, probe) {
             continue;
         }
         options.push(CastingVariantChoiceOption {
@@ -9226,7 +9230,7 @@ pub fn handle_casting_variant_choice_with_payment_mode(
     let option = options
         .get(index)
         .ok_or_else(|| EngineError::InvalidAction("Invalid cast variant choice".to_string()))?;
-    let fresh_options = casting_variant_choice_set(state, player, object_id).options;
+    let fresh_options = casting_variant_choice_set(state, player, object_id, None).options;
     if !fresh_options
         .iter()
         .any(|fresh| fresh.variant == option.variant)
@@ -10048,7 +10052,7 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    let variant_choices = casting_variant_choice_set(state, player, object_id);
+    let variant_choices = casting_variant_choice_set(state, player, object_id, None);
     if variant_choices.options.len() > 1 {
         return Ok(WaitingFor::CastingVariantChoice {
             player,
@@ -12128,7 +12132,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
 
     // CR 601.2b: Alternative/additional cost choices are announced before
     // targets, so casts with multiple viable variants are target-ambiguous.
-    let choices = casting_variant_choice_set(state, player, object_id);
+    let choices = casting_variant_choice_set(state, player, object_id, None);
     if choices.options.len() > 1 {
         return Ok(Vec::new());
     }
@@ -12593,11 +12597,11 @@ pub fn can_cast_object_now_with_probe(
         {
             return true;
         }
-        let choices = casting_variant_choice_set(state, player, object_id);
+        let choices = casting_variant_choice_set(state, player, object_id, probe);
         return !choices.options.is_empty();
     };
     can_cast_prepared_now_with_probe(state, player, &prepared, probe)
-        || !casting_variant_choice_set(state, player, object_id)
+        || !casting_variant_choice_set(state, player, object_id, probe)
             .options
             .is_empty()
 }
@@ -12674,14 +12678,6 @@ fn can_feasibly_pay_harmonize_mana_cost_with_probe(
                 None,
             )
         })
-}
-
-fn can_cast_prepared_now(
-    state: &GameState,
-    player: PlayerId,
-    prepared: &PreparedSpellCast,
-) -> bool {
-    can_cast_prepared_now_with_probe(state, player, prepared, None)
 }
 
 fn can_cast_prepared_now_with_probe(

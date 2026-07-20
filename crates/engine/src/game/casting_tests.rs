@@ -1866,7 +1866,7 @@ fn fused_split_spell_blocked_by_combined_mana_value_per_turn_limit_enumeration()
     // Sanity: marker must NOT be set — this exercises the pre-payment path.
     assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
 
-    let set = casting_variant_choice_set(&sc.state, P0, breaking);
+    let set = casting_variant_choice_set(&sc.state, P0, breaking, None);
     assert!(
         !fuse_option_offered(&set),
         "a fused Breaking // Entering (combined MV 8) must be BLOCKED by a \
@@ -1896,7 +1896,7 @@ fn fused_split_spell_blocked_by_combined_mana_value_per_turn_limit_enumeration()
             spell_filter: Some(cmc_ge(9)),
         }),
     );
-    let set9 = casting_variant_choice_set(&sc9.state, P0, breaking9);
+    let set9 = casting_variant_choice_set(&sc9.state, P0, breaking9, None);
     assert!(
         fuse_option_offered(&set9),
         "under Cmc >= 9 the fused cast (combined MV 8 < 9) is NOT blocked and must be \
@@ -1943,7 +1943,7 @@ fn non_fuse_alt_cost_candidate_uses_front_half_not_combined() {
             .affected(filter),
         );
         assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
-        casting_variant_choice_set(&sc.state, P0, breaking)
+        casting_variant_choice_set(&sc.state, P0, breaking, None)
             .options
             .iter()
             .any(|o| o.variant == CastingVariant::Dash)
@@ -1999,7 +1999,7 @@ fn fused_split_spell_assist_offer_uses_combined_projection() {
         // Marker must NOT be set — this exercises the pre-payment path.
         assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
 
-        let set = casting_variant_choice_set(&sc.state, P0, breaking);
+        let set = casting_variant_choice_set(&sc.state, P0, breaking, None);
         let options: Vec<CastingVariantChoiceOption> = set.options.clone();
         let fuse_index = options
             .iter()
@@ -2102,7 +2102,7 @@ fn fused_split_spell_granted_flash_timing_uses_combined_projection() {
         // Marker must NOT be set — this exercises the pre-payment path.
         assert!(!sc.state.objects.get(&breaking).unwrap().fused_split_spell);
 
-        fuse_option_offered(&casting_variant_choice_set(&sc.state, P0, breaking))
+        fuse_option_offered(&casting_variant_choice_set(&sc.state, P0, breaking, None))
     };
 
     assert!(
@@ -14825,7 +14825,7 @@ fn ashling_granted_evoke_offered_and_installs_etb_sac() {
         can_cast_object_now(&state, PlayerId(0), spell),
         "granted evoke {{4}} affordable ⇒ spell must be castable via the gate"
     );
-    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
     assert!(
         choices
             .options
@@ -14923,7 +14923,7 @@ fn blitz_creature_offers_blitz_variant() {
         can_cast_object_now(&state, PlayerId(0), spell),
         "a blitz creature with affordable cost must be castable"
     );
-    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
     assert!(
         choices
             .options
@@ -14995,7 +14995,7 @@ fn granted_blitz_offers_blitz_variant() {
         "recipient must have no printed Blitz — the option must come from the grant"
     );
 
-    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
     assert!(
         choices
             .options
@@ -15066,7 +15066,7 @@ fn granted_blitz_self_mana_cost_surfaces_self_referential_cost() {
         obj.base_mana_cost = spell_cost.clone();
     }
 
-    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
     let blitz = choices
         .options
         .iter()
@@ -15728,7 +15728,7 @@ fn overload_castable_with_no_legal_printed_target() {
     );
 
     // (2) The choice set surfaces the Overload variant.
-    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
     assert!(
         choices
             .options
@@ -15784,7 +15784,7 @@ fn dash_creature_offers_dash_variant() {
         can_cast_object_now(&state, PlayerId(0), spell),
         "a dash creature with affordable cost must be castable"
     );
-    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
     assert!(
         choices
             .options
@@ -15959,7 +15959,7 @@ fn spectacle_offered_only_when_opponent_lost_life() {
     }
 
     // No opponent has lost life this turn ⇒ Spectacle is not offered.
-    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
     assert!(
         !choices
             .options
@@ -15971,7 +15971,7 @@ fn spectacle_offered_only_when_opponent_lost_life() {
 
     // An opponent loses life this turn ⇒ Spectacle becomes available.
     state.players[1].life_lost_this_turn = 2;
-    let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+    let choices = casting_variant_choice_set(&state, PlayerId(0), spell, None);
     assert!(
         choices
             .options
@@ -19068,6 +19068,76 @@ fn priority_activation_candidates_share_activation_restriction_static_gate() {
     assert_eq!(
         snapshot.restriction_static_exact_scans, 0,
         "absent ModifyActivationLimit statics must not fall through to exact static scans per candidate"
+    );
+}
+
+#[test]
+fn priority_spell_candidates_without_keyword_grants_skip_static_scans() {
+    let mut state = setup_game_at_main_phase();
+    let spells = [
+        create_generic_creature_in_hand(&mut state, 7_317, PlayerId(0), "Vanilla Spell A", 0),
+        create_generic_creature_in_hand(&mut state, 7_318, PlayerId(0), "Vanilla Spell B", 0),
+        create_generic_creature_in_hand(&mut state, 7_319, PlayerId(0), "Vanilla Spell C", 0),
+    ];
+
+    crate::game::perf_counters::reset();
+    let (actions, _, _) = crate::ai_support::legal_actions_full(&state);
+
+    for spell in spells {
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                GameAction::CastSpell { object_id, .. } if *object_id == spell
+            )),
+            "every castable hand spell must reach production candidate enumeration"
+        );
+    }
+    assert_eq!(
+        crate::game::perf_counters::snapshot().spell_keyword_grant_scans,
+        0,
+        "production spell candidate enumeration must skip CastWithKeyword static scans when none exist"
+    );
+}
+
+#[test]
+fn priority_spell_candidates_scan_and_merge_present_keyword_grants() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_generic_creature_in_hand(&mut state, 7_320, PlayerId(0), "Vanilla Spell", 0);
+    let grantor = create_object(
+        &mut state,
+        CardId(7_321),
+        PlayerId(0),
+        "Keyword Grantor".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&grantor)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash,
+        }));
+
+    crate::game::perf_counters::reset();
+    let (actions, _, _) = crate::ai_support::legal_actions_full(&state);
+
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == spell
+        )),
+        "the granted-keyword spell must remain a production cast candidate"
+    );
+    assert!(
+        crate::game::perf_counters::snapshot().spell_keyword_grant_scans > 0,
+        "present CastWithKeyword statics must fall through to the exact grant scan"
+    );
+    assert!(
+        effective_spell_keywords(&state, PlayerId(0), spell)
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Flash)),
+        "the exact scan must still merge the granted keyword"
     );
 }
 
@@ -35258,7 +35328,7 @@ mod alt_cost_reduction_509 {
 
         // The Evoke hand candidate is the only non-Normal variant, so the
         // choice set carries exactly one option and is not flagged multiple.
-        let choices = casting_variant_choice_set(&state, PlayerId(0), obj);
+        let choices = casting_variant_choice_set(&state, PlayerId(0), obj, None);
         assert!(
             choices
                 .options
