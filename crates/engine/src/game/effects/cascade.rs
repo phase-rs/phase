@@ -1,8 +1,8 @@
-use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
+use crate::types::ability::{Effect, EffectError, EffectKind, LibraryPosition, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -59,110 +59,193 @@ pub fn resolve(
         return Err(EffectError::PlayerNotFound);
     }
 
-    let mut exiled_misses: Vec<ObjectId> = Vec::new();
-    let mut hit_card: Option<ObjectId> = None;
-
-    // CR 702.85a: Exile one at a time until a nonland with MV < source_mv is
-    // exiled, or the library is exhausted. Each iteration reads `library[0]`
-    // off the live player record so any replacement effect that mutated the
-    // library mid-loop is observed.
-    while let Some(card_id) = state
-        .players
-        .iter()
-        .find(|p| p.id == controller)
-        .and_then(|p| p.library.front().copied())
-    {
-        zones::move_to_zone(state, card_id, Zone::Exile, events);
-
-        // CR 614.1: A replacement effect may have moved the card to a zone
-        // other than Exile, or removed it entirely. Only count it as exiled
-        // (a hit or a miss) if it actually landed in Exile.
-        let zone_after = state.objects.get(&card_id).map(|o| o.zone);
-        if zone_after != Some(Zone::Exile) {
-            // Replacement redirected or removed; do not loop on the same card.
-            // Re-read the next library top on the next iteration.
-            if state
-                .players
-                .iter()
-                .find(|p| p.id == controller)
-                .is_some_and(|p| p.library.front().copied() == Some(card_id))
-            {
-                // Defensive: if the card is somehow still on top, break to
-                // avoid an infinite loop.
-                break;
-            }
-            continue;
-        }
-
-        let is_hit = state.objects.get(&card_id).is_some_and(|obj| {
-            let is_land = obj.card_types.core_types.contains(&CoreType::Land);
-            // CR 202.3d + CR 709.4b: the exiled card is off the stack, so a split
-            // card's mana value is its combined halves (front-only would misjudge
-            // the < source_mv hit test). No-ops for single-face cards.
-            let mv = obj.effective_mana_value();
-            !is_land && mv < source_mv
-        });
-
-        if is_hit {
-            hit_card = Some(card_id);
-            break;
-        } else {
-            exiled_misses.push(card_id);
-        }
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    match hit_card {
-        Some(hit) => {
-            // CR 702.85a: Offer the cast. The caster's response is handled in
-            // `engine_resolution_choices` — we do not bottom-shuffle misses
-            // here because a rejection at cast time (X makes resulting MV
-            // ineligible) must still bottom-shuffle them together with the
-            // hit, and that path runs from `casting_costs`.
-            state.waiting_for = WaitingFor::CastOffer {
-                player: controller,
-                kind: CastOfferKind::Cascade {
-                    hit_card: hit,
-                    exiled_misses,
-                    source_mv,
-                },
-            };
-        }
-        None => {
-            // CR 702.85a: Library exhausted with no eligible hit — emit a
-            // CascadeMissed event for the log/UI, then shuffle all exiled
-            // misses to the bottom in random order.
-            events.push(GameEvent::CascadeMissed {
-                controller,
-                source_id: ability.source_id,
-                exiled_count: exiled_misses.len() as u32,
-            });
-            shuffle_to_bottom(state, &exiled_misses, events);
-        }
-    }
+    let _ = continue_exile_loop(
+        state,
+        controller,
+        ability.source_id,
+        source_mv,
+        Vec::new(),
+        events,
+    );
 
     Ok(())
 }
 
-/// CR 702.85a: Put cards on the bottom of the player's library in random order.
+/// CR 702.85a + CR 614.1 + CR 616.1: Propose one Library-to-Exile event at a
+/// time. The typed completion carries the loop cursor across a replacement
+/// choice, so the next top card and the cascade tail cannot run early.
+pub(crate) fn continue_exile_loop(
+    state: &mut GameState,
+    controller: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    source_mv: u32,
+    exiled_misses: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let Some(current_card) = state
+        .players
+        .iter()
+        .find(|player| player.id == controller)
+        .and_then(|player| player.library.front().copied())
+    else {
+        return finish_without_hit(state, controller, source_id, exiled_misses, events);
+    };
+
+    zone_pipeline::move_objects_simultaneously_then(
+        state,
+        vec![ZoneMoveRequest::effect(
+            current_card,
+            Zone::Exile,
+            source_id,
+        )],
+        Some(BatchCompletion::CascadeExileLoopComplete {
+            controller,
+            source_id,
+            source_mv,
+            exiled_misses,
+            current_card,
+        }),
+        events,
+    )
+}
+
+/// CR 702.85a + CR 614.1 + CR 616.1: Classify one settled cascade exile after
+/// its replacement-safe delivery. A redirected card is not a hit or miss; a
+/// card still on top ends the loop defensively just as the former raw loop did.
+pub(crate) fn complete_exile_loop_step(
+    state: &mut GameState,
+    controller: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    source_mv: u32,
+    mut exiled_misses: Vec<ObjectId>,
+    current_card: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    if state.objects.get(&current_card).map(|object| object.zone) != Some(Zone::Exile) {
+        let current_card_is_still_top = state
+            .players
+            .iter()
+            .find(|player| player.id == controller)
+            .is_some_and(|player| player.library.front().copied() == Some(current_card));
+        return if current_card_is_still_top {
+            finish_without_hit(state, controller, source_id, exiled_misses, events)
+        } else {
+            continue_exile_loop(
+                state,
+                controller,
+                source_id,
+                source_mv,
+                exiled_misses,
+                events,
+            )
+        };
+    }
+
+    let is_hit = state.objects.get(&current_card).is_some_and(|object| {
+        let is_land = object.card_types.core_types.contains(&CoreType::Land);
+        // CR 202.3d + CR 709.4b: the exiled card is off the stack, so a split
+        // card's mana value is its combined halves (front-only would misjudge
+        // the < source_mv hit test). No-ops for single-face cards.
+        let mana_value = object.effective_mana_value();
+        !is_land && mana_value < source_mv
+    });
+    if is_hit {
+        return finish_with_hit(
+            state,
+            controller,
+            source_id,
+            source_mv,
+            exiled_misses,
+            current_card,
+            events,
+        );
+    }
+
+    exiled_misses.push(current_card);
+    continue_exile_loop(
+        state,
+        controller,
+        source_id,
+        source_mv,
+        exiled_misses,
+        events,
+    )
+}
+
+/// CR 702.85a: After the first eligible card is delivered to exile, expose the
+/// cast offer exactly once. Declined or rejected casts bottom this hit together
+/// with the carried miss pile in `engine_resolution_choices`/`casting_costs`.
+fn finish_with_hit(
+    state: &mut GameState,
+    controller: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    source_mv: u32,
+    exiled_misses: Vec<ObjectId>,
+    hit_card: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Cascade,
+        source_id,
+        subject: None,
+    });
+    state.waiting_for = WaitingFor::CastOffer {
+        player: controller,
+        kind: CastOfferKind::Cascade {
+            hit_card,
+            exiled_misses,
+            source_mv,
+            source_id,
+        },
+    };
+    BatchMoveResult::Done
+}
+
+/// CR 702.85a + CR 616.1: With no eligible card, finish only after every miss
+/// settles into the randomly ordered Library-bottom batch.
+fn finish_without_hit(
+    state: &mut GameState,
+    controller: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    exiled_misses: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let exiled_count = exiled_misses.len() as u32;
+    shuffle_to_bottom(
+        state,
+        &exiled_misses,
+        source_id,
+        Some(BatchCompletion::CascadeBottomComplete {
+            controller,
+            source_id,
+            exiled_count,
+        }),
+        events,
+    )
+}
+
+/// CR 702.85a + CR 401.4: Put cards on the bottom of the player's library in
+/// random order through the replacement-aware library-placement pipeline.
 pub(crate) fn shuffle_to_bottom(
     state: &mut GameState,
     cards: &[ObjectId],
+    source_id: ObjectId,
+    completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
-) {
+) -> BatchMoveResult {
     use rand::seq::SliceRandom;
 
     let mut shuffled = cards.to_vec();
     shuffled.shuffle(&mut state.rng);
 
-    for &card_id in &shuffled {
-        zones::move_to_library_position(state, card_id, false, events);
-    }
+    let requests = shuffled
+        .into_iter()
+        .map(|card_id| {
+            ZoneMoveRequest::effect(card_id, Zone::Library, source_id)
+                .at_library_position(LibraryPosition::Bottom)
+        })
+        .collect();
+    zone_pipeline::move_objects_simultaneously_then(state, requests, completion, events)
 }
 
 #[cfg(test)]
@@ -240,6 +323,7 @@ mod tests {
                         hit_card,
                         exiled_misses,
                         source_mv,
+                        ..
                     },
                 ..
             } => {

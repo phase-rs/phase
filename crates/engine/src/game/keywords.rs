@@ -765,16 +765,24 @@ pub fn activate_ninjutsu(
     let effective_cost = apply_ability_cost_reduction(state, player, "ninjutsu", mana_cost);
 
     // CR 702.49a/d: Pay the ninjutsu-family mana cost (after all validation, before mutations)
-    super::casting::pay_ability_cost(
+    match super::casting::pay_ability_cost_for_activation(
         state,
         player,
         ninjutsu_obj_id,
         &AbilityCost::Mana {
             cost: effective_cost,
         },
+        None,
         events,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    {
+        super::casting::PaymentOutcome::Paid => {}
+        super::casting::PaymentOutcome::Paused { .. }
+        | super::casting::PaymentOutcome::Failed { .. } => {
+            return Err("ninjutsu mana payment unexpectedly paused".to_string());
+        }
+    }
 
     // 1. Return creature to owner's hand
     // CR 702.49a + CR 614.6: ninjutsu returns the unblocked attacker to its

@@ -57,6 +57,7 @@ mod prelude {
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
     };
     pub(super) use crate::types::counter::{parse_counter_type, CounterMatch};
+    pub(super) use crate::types::events::ActivatedAbilityKind;
     pub(super) use crate::types::keywords::{Keyword, KeywordKind};
     pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType, SpecialAction};
     pub(super) use crate::types::phase::Phase;
@@ -98,6 +99,7 @@ pub(crate) use dispatch::parse_may_look_at_face_down_filter;
 pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
+pub(crate) use restriction::is_control_players_during_own_library_search;
 
 mod support {
     pub(super) use super::anthem::{
@@ -129,7 +131,7 @@ mod support {
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
-        strip_casting_prohibition_subject,
+        parse_relative_count_typed_cast_prohibitions, strip_casting_prohibition_subject,
     };
     pub(super) use super::shared::*;
     pub(super) use super::static_helpers::*;
@@ -159,6 +161,7 @@ pub(crate) use keyword_grant::{
 };
 pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
+pub(crate) use restriction::parse_passive_cant_be_cast_spell_filter;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
 pub(crate) use shared::canonicalize_anchor_label;
 pub(crate) use shared::parse_activated_abilities_cant_be_activated;
@@ -178,6 +181,7 @@ pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use static_helpers::parse_basic_land_type_plural;
 pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
 pub(crate) use type_change::parse_additive_type_clause_modifications;
+pub(crate) use type_change::parse_inverted_base_pt_type_grant;
 
 /// Parse a static/continuous ability line into a `StaticDefinition`.
 #[tracing::instrument(level = "debug")]

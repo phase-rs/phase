@@ -49,9 +49,11 @@
 //! exercises the interaction. See `ISSUES.md` #12.
 
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityDefinition, ActivationRestriction};
+use engine::types::ability::{
+    AbilityDefinition, ActivationRestriction, Effect, ManaProduction, QuantityExpr,
+    TriggerDefinition,
+};
 use engine::types::triggers::TriggerMode;
-use engine::types::TriggerDefinition;
 
 /// The sole index of the element matching `pred`.
 ///
@@ -104,15 +106,10 @@ fn strings(items: &[&str]) -> Vec<String> {
 }
 
 fn parse_spacecraft(oracle: &str, name: &str) -> engine::parser::oracle::ParsedAbilities {
-    // Spacecraft print `Station` as an MTGJSON keyword ability; card-data is
-    // generated WITH it, so the `Station` reminder line is consumed as a keyword.
-    // Passing it here matches production — without it the bare `Station` line falls
-    // through to an `Unimplemented` ability that pollutes the `abilities` vector
-    // (irrelevant to the printed-ORDER property under test).
     parse_oracle_text(
         oracle,
         name,
-        &strings(&["Station"]),
+        &[],
         &strings(&["Artifact"]),
         &strings(&["Spacecraft"]),
     )
@@ -302,8 +299,9 @@ fn memory_test_triggers_are_in_printed_order() {
 // abilities — threshold / level blocks printed below a plain activated ability
 // ---------------------------------------------------------------------------
 
-/// Both abilities are `{T}` → mana, so mode and cost cannot tell them apart.
-/// The only discriminating field is `activation_restrictions`.
+/// The first and threshold abilities both tap for mana. The unclassified Station
+/// reminder also becomes an unrestricted activation in this synthetic fixture, so
+/// the first anchor must include its exact colorless-mana output.
 #[test]
 fn the_eternity_elevator_abilities_are_in_printed_order() {
     const ORACLE: &str = "{T}: Add {C}{C}{C}.\n\
@@ -318,7 +316,18 @@ fn the_eternity_elevator_abilities_are_in_printed_order() {
         "abilities",
         "unrestricted {T}: Add {C}{C}{C} (line 0)",
         &parsed.abilities,
-        unrestricted,
+        |ability| {
+            unrestricted(ability)
+                && matches!(
+                    ability.effect.as_ref(),
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 3 }
+                        },
+                        ..
+                    }
+                )
+        },
     );
     let gated = sole_index(
         card,

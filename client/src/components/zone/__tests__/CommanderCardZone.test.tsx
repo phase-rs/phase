@@ -8,6 +8,7 @@ import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildCommanderGameObject,
   buildObjectMap,
+  gameObjectFactory,
 } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
@@ -54,6 +55,15 @@ function castAction(): GameAction {
     type: "CastSpell",
     data: { object_id: COMMANDER_ID, card_id: 201, targets: [] },
   };
+}
+
+function signatureSpell() {
+  return gameObjectFactory
+    .signatureSpell()
+    .sorcery()
+    .withId(COMMANDER_ID)
+    .named("Scheming Symmetry")
+    .build();
 }
 
 /** Seed both stores for a command-zone commander with the given legal actions. */
@@ -125,5 +135,25 @@ describe("CommanderCardZone commander ninjutsu (issue #5239)", () => {
     // must still inspect, not cast — the ninjutsu branch must not hijack it.
     expect(dispatchAction).not.toHaveBeenCalled();
     expect(useUiStore.getState().inspectedObjectId).toBe(COMMANDER_ID);
+  });
+
+  it("renders an Oathbreaker signature spell from the command zone", () => {
+    const spell = signatureSpell();
+    const gameState = makeState(spell);
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [castAction()],
+      legalActionsByObject: { [String(COMMANDER_ID)]: [castAction()] },
+      spellCosts: {},
+    });
+
+    render(<CommanderCardZone playerId={0} />);
+
+    expect(screen.getByText("Signature Spell")).toBeInTheDocument();
+    expect(screen.getByRole("button")).toHaveAttribute(
+      "title",
+      "Cast Scheming Symmetry — double-click or drag to play",
+    );
   });
 });

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
@@ -6,8 +6,8 @@ import type { TokenSearchFilters } from "../../services/scryfall.ts";
 import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
+import { CardArtFallback } from "./CardArtFallback.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
-import { RichLabel } from "../mana/RichLabel.tsx";
 
 interface CardImageProps {
   cardName: string;
@@ -70,6 +70,11 @@ export function CardImage({
     faceName: faceDown ? undefined : faceName,
   });
   const [imageError, setImageError] = useState(false);
+  // Reset whenever the art source changes so a component instance that once saw
+  // a 404 re-tries the new image: the same instance survives a permanent turning
+  // face up or a DFC transforming, and would otherwise stay latched on the text
+  // tile forever. Mirrors `CardPreview.tsx`'s `useEffect(… , [src])`.
+  useEffect(() => setImageError(false), [src]);
   const fallbackData = useEngineCardData(!faceDown && oracleText === undefined ? cardName : null);
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
 
@@ -80,7 +85,8 @@ export function CardImage({
     ? getBevelBorderStyle(colors)
     : undefined;
 
-  if (!faceDown && (isLoading || !src)) {
+  // Genuinely still resolving art — pulse until the async lookup settles.
+  if (!faceDown && isLoading) {
     return (
       <div
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
@@ -90,37 +96,41 @@ export function CardImage({
     );
   }
 
-  if (!faceDown && imageError) {
-    return (
-      <div
-        className={`${baseClasses} bg-gray-800 shadow-md overflow-hidden flex flex-col p-2`}
-        style={borderStyle ?? { border: "1px solid #4b5563" }}
-        role="img"
-        aria-label={cardName}
-      >
-        <div className="text-xs font-semibold text-gray-100 mb-1 truncate">{cardName}</div>
-        {resolvedOracleText && (
-          <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
-            <RichLabel text={resolvedOracleText} size="xs" />
-          </div>
-        )}
-      </div>
-    );
-  }
+  // Two distinct art failures collapse to the same deliberate text tile:
+  //   - `!src`: art resolution finished with no image (issue #6156 — tokens with
+  //     no official paper printing, e.g. Kibo, Uktabi Prince's Banana, resolve to
+  //     a null token-image src). Previously these fell into the pulse branch and
+  //     animated forever as a featureless dark square.
+  //   - `imageError`: the resolved `<img>` failed to load.
+  // Both render the card/token name (and Oracle text when known) so every artless
+  // card or token — not just one hard-coded name — stays identifiable.
+  const showArtFallback = !faceDown && (imageError || !src);
 
   const renderedSrc = faceDown ? CARD_BACK_URL : (src ?? "");
   const renderedAlt = faceDown ? t("card.faceDownName") : cardName;
 
   return (
     <div className="relative inline-block w-fit select-none">
-      <img
-        src={renderedSrc}
-        alt={renderedAlt}
-        draggable={false}
-        onError={() => setImageError(true)}
-        className={`${baseClasses} shadow-lg object-cover`}
-        style={borderStyle ?? { border: "1px solid #4b5563" }}
-      />
+      {showArtFallback ? (
+        // Swapped in place of the `<img>` rather than early-returned, so the
+        // overlay badges below stay on screen: an artless card must not also
+        // lose its unimplemented-mechanics warning.
+        <CardArtFallback
+          name={cardName}
+          oracleText={resolvedOracleText}
+          className={baseClasses}
+          style={borderStyle ?? { border: "1px solid #4b5563" }}
+        />
+      ) : (
+        <img
+          src={renderedSrc}
+          alt={renderedAlt}
+          draggable={false}
+          onError={() => setImageError(true)}
+          className={`${baseClasses} shadow-lg object-cover`}
+          style={borderStyle ?? { border: "1px solid #4b5563" }}
+        />
+      )}
       {unimplementedMechanics && unimplementedMechanics.length > 0 && (
         <span
           className="absolute top-0.5 left-0.5 bg-amber-500 text-black text-[8px] font-bold rounded-sm px-0.5 leading-tight"

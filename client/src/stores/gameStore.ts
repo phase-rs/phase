@@ -82,6 +82,10 @@ interface GameStoreState {
   logHistory: GameLogEntry[];
   nextLogSeq: number;
   adapter: EngineAdapter | null;
+  /** Monotonically unique local game lifecycle identity. Unlike gameId, it
+   * changes for a fresh init/resume/reset even when the adapter and id are
+   * reused. Transient: never persisted or restored from engine snapshots. */
+  gameSessionGeneration: number;
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
   autoPassRecommended: boolean;
@@ -257,6 +261,13 @@ interface GameStoreActions {
   clearStartingContest: () => void;
 }
 
+let latestGameSessionGeneration = 0;
+
+export function nextGameSessionGeneration(): number {
+  latestGameSessionGeneration += 1;
+  return latestGameSessionGeneration;
+}
+
 export type GameStore = GameStoreState & GameStoreActions;
 
 const initialState: GameStoreState = {
@@ -268,6 +279,7 @@ const initialState: GameStoreState = {
   logHistory: [],
   nextLogSeq: 0,
   adapter: null,
+  gameSessionGeneration: nextGameSessionGeneration(),
   waitingFor: null,
   legalActions: [],
   autoPassRecommended: false,
@@ -374,6 +386,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: initLogEntries,
@@ -399,6 +412,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: [],
@@ -425,6 +439,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: [],
@@ -505,7 +520,7 @@ export const useGameStore = create<GameStore>()(
       if (adapter) {
         adapter.dispose();
       }
-      set(initialState);
+      set({ ...initialState, gameSessionGeneration: nextGameSessionGeneration() });
     },
 
     setAdapter: (adapter) => {

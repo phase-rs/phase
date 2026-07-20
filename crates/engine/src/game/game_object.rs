@@ -5,18 +5,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
-    AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
-    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
-    ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
-    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
-    TriggerDefinition,
+    AbilityBlockEntry, AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment,
+    AdditionalCostOrigin, BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission,
+    CastingRestriction, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
+    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
-use crate::types::game_state::{AttackDeclarationRecord, GameState, LKISnapshot};
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::game_state::{
+    AttackDeclarationRecord, GameState, LKISnapshot, TriggerSourceContext,
+};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
 use crate::types::player::PlayerId;
@@ -110,7 +113,7 @@ pub struct PrototypeFormState {
 /// treatment as other command-zone leaders. Stored as a typed marker to avoid
 /// proliferating bare role booleans on `GameObject`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SignatureSpellState;
+pub struct SignatureSpellState {}
 
 /// CR 702.148a-b + CR 612: Cleave form marker — `Some(_)` while this object's
 /// cleave text-changing effect is live (the spell was cast for its cleave cost
@@ -127,11 +130,13 @@ pub struct SignatureSpellState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleaveFormState {
     pub abilities: Arc<Vec<AbilityDefinition>>,
-    pub triggers: Definitions<TriggerDefinition>,
+    pub triggers: Definitions<TriggerEntry>,
     pub statics: Definitions<StaticDefinition>,
     pub replacements: Definitions<ReplacementDefinition>,
     pub base_abilities: Arc<Vec<AbilityDefinition>>,
     pub base_triggers: Arc<Vec<TriggerDefinition>>,
+    pub trigger_base_set_instance: TriggerBaseSetInstanceRef,
+    pub next_trigger_base_set_instance: u64,
     pub base_statics: Arc<Vec<StaticDefinition>>,
     pub base_replacements: Arc<Vec<ReplacementDefinition>>,
 }
@@ -187,6 +192,8 @@ pub struct BackFaceData {
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
+    /// Stored card-face payload. Live object definitions are materialized with
+    /// recipient-local occurrence provenance when this face is installed.
     pub trigger_definitions: Definitions<TriggerDefinition>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
@@ -204,7 +211,7 @@ pub struct BackFaceData {
 }
 
 /// CR 719.3b: Tracks the solve state of a Case enchantment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseState {
     pub is_solved: bool,
     pub solve_condition: SolveCondition,
@@ -220,7 +227,7 @@ pub struct CaseState {
 /// truth and lets exhaustive `match` arms force every consumer to handle both
 /// variants. Equipment-only call sites use `as_object()` with a CR-cited
 /// `expect` to assert the rules invariant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AttachTarget {
     /// CR 301.5 / CR 303.4f: attached to a permanent.
@@ -261,7 +268,7 @@ impl From<ObjectId> for AttachTarget {
 
 /// CR 709.5c: Which half, or door, of a shared-type-line split permanent is
 /// being locked or unlocked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RoomDoor {
     Left,
     Right,
@@ -352,6 +359,11 @@ pub struct GameObject {
     pub face_down: bool,
     pub flipped: bool,
     pub transformed: bool,
+    /// CR 701.27f: Number of successful transforms/conversions of this object.
+    /// Stack abilities capture this generation so a stale self-transform
+    /// instruction can be ignored after another ability has already flipped it.
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub transformation_count: u32,
     /// CR 712.8a + CR 400.7: True when this object is showing its MDFC back face
     /// (set via ChooseModalFace back_face=true). Reverted to front face on any
     /// zone exit that is not to the battlefield (CR 712.8a: front face only in
@@ -444,7 +456,9 @@ pub struct GameObject {
     /// `GameState::clone()` shares the ability list across cloned states
     /// (AI search); mutations go through `Arc::make_mut` for copy-on-write.
     pub abilities: Arc<Vec<AbilityDefinition>>,
-    pub trigger_definitions: Definitions<TriggerDefinition>,
+    /// Live trigger definitions are identity-bearing entries. Parser and card-face
+    /// data remain payload-only in `base_trigger_definitions` / `BackFaceData`.
+    pub trigger_definitions: Definitions<TriggerEntry>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
     /// CR 702.148a-b + CR 612: When this object is a cleave spell, the alternate
@@ -509,6 +523,17 @@ pub struct GameObject {
     /// than the `Definitions<T>` wrapper that gates live reads.
     /// Wrapped in `Arc` for structural sharing across cloned `GameState`s.
     pub base_trigger_definitions: Arc<Vec<TriggerDefinition>>,
+    /// Current ordered printed/base trigger-set generation. This stays stable
+    /// across ordinary layer resets and only changes when a caller intentionally
+    /// installs a new base/face/cleave trigger set.
+    #[serde(default = "GameObject::initial_trigger_base_set_instance")]
+    pub trigger_base_set_instance: TriggerBaseSetInstanceRef,
+    /// Next object-local base-set generation. Never rewound or reused.
+    #[serde(default = "GameObject::initial_next_trigger_base_set_instance")]
+    pub next_trigger_base_set_instance: u64,
+    /// Recipient-local Layer-6 grant allocator and active producer table.
+    #[serde(default)]
+    pub trigger_occurrence_state: TriggerOccurrenceState,
     /// CR 613.1: printed-card baseline for replacement definitions. See
     /// `base_trigger_definitions`.
     pub base_replacement_definitions: Arc<Vec<ReplacementDefinition>>,
@@ -653,6 +678,14 @@ pub struct GameObject {
     /// currently resolves the count.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 700.2a + CR 700.2d: The modal-mode indices chosen for this spell as it
+    /// was cast (ascending, with repeats per CR 700.2d), latched from
+    /// `SpellContext.chosen_modes` at cast finalize and surviving on the stack
+    /// object so cast-triggers resolving above it (Riku:
+    /// `QuantityRef::EventContextSourceModesChosen`) read the mode count. Empty
+    /// for non-modal spells.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_modes: Vec<usize>,
 
     /// CR 702.103b + CR 702.103f: `Some(_)` while this object is in the
     /// "bestowed Aura" form. Set by `apply_bestow_aura_form`; cleared per
@@ -759,6 +792,14 @@ pub struct GameObject {
     // constraints.
     #[serde(skip_deserializing, default)]
     pub available_mana_pips: Vec<ManaPip>,
+
+    // CR 602.5: Derived read-out of which activated abilities on this object are
+    // currently blocked from activation, and by what. Display-only — carries no
+    // enforcement authority (the gates in `game::casting` remain the sole
+    // authority). Recomputed per-tick by the `derived.rs` block sweep; omitted
+    // from the wire when empty.
+    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_abilities: Vec<AbilityBlockEntry>,
 
     /// CR 606.3 + CR 606.1: Per-permanent loyalty-ability activation count for
     /// the current turn. Default cap is 1 (CR 606.3 "once per turn"); raised
@@ -1041,7 +1082,7 @@ pub struct GameObject {
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
-/// (types/game_state.rs) — the §5.2c 136-field partition. `GameObject` deliberately
+/// (types/game_state.rs) — the §5.2c 137-field partition. `GameObject` deliberately
 /// does NOT derive `PartialEq` (constant-depth loop detection must omit `timestamp`
 /// / `incarnation`), so the row comparator is hand-rolled and needs this no-`..`
 /// destructure: adding a field breaks the build until it is classified into a
@@ -1060,6 +1101,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         face_down: _,
         flipped: _,
         transformed: _,
+        transformation_count: _,
         modal_back_face: _,
         damage_marked: _,
         dealt_deathtouch_damage: _,
@@ -1107,6 +1149,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_keywords: _,
         base_abilities: _,
         base_trigger_definitions: _,
+        trigger_base_set_instance: _,
+        next_trigger_base_set_instance: _,
+        trigger_occurrence_state: _,
         base_replacement_definitions: _,
         base_static_definitions: _,
         base_color: _,
@@ -1128,6 +1173,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         additional_cost_payment_count: _,
         additional_cost_payments: _,
         convoked_creatures: _,
+        chosen_modes: _,
         bestow_form: _,
         prototype_form: _,
         mutate_form: _,
@@ -1143,6 +1189,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         has_mana_ability: _,
         mana_ability_index: _,
         available_mana_pips: _,
+        blocked_abilities: _,
         loyalty_activations_this_turn: _,
         is_commander: _,
         signature_spell: _,
@@ -1205,6 +1252,134 @@ pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType>
 }
 
 impl GameObject {
+    const fn initial_trigger_base_set_instance() -> TriggerBaseSetInstanceRef {
+        TriggerBaseSetInstanceRef::INITIAL
+    }
+
+    const fn initial_next_trigger_base_set_instance() -> u64 {
+        2
+    }
+
+    /// Allocates an intentionally-new printed/base trigger-set generation.
+    /// This is the sole mutation site for the serialized base-set counter.
+    pub fn allocate_trigger_base_set_instance(&mut self) -> Result<(), &'static str> {
+        let next = self.next_trigger_base_set_instance;
+        self.next_trigger_base_set_instance = next
+            .checked_add(1)
+            .ok_or("trigger base-set allocator exhausted")?;
+        self.trigger_base_set_instance = TriggerBaseSetInstanceRef(next);
+        Ok(())
+    }
+
+    /// Re-materializes the live base slots without changing their generation.
+    /// Ordinary full/incremental layer resets and same-face rehydration use this
+    /// path, preserving each printed slot's occurrence identity.
+    pub fn materialize_base_trigger_definitions(&mut self) {
+        self.trigger_definitions = self
+            .base_trigger_definitions
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(printed_index, definition)| {
+                TriggerEntry::new(
+                    TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: self.trigger_base_set_instance,
+                        printed_index,
+                    },
+                    definition,
+                )
+            })
+            .collect();
+    }
+
+    /// Installs a new intentional base/face/cleave trigger set and then
+    /// materializes its ordered printed slots. Allocation occurs before the
+    /// live entries become observable.
+    pub fn install_trigger_base_definitions(
+        &mut self,
+        definitions: Arc<Vec<TriggerDefinition>>,
+    ) -> Result<(), &'static str> {
+        self.allocate_trigger_base_set_instance()?;
+        self.base_trigger_definitions = definitions;
+        self.materialize_base_trigger_definitions();
+        Ok(())
+    }
+
+    /// Returns the exact source-side identity for a currently materialized
+    /// trigger entry.
+    pub fn trigger_definition_ref(
+        &self,
+        entry: &TriggerEntry,
+    ) -> crate::types::ability::TriggerDefinitionRef {
+        crate::types::ability::TriggerDefinitionRef {
+            source: crate::types::identifiers::ObjectIncarnationRef::from_object(self),
+            occurrence: entry.occurrence.clone(),
+        }
+    }
+
+    /// Validates the object-local portion of trigger occurrence provenance.
+    pub fn validate_trigger_definitions(&self) -> Result<(), &'static str> {
+        for entry in self.trigger_definitions.iter_all() {
+            match &entry.occurrence {
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set,
+                    printed_index,
+                } => {
+                    if *base_set != self.trigger_base_set_instance {
+                        return Err("printed trigger refers to a noncurrent base set");
+                    }
+                    if self.base_trigger_definitions.get(*printed_index) != Some(&entry.definition)
+                    {
+                        return Err("printed trigger slot does not match the active base set");
+                    }
+                }
+                TriggerDefinitionOccurrenceRef::Unmaterialized => {
+                    return Err("observable trigger entry lacks occurrence provenance");
+                }
+                TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+                | TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+                | TriggerDefinitionOccurrenceRef::CopyRetained { .. }
+                | TriggerDefinitionOccurrenceRef::Granted { .. }
+                | TriggerDefinitionOccurrenceRef::ExpandedGrant { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Promotes a legacy payload-only live list only when its persisted base
+    /// slots prove the exact ordered printed mapping. Copied and granted
+    /// runtime payloads are rejected rather than guessed from equal definition
+    /// bytes.
+    pub fn migrate_legacy_trigger_definitions(&mut self) -> Result<(), &'static str> {
+        let has_legacy_entries = self.trigger_definitions.iter_all().any(|entry| {
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Unmaterialized
+            )
+        });
+        if !has_legacy_entries {
+            return self.validate_trigger_definitions();
+        }
+        if self.base_trigger_definitions.is_empty()
+            || self.trigger_definitions.len() != self.base_trigger_definitions.len()
+            || !self.trigger_definitions.iter_all().all(|entry| {
+                matches!(
+                    entry.occurrence,
+                    TriggerDefinitionOccurrenceRef::Unmaterialized
+                )
+            })
+            || !self
+                .trigger_definitions
+                .iter_all()
+                .zip(self.base_trigger_definitions.iter())
+                .all(|(entry, base)| entry.definition == *base)
+        {
+            return Err("legacy runtime trigger payload has no provable producer or base slot");
+        }
+        self.materialize_base_trigger_definitions();
+        self.validate_trigger_definitions()
+    }
+
     /// Apply an Alchemy "perpetually" modification to this card: record it on the
     /// object (so it persists across zones/serialization and can be re-applied
     /// after a copy rebuilds base characteristics) and edit the corresponding
@@ -1347,7 +1522,7 @@ impl GameObject {
 
     /// Oathbreaker RC: mark this command-zone object as a signature spell.
     pub fn mark_signature_spell(&mut self) {
-        self.signature_spell = Some(SignatureSpellState);
+        self.signature_spell = Some(SignatureSpellState {});
     }
 
     /// CR 903 + Oathbreaker RC: command-zone cards that use commander tax and
@@ -1545,6 +1720,52 @@ impl GameObject {
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
             trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
+            trigger_source_context: Some(TriggerSourceContext {
+                identity: ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::from_object(self),
+                    from.unwrap_or(self.zone),
+                ),
+                lki: self.snapshot_public_characteristics(),
+                card_id: self.card_id,
+                printed_ref: self.printed_ref.clone(),
+                is_token: self.is_token,
+                face_down: self.face_down,
+                transformed: self.transformed,
+                is_renowned: self.is_renowned,
+                is_saddled: self.is_saddled,
+                echo_due: self.echo_due,
+                harnessed: self.harnessed,
+                saddled_by: self.saddled_by.clone(),
+                convoked_creatures: self.convoked_creatures.clone(),
+                case_state: self.case_state.clone(),
+                class_level: self.class_level,
+                trigger_entries: self.trigger_definitions.iter_all().cloned().collect(),
+                timestamp: self.timestamp,
+                entered_battlefield_turn: self.entered_battlefield_turn,
+                paired_with: self.paired_with,
+                pair_controller: self.pair_controller,
+                attached_to: self.attached_to,
+                attachments: Vec::new(),
+                linked_exile_snapshot: Vec::new(),
+                cards_exiled_this_turn: Vec::new(),
+                combat_status: Default::default(),
+                cast_from_zone: self.cast_from_zone,
+                played_from_zone: self.played_from_zone,
+                entered_via_ability_source: self.entered_via_ability_source,
+                cast_controller: self.cast_controller,
+                phase_status: self.phase_status,
+                cast_variant_paid: self.cast_variant_paid,
+                cast_timing_permission: self.cast_timing_permission,
+                cost_x_paid: self.cost_x_paid,
+                cast_spell_keywords: self.cast_spell_keywords.clone(),
+                mana_spent_to_cast: self.mana_spent_to_cast,
+                colors_spent_to_cast: self.colors_spent_to_cast.clone(),
+                mana_spent_to_cast_amount: self.mana_spent_to_cast_amount,
+                kickers_paid: self.kickers_paid.clone(),
+                additional_cost_payment_count: self.additional_cost_payment_count,
+                additional_cost_payments: self.additional_cost_payments.clone(),
+                cast_cost_paid_object: self.cast_cost_paid_object.clone(),
+            }),
             power: self.power,
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same
@@ -1617,10 +1838,8 @@ impl GameObject {
             // Both sides are `Arc<Vec<_>>` — refcount-only clone.
             self.base_abilities = Arc::clone(&self.abilities);
         }
-        if self.base_trigger_definitions.is_empty() && !self.trigger_definitions.is_empty() {
-            self.base_trigger_definitions =
-                Arc::new(self.trigger_definitions.iter_all().cloned().collect());
-        }
+        #[cfg(any(test, feature = "test-support"))]
+        self.materialize_test_fixture_trigger_base();
         if self.base_replacement_definitions.is_empty() && !self.replacement_definitions.is_empty()
         {
             self.base_replacement_definitions =
@@ -1640,6 +1859,26 @@ impl GameObject {
         self.base_characteristics_initialized = true;
     }
 
+    /// Test-fixture-only construction seam for pre-identity unit fixtures.
+    ///
+    /// Production restore never calls this: deserialization instead requires
+    /// `migrate_legacy_trigger_definitions` to prove every legacy payload from
+    /// persisted printed slots. Keeping the compatibility path behind the same
+    /// `test-support` boundary as scenario construction makes that distinction
+    /// explicit rather than dependent on layer-flush call order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn materialize_test_fixture_trigger_base(&mut self) {
+        if self.base_trigger_definitions.is_empty() && !self.trigger_definitions.is_empty() {
+            self.base_trigger_definitions = Arc::new(
+                self.trigger_definitions
+                    .iter_all()
+                    .map(|entry| entry.definition.clone())
+                    .collect(),
+            );
+            self.materialize_base_trigger_definitions();
+        }
+    }
+
     pub fn new(id: ObjectId, card_id: CardId, owner: PlayerId, name: String, zone: Zone) -> Self {
         GameObject {
             id,
@@ -1652,6 +1891,7 @@ impl GameObject {
             face_down: false,
             flipped: false,
             transformed: false,
+            transformation_count: 0,
             modal_back_face: false,
             damage_marked: 0,
             dealt_deathtouch_damage: false,
@@ -1699,6 +1939,9 @@ impl GameObject {
             base_keywords: Vec::new(),
             base_abilities: Arc::new(Vec::new()),
             base_trigger_definitions: Default::default(),
+            trigger_base_set_instance: TriggerBaseSetInstanceRef::INITIAL,
+            next_trigger_base_set_instance: 2,
+            trigger_occurrence_state: TriggerOccurrenceState::default(),
             base_replacement_definitions: Default::default(),
             base_static_definitions: Default::default(),
             base_color: Vec::new(),
@@ -1719,6 +1962,7 @@ impl GameObject {
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
+            chosen_modes: Vec::new(),
             bestow_form: None,
             prototype_form: None,
             mutate_form: None,
@@ -1735,6 +1979,7 @@ impl GameObject {
             mana_ability_index: None,
             devotion: None,
             available_mana_pips: Vec::new(),
+            blocked_abilities: Vec::new(),
             loyalty_activations_this_turn: 0,
             is_commander: false,
             signature_spell: None,
@@ -1963,7 +2208,7 @@ impl GameObject {
         self.mana_cost = self.base_mana_cost.clone();
         self.keywords = self.base_keywords.clone();
         self.abilities = Arc::clone(&self.base_abilities);
-        self.trigger_definitions = Arc::clone(&self.base_trigger_definitions).into();
+        self.materialize_base_trigger_definitions();
         self.replacement_definitions = Arc::clone(&self.base_replacement_definitions).into();
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
         self.color = self.base_color.clone();
@@ -2248,7 +2493,13 @@ impl GameObject {
         // card, not subject to functioning gates. `iter_all` is pub(crate).
         self.trigger_definitions
             .iter_all()
-            .filter_map(|t| t.counter_filter.as_ref().and_then(|f| f.threshold))
+            .filter_map(|entry| {
+                entry
+                    .definition
+                    .counter_filter
+                    .as_ref()
+                    .and_then(|f| f.threshold)
+            })
             .max()
     }
 
@@ -2319,7 +2570,11 @@ pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{
+        TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantInstanceRef,
+    };
     use crate::types::counter::parse_counter_type;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn game_object_has_all_rules_relevant_fields() {
@@ -2356,6 +2611,48 @@ mod tests {
     }
 
     #[test]
+    fn zone_change_snapshot_keeps_exact_trigger_source_context_in_sync() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(7),
+            },
+            TriggerDefinition::new(TriggerMode::ChangesZone),
+        );
+        object.trigger_definitions = vec![entry.clone()].into();
+
+        let mut record =
+            object.snapshot_for_zone_change(object.id, Some(Zone::Battlefield), Zone::Graveyard);
+        let source = record
+            .trigger_source_context()
+            .expect("live zone-change snapshots own a source context");
+        assert_eq!(
+            source.identity.reference,
+            ObjectIncarnationRef::from_object(&object)
+        );
+        assert_eq!(source.card_id, CardId(100));
+        assert_eq!(source.trigger_entries, vec![entry]);
+
+        // Meld refreshes a record after snapshot construction. The source context
+        // must follow those final record projections rather than retaining stale
+        // pre-refresh controller/combat facts.
+        record.controller = PlayerId(1);
+        record.combat_status.attacking = true;
+        record.sync_trigger_source_context();
+        let source = record
+            .trigger_source_context()
+            .expect("synchronization preserves the source context");
+        assert_eq!(source.lki.controller, PlayerId(1));
+        assert!(source.combat_status.attacking);
+    }
+
+    #[test]
     fn counter_type_covers_required_variants() {
         let counters = [
             CounterType::Plus1Plus1,
@@ -2379,6 +2676,218 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn legacy_printed_trigger_payload_with_matching_base_slots_is_materialized() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        let definitions = vec![
+            TriggerDefinition::new(TriggerMode::Phase),
+            TriggerDefinition::new(TriggerMode::Attacks),
+        ];
+        object.base_trigger_definitions = Arc::new(definitions.clone());
+        object.trigger_definitions = definitions.into();
+
+        object
+            .migrate_legacy_trigger_definitions()
+            .expect("matching persisted base slots prove the legacy printed mapping");
+
+        assert!(object
+            .trigger_definitions
+            .iter_all()
+            .enumerate()
+            .all(|(printed_index, entry)| {
+                entry.occurrence
+                    == TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index,
+                    }
+            }));
+    }
+
+    #[test]
+    fn legacy_runtime_trigger_payload_without_a_printed_slot_is_rejected() {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object
+            .trigger_definitions
+            .push(TriggerDefinition::new(TriggerMode::Attacks));
+
+        assert_eq!(
+            object.migrate_legacy_trigger_definitions(),
+            Err("legacy runtime trigger payload has no provable producer or base slot"),
+            "a payload-only runtime copied/granted trigger must not be guessed as printed"
+        );
+    }
+
+    fn trigger_test_object() -> GameObject {
+        GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Trigger Test".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    #[test]
+    fn printed_explicit_and_keyword_companion_map_to_stable_distinct_base_slots() {
+        let mut object = trigger_test_object();
+        let explicit = TriggerDefinition::new(TriggerMode::Phase);
+        let keyword_companion = TriggerDefinition::new(TriggerMode::Attacks);
+        object.base_trigger_definitions = Arc::new(vec![explicit.clone(), keyword_companion]);
+
+        object.materialize_base_trigger_definitions();
+
+        let occurrences = object
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.occurrence.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences,
+            vec![
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            object.trigger_definitions[0].definition, explicit,
+            "the first final slot preserves the explicit printed trigger payload"
+        );
+    }
+
+    #[test]
+    fn repeated_printed_companion_slots_stay_distinct() {
+        let mut object = trigger_test_object();
+        let companion = TriggerDefinition::new(TriggerMode::Attacks);
+        object.base_trigger_definitions = Arc::new(vec![companion.clone(), companion]);
+
+        object.materialize_base_trigger_definitions();
+
+        assert_ne!(
+            object.trigger_definitions[0].occurrence, object.trigger_definitions[1].occurrence,
+            "repeated final slots must not collapse because their payloads match"
+        );
+    }
+
+    #[test]
+    fn unchanged_base_reset_and_rehydrate_keep_trigger_refs() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object.materialize_base_trigger_definitions();
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_eq!(before, after);
+        assert_eq!(
+            object.next_trigger_base_set_instance, 2,
+            "rehydrating unchanged base slots must not allocate a new generation"
+        );
+    }
+
+    #[test]
+    fn reincarnation_changes_the_full_trigger_ref_without_reusing_a_base_slot() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object.bump_incarnation();
+        object.materialize_base_trigger_definitions();
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_ne!(
+            before, after,
+            "a new object incarnation is a new trigger source"
+        );
+        assert_eq!(
+            before.occurrence, after.occurrence,
+            "ordinary base rehydration does not fabricate a new base set"
+        );
+    }
+
+    #[test]
+    fn intentional_base_replacement_gets_fresh_base_set_ref() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions =
+            Arc::new(vec![TriggerDefinition::new(TriggerMode::Phase)]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        object
+            .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+                TriggerMode::Attacks,
+            )]))
+            .expect("base-set allocator has capacity");
+        let after = object.trigger_definition_ref(&object.trigger_definitions[0]);
+
+        assert_ne!(before, after);
+        assert_eq!(
+            object.trigger_base_set_instance,
+            TriggerBaseSetInstanceRef(2)
+        );
+        assert_eq!(object.next_trigger_base_set_instance, 3);
+    }
+
+    #[test]
+    fn serialized_base_slots_preserve_exact_refs() {
+        let mut object = trigger_test_object();
+        object.base_trigger_definitions = Arc::new(vec![
+            TriggerDefinition::new(TriggerMode::Phase),
+            TriggerDefinition::new(TriggerMode::Attacks),
+        ]);
+        object.materialize_base_trigger_definitions();
+        let refs = object
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| object.trigger_definition_ref(entry))
+            .collect::<Vec<_>>();
+
+        let roundtrip: GameObject = serde_json::from_str(&serde_json::to_string(&object).unwrap())
+            .expect("identity-bearing trigger entries roundtrip");
+        let roundtrip_refs = roundtrip
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| roundtrip.trigger_definition_ref(entry))
+            .collect::<Vec<_>>();
+
+        assert_eq!(refs, roundtrip_refs);
+        assert_eq!(
+            object.trigger_base_set_instance,
+            roundtrip.trigger_base_set_instance
+        );
+        assert_eq!(
+            object.next_trigger_base_set_instance,
+            roundtrip.next_trigger_base_set_instance
+        );
+        assert_eq!(
+            object.trigger_occurrence_state,
+            roundtrip.trigger_occurrence_state
+        );
     }
 
     /// CR 702.26: `phase_status` must be exposed on the wire so the FE can

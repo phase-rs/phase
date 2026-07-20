@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Blockiert",
+    "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
+    "cantActivateDuring": "Kann derzeit nicht aktiviert werden",
+    "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -321,7 +327,7 @@
     "assignRemaining_other": "Noch {{count}} zuweisen",
     "confirmDistribute_one": "{{count}} Angreifer erklären",
     "confirmDistribute_other": "{{count}} Angreifer erklären",
-    "mustAttackPlayer": "{{creature}} muss {{player}} angreifen"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Kontrolle",
@@ -506,6 +512,11 @@
     "castCommander": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
     "castCommanderTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
     "ninjutsuCommander": "Kommandeur-Ninjutsu: {{name}} — klicken, um einen ungeblockten Angreifer auf die Hand zurückzunehmen und diesen Kommandeur getappt und angreifend ins Spiel zu bringen",
+    "signatureSpell": "Signaturzauber",
+    "signatureSpellTitle": "Signaturzauber: {{name}}",
+    "signatureSpellTitleTax": "Signaturzauber: {{name}} (Steuer: +{{tax}})",
+    "castSignatureSpell": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
+    "castSignatureSpellTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
     "tax": "Steuer: +{{tax}}",
     "companion": "Gefährte",
     "companionTitle": "Gefährte: {{name}}",
@@ -628,8 +639,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "{{amount}} Kampfschaden zuteilen",
@@ -713,6 +722,7 @@
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
     "skip": "Überspringen",
+    "opponentChoice": "(nach Wahl des Gegners)",
     "chooseNewTarget": "Wähle das neue Ziel des Zauberspruchs",
     "chooseNewTargetForSpell": "Wähle ein neues Ziel für {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1666,6 +1676,13 @@
     "title": "Beschützer wählen",
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
+  },
+  "announcingOpponent": {
+    "title": "Ansagenden Gegner wählen ({{current}} von {{total}})",
+    "subtitle": "Wähle, welcher Gegner {{target}} ansagt ({{current}} von {{total}}).",
+    "targetLand": "das Länderziel",
+    "targetCreature": "das Kreaturenziel",
+    "targetChoice": "diese Zielwahl"
   },
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",

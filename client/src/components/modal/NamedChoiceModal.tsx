@@ -13,7 +13,10 @@ import {
 } from "../../stores/multiplayerStore.ts";
 import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
 
-type NamedChoice = Extract<WaitingFor, { type: "NamedChoice" }>;
+type OptionChoice = Extract<
+  WaitingFor,
+  { type: "NamedChoice" | "OpponentGuess" }
+>;
 
 /** Maps a ChoiceType key to its i18n leaf under `namedChoice.title.*`. */
 const CHOICE_TYPE_TITLE_KEYS: Record<string, string> = {
@@ -46,7 +49,7 @@ function getChoiceTypeKey(choiceType: string | Record<string, unknown>): string 
 
 const MAX_RESULTS = 10;
 
-export function NamedChoiceModal({ data }: { data: NamedChoice["data"] }) {
+export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
   if (typeKey === "CardName") {
     return <CardNameSearch />;
@@ -216,7 +219,7 @@ function HighlightedName({ name, query }: { name: string; query: string }) {
  *  buttons. Short lists (colors, card types) render without the extra chrome. */
 const FILTERABLE_OPTION_THRESHOLD = 12;
 
-function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: string }) {
+function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: string }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);

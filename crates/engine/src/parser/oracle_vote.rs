@@ -28,27 +28,33 @@ use nom::Parser;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef, Duration,
-    Effect, PlayerFilter, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
-    TargetSelectionMode, TieResolution, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+    Effect, PlayerFilter, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TieResolution,
+    VoteSubject, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::keywords::Keyword;
 use crate::types::zones::{EtbTapState, Zone};
 
 use super::oracle_effect::{parse_effect_chain_with_context, strip_trailing_duration};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::trigger::VoteIr;
 use super::oracle_keyword::parse_granted_keyword_fragment;
 use super::oracle_target::parse_target;
 use super::oracle_util::SELF_REF_TYPE_PHRASES;
 
-/// Detect and parse the entire Council's-dilemma vote block. Returns a single
-/// `AbilityDefinition` whose `effect` is `Effect::Vote` populated with the
-/// per-choice sub-effects, or `None` if the input doesn't match the pattern.
+/// Detect and parse the entire Council's-dilemma vote block into typed trigger
+/// IR. The vote's per-choice sub-effects remain independently lowered payloads;
+/// the root ballot and optional pre-ballot random choice stay typed until
+/// trigger lowering.
 ///
 /// The input is the trigger/effect *body* text — i.e., what comes after
 /// "Whenever ~ enters or deals combat damage to a player, ". The "starting
 /// with you, " prefix is consumed here (kept inside this module so chain-level
 /// stripping in `parse_effect_chain_ir` doesn't interfere).
-pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+pub(crate) fn parse_vote_block_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<VoteIr> {
     // Case-insensitive nom tags (`tag_no_case`) match directly against the
     // original-case input, so the entire vote-detection pipeline operates on
     // `text` without an upfront `to_lowercase()` allocation. On the failure
@@ -100,6 +106,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
                 voter_scope,
                 visibility,
             )
+            .map(|vote| vote.with_source(text).with_context(ctx))
         }
     };
     // CR 701.38a: Will-of-the-council threshold votes. Shape:
@@ -120,7 +127,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         voter_scope,
         visibility,
     ) {
-        return Some(def);
+        return Some(def.with_source(text).with_context(ctx));
     }
     // CR 701.38a: "...or tied for most votes" all-tied outcome over named
     // choices (Council Guardian: "This creature gains protection from each
@@ -134,7 +141,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         voter_scope,
         visibility,
     ) {
-        return Some(def);
+        return Some(def.with_source(text).with_context(ctx));
     }
     // Phase 3: per-choice clauses. Three shapes covered, dispatched by scope:
     //   * "For each <choice> vote, <effect>."                     (Tivit / classic)
@@ -257,18 +264,18 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
     let per_choice_effect: Vec<Box<AbilityDefinition>> =
         slots.into_iter().collect::<Option<Vec<_>>>()?;
 
-    let vote_def = AbilityDefinition::new(
-        kind,
-        Effect::Vote {
-            choices,
-            per_choice_effect,
-            starting_with,
-            voter_scope,
-            tally_mode: VoteTally::PerVote,
-            subject: VoteSubject::Named,
-            visibility,
-        },
-    );
+    let vote = Effect::Vote {
+        choices,
+        per_choice_effect,
+        starting_with,
+        voter_scope,
+        tally_mode: VoteTally::PerVote,
+        subject: VoteSubject::Named,
+        visibility,
+    };
+    // CR 701.38 + CR 608.2d: retain the ballot and its optional random setup
+    // as typed trigger IR. The setup becomes the root only during lowering;
+    // the trigger body itself never needs a pre-lowered AbilityDefinition.
     match pre_vote_choose {
         // CR 608.2d + CR 102.2: the card chooses the opponent unconditionally
         // ("Then choose an opponent at random"), even with a zero tally, so the
@@ -279,18 +286,19 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         // (CR 608.2c). The random pick is independent of the tally, so choosing
         // before vs. after the ballot is outcome-equivalent.
         Some(choice_type) => Some(
-            AbilityDefinition::new(
-                kind,
-                Effect::Choose {
-                    choice_type,
-                    persist: true,
-                    selection: TargetSelectionMode::Random,
-                },
-            )
-            .sub_ability(vote_def),
+            VoteIr::new(vote, Some(choice_type))
+                .with_source(text)
+                .with_context(ctx),
         ),
-        None => Some(vote_def),
+        None => Some(VoteIr::new(vote, None).with_source(text).with_context(ctx)),
     }
+}
+
+/// Compatibility entry point for non-trigger callers that still consume a
+/// lowered definition. Trigger parsing uses [`parse_vote_block_ir`] so its root
+/// goes through the ordinary trigger effect-chain arm.
+pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+    parse_vote_block_ir(text, kind, &ParseContext::default()).map(|vote| vote.into_ability(kind))
 }
 
 /// CR 701.38a: Parse the Will-of-the-council threshold-clause body that
@@ -325,7 +333,7 @@ fn parse_threshold_vote_clauses(
     starting_with: ControllerRef,
     voter_scope: VoterScope,
     visibility: VoteVisibility,
-) -> Option<AbilityDefinition> {
+) -> Option<VoteIr> {
     // Per-choice effect slots, parallel to `choices`, plus the discovered
     // tie-breaker index. Each named clause binds to its choice's slot; unlisted
     // choices stay `None` and are filled with `Effect::NoOp` below.
@@ -380,8 +388,7 @@ fn parse_threshold_vote_clauses(
         .map(|slot| slot.unwrap_or_else(|| Box::new(AbilityDefinition::new(kind, Effect::NoOp))))
         .collect();
 
-    Some(AbilityDefinition::new(
-        kind,
+    Some(VoteIr::new(
         Effect::Vote {
             choices: choices.to_vec(),
             per_choice_effect,
@@ -393,6 +400,7 @@ fn parse_threshold_vote_clauses(
             subject: VoteSubject::Named,
             visibility,
         },
+        None,
     ))
 }
 
@@ -424,7 +432,7 @@ fn parse_all_tied_vote_clause(
     starting_with: ControllerRef,
     voter_scope: VoterScope,
     visibility: VoteVisibility,
-) -> Option<AbilityDefinition> {
+) -> Option<VoteIr> {
     let (sentence, _rest) = read_sentence(input);
     // Locate the "with the most votes [or tied for most votes]" suffix; `head`
     // is the grant template preceding it.
@@ -459,8 +467,7 @@ fn parse_all_tied_vote_clause(
         )));
     }
 
-    Some(AbilityDefinition::new(
-        kind,
+    Some(VoteIr::new(
         Effect::Vote {
             choices: choices.to_vec(),
             per_choice_effect,
@@ -472,6 +479,7 @@ fn parse_all_tied_vote_clause(
             subject: VoteSubject::Named,
             visibility,
         },
+        None,
     ))
 }
 
@@ -493,7 +501,7 @@ fn parse_object_vote_block(
     starting_with: ControllerRef,
     voter_scope: VoterScope,
     visibility: VoteVisibility,
-) -> Option<AbilityDefinition> {
+) -> Option<VoteIr> {
     // Strip a leading article so `parse_target` sees the bare descriptor.
     let candidate_phrase = strip_leading_article(choice_text.trim());
     let (candidate_filter, rest) = parse_target(candidate_phrase);
@@ -538,8 +546,7 @@ fn parse_object_vote_block(
     };
     let outcome_template = Box::new(AbilityDefinition::new(kind, exile));
 
-    Some(AbilityDefinition::new(
-        kind,
+    Some(VoteIr::new(
         Effect::Vote {
             choices: Vec::new(),
             per_choice_effect: Vec::new(),
@@ -554,6 +561,7 @@ fn parse_object_vote_block(
             },
             visibility,
         },
+        None,
     ))
 }
 

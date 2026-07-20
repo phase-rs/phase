@@ -37,10 +37,10 @@ use crate::types::zones::{EtbTapState, Zone};
 
 use super::oracle_effect::parse_effect_chain_with_context;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::trigger::PileIr;
 
-/// CR 700.3: Detect and parse the full pile-separation block. Returns a
-/// synthesized `AbilityDefinition` wrapping the new `Effect::SeparateIntoPiles`,
-/// or `None` if the input doesn't match.
+/// CR 700.3: Detect and parse the full pile-separation block into typed trigger
+/// IR, or return `None` if the input doesn't match.
 ///
 /// The input is the joined effect-body text (multi-sentence). The dispatcher
 /// in `parser/oracle.rs` calls this BEFORE generic chain parsing so the
@@ -55,45 +55,42 @@ use super::oracle_ir::context::ParseContext;
 ///    library. An opponent separates those cards into two piles. Put one pile
 ///    into your hand and the other into your graveyard." The disposition seam
 ///    also accepts the sibling wording "the rest".
-pub(crate) fn parse_separate_into_piles(
+pub(crate) fn parse_separate_into_piles_ir(
     text: &str,
     kind: AbilityKind,
-) -> Option<AbilityDefinition> {
+    ctx: &ParseContext,
+) -> Option<PileIr> {
     // Try the reveal-from-library shape first (Fact or Fiction family).
-    if let Some(def) = try_parse_reveal_separate(text, kind) {
-        return Some(def);
-    }
-    // Fall through to the battlefield partition shape (Make an Example family).
-    let (rest, partition_subject) = parse_separates_line(text)?;
-    let (rest, chooser) = parse_choose_line(rest)?;
-    let trailing = rest.trim_start();
-    if trailing.is_empty() {
-        return None;
-    }
-    // Parse the trailing sentence (the per-pile sub-effect) through the
-    // standard imperative chain parser. For Make an Example this yields a
-    // `Sacrifice { target: ParentTarget }` chain — the runtime resolver
-    // re-binds `controller` to each subject before applying it.
-    //
-    // CR 700.3b: the pile is not an object — the sub-effect's target is
-    // wired by the resolver per-object, not via the parsed `target_filter`.
-    let parsed = parse_effect_chain_with_context(trailing, kind, &mut ParseContext::default());
-    // Reject if the trailing sentence didn't yield a real effect (the parser
-    // returns an Unimplemented stub on failure).
-    if matches!(*parsed.effect, Effect::Unimplemented { .. }) {
-        return None;
-    }
-    // CR 700.3 + CR 608.2c: Build a sub-effect with a generic ParentTarget
-    // filter so the runtime's per-object loop in `apply_pile_effect` sets
-    // the target via `TargetRef::Object`. Force-rewrite the sub-effect's
-    // target filter to `ParentTarget` so the per-object pipeline routes
-    // through the standard sacrifice handler unambiguously.
-    let mut sub_def = parsed;
-    rewrite_sub_effect_target_to_parent(&mut sub_def.effect);
+    let effect = try_parse_reveal_separate(text, kind).or_else(|| {
+        // Fall through to the battlefield partition shape (Make an Example family).
+        let (rest, partition_subject) = parse_separates_line(text)?;
+        let (rest, chooser) = parse_choose_line(rest)?;
+        let trailing = rest.trim_start();
+        if trailing.is_empty() {
+            return None;
+        }
+        // Parse the trailing sentence (the per-pile sub-effect) through the
+        // standard imperative chain parser. For Make an Example this yields a
+        // `Sacrifice { target: ParentTarget }` chain — the runtime resolver
+        // re-binds `controller` to each subject before applying it.
+        //
+        // CR 700.3b: the pile is not an object — the sub-effect's target is
+        // wired by the resolver per-object, not via the parsed `target_filter`.
+        let parsed = parse_effect_chain_with_context(trailing, kind, &mut ParseContext::default());
+        // Reject if the trailing sentence didn't yield a real effect (the parser
+        // returns an Unimplemented stub on failure).
+        if matches!(*parsed.effect, Effect::Unimplemented { .. }) {
+            return None;
+        }
+        // CR 700.3 + CR 608.2c: Build a sub-effect with a generic ParentTarget
+        // filter so the runtime's per-object loop in `apply_pile_effect` sets
+        // the target via `TargetRef::Object`. Force-rewrite the sub-effect's
+        // target filter to `ParentTarget` so the per-object pipeline routes
+        // through the standard sacrifice handler unambiguously.
+        let mut sub_def = parsed;
+        rewrite_sub_effect_target_to_parent(&mut sub_def.effect);
 
-    Some(AbilityDefinition::new(
-        kind,
-        Effect::SeparateIntoPiles {
+        Some(Effect::SeparateIntoPiles {
             partition_subject,
             // CR 700.3: Make an Example partitions creatures specifically;
             // the Liliana −6 follow-up will pass a wider filter. Defaulting
@@ -104,8 +101,21 @@ pub(crate) fn parse_separate_into_piles(
             chosen_pile_effect: Box::new(sub_def),
             pile_source: crate::types::ability::PileSource::Battlefield,
             unchosen_pile_effect: None,
-        },
-    ))
+        })
+    })?;
+
+    Some(PileIr::new(effect).with_source(text).with_context(ctx))
+}
+
+/// Compatibility entry point for non-trigger callers that still consume a
+/// lowered definition. Trigger parsing uses [`parse_separate_into_piles_ir`]
+/// so the root flows through ordinary trigger lowering.
+pub(crate) fn parse_separate_into_piles(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    parse_separate_into_piles_ir(text, kind, &ParseContext::default())
+        .map(|pile| pile.into_ability(kind))
 }
 
 /// CR 700.3 + CR 700.3a: Consume the "Each opponent separates the creatures
@@ -191,7 +201,7 @@ fn rewrite_sub_effect_target_to_parent(effect: &mut Effect) {
 /// `PileSource::RevealedFromLibraryTop { count: u32 }` holds a fixed count, so
 /// variable-count members like Epiphany at the Drownyard ("top X cards") are
 /// not representable here yet.
-fn try_parse_reveal_separate(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+fn try_parse_reveal_separate(text: &str, kind: AbilityKind) -> Option<Effect> {
     // Sentence 1: "Reveal the top N cards of your library."
     let (rest, count) = parse_reveal_top_sentence(text)?;
     // Sentence 2: "An opponent separates those cards into two piles."
@@ -211,19 +221,16 @@ fn try_parse_reveal_separate(text: &str, kind: AbilityKind) -> Option<AbilityDef
         make_change_zone_effect(unchosen_zone),
     )));
 
-    Some(AbilityDefinition::new(
-        kind,
-        Effect::SeparateIntoPiles {
-            partition_subject,
-            // CR 700.3: revealed cards are the objects being separated —
-            // no battlefield filter applies.
-            object_filter: TargetFilter::Any,
-            chooser: PlayerScope::Controller,
-            chosen_pile_effect,
-            pile_source: PileSource::RevealedFromLibraryTop { count },
-            unchosen_pile_effect,
-        },
-    ))
+    Some(Effect::SeparateIntoPiles {
+        partition_subject,
+        // CR 700.3: revealed cards are the objects being separated —
+        // no battlefield filter applies.
+        object_filter: TargetFilter::Any,
+        chooser: PlayerScope::Controller,
+        chosen_pile_effect,
+        pile_source: PileSource::RevealedFromLibraryTop { count },
+        unchosen_pile_effect,
+    })
 }
 
 /// Parse "Reveal the top N cards of your library." — returns remainder and count.

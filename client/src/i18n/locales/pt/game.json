@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Bloqueada",
+    "cantBeActivated": "Esta habilidade não pode ser ativada",
+    "cantActivateDuring": "Não pode ser ativada agora",
+    "prohibited": "Ativar esta habilidade é proibido"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -321,7 +327,7 @@
     "assignRemaining_other": "Atribuir mais {{count}}",
     "confirmDistribute_one": "Declarar {{count}} Atacante",
     "confirmDistribute_other": "Declarar {{count}} Atacantes",
-    "mustAttackPlayer": "{{creature}} deve atacar {{player}}"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Controle",
@@ -506,6 +512,11 @@
     "castCommander": "Conjure {{name}} — clique duas vezes ou arraste para jogar",
     "castCommanderTax": "Conjure {{name}} (Taxa: +{{tax}}) — clique duas vezes ou arraste para jogar",
     "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — clique para devolver um atacante não bloqueado à mão e colocar este comandante no campo de batalha virado e atacando",
+    "signatureSpell": "Magia assinatura",
+    "signatureSpellTitle": "Magia assinatura: {{name}}",
+    "signatureSpellTitleTax": "Magia assinatura: {{name}} (Taxa: +{{tax}})",
+    "castSignatureSpell": "Conjure {{name}} — clique duas vezes ou arraste para jogar",
+    "castSignatureSpellTax": "Conjure {{name}} (Taxa: +{{tax}}) — clique duas vezes ou arraste para jogar",
     "tax": "Taxa: +{{tax}}",
     "companion": "Companheiro",
     "companionTitle": "Companheiro: {{name}}",
@@ -628,8 +639,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Atribuir {{amount}} de Dano de Combate",
@@ -713,6 +722,7 @@
     "confirmTap": "Confirmar Virar ({{selected}}/{{count}})",
     "keepCurrentTargets": "Manter Alvos Atuais",
     "skip": "Pular",
+    "opponentChoice": "(à escolha do oponente)",
     "chooseNewTarget": "Escolha o novo alvo da mágica",
     "chooseNewTargetForSpell": "Escolha um novo alvo para {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1666,6 +1676,13 @@
     "title": "Escolher um Protetor",
     "battleFallback": "Batalha",
     "subtitle": "{{name}} precisa de um novo protetor. Escolha qual oponente a defenderá."
+  },
+  "announcingOpponent": {
+    "title": "Escolher oponente que anuncia ({{current}} de {{total}})",
+    "subtitle": "Escolha qual oponente anuncia {{target}} ({{current}} de {{total}}).",
+    "targetLand": "o alvo de terreno",
+    "targetCreature": "o alvo de criatura",
+    "targetChoice": "esta escolha de alvo"
   },
   "clashOpponent": {
     "title": "Escolher oponente para confronto",

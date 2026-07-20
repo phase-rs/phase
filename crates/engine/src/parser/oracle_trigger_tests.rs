@@ -4,6 +4,7 @@ use crate::parser::oracle::parse_oracle_text;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
+use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
@@ -836,6 +837,42 @@ fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
         Some(crate::types::ability::TriggerConstraint::OncePerTurn),
     );
     assert!(def.execute.is_some());
+}
+
+/// CR 603.4 + CR 113.6b: Nether Spirit's intervening-if
+/// ("if this card is the only creature card in your graveyard") must be hoisted
+/// into `def.condition`. The `{SourceInZone, Graveyard}` conjunct then drives
+/// `trigger_condition_source_zones` to derive `trigger_zones == [Graveyard]`
+/// (so the trigger is even detectable while the card sits in the graveyard) and
+/// `stamp_self_return_origin_from_trigger_condition` to stamp the return
+/// effect's `ChangeZone.origin == Graveyard` — the same auto-derivation Jocasta,
+/// Automaton Avenger (issue #4566) already relies on. SHAPE TEST — the end-to-end
+/// runtime behavior is covered by the
+/// `nether_spirit_only_creature_card_intervening_if` integration suite.
+#[test]
+fn nether_spirit_intervening_if_hoists_condition_zone_and_origin() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if this card is the only creature card \
+             in your graveyard, you may return this card to the battlefield.",
+        "Nether Spirit",
+    );
+    // The intervening-if is hoisted out of the effect text into the trigger.
+    assert!(
+        def.condition.is_some(),
+        "intervening-if must be hoisted to def.condition, got None"
+    );
+    // The off-battlefield zone is derived so the trigger is detectable from the
+    // graveyard, not stuck at the structural [Battlefield] default.
+    assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+    // The return effect's origin is stamped from the derived source zone.
+    let execute = def.execute.expect("execute");
+    let Effect::ChangeZone { origin, .. } = execute.effect.as_ref() else {
+        panic!(
+            "expected ChangeZone return effect, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard));
 }
 
 /// CR 603.2b + CR 103.8: "at the beginning of the first upkeep of the game"
@@ -2405,6 +2442,46 @@ fn grim_hireling_combat_damage_trigger_is_batched() {
         );
     assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
     assert!(def.batched);
+}
+
+#[test]
+fn malcolm_keen_eyed_navigator_damage_trigger_counts_damaged_opponents() {
+    let def = parse_trigger_line(
+        "Whenever one or more Pirates you control deal damage to your opponents, you create a Treasure token for each opponent dealt damage.",
+        "Malcolm, Keen-Eyed Navigator",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+    assert_eq!(def.damage_kind, DamageKindFilter::Any);
+    assert_eq!(
+        def.valid_source,
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Pirate".to_string())],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        }))
+    );
+    assert!(matches!(
+        def.valid_target,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }))
+    ));
+    assert!(def.batched);
+
+    let execute = def.execute.as_ref().expect("trigger should execute");
+    let Effect::Token { name, count, .. } = execute.effect.as_ref() else {
+        panic!("expected Token effect, got {:?}", execute.effect);
+    };
+    assert_eq!(name, "Treasure");
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        }
+    );
 }
 
 #[test]
@@ -6297,6 +6374,55 @@ fn doran_attack_block_pump_resolves_pt_difference() {
 }
 
 #[test]
+fn jaws_of_defeat_binds_life_loss_to_entering_creature_pt_difference() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+        "Jaws of Defeat",
+    );
+
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+    let execute = def.execute.as_ref().expect("Jaws trigger execute");
+    let Effect::LoseLife { amount, target } = execute.effect.as_ref() else {
+        panic!("expected typed LoseLife, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        target,
+        &Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        )),
+        "target opponent must remain a selectable opponent player filter"
+    );
+    assert_eq!(
+        amount,
+        &QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Demonstrative,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Demonstrative,
+                },
+            }),
+        }
+    );
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+        "Jaws must not hide the dynamic quantity behind Unimplemented"
+    );
+}
+
+#[test]
 fn trigger_execute_pump_all_creatures() {
     // Regression: trigger bodies with "creatures you control get +1/+1 until end of turn"
     // must produce a PumpAll execute effect, not null.
@@ -8107,6 +8233,37 @@ fn trigger_you_cast_another_spell_keeps_another_filter() {
     assert!(
         tf.properties.contains(&FilterProp::Another),
         "expected Another in {:?}",
+        tf.properties
+    );
+}
+
+/// CR 702.8a + CR 603.2 (issue #4754): Slitherwisp — "Whenever you cast another
+/// spell that has flash" must scope the trigger to flash spells. The "that has
+/// flash" keyword clause was dropped by `parse_type_phrase`, leaving only the
+/// `Another` prop, so the trigger over-fired on every non-first spell (a
+/// counterspell without flash wrongly triggered it). The spell filter must now
+/// carry BOTH `WithKeyword(Flash)` and `Another`.
+#[test]
+fn slitherwisp_cast_another_flash_spell_scopes_to_flash() {
+    let def = parse_trigger_line(
+        "Whenever you cast another spell that has flash, you draw a card and each opponent loses 1 life.",
+        "Slitherwisp",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+        panic!("expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::WithKeyword {
+            value: Keyword::Flash
+        }),
+        "expected WithKeyword(Flash) in {:?}",
+        tf.properties
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::Another),
+        "expected Another retained in {:?}",
         tf.properties
     );
 }
@@ -11381,7 +11538,7 @@ fn trigger_unless_you_return_from_graveyard() {
 
 #[test]
 fn trigger_unless_you_tap_untapped_creature() {
-    // CR 118.12 + CR 701.20a: Koskun Falls — "sacrifice this enchantment
+    // CR 118.12 + CR 701.26a: Koskun Falls — "sacrifice this enchantment
     // unless you tap an untapped creature you control."
     let def = parse_trigger_line(
             "At the beginning of your upkeep, sacrifice this enchantment unless you tap an untapped creature you control.",
@@ -11420,7 +11577,7 @@ fn trigger_unless_you_tap_untapped_creature() {
 
 #[test]
 fn trigger_unless_you_tap_untapped_permanent() {
-    // CR 118.12 + CR 701.20a: Command Bridge — "sacrifice it unless you
+    // CR 118.12 + CR 701.26a: Command Bridge — "sacrifice it unless you
     // tap an untapped permanent you control."
     let def = parse_trigger_line(
         "When this land enters, sacrifice it unless you tap an untapped permanent you control.",
@@ -13869,6 +14026,140 @@ fn phase_trigger_combat_on_your_turn() {
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::BeginCombat));
     assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+}
+
+/// CR 118.12 + CR 603.12 + CR 102.1: Kitt Kanto's beginning-of-combat trigger
+/// pays an optional fixed-count tap-creatures cost, then the reflexive body may
+/// target only a creature controlled by the player whose turn it is.
+#[test]
+fn kitt_kanto_reflexive_tap_two_cost_targets_active_player_creature() {
+    let def = parse_trigger_line(
+        "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.",
+        "Kitt Kanto, Mayhem Diva",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert!(
+        !def.optional,
+        "the trigger itself is mandatory; only paying the tap cost is optional"
+    );
+
+    let execute = def.execute.as_ref().expect("execute");
+    assert!(execute.optional, "the PayCost instruction is optional");
+    match execute.effect.as_ref() {
+        Effect::PayCost {
+            cost:
+                AbilityCost::TapCreatures {
+                    requirement,
+                    filter,
+                },
+            payer,
+            ..
+        } => {
+            assert_eq!(requirement.fixed_count(), Some(2));
+            assert_eq!(payer, &TargetFilter::Controller);
+            match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected creature-you-control cost filter, got {other:?}"),
+            }
+        }
+        other => panic!("expected optional PayCost(TapCreatures), got {other:?}"),
+    }
+
+    let reflexive = execute
+        .sub_ability
+        .as_ref()
+        .expect("PayCost must have WhenYouDo body");
+    assert_eq!(reflexive.condition, Some(AbilityCondition::WhenYouDo));
+    match reflexive.effect.as_ref() {
+        Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(tf)),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "\"that player controls\" must bind to the active/scoped turn player"
+            );
+        }
+        other => panic!("expected targeted GenericEffect reflexive body, got {other:?}"),
+    }
+}
+
+/// CR 118.12 + CR 603.12 + CR 102.1: Reflexive optional-payment parsing must
+/// let exact target phrases bind themselves. Seeing one "that player controls"
+/// clause must not rewrite a separate "you control" target in the same body.
+#[test]
+fn reflexive_optional_payment_does_not_rewrite_separate_you_control_target() {
+    let def = parse_trigger_line(
+        "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature you control gets +1/+1 until end of turn. Target creature that player controls gets +1/+1 until end of turn.",
+        "Reflexive Mixed Controller Test",
+    );
+
+    let execute = def.execute.as_ref().expect("execute");
+    let first = execute
+        .sub_ability
+        .as_ref()
+        .expect("PayCost must have WhenYouDo body");
+    match first.effect.as_ref() {
+        Effect::Pump {
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "the exact 'you control' target must remain controller-scoped"
+            );
+        }
+        other => panic!("expected first targeted Pump, got {other:?}"),
+    }
+
+    let second = first
+        .sub_ability
+        .as_ref()
+        .expect("reflexive chain must include the second target");
+    match second.effect.as_ref() {
+        Effect::Pump {
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "the exact 'that player controls' target must bind to the active/scoped turn player"
+            );
+        }
+        other => panic!("expected second targeted Pump, got {other:?}"),
+    }
+}
+
+/// CR 118.12 + CR 603.12: the generic reflexive optional-cost splitter only
+/// supports straight-line resolution costs. Disjunctive `OneOf` costs require a
+/// branch-choice payment flow, so they must not be exported as a supported
+/// optional `PayCost` until that flow exists.
+#[test]
+fn reflexive_optional_disjunctive_cost_remains_parser_gap() {
+    let def = parse_trigger_line(
+        "Whenever you discard a card, you may pay {1} or discard a card. When you do, draw a card.",
+        "Disjunctive Reflexive Test",
+    );
+    let execute = def.execute.as_ref().expect("execute");
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
+        "OneOf resolution costs must not be surfaced through the straight-line PayCost prompt"
+    );
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+        "unsupported reflexive optional costs should remain honest parser gaps, got {:?}",
+        execute.effect
+    );
 }
 
 /// Issue #1993: Halana and Alena, Partners — X in the counter clause must bind
@@ -17549,6 +17840,8 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,
@@ -17628,6 +17921,8 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,
@@ -17721,6 +18016,8 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,

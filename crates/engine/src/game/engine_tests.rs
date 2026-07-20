@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::*;
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::{BackFaceData, RoomDoor};
+use crate::game::scenario::{GameScenario, P0};
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
@@ -11,10 +12,10 @@ use crate::types::ability::{
     StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CardType;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::format::FormatConfig;
-use crate::types::game_state::CastingVariant;
+use crate::types::game_state::{CastPaymentMode, CastingVariant};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
@@ -401,6 +402,71 @@ fn setup_game_at_main_phase() -> GameState {
         player: PlayerId(0),
     };
     state
+}
+
+#[test]
+fn shigeki_channel_x_zero_resolves_from_stack_without_zone_choice() {
+    let mut state = setup_game_at_main_phase();
+    let shigeki = create_object(
+        &mut state,
+        CardId(9200),
+        PlayerId(0),
+        "Shigeki, Jukai Visionary".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&shigeki).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+    }
+    apply_oracle_to_object(
+        &mut state,
+        shigeki,
+        "Shigeki, Jukai Visionary",
+        "{1}{G}, {T}, Return Shigeki to its owner's hand: Reveal the top four cards of your library. You may put a land card from among them onto the battlefield tapped. Put the rest into your graveyard.\nChannel — {X}{X}{G}{G}, Discard this card: Return X target nonlegendary cards from your graveyard to your hand.",
+    );
+    let rage = create_object(
+        &mut state,
+        CardId(9201),
+        PlayerId(0),
+        "Worldsoul's Rage".to_string(),
+        Zone::Graveyard,
+    );
+    let overlook = create_object(
+        &mut state,
+        CardId(9202),
+        PlayerId(0),
+        "Riveteers Overlook".to_string(),
+        Zone::Graveyard,
+    );
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, shigeki, false, vec![]));
+    state.players[0]
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Green, shigeki, false, vec![]));
+
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: shigeki,
+            ability_index: 1,
+        },
+    )
+    .unwrap();
+    assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+    apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+    assert!(state.stack.iter().any(|entry| entry.source_id == shigeki));
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.players[0].graveyard.contains(&rage));
+    assert!(state.players[0].graveyard.contains(&overlook));
+    assert!(state.players[0].graveyard.contains(&shigeki));
+    assert!(state.players[0].hand.is_empty());
 }
 
 /// Perf guard for go-wide mana-board slowness (turn-40 Cryptolith-Rite
@@ -1434,6 +1500,7 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
         player: PlayerId(0),
         valid_attacker_ids: vec![bombardiers],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     apply_as_current(
@@ -2025,6 +2092,52 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
 }
 
 #[test]
+fn set_priority_passing_mode_is_actor_scoped_sparse_and_any_state() {
+    use crate::types::game_state::PriorityPassingMode;
+
+    let mut state = setup_game_at_main_phase();
+    state.priority_player = PlayerId(1);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    let waiting = state.waiting_for.clone();
+    let passes = state.priority_passes.clone();
+    let auto_pass = state.auto_pass.clone();
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityPassingMode {
+            mode: PriorityPassingMode::SkipLowUseWindows,
+        },
+    )
+    .expect("non-priority actor may set their own mode");
+
+    assert_eq!(result.events, Vec::new());
+    assert_eq!(state.waiting_for, waiting);
+    assert_eq!(state.priority_passes, passes);
+    assert_eq!(state.auto_pass, auto_pass);
+    assert_eq!(
+        state.priority_passing_mode(PlayerId(0)),
+        PriorityPassingMode::SkipLowUseWindows
+    );
+    assert_eq!(
+        state.priority_passing_mode(PlayerId(1)),
+        PriorityPassingMode::Standard
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityPassingMode {
+            mode: PriorityPassingMode::Standard,
+        },
+    )
+    .expect("Standard removes the sparse preference entry");
+    assert!(state.priority_passing_modes.is_empty());
+}
+
+#[test]
 fn cancel_auto_pass_routes_by_actor() {
     // Regression: P0 had an auto-pass session; P1 holds priority and submits
     // CancelAutoPass on P0's behalf would previously cancel *P1's* session
@@ -2072,8 +2185,9 @@ fn push_token_trigger(
         source,
         controller,
     );
-    ability.source_incarnation = incarnation;
-    ability.source_card_id = card_id;
+    if let Some(incarnation) = incarnation {
+        ability.set_test_trigger_source_recursive(incarnation, card_id.unwrap_or(CardId(0)));
+    }
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
     state.stack.push_back(StackEntry {
@@ -2169,8 +2283,9 @@ fn set_priority_yield_add_no_op_without_matching_stack_entry() {
 /// G6 (CR 400.7): a `ThisObject` add on a trigger with no latched incarnation
 /// (a synthetic/delayed game-rule trigger) now STORES a `None`-incarnation yield
 /// through the real `SetPriorityYield` pipeline and that yield matches its own
-/// trigger — previously this add was a silent no-op. An `AllCopies` add on the
-/// same trigger also stores.
+/// trigger — previously this add was a silent no-op. An `AllCopies` add cannot
+/// bind without an exact source context, even if a synthetic fixture carries a
+/// display card id.
 #[test]
 fn set_priority_yield_this_object_none_incarnation_latches_and_matches() {
     let mut state = setup_game_at_main_phase();
@@ -2222,10 +2337,9 @@ fn set_priority_yield_this_object_none_incarnation_latches_and_matches() {
         },
     )
     .expect("legal");
-    assert_eq!(
-        state.priority_yields.len(),
-        1,
-        "AllCopies add stores when the card identity is present"
+    assert!(
+        state.priority_yields.is_empty(),
+        "AllCopies add requires the exact source context rather than a synthetic card id"
     );
 }
 
@@ -2295,7 +2409,7 @@ fn set_may_trigger_auto_choice_remove_revokes_actor_choice() {
     let mut state = setup_game_at_main_phase();
     let source = ObjectId(500);
     let key = may_trigger_key(PlayerId(0), source);
-    state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
     assert_eq!(state.may_trigger_auto_choices.len(), 1);
 
     apply(
@@ -2327,7 +2441,7 @@ fn set_may_trigger_auto_choice_clear_all_is_actor_scoped() {
     let p0_key = may_trigger_key(PlayerId(0), ObjectId(500));
     let p0_key2 = may_trigger_key(PlayerId(0), ObjectId(501));
     let p1_key = may_trigger_key(PlayerId(1), ObjectId(600));
-    state.set_may_trigger_auto_choice(p0_key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(p0_key.clone(), AutoMayChoice::Accept);
     state.set_may_trigger_auto_choice(p0_key2, AutoMayChoice::Decline);
     state.set_may_trigger_auto_choice(p1_key, AutoMayChoice::Accept);
     assert_eq!(state.may_trigger_auto_choices.len(), 3);
@@ -2366,7 +2480,7 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
     let mut state = setup_game_at_main_phase();
     let source = ObjectId(500);
     let p0_key = may_trigger_key(PlayerId(0), source);
-    state.set_may_trigger_auto_choice(p0_key, AutoMayChoice::Accept);
+    state.set_may_trigger_auto_choice(p0_key.clone(), AutoMayChoice::Accept);
 
     // Reach-guard: a non-exempt action from P1 in P0's priority window errors,
     // proving the auth gate is live (so the exemption below is what lets P1 act).
@@ -2382,7 +2496,9 @@ fn set_may_trigger_auto_choice_remove_cannot_target_another_player() {
         &mut state,
         PlayerId(1),
         GameAction::SetMayTriggerAutoChoice {
-            op: MayTriggerAutoChoiceOp::Remove { key: p0_key },
+            op: MayTriggerAutoChoiceOp::Remove {
+                key: p0_key.clone(),
+            },
         },
     )
     .expect("SetMayTriggerAutoChoice is exempt from the priority-holder gate");
@@ -2589,6 +2705,7 @@ fn concede_owner_of_waiting_for_advances_state() {
         player: PlayerId(1),
         valid_attacker_ids: vec![],
         valid_attack_targets: vec![],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 
@@ -3139,9 +3256,9 @@ fn thriving_grove_play_land_stays_tapped_after_color_choice() {
         result.waiting_for,
         WaitingFor::NamedChoice {
             choice_type: ChoiceType::Color { .. },
-            source_id: Some(id),
+            source: Some(source),
             ..
-        } if id == grove
+        } if source.prompt.identity.reference.object_id == grove
     ));
     assert!(
         state.objects.get(&grove).unwrap().tapped,
@@ -3325,6 +3442,187 @@ fn apply_play_land_rejects_under_cant_play_land_transient_effect() {
     assert!(
         result.is_err(),
         "PlayLand must be rejected under transient CantPlayLand effect (Pardic Miner class)"
+    );
+}
+
+#[test]
+fn apply_play_land_rejects_under_cant_play_lands_chosen_name_filter() {
+    // CR 305.1 + CR 116.2a + CR 201.2: Conjurer's Ban's land-play half —
+    // "lands with the chosen name can't be played". Filter-scoped sibling of
+    // `apply_play_land_rejects_under_cant_play_land` (the blanket static
+    // form): the restriction denies only the SPECIFICALLY NAMED land, not
+    // every land. The prohibiting object sits in the graveyard (as Conjurer's
+    // Ban, a sorcery, would after resolving) to prove the chosen-name
+    // `chosen_attributes` binding survives its own source's zone change —
+    // `HasChosenName` is a LIVE lookup against `source_id` at each
+    // evaluation, not a value snapshotted into the restriction.
+    use crate::types::ability::{
+        ChosenAttribute, GameRestriction, ProhibitedActivity, RestrictionExpiry,
+        RestrictionPlayerScope,
+    };
+
+    let mut state = setup_game_at_main_phase();
+
+    let forest_id = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Forest".to_string(),
+        Zone::Hand,
+    );
+    let island_id = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Island".to_string(),
+        Zone::Hand,
+    );
+
+    // The (already-resolved) Conjurer's Ban, sitting in the graveyard with its
+    // chosen name still attached.
+    let source_id = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Conjurer's Ban".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&source_id)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::CardName("Forest".to_string()));
+
+    state.restrictions.push(GameRestriction::ProhibitActivity {
+        source: source_id,
+        affected_players: RestrictionPlayerScope::AllPlayers,
+        expiry: RestrictionExpiry::EndOfTurn,
+        activity: ProhibitedActivity::PlayLands {
+            land_filter: Some(TargetFilter::HasChosenName),
+        },
+    });
+
+    let forest_result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: forest_id,
+            card_id: CardId(1),
+        },
+    );
+    assert!(
+        forest_result.is_err(),
+        "the specifically-named land (Forest) must be rejected"
+    );
+
+    let island_result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: island_id,
+            card_id: CardId(2),
+        },
+    );
+    assert!(
+        island_result.is_ok(),
+        "a differently-named land (Island) must NOT be blocked by a filter-scoped \
+         restriction — got {island_result:?}"
+    );
+}
+
+/// CR 305.1 + CR 116.2a + CR 601.2a + CR 201.2: Conjurer's Ban, driven through
+/// the REAL cast → resolve pipeline (`GameScenario`/`GameRunner`), not direct
+/// `GameState`/`GameRestriction` construction like the sibling test above.
+/// Proves `Effect::Choose` actually binds the chosen name onto the resolving
+/// sorcery's own source object, that `Effect::AddRestriction`'s sub_ability
+/// chain (`CastSpells` → `PlayLands`) is actually installed by real
+/// resolution (not hand-assembled), and that `handle_play_land`'s new gate —
+/// and the pre-existing `CastSpells` cast-prohibition gate, for the same
+/// resolved restriction — both see it, all after the sorcery has resolved
+/// into the graveyard. This test fails if either the `PlayLands` sub-ability
+/// or its production gate is reverted.
+#[test]
+fn conjurers_ban_full_cast_resolve_blocks_named_land_and_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Verbatim Oracle text (Scryfall).
+    let oracle = "Choose a card name. Until your next turn, spells with the chosen \
+                  name can't be cast and lands with the chosen name can't be played.\n\
+                  Draw a card.";
+    let ban = scenario
+        .add_spell_to_hand_from_oracle(P0, "Conjurer's Ban", false, oracle)
+        .id();
+
+    let forest_land = scenario.add_land_to_hand(P0, "Forest").id();
+    let island_land = scenario.add_land_to_hand(P0, "Island").id();
+    // A second card sharing the chosen name, but a SPELL this time — exercises
+    // the cast-prohibition half (the already-proven `CastSpells` machinery)
+    // against the exact same resolved restriction, not just the new land half.
+    let forest_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Forest", true, "You gain 1 life.")
+        .id();
+    scenario.with_library_top(P0, &["Library Filler"]);
+
+    let mut runner = scenario.build();
+    runner.state_mut().all_card_names = vec![
+        "Conjurer's Ban".to_string(),
+        "Forest".to_string(),
+        "Island".to_string(),
+    ]
+    .into();
+
+    let forest_land_card_id = runner.state().objects[&forest_land].card_id;
+    let island_card_id = runner.state().objects[&island_land].card_id;
+    let forest_spell_card_id = runner.state().objects[&forest_spell].card_id;
+
+    let outcome = runner.cast(ban).choose_option("Forest").resolve();
+    outcome.assert_hand_drawn(P0, 1);
+    outcome.assert_zone(&[ban], Zone::Graveyard);
+    assert!(
+        runner.state().objects[&ban].chosen_attributes.contains(
+            &crate::types::ability::ChosenAttribute::CardName("Forest".to_string())
+        ),
+        "the exact resolving source must retain the chosen name after its stack exit; \
+         source={:?}, relatch={:?}",
+        runner.state().objects[&ban],
+        runner.state().resolution_source_relatch,
+    );
+
+    // Land half: the specifically-named land is rejected...
+    let forest_land_result = runner.act(GameAction::PlayLand {
+        object_id: forest_land,
+        card_id: forest_land_card_id,
+    });
+    assert!(
+        forest_land_result.is_err(),
+        "Forest must be rejected while the chosen-name land-play ban is active, \
+         got {forest_land_result:?}"
+    );
+    // ...while a differently-named land remains legal (proves the ban is
+    // filter-scoped, not the blanket `CantPlayLand` static).
+    let island_result = runner.act(GameAction::PlayLand {
+        object_id: island_land,
+        card_id: island_card_id,
+    });
+    assert!(
+        island_result.is_ok(),
+        "Island must remain playable — got {island_result:?}"
+    );
+
+    // Spell half: a spell sharing the chosen name is rejected by the same
+    // resolved restriction (`ProhibitedActivity::CastSpells { HasChosenName }`,
+    // installed by the SAME `Effect::Choose` → `Effect::AddRestriction` chain
+    // as the land half above).
+    let forest_spell_result = runner.act(GameAction::CastSpell {
+        object_id: forest_spell,
+        card_id: forest_spell_card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::default(),
+    });
+    assert!(
+        forest_spell_result.is_err(),
+        "a spell named Forest must be rejected while the chosen-name cast ban \
+         is active, got {forest_spell_result:?}"
     );
 }
 
@@ -5932,6 +6230,7 @@ fn setup_tempest_hawk_attack(library_hawk_ids: &[u64]) -> (GameState, ObjectId, 
         player: PlayerId(0),
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 
@@ -6761,8 +7060,10 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         declared_mana_additions: Vec::new(),
         activation_cost: None,
         activation_ability_index: None,
+        pending_loyalty_activation_player: None,
         target_constraints: vec![],
         casting_variant: crate::types::game_state::CastingVariant::Normal,
+        casting_permission_index: None,
         cast_timing_permission: None,
         distribute: None,
         origin_zone: crate::types::zones::Zone::Hand,
@@ -6784,6 +7085,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
+        activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
         alt_cost_grant_source: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
@@ -7152,8 +7454,10 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         declared_mana_additions: Vec::new(),
         activation_cost: None,
         activation_ability_index: None,
+        pending_loyalty_activation_player: None,
         target_constraints: vec![],
         casting_variant: crate::types::game_state::CastingVariant::Normal,
+        casting_permission_index: None,
         cast_timing_permission: None,
         distribute: None,
         origin_zone: crate::types::zones::Zone::Hand,
@@ -7175,6 +7479,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         assist_state: AssistState::NotOffered,
         activation_residual: crate::types::game_state::ActivationResidual::None,
+        activation_target_selection: crate::types::game_state::ActivationTargetSelection::Pending,
         alt_cost_grant_source: None,
     }));
     state.waiting_for = WaitingFor::ManaPayment {
@@ -8443,6 +8748,7 @@ fn learn_rummage_stashes_draw_continuation() {
             source,
             PlayerId(0),
         )),
+        &state,
     ));
 
     let learn_ability = ResolvedAbility::new(Effect::Learn, vec![], source, PlayerId(0));
@@ -9011,7 +9317,7 @@ fn disguise_face_down_has_ward_morph_does_not() {
 
     assert!(
         cast_face_down(crate::types::keywords::Keyword::Disguise(
-            ManaCost::generic(4)
+            ManaCost::generic(4).into()
         )),
         "CR 702.168a: a disguise face-down 2/2 must have ward {{2}}"
     );

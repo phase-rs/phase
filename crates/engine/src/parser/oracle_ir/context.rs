@@ -236,6 +236,31 @@ pub(crate) struct ParseContext {
     /// top-level morph reminder/special-action text). Set by
     /// `parse_quoted_ability`; defaults to `false` everywhere else.
     pub in_granted_activated_ability: bool,
+    /// CR 400.1/400.2 + CR 601.2a + CR 608.2c: The player-referencing target of
+    /// an EARLIER same-chain `Effect::RevealHand` clause ("look at that
+    /// player's hand" / "reveal their hand"), e.g. `TriggeringPlayer`. When a
+    /// LATER clause in the SAME chain references "them"/"those cards" in a
+    /// cast-permission clause (Silent-Blade Oni: "You may cast a spell from
+    /// among those cards without paying its mana cost"), the anaphor binds to
+    /// THIS revealed player's hand instead of the exile-only
+    /// `TargetFilter::ExiledBySource` default — no exile ever happened, so
+    /// `ExiledBySource` would resolve to an empty set and silently swallow the
+    /// cast permission. Mirrors `chain_has_prior_exile_producer`'s same-chain
+    /// scan, but for the hand-reveal producer shape. `None` when no such
+    /// producer exists in this chain, or during standalone clause parsing.
+    pub chain_prior_hand_reveal_target: Option<TargetFilter>,
+    /// CR 608.2c: The object POPULATION established by a mass ("each …") effect in
+    /// an earlier clause of this same chain — Ardbert, Warrior of Darkness:
+    /// "put a +1/+1 counter on each legendary creature you control. They gain
+    /// vigilance until end of turn."
+    ///
+    /// Distinct from [`Self::parent_target_available`], which tracks a CHOSEN
+    /// referent that `TargetFilter::ParentTarget` binds to (see
+    /// `has_typed_target_widened`'s single-target whitelist). A mass effect
+    /// chooses nothing, so an anaphor referring back to its population cannot use
+    /// `ParentTarget` — it must inherit the population FILTER itself. `None` when
+    /// no such producer exists in this chain, or during standalone clause parsing.
+    pub chain_prior_mass_population: Option<TargetFilter>,
 }
 
 impl ParseContext {

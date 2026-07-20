@@ -243,7 +243,7 @@ pub fn resolve(
     // `resolve_tally`, then drains this continuation to run any post-Vote
     // chained effects. Mirrors clash::stash_sub.
     if let Some(sub) = ability.sub_ability.as_ref() {
-        state.pending_continuation = Some(PendingContinuation::new(sub.clone()));
+        state.pending_continuation = Some(PendingContinuation::new(sub.clone(), state));
     }
 
     Ok(())
@@ -353,7 +353,8 @@ pub fn resolve_tally(
                 targets: Vec::new(),
                 source_id,
                 source_incarnation: None,
-                source_card_id: None,
+                trigger_source: None,
+                trigger_definition_ref: None,
                 controller,
                 original_controller: None,
                 scoped_player: None,
@@ -387,6 +388,7 @@ pub fn resolve_tally(
                 starting_with: per_choice_effect[idx].starting_with.clone(),
                 chosen_x: None,
                 cost_paid_object: None,
+                cost_paid_object_ids: Vec::new(),
                 effect_context_object: None,
                 amassed_army_object: None,
                 ability_index: None,
@@ -398,8 +400,7 @@ pub fn resolve_tally(
                 sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
                 modal: None,
                 mode_abilities: vec![],
-                dig_found_nothing_for_parent_target: false,
-                choose_from_zone_found_nothing_for_parent_target: false,
+                parent_target_missing_reason: None,
             };
             resolve_ability_chain(state, &chain, events, 1)?;
         } else if per_choice_effect[idx]
@@ -417,7 +418,8 @@ pub fn resolve_tally(
                 targets: Vec::new(),
                 source_id,
                 source_incarnation: None,
-                source_card_id: None,
+                trigger_source: None,
+                trigger_definition_ref: None,
                 controller,
                 original_controller: None,
                 scoped_player: None,
@@ -451,6 +453,7 @@ pub fn resolve_tally(
                 starting_with: per_choice_effect[idx].starting_with.clone(),
                 chosen_x: None,
                 cost_paid_object: None,
+                cost_paid_object_ids: Vec::new(),
                 effect_context_object: None,
                 amassed_army_object: None,
                 ability_index: None,
@@ -462,8 +465,7 @@ pub fn resolve_tally(
                 sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
                 modal: None,
                 mode_abilities: vec![],
-                dig_found_nothing_for_parent_target: false,
-                choose_from_zone_found_nothing_for_parent_target: false,
+                parent_target_missing_reason: None,
             };
             resolve_ability_chain(state, &chain, events, 1)?;
         } else {
@@ -650,7 +652,8 @@ fn resolved_from_def(
         targets: Vec::new(),
         source_id,
         source_incarnation: None,
-        source_card_id: None,
+        trigger_source: None,
+        trigger_definition_ref: None,
         controller,
         original_controller: None,
         scoped_player: None,
@@ -687,6 +690,7 @@ fn resolved_from_def(
         starting_with: def.starting_with.clone(),
         chosen_x: None,
         cost_paid_object: None,
+        cost_paid_object_ids: Vec::new(),
         effect_context_object: None,
         amassed_army_object: None,
         ability_index: None,
@@ -701,8 +705,7 @@ fn resolved_from_def(
         // abilities through (None for vote sub-effects).
         modal: def.modal.clone(),
         mode_abilities: def.mode_abilities.clone(),
-        dig_found_nothing_for_parent_target: false,
-        choose_from_zone_found_nothing_for_parent_target: false,
+        parent_target_missing_reason: None,
     }
 }
 
@@ -879,7 +882,8 @@ mod tests {
             targets: vec![],
             source_id: ObjectId(1),
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             controller,
             original_controller: None,
             scoped_player: None,
@@ -910,6 +914,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -921,8 +926,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         };
 
         let mut events = Vec::new();
@@ -984,7 +988,8 @@ mod tests {
             targets: vec![],
             source_id: ObjectId(1),
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             controller,
             original_controller: None,
             scoped_player: None,
@@ -1015,6 +1020,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -1026,8 +1032,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         }
     }
 
@@ -1320,7 +1325,8 @@ mod tests {
             targets: vec![],
             source_id: ObjectId(1),
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             controller,
             original_controller: None,
             scoped_player: None,
@@ -1351,6 +1357,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -1362,8 +1369,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         };
 
         // Resolution parks on VoteChoice with controller as first subject.
@@ -1482,7 +1488,8 @@ mod tests {
             targets: vec![],
             source_id,
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             controller,
             original_controller: None,
             scoped_player: None,
@@ -1513,6 +1520,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -1524,8 +1532,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
-            choose_from_zone_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         };
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("vote initiates");

@@ -338,6 +338,20 @@ describe("PermanentCard", () => {
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
   });
 
+  it("keeps the single-attachment control readable at compact card sizes", () => {
+    renderPermanent();
+
+    const button = screen.getByRole("button", {
+      name: "View Test Creature's attached card",
+    });
+
+    expect(button).toHaveStyle({
+      width: "clamp(20px, calc(var(--card-w) * 0.22), 28px)",
+      height: "clamp(20px, calc(var(--card-w) * 0.22), 28px)",
+      fontSize: "clamp(12px, calc(var(--card-w) * 0.12), 15px)",
+    });
+  });
+
   it("refreshes the attachment fan when the engine clears host attachments", () => {
     const gameState = makeState();
     const host = gameState.objects[1];
@@ -1233,5 +1247,85 @@ describe("PermanentCard", () => {
 
     expect(dispatchAction).toHaveBeenCalledWith(abilityAction);
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
+  });
+
+  // Issue #6092: the engine-derived `blocked_abilities` read-out renders as a
+  // badge with a localized reason. The frontend performs no game logic — it
+  // reads the entries verbatim.
+  it("renders the blocked-ability badge and localized reason from blocked_abilities", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "Tap ability",
+          effect: { type: "Draw" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, sources: [1], type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Badge label (t("abilityBlock.badge")) and the localized CantBeActivated
+    // reason both render.
+    expect(screen.getAllByText("Blocked").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/This ability can't be activated/),
+    ).toBeInTheDocument();
+    // Single-source name renders via preview.fromSource.
+    expect(screen.getByText(/\(from Test Creature\)/)).toBeInTheDocument();
+  });
+
+  it("renders every prohibiting source when two sources block one ability", () => {
+    const gameState = makeState();
+    gameState.objects[10] = makeObject({ id: 10, name: "Needle A" });
+    gameState.objects[11] = makeObject({ id: 11, name: "Needle B" });
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "Tap ability",
+          effect: { type: "Draw" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, sources: [10, 11], type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Both prohibiting source names render in the joined fromSource string.
+    expect(screen.getByText(/\(from Needle A, Needle B\)/)).toBeInTheDocument();
+  });
+
+  it("renders a blocked-ability reason without throwing when the source is departed", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [],
+      // source 999 is not present in objects — the departed-source guard must
+      // render the reason alone and never dereference a missing object.
+      blocked_abilities: [
+        { ability_index: 5, sources: [999], type: "Prohibited" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    expect(() => renderPermanent()).not.toThrow();
+    expect(
+      screen.getByText(/Activating this ability is prohibited/),
+    ).toBeInTheDocument();
+    // Departed source is dropped — no fromSource span renders.
+    expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
   });
 });

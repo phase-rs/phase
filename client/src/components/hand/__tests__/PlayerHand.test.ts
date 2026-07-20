@@ -7,6 +7,7 @@ import {
   computeGapPx,
   computeReorderedHand,
   flankingHandIndices,
+  isHandPermutation,
   VISIBLE_GAP_FRACTION,
 } from "../handInsertionSlot.ts";
 
@@ -177,5 +178,38 @@ describe("computeReorderedHand", () => {
     const input = [1, 2, 3];
     computeReorderedHand(input, 3, 0, false);
     expect(input).toEqual([1, 2, 3]);
+  });
+});
+
+describe("isHandPermutation (issue #5913 — stale reorder guard)", () => {
+  it("accepts a pure reordering of the same cards", () => {
+    expect(isHandPermutation([3, 1, 2], [1, 2, 3])).toBe(true);
+  });
+
+  it("accepts an unchanged order and two empty hands", () => {
+    expect(isHandPermutation([1, 2, 3], [1, 2, 3])).toBe(true);
+    expect(isHandPermutation([], [])).toBe(true);
+  });
+
+  it("rejects an order computed before a card was drawn", () => {
+    // The drag was set up against a 5-card hand; a draw landed mid-drag, so the
+    // real hand is 6. Dispatching the stale 5-id order is exactly what made the
+    // engine answer "expected 6 ids, got 5" and surface an error to the player.
+    expect(isHandPermutation([1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6])).toBe(false);
+  });
+
+  it("rejects an order computed before a card left the hand", () => {
+    expect(isHandPermutation([1, 2, 3], [1, 2])).toBe(false);
+  });
+
+  it("rejects a same-length order naming a card no longer in hand", () => {
+    // Card 3 was cast and card 9 drawn during the drag: the count still matches,
+    // so only a multiset comparison catches it.
+    expect(isHandPermutation([1, 2, 3], [1, 2, 9])).toBe(false);
+  });
+
+  it("compares as a multiset, not a set", () => {
+    expect(isHandPermutation([1, 1, 2], [1, 2, 2])).toBe(false);
+    expect(isHandPermutation([1, 1, 2], [1, 2, 1])).toBe(true);
   });
 });

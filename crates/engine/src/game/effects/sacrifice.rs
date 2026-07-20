@@ -1,11 +1,10 @@
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::sacrifice::{self, SacrificeOutcome};
 use crate::types::ability::{
     ControllerRef, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter,
     TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, PendingPlayerScopeSacrificeCompletion, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -143,7 +142,7 @@ pub fn resolve(
     // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
     // wrapped in `UpTo` means the player may select 0..=count.
     let default_count = QuantityExpr::Fixed { value: 1 };
-    let (filter, count_expr, up_to, min_count) = match &ability.effect {
+    let (raw_filter, count_expr, up_to, min_count) = match &ability.effect {
         Effect::Sacrifice {
             target,
             count,
@@ -154,13 +153,28 @@ pub fn resolve(
         }
         _ => (&TargetFilter::Any, &default_count, false, 0),
     };
+    // CR 608.2c + CR 510.2: Bind the parser's `TrackedSetId(0)` "most recent set"
+    // sentinel to a concrete filter before deriving the eligible pool. This is
+    // the same filter-level authority every other tracked-set consumer
+    // (`change_zone`, `shuffle`, `token_copy`, …) routes through, and it is the
+    // ONLY one that carries the combat-damage rung: for a "you may sacrifice one
+    // of them" trigger seeded from a `CombatDamageDealtToPlayer` event (e.g.
+    // Descendants' Fury), the eligible creatures live in the event's
+    // `source_amounts`, reachable only via `current_combat_damage_source_filter`.
+    // `matches_target_filter`'s id-level ladder (`resolve_tracked_set_id`) never
+    // reaches that rung, so matching the raw sentinel directly would leave the
+    // pool empty and silently sacrifice nothing. Non-sentinel filters (SelfRef,
+    // Any, controller-scoped) pass through unchanged.
+    let resolved_filter =
+        crate::game::targeting::resolve_tracked_set_sentinel(state, raw_filter.clone());
+    let filter = &resolved_filter;
     // CR 400.7: A self-referential sacrifice ("sacrifice this creature") does
     // nothing if the source has left and re-entered the battlefield (blink/
     // flicker) since this ability fired — the re-entered permanent is a new
     // object. Sacrifice is non-targeted and resolves `SelfRef` through a
     // resolution-time pool filter rather than the `resolved_targets` chokepoint,
     // so the self-reference epoch guard must be applied here explicitly.
-    if matches!(filter, TargetFilter::SelfRef) && !ability.source_is_current(state) {
+    if matches!(filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -276,33 +290,18 @@ pub fn resolve(
         // eligible permanent — the effect does as much as possible. Fast-path
         // this rather than round-tripping through EffectZoneChoice.
         if !up_to && eligible.len() <= count {
-            let mut sacrificed: i32 = 0;
-            for &obj_id in &eligible {
-                match sacrifice::sacrifice_permanent(state, obj_id, chooser, events) {
-                    Ok(SacrificeOutcome::Complete) => sacrificed += 1,
-                    Ok(SacrificeOutcome::NeedsReplacementChoice(player)) => {
-                        state.waiting_for =
-                            crate::game::replacement::replacement_choice_waiting_for(player, state);
-                        return Ok(());
-                    }
-                    Err(_) => {}
-                }
-            }
-            // CR 701.17a + CR 603.10a + CR 608.2f: every eligible permanent was
-            // sacrificed as part of the same resolution event, so co-departing
-            // sacrifice/LTB observers (Blood Artist) observe each other.
-            // `departed_subset` drops any permanent that didn't actually leave
-            // (e.g. CantBeSacrificed members excluded upstream).
-            crate::game::zones::mark_simultaneous_departures(
+            let completion = PendingPlayerScopeSacrificeCompletion {
+                effect_kind: Some(EffectKind::from(&ability.effect)),
+                ..Default::default()
+            };
+            let _ = super::perform_collected_player_scope_sacrifices_with_completion(
+                state,
+                ability.source_id,
+                ability.controller,
+                vec![(chooser, eligible)],
+                completion,
                 events,
-                &crate::game::zones::departed_subset(state, &eligible),
-            );
-            state.last_effect_count = Some(sacrificed);
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-                subject: None,
-            });
+            )?;
             return Ok(());
         }
 
@@ -341,6 +340,7 @@ pub fn resolve(
         return Ok(());
     }
 
+    let mut selections = Vec::new();
     for obj_id in targeted_objects {
         let obj = state
             .objects
@@ -386,26 +386,21 @@ pub fn resolve(
             continue;
         }
 
-        match sacrifice::sacrifice_permanent(state, obj_id, player_id, events) {
-            Ok(SacrificeOutcome::Complete) => {}
-            Ok(SacrificeOutcome::NeedsReplacementChoice(player)) => {
-                state.waiting_for =
-                    crate::game::replacement::replacement_choice_waiting_for(player, state);
-                return Ok(());
-            }
-            Err(_) => {
-                // Object may have left the battlefield between check and sacrifice;
-                // skip silently (same as the zone check above).
-                continue;
-            }
-        }
+        selections.push((player_id, vec![obj_id]));
     }
 
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
+    let completion = PendingPlayerScopeSacrificeCompletion {
+        effect_kind: Some(EffectKind::from(&ability.effect)),
+        ..Default::default()
+    };
+    let _ = super::perform_collected_player_scope_sacrifices_with_completion(
+        state,
+        ability.source_id,
+        ability.controller,
+        selections,
+        completion,
+        events,
+    )?;
 
     Ok(())
 }

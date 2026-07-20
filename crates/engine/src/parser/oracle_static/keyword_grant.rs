@@ -339,26 +339,30 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // [keyword]" — a once-per-turn keyword grant gated on the first qualifying
     // spell of the turn (Peri Brown, The Twelfth Doctor, Maelstrom Nexus,
     // Wild-Magic Sorcerer, Current Curriculum). Reuses the same
-    // `parse_first_qualified_spell_filter` grammar + `first_qualified_spell_condition`
+    // `parse_nth_qualified_spell_filter` grammar + `nth_qualified_spell_condition`
     // gate as the paired cost-modifier consumer, so the qualifying spell filter,
     // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
     // instead of collapsing to "every spell you cast".
-    match parse_first_qualified_spell_filter(subject) {
-        // Not a first-qualified-spell line — fall through to the ordinary
+    match parse_nth_qualified_spell_filter(subject) {
+        // Not an Nth-qualified-spell line — fall through to the ordinary
         // "[type] spells you cast [from zone] have [keyword]" patterns below.
-        FirstQualifiedSpell::NotApplicable => {}
+        NthQualifiedSpell::NotApplicable => {}
         // The shape is present but the qualifier/timing isn't representable. Fall
         // through (NOT a `return None`) so the existing gateless static is
         // preserved for not-yet-representable qualifiers — no regression.
-        FirstQualifiedSpell::UnsupportedQualifier => {}
-        FirstQualifiedSpell::Supported(filter, timing) => {
-            // CR 601.2f: trailing-residue guard. `parse_first_qualified_spell_filter`
+        NthQualifiedSpell::UnsupportedQualifier => {}
+        NthQualifiedSpell::Supported {
+            filter,
+            timing,
+            ordinal,
+        } => {
+            // CR 601.2f: trailing-residue guard. `parse_nth_qualified_spell_filter`
             // discards any text after the timing phrase; if that region is
             // non-empty an unrepresentable qualifier was dropped (Rain of Riches'
             // "that mana from a Treasure was spent to cast"; TARDIS Bay's
             // post-timing "with mana value 2 or greater"). Decline rather than emit
             // a residue-blind gate — fall through to the existing gateless static.
-            if first_qualified_spell_subject_fully_consumed(subject) {
+            if nth_qualified_spell_subject_fully_consumed(subject) {
                 // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
                 // recursion) so an opponent's qualifying spell never qualifies.
                 let affected =
@@ -369,12 +373,12 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
                 // TARDIS Bay itself declines above because its MV qualifier follows
                 // the timing). When a leading "during your turn," scope was already
                 // stripped, combine both rather than dropping either.
-                let first_qualified = first_qualified_spell_condition(&filter, &timing);
+                let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
                 let combined_condition = match condition.clone() {
                     Some(leading) => StaticCondition::And {
-                        conditions: vec![leading, first_qualified],
+                        conditions: vec![leading, nth_qualified],
                     },
-                    None => first_qualified,
+                    None => nth_qualified,
                 };
                 return Some(
                     StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
@@ -522,23 +526,12 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     }
 
     // Pattern 2: "Creature cards you own that aren't on the battlefield have flash"
-    // This grants flash to cards in non-battlefield zones.
+    // This grants flash to cards in non-battlefield zones. The subject-to-filter
+    // grammar is shared with the land type-change compound handler (Dune
+    // Chanter) via `parse_owned_off_battlefield_subject_filter`.
     if nom_primitives::scan_contains(subject, "cards you own that aren't on the battlefield") {
-        let (prefix, _) = nom_primitives::scan_split_at_phrase(subject, |i| tag("cards").parse(i))?;
-        let type_end = prefix.len();
-        let type_part = &tp.original[..type_end];
-        let (base_filter, _) = parse_type_phrase(type_part);
-        let affected = match base_filter {
-            TargetFilter::Typed(mut typed) => {
-                typed = typed.controller(ControllerRef::You);
-                // "aren't on the battlefield" means any zone except battlefield
-                typed.properties.push(FilterProp::InAnyZone {
-                    zones: vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command],
-                });
-                TargetFilter::Typed(typed)
-            }
-            _ => base_filter,
-        };
+        let subject_original = &tp.original[..subject.len()];
+        let affected = parse_owned_off_battlefield_subject_filter(subject_original)?;
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
             .affected(affected)
             .description(text.to_string())

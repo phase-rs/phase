@@ -1,7 +1,7 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
 use crate::game::layers::{compute_current_copiable_values, has_active_copy_layer_effects};
-use crate::game::printed_cards::intrinsic_copiable_values;
+use crate::game::printed_cards::{install_copiable_values_as_base, intrinsic_copiable_values};
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
@@ -363,7 +363,7 @@ fn strip_spell_casting_copiable_characteristics(obj: &mut GameObject) {
     obj.keywords.retain(|kw| !kw.is_spell_casting_only());
     obj.base_keywords.retain(|kw| !kw.is_spell_casting_only());
     obj.trigger_definitions
-        .retain(|trig| !is_cast_payment_gated_trigger(trig));
+        .retain(|entry| !is_cast_payment_gated_trigger(entry.definition()));
     Arc::make_mut(&mut obj.base_trigger_definitions)
         .retain(|trig| !is_cast_payment_gated_trigger(trig));
 }
@@ -640,32 +640,9 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // CR 111.1 + CR 707.2: when copying a true token, carry its exact token
         // art pointer so the copy resolves the same art (not a name fallback).
         token.token_image_ref = token_image_ref.clone();
-        token.name = values.name.clone();
-        token.base_name = values.name.clone();
-        token.mana_cost = values.mana_cost.clone();
-        token.base_mana_cost = values.mana_cost.clone();
-        token.base_color = values.color.clone();
-        token.color = values.color.clone();
-        token.base_card_types = values.card_types.clone();
-        token.card_types = values.card_types.clone();
-        token.base_power = values.power;
-        token.power = values.power;
-        token.base_toughness = values.toughness;
-        token.toughness = values.toughness;
+        install_copiable_values_as_base(token, &values);
         token.base_loyalty = copied_loyalty;
         token.loyalty = copied_loyalty;
-        token.base_keywords = values.keywords.clone();
-        token.keywords = values.keywords.clone();
-        // All four ability sets are Arc-shared — refcount bumps, no deep copy.
-        token.base_abilities = Arc::clone(&values.abilities);
-        token.abilities = Arc::clone(&values.abilities);
-        token.base_trigger_definitions = Arc::clone(&values.trigger_definitions);
-        token.trigger_definitions = Arc::clone(&values.trigger_definitions).into();
-        token.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
-        token.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
-        token.base_static_definitions = Arc::clone(&values.static_definitions);
-        token.static_definitions = Arc::clone(&values.static_definitions).into();
-        token.base_characteristics_initialized = true;
         // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted
         // below via `extra_keywords` (Twinflame, etc.) is folded in at query
         // time by `has_summoning_sickness`.
@@ -4383,7 +4360,7 @@ mod tests {
         );
         assert!(
             !token.trigger_definitions.iter_all().any(|trig| matches!(
-                trig.condition,
+                trig.definition.condition,
                 Some(TriggerCondition::AdditionalCostPaid { .. })
             )),
             "offspring token must not retain AdditionalCostPaid ETB triggers"
@@ -4468,7 +4445,7 @@ mod tests {
             token
                 .trigger_definitions
                 .iter_all()
-                .any(|trig| matches!(trig.mode, TriggerMode::SpellCastOrCopy)),
+                .any(|trig| matches!(trig.definition.mode, TriggerMode::SpellCastOrCopy)),
             "token copy must keep the persistent Magecraft SpellCastOrCopy trigger (CR 707.2)"
         );
         assert!(
@@ -4480,7 +4457,7 @@ mod tests {
         );
         assert!(
             !token.trigger_definitions.iter_all().any(|trig| matches!(
-                trig.condition,
+                trig.definition.condition,
                 Some(TriggerCondition::AdditionalCostPaid { .. })
             )),
             "token copy must strip cast-payment-gated triggers (CR 601.2f + CR 603.4)"

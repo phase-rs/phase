@@ -27,6 +27,7 @@ abundance	Draw	Optional	none	Choose	-	IndividualDraw
 alhammarret's archive	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 archmage ascension	Draw	Optional	none	SearchLibrary	-	IndividualDraw
 asmodeus the archfiend	Draw	Mandatory	none	ExileTop	-	IndividualDraw
+bard, king of dale	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 blood scrivener	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 breathstealer's crypt	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 chains of mephistopheles	Draw	Mandatory	none	Discard	nested-draw	IndividualDraw

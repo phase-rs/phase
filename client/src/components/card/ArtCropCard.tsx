@@ -1,4 +1,4 @@
-import { memo, useMemo, type CSSProperties } from "react";
+import { memo, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PTColor } from "../../viewmodel/cardProps";
@@ -12,6 +12,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
+import { CardArtFallback } from "./CardArtFallback.tsx";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
@@ -49,6 +50,14 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     faceName: obj?.face_down ? undefined : imageLookup.faceName,
   });
 
+  // A resolved URL can still 404 (future-dated sets not yet on the CDN, stale
+  // token image refs). Without this the default battlefield renderer would show
+  // the browser's broken-image glyph — the same visual defect issue #6156
+  // reports — while `CardImage` recovered. Reset on src change so a new face
+  // re-tries; mirrors `CardImage.tsx`.
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [cardSrc]);
+
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {
     if (!obj) return { frameGradient: "", lightText: false, ptDisplay: null };
     const isLand = obj.card_types.core_types.includes("Land");
@@ -83,7 +92,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     }
   }
 
-  if (!obj.face_down && (isLoading || !src)) {
+  // Genuinely still resolving art — pulse until the async lookup settles.
+  if (!obj.face_down && isLoading) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
@@ -160,12 +170,25 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           {/* 4. ART AREA */}
           <div className="flex-1 w-full px-[2px] pb-[2px] flex flex-col relative z-0">
             <div className="w-full h-full relative rounded-[1.5px] overflow-hidden border border-black/80 shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)] bg-black">
-              <img
-                src={renderedSrc}
-                alt={cardName}
-                draggable={false}
-                className="absolute inset-0 w-full h-full object-cover"
-              />
+              {/* Issue #6156: a token with no official paper printing (Kibo,
+                  Uktabi Prince's Banana) resolves to a null src, as does any
+                  card whose art fetch is rejected. Swapping only the art —
+                  rather than returning a bare tile before the frame — keeps the
+                  header name, P/T box, counters and loyalty badge on screen, so
+                  an artless permanent loses its picture but never its game
+                  state. `src` is non-null for face-down cards (CARD_BACK_URL),
+                  so those still render the card back here. */}
+              {src && !artError ? (
+                <img
+                  src={renderedSrc}
+                  alt={cardName}
+                  draggable={false}
+                  onError={() => setArtError(true)}
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+              ) : (
+                <CardArtFallback name={cardName} variant="artCrop" className="absolute inset-0 w-full h-full" />
+              )}
 
               <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />
 
