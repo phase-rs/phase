@@ -45,7 +45,8 @@ use super::replacements::ReplacementEvent;
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
     AbilityContinuationFrame, ChangeZoneFrame, OptionalEffectFrame, PendingCoinFlip,
-    RepeatedOptionalPaymentFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
+    PendingProliferateActions, RepeatedOptionalPaymentFrame, ResolutionStack, ResolutionStackError,
+    ResolutionStateWire,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -4949,17 +4950,6 @@ pub struct PendingLifeTotalAssignment {
     pub remaining: Vec<(PlayerId, i32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<PendingEffectResolved>,
-}
-
-/// CR 701.34a + CR 614.1a: Remaining proliferate actions after a replacement
-/// effect (Tekuthal class) doubles the count. Each completed `ProliferateChoice`
-/// drains one action; when `remaining` reaches zero the originating effect
-/// resolves.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingProliferateActions {
-    pub actor: PlayerId,
-    pub source_id: ObjectId,
-    pub remaining: u32,
 }
 
 /// CR 603.7: A delayed triggered ability created during resolution of a spell or ability.
@@ -11767,12 +11757,6 @@ pub struct GameState {
     /// CR 616.1: search-found replacement batch parked across a choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
-    /// CR 701.34a + CR 614.1a: Remaining proliferate actions after a count-
-    /// modifying replacement (Tekuthal class). Resumed after each
-    /// `ProliferateChoice` completes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_proliferate_actions: Option<PendingProliferateActions>,
-
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
 
@@ -13958,6 +13942,39 @@ impl GameState {
         self.resolution_stack.take_active_coin_flip()
     }
 
+    /// Returns the parked proliferate authority only when its target-choice
+    /// frame owns the stack top.
+    pub fn active_proliferate_frame(&self) -> Option<&PendingProliferateActions> {
+        self.resolution_stack.active_proliferate()
+    }
+
+    /// Mutably accesses only the active proliferate frame.
+    pub fn active_proliferate_frame_mut(&mut self) -> Option<&mut PendingProliferateActions> {
+        self.resolution_stack.active_proliferate_mut()
+    }
+
+    /// Parks one proliferate target-choice resolution.
+    pub fn push_proliferate_frame(&mut self, pending: PendingProliferateActions) {
+        self.resolution_stack.push_proliferate(pending);
+    }
+
+    /// Re-parks the active proliferate owner after a replacement-produced
+    /// subsequent target choice.
+    pub fn replace_active_proliferate_frame(
+        &mut self,
+        pending: PendingProliferateActions,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_proliferate(pending)
+    }
+
+    /// Consumes exactly the active proliferate frame when its player submits
+    /// targets.
+    pub fn take_active_proliferate_frame(
+        &mut self,
+    ) -> Result<Option<PendingProliferateActions>, ResolutionStackError> {
+        self.resolution_stack.take_active_proliferate()
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14639,7 +14656,6 @@ impl GameState {
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
             pending_search_found_batch: None,
-            pending_proliferate_actions: None,
             may_trigger_auto_choices: Vec::new(),
             decision_templates: Vec::new(),
             priority_yields: Vec::new(),
@@ -15743,7 +15759,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_continuation_attach_host: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
-        pending_proliferate_actions: _,
         may_trigger_auto_choices: _,
         decision_templates: _,
         priority_yields: _,
@@ -16044,7 +16059,6 @@ impl PartialEq for GameState {
             && self.pending_scoped_library_search == other.pending_scoped_library_search
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch
-            && self.pending_proliferate_actions == other.pending_proliferate_actions
             && self.pending_cost_move_resume == other.pending_cost_move_resume
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.decision_templates == other.decision_templates

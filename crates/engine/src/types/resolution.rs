@@ -16,8 +16,8 @@ use crate::types::game_state::{
     PendingChooseOneOf, PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
     PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
     PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMutateMerge,
-    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingProliferateActions,
-    PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
     PostReplacementDrainStack, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
@@ -97,6 +97,16 @@ pub struct PendingCoinFlip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lose_effect: Option<Box<AbilityDefinition>>,
     pub kind: PendingCoinFlipKind,
+}
+
+/// CR 701.34a + CR 614.1a: Remaining proliferate actions after a count-modifying
+/// replacement effect. Each completed `ProliferateChoice` drains one action;
+/// when `remaining` reaches zero the originating effect resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingProliferateActions {
+    pub actor: PlayerId,
+    pub source_id: ObjectId,
+    pub remaining: u32,
 }
 
 /// The ChangeZone owner plus the only sidecar that is not already embedded in
@@ -1329,6 +1339,66 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the proliferate owner only when it owns the stack top.
+    pub fn active_proliferate(&self) -> Option<&PendingProliferateActions> {
+        match self.last() {
+            Some(ResolutionFrame::Proliferate(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active proliferate owner.
+    pub fn active_proliferate_mut(&mut self) -> Option<&mut PendingProliferateActions> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::Proliferate(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active proliferate owner after its target choice.
+    pub fn take_active_proliferate(
+        &mut self,
+    ) -> Result<Option<PendingProliferateActions>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::Proliferate(_)) => {
+                let ResolutionFrame::Proliferate(frame) =
+                    self.pop_expected(FrameKind::Proliferate)?
+                else {
+                    unreachable!("checked proliferate frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::Proliferate,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks one proliferate target-choice resolution.
+    pub fn push_proliferate(&mut self, frame: PendingProliferateActions) {
+        self.push_inner(ResolutionFrame::Proliferate(frame));
+    }
+
+    /// Re-parks the active proliferate owner without exposing an empty-stack
+    /// interval between replacement-produced proliferate choices.
+    pub fn replace_active_proliferate(
+        &mut self,
+        frame: PendingProliferateActions,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::Proliferate(_)) => {
+                self.replace_active(ResolutionFrame::Proliferate(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::Proliferate,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns the multi-player choose-one owner only when it owns the stack
     /// top.
     pub fn active_choose_one_of(&self) -> Option<&PendingChooseOneOf> {
@@ -1758,6 +1828,7 @@ impl ResolutionStateWire {
                     LegacyRepeatedOptionalPaymentWire::from_value(&value)?;
                 let legacy_optional_effect = LegacyOptionalEffectWire::from_value(&value)?;
                 let legacy_coin_flip = LegacyCoinFlipWire::from_value(&value)?;
+                let legacy_proliferate = LegacyProliferateWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -1786,6 +1857,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_optional_trigger_event");
                 legacy_object.remove("pending_optional_trigger_match_count");
                 legacy_object.remove("pending_coin_flip");
+                legacy_object.remove("pending_proliferate_actions");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -1842,6 +1914,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_coin_flip.into_frame() {
                     legacy.push_coin_flip_frame(frame);
+                }
+                if let Some(frame) = legacy_proliferate.into_frame() {
+                    legacy.push_proliferate_frame(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -2206,6 +2281,24 @@ impl LegacyCoinFlipWire {
     }
 }
 
+/// v1-only proliferate authority. Runtime state keeps the target-choice
+/// continuation in a typed `Proliferate` frame.
+#[derive(Deserialize)]
+struct LegacyProliferateWire {
+    #[serde(default)]
+    pending_proliferate_actions: Option<PendingProliferateActions>,
+}
+
+impl LegacyProliferateWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingProliferateActions> {
+        self.pending_proliferate_actions
+    }
+}
+
 impl LegacyRepeatedOptionalPaymentWire {
     fn from_value(value: &Value) -> Result<Self, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
@@ -2343,6 +2436,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::RepeatedOptionalPayment(_)
                 | ResolutionFrame::OptionalEffect(_)
                 | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::Proliferate(_)
         ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
@@ -2389,10 +2483,6 @@ fn push_legacy_direct_choice_frames(
         .iter()
         .filter(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)))
         .count();
-    if let Some(pending) = state.pending_proliferate_actions.clone() {
-        direct_choice_count += 1;
-        frames.push_inner(ResolutionFrame::Proliferate(pending));
-    }
     if let Some(pending) = state.pending_mutate_merge.clone() {
         direct_choice_count += 1;
         frames.push_inner(ResolutionFrame::MutateMerge(pending));
@@ -2502,11 +2592,9 @@ fn project_frames_into_legacy_state(
                 projected.push_optional_effect_frame(frame.clone());
             }
             ResolutionFrame::CoinFlip(pending) => projected.push_coin_flip_frame(pending.clone()),
-            ResolutionFrame::Proliferate(pending) => set_once(
-                &mut projected.pending_proliferate_actions,
-                pending.clone(),
-                "Proliferate",
-            )?,
+            ResolutionFrame::Proliferate(pending) => {
+                projected.push_proliferate_frame(pending.clone())
+            }
             ResolutionFrame::MultiDraw(frame) => {
                 if !projected.draw_sequences.is_empty()
                     || projected.pending_connive_reentry.is_some()
@@ -2549,7 +2637,6 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.pending_proliferate_actions = None;
     state.draw_sequences = DrawSequenceStack::default();
     state.legacy_pending_multi_draw = None;
     state.pending_connive_reentry = None;
@@ -2682,9 +2769,9 @@ mod tests {
         PendingChooseOneOf, PendingCopyTokenResolution, PendingCounterAdditionQueue,
         PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
         PendingLifeTotalAssignment, PendingMutateMerge, PendingPerCategoryZoneChoice,
-        PendingPerPlayerZoneChoice, PendingProliferateActions, PendingRepeatIteration,
-        PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
-        PostReplacementDrain, ResidentDrainPolicy, ZoneDeliveryExileTracking,
+        PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
+        PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
+        ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
@@ -2895,6 +2982,36 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("v2 coin-flip fixture restores for the runtime action path")
+            .into_game_state()
+    }
+
+    fn restore_v1_proliferate_fixture(
+        state: GameState,
+        pending: PendingProliferateActions,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_proliferate_actions"] =
+            serde_json::to_value(pending).expect("legacy proliferate serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        let wire: ResolutionStateWire =
+            serde_json::from_value(v1).expect("v1 proliferate fixture converts through the wire");
+        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        assert_eq!(
+            v2["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(v2.get("resolution_frames").is_some());
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                v2.get(*field).is_none(),
+                "v2 fixture must not write legacy field {field}"
+            );
+        }
+
+        serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("v2 proliferate fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -3723,16 +3840,18 @@ mod tests {
         assert_reserializes_v2_only(coin);
 
         let mut proliferate = GameState::new_two_player(104);
-        proliferate.pending_proliferate_actions = Some(PendingProliferateActions {
-            actor: PlayerId(0),
-            source_id: ObjectId(104),
-            remaining: 0,
-        });
         proliferate.waiting_for = WaitingFor::ProliferateChoice {
             player: PlayerId(0),
             eligible: Vec::new(),
         };
-        let mut proliferate = restore_v1_fixture(proliferate);
+        let mut proliferate = restore_v1_proliferate_fixture(
+            proliferate,
+            PendingProliferateActions {
+                actor: PlayerId(0),
+                source_id: ObjectId(104),
+                remaining: 0,
+            },
+        );
         apply_as_current(
             &mut proliferate,
             GameAction::SelectTargets {
@@ -3740,7 +3859,7 @@ mod tests {
             },
         )
         .expect("proliferate fixture resumes through the real target-choice action");
-        assert!(proliferate.pending_proliferate_actions.is_none());
+        assert!(proliferate.active_proliferate_frame().is_none());
         assert_reserializes_v2_only(proliferate);
 
         let mut scenario = GameScenario::new();

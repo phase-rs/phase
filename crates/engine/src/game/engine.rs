@@ -6610,12 +6610,14 @@ fn apply_action(
                 player_id: p,
                 action: PlayerActionKind::Proliferate,
             });
-            let completion_source = state
-                .pending_proliferate_actions
-                .as_ref()
-                .map(|pending| pending.source_id)
-                .unwrap_or(ObjectId(0));
-            if !effects::proliferate::resume_pending_proliferate_actions(state, &mut events) {
+            let pending = state
+                .take_active_proliferate_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No active proliferate frame to resume".to_string())
+                })?;
+            let completion_source = pending.source_id;
+            if !effects::proliferate::resume_proliferate_actions(state, pending, &mut events) {
                 return Ok(ActionResult {
                     events,
                     waiting_for: state.waiting_for.clone(),
