@@ -985,6 +985,11 @@ mod tests {
             )),
             "FlipCoin EffectResolved fired before the optional choice was made"
         );
+        assert!(state.active_optional_effect_frame().is_some());
+        assert!(matches!(
+            state.resolution_stack.active_predecessor(),
+            Some(crate::types::resolution::ResolutionFrame::AbilityContinuation(_))
+        ));
 
         // Accept the optional exile through the real `apply` pipeline.
         let result = apply(

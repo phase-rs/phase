@@ -30,7 +30,7 @@ use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
-    AbilityContinuationFrame, OptionalEffectFrame, PendingRepeatedOptionalPayment,
+    AbilityContinuationFrame, FrameGate, OptionalEffectFrame, PendingRepeatedOptionalPayment,
     RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack,
 };
 use crate::types::zones::Zone;
@@ -1478,7 +1478,14 @@ fn park_repeat_for_after_current_iteration(
 }
 
 fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool {
-    state.active_per_player_zone_choice().is_some()
+    // A direct-choice frame owns the current prompt and must stay at the stack
+    // top until its action handler consumes it. Any later chain instruction is
+    // its parent, so insert that continuation below the direct-choice child.
+    state
+        .resolution_stack
+        .last()
+        .is_some_and(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)))
+        || state.active_per_player_zone_choice().is_some()
         || state.active_per_category_zone_choice().is_some()
         || state.active_change_zone_frame().is_some()
         || state.active_batch_delivery().is_some()
@@ -23571,8 +23578,13 @@ mod tests {
             WaitingFor::OptionalEffectChoice { .. }
         ));
         let pending = state
-            .active_repeat_for()
-            .expect("first optional prompt must stash the remaining iteration");
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                ResolutionFrame::RepeatFor(pending) => Some(pending),
+                _ => None,
+            })
+            .expect("first optional prompt must retain the remaining iteration below its direct-choice frame");
         assert_eq!(
             pending.total_iterations, 2,
             "two controlled creatures imply two search iterations"
