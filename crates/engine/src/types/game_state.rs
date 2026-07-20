@@ -10664,15 +10664,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_token_substitution_count: Option<i32>,
 
-    /// CR 701.50a + CR 614.5 + CR 616.1f: deferred connive link of a connive
-    /// replacement whose leading draw parked a replacement-ordering choice. See
-    /// `PendingConniveReentry`. Drained only by
-    /// `engine_replacement::handle_replacement_choice` (accept and decline) —
-    /// never by the shared zone-delivery tail. Transient; serde-skipped when None;
-    /// `.take()`-cleared at drain.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_connive_reentry: Option<PendingConniveReentry>,
-
     /// CR 701.12c + CR 616.1: Tail of a life-total assignment that paused on a
     /// gain/loss replacement choice. Drained by `handle_replacement_choice` after
     /// the chosen replacement finishes, preserving the simultaneous snapshot's
@@ -13956,7 +13947,7 @@ impl GameState {
                 draw_sequences: DrawSequenceStack::with_next_frame_id(
                     self.resolution_stack.next_draw_sequence_frame_id(),
                 ),
-                pending_connive_reentry: None,
+                connive_reentry: None,
             });
         }
         let frame_id = self
@@ -14023,6 +14014,61 @@ impl GameState {
             .is_some_and(|frame| frame.draw_sequences.is_empty())
     }
 
+    /// Returns the deferred connive tail from its active draw authority, or
+    /// from a standalone ConniveReentry frame when no draw is active.
+    pub fn active_connive_reentry(&self) -> Option<&PendingConniveReentry> {
+        if let Some(frame) = self.active_multi_draw_frame() {
+            return frame.connive_reentry.as_ref();
+        }
+        self.resolution_stack.active_connive_reentry()
+    }
+
+    /// Mutably accesses only the active Connive re-entry authority.
+    pub fn active_connive_reentry_mut(&mut self) -> Option<&mut PendingConniveReentry> {
+        if self.active_multi_draw_frame().is_some() {
+            return self
+                .active_multi_draw_frame_mut()
+                .and_then(|frame| frame.connive_reentry.as_mut());
+        }
+        self.resolution_stack.active_connive_reentry_mut()
+    }
+
+    /// Parks a deferred Connive re-entry in the active draw authority, or as a
+    /// standalone frame when no draw is active. The `ConniveSubject` snapshot
+    /// is transferred verbatim; it is never reconstructed from an object id.
+    pub fn push_connive_reentry(&mut self, pending: PendingConniveReentry) {
+        if let Some(frame) = self.active_multi_draw_frame_mut() {
+            assert!(
+                frame.connive_reentry.replace(pending).is_none(),
+                "an active multi-draw frame already owns a connive re-entry"
+            );
+            return;
+        }
+        self.resolution_stack.push_connive_reentry(pending);
+    }
+
+    /// Takes only the active Connive re-entry owner. If its leading draw has
+    /// already completed, retire that now-empty MultiDraw frame before the
+    /// re-entry can start a fresh draw; otherwise retain the live draw stack.
+    /// No parent search or object-id rebind occurs.
+    pub fn take_active_connive_reentry(&mut self) -> Option<PendingConniveReentry> {
+        if let Some(frame) = self.active_multi_draw_frame_mut() {
+            let pending = frame.connive_reentry.take();
+            if pending.is_some() && self.active_draw_sequences_are_empty() {
+                let completed = self
+                    .take_completed_multi_draw_frame()
+                    .expect("an empty multi-draw frame must remain top-owned");
+                if completed.is_some() {
+                    self.finish_active_paused_post_replacement_dispatch();
+                }
+            }
+            return pending;
+        }
+        self.resolution_stack
+            .take_active_connive_reentry()
+            .expect("the active connive frame must be structurally consumable")
+    }
+
     /// Removes a completed independent MultiDraw frame. A frame carrying the
     /// deferred connive re-entry remains resident until that exact link is
     /// consumed by its action/resume owner.
@@ -14032,7 +14078,7 @@ impl GameState {
         let Some(frame) = self.active_multi_draw_frame() else {
             return Ok(None);
         };
-        if !frame.draw_sequences.is_empty() || frame.pending_connive_reentry.is_some() {
+        if !frame.draw_sequences.is_empty() || frame.connive_reentry.is_some() {
             return Ok(None);
         }
         let next_frame_id = frame.draw_sequences.next_frame_id();
@@ -14143,7 +14189,9 @@ impl GameState {
             self.resolution_stack
                 .observe_draw_sequence_frame_id(frame.draw_sequences.next_frame_id());
             frame.draw_sequences.abandon_all();
-            frame.pending_connive_reentry = None;
+            frame.connive_reentry = None;
+        } else if self.active_connive_reentry().is_some() {
+            let _ = self.take_active_connive_reentry();
         }
         if matches!(
             self.resolution_stack.last(),
@@ -14688,7 +14736,6 @@ impl GameState {
             replacement_may_cost_paused: false,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
-            pending_connive_reentry: None,
             pending_life_total_assignment: None,
             pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
@@ -15697,7 +15744,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_replacement: _,
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
-        pending_connive_reentry: _,
         pending_life_total_assignment: _,
         pending_spell_resolution: _,
         deferred_entry_events: _,
@@ -15994,7 +16040,6 @@ impl PartialEq for GameState {
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
-            && self.pending_connive_reentry == other.pending_connive_reentry
             && self.pending_life_total_assignment == other.pending_life_total_assignment
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events

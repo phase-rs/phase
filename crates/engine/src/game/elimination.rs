@@ -781,7 +781,7 @@ fn do_eliminate(
     // relied upon.) Mirror the `pending_cast` teardown: clear `pending_replacement`
     // (the SBA-gating slot) plus the parked replacement's own tightly-coupled
     // continuation slots (`replacement_may_cost_paused`, `post_replacement_*`,
-    // `pending_connive_reentry`). The resume drain also touches OTHER resolution
+    // the stack-owned Connive re-entry). The resume drain also touches OTHER resolution
     // slots on a normal answer (e.g. `pending_phase_transition_progress`,
     // `pending_team_draw_step`, `pending_continuation`); those are intentionally
     // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
@@ -2295,7 +2295,7 @@ mod tests {
         state.post_replacement_token_choice_applied = Some(HashSet::from([
             crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
         ]));
-        state.pending_connive_reentry = Some(PendingConniveReentry {
+        state.push_connive_reentry(PendingConniveReentry {
             conniver: state
                 .capture_connive_subject(o)
                 .expect("fixture conniver exists"),
@@ -2353,7 +2353,7 @@ mod tests {
             "abandoning the parked chooser's continuation must also clear the token-choice \
              applied seed, not just its established siblings (issue #4886, review #6)"
         );
-        assert!(state.pending_connive_reentry.is_none());
+        assert!(state.active_connive_reentry().is_none());
         assert!(
             state.pending_search_found_batch.is_none(),
             "the eliminated chooser's outer found-card batch must be abandoned"

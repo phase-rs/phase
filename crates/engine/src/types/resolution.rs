@@ -33,8 +33,11 @@ use crate::types::player::PlayerId;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiDrawFrame {
     pub draw_sequences: DrawSequenceStack,
+    /// The exact conniver snapshot remains inside its active draw authority so
+    /// an adjacent paused PostReplacement parent stays the draw's immediate
+    /// predecessor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_connive_reentry: Option<PendingConniveReentry>,
+    pub connive_reentry: Option<PendingConniveReentry>,
 }
 
 /// CR 603.12a + CR 608.2c: A repeated optional-cost process parked at one
@@ -275,10 +278,9 @@ impl ResolutionFrame {
             | Self::Proliferate(_)
             | Self::MutateMerge(_)
             | Self::MultiDraw(_)
+            | Self::ConniveReentry(_)
             | Self::PostReplacement(_) => true,
-            Self::ConniveReentry(_) | Self::LifeTotalAssignment(_) | Self::SpellResolution(_) => {
-                false
-            }
+            Self::LifeTotalAssignment(_) | Self::SpellResolution(_) => false,
         }
     }
 
@@ -487,7 +489,7 @@ impl ResolutionStack {
                     Some(ResolutionFrame::MultiDraw(left)),
                     Some(ResolutionFrame::MultiDraw(right)),
                 ) if left.draw_sequences.loop_equal(&right.draw_sequences)
-                    && left.pending_connive_reentry == right.pending_connive_reentry => {}
+                    && left.connive_reentry == right.connive_reentry => {}
                 (Some(left), Some(right)) if left == right => {}
                 (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => return false,
             }
@@ -1750,6 +1752,50 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns a standalone Connive re-entry only when it owns the active
+    /// stack top. A re-entry coupled to an active draw belongs in that draw's
+    /// `MultiDrawFrame` instead, preserving the draw's parent adjacency.
+    pub fn active_connive_reentry(&self) -> Option<&PendingConniveReentry> {
+        match self.last() {
+            Some(ResolutionFrame::ConniveReentry(pending)) => Some(pending),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only a standalone active Connive re-entry.
+    pub fn active_connive_reentry_mut(&mut self) -> Option<&mut PendingConniveReentry> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::ConniveReentry(pending)) => Some(pending),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active standalone Connive re-entry frame.
+    pub fn take_active_connive_reentry(
+        &mut self,
+    ) -> Result<Option<PendingConniveReentry>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::ConniveReentry(_)) => {
+                let ResolutionFrame::ConniveReentry(pending) =
+                    self.pop_expected(FrameKind::ConniveReentry)?
+                else {
+                    unreachable!("checked connive re-entry frame kind must match")
+                };
+                Ok(Some(pending))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::ConniveReentry,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks a standalone Connive re-entry when no active draw owns it.
+    pub fn push_connive_reentry(&mut self, pending: PendingConniveReentry) {
+        self.push_inner(ResolutionFrame::ConniveReentry(pending));
+    }
+
     /// Returns the active general replacement drain. During the one shipped
     /// G4 topology this is its exact, immediately preceding parent while the
     /// child starts or remains paused; there is intentionally no general frame
@@ -2269,9 +2315,8 @@ impl ResolutionStateWire {
                 if let Some(frame) = legacy_mutate_merge.into_frame() {
                     legacy.push_mutate_merge_frame(frame);
                 }
-                let (tail_frames, pending_connive_reentry, next_draw_sequence_frame_id) =
+                let (tail_frames, next_draw_sequence_frame_id) =
                     legacy_replacement_tails.into_frames()?;
-                legacy.pending_connive_reentry = pending_connive_reentry;
                 legacy
                     .resolution_stack
                     .observe_draw_sequence_frame_id(next_draw_sequence_frame_id);
@@ -2818,9 +2863,7 @@ impl LegacyReplacementTailsWire {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
     }
 
-    fn into_frames(
-        mut self,
-    ) -> Result<(Vec<ResolutionFrame>, Option<PendingConniveReentry>, u64), String> {
+    fn into_frames(mut self) -> Result<(Vec<ResolutionFrame>, u64), String> {
         if self.draw_sequences.is_empty() {
             if let Some(pending) = self.pending_multi_draw.take() {
                 let frame_id = self.draw_sequences.push(pending.player, pending.remaining);
@@ -2859,53 +2902,43 @@ impl LegacyReplacementTailsWire {
             }
         }
 
-        let pending_connive_reentry = self.pending_connive_reentry.take();
         let next_draw_sequence_frame_id = self.draw_sequences.next_frame_id();
-        let draw = (!self.draw_sequences.is_empty()).then(|| {
-            ResolutionFrame::MultiDraw(MultiDrawFrame {
+        let pending_connive_reentry = self.pending_connive_reentry.take();
+        if !self.draw_sequences.is_empty() {
+            let child = ResolutionFrame::MultiDraw(MultiDrawFrame {
                 draw_sequences: self.draw_sequences,
-                pending_connive_reentry: None,
-            })
-        });
-        let post = (!self.post_replacement_drains.is_empty())
-            .then(|| ResolutionFrame::PostReplacement(self.post_replacement_drains));
-
-        match (post, draw) {
-            (Some(parent), Some(child)) => {
-                let ResolutionFrame::PostReplacement(drains) = &parent else {
-                    unreachable!("post-replacement conversion built the wrong frame kind")
-                };
-                if !matches!(
-                    drains.resident().map(|drain| &drain.status),
-                    Some(DrainStatus::Paused)
-                ) {
-                    return Err(
-                        "legacy post-replacement and multi-draw state is ambiguous without a paused resident drain"
-                            .to_string(),
-                    );
-                }
-                Ok((
-                    vec![parent, child],
-                    pending_connive_reentry,
-                    next_draw_sequence_frame_id,
-                ))
+                connive_reentry: pending_connive_reentry,
+            });
+            if self.post_replacement_drains.is_empty() {
+                return Ok((vec![child], next_draw_sequence_frame_id));
             }
-            (None, Some(draw)) => Ok((
-                vec![draw],
-                pending_connive_reentry,
-                next_draw_sequence_frame_id,
-            )),
-            (Some(post), None) => Ok((
-                vec![post],
-                pending_connive_reentry,
-                next_draw_sequence_frame_id,
-            )),
-            (None, None) => Ok((
-                Vec::new(),
-                pending_connive_reentry,
-                next_draw_sequence_frame_id,
-            )),
+
+            let parent = ResolutionFrame::PostReplacement(self.post_replacement_drains);
+            let ResolutionFrame::PostReplacement(drains) = &parent else {
+                unreachable!("post-replacement conversion built the wrong frame kind")
+            };
+            if !matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(DrainStatus::Paused)
+            ) {
+                return Err(
+                    "legacy post-replacement and multi-draw state is ambiguous without a paused resident drain"
+                        .to_string(),
+                );
+            }
+            return Ok((vec![parent, child], next_draw_sequence_frame_id));
         }
+
+        let mut frames = Vec::new();
+        if !self.post_replacement_drains.is_empty() {
+            frames.push(ResolutionFrame::PostReplacement(
+                self.post_replacement_drains,
+            ));
+        }
+        if let Some(pending) = pending_connive_reentry {
+            frames.push(ResolutionFrame::ConniveReentry(pending));
+        }
+        Ok((frames, next_draw_sequence_frame_id))
     }
 }
 
@@ -2926,15 +2959,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
         frames.push_inner(frame.clone());
     }
     push_legacy_after_child_frames(state, &mut frames);
-    if let Some(pending) = state.pending_connive_reentry.clone() {
-        if let Some(draw) = frames.active_multi_draw_mut() {
-            if draw.pending_connive_reentry.replace(pending).is_some() {
-                return Err("duplicate MultiDraw connive re-entry".to_string());
-            }
-        } else {
-            frames.push_inner(ResolutionFrame::ConniveReentry(pending));
-        }
-    }
     Ok(frames)
 }
 
@@ -3018,21 +3042,11 @@ fn project_frames_into_legacy_state(
                 projected.push_mutate_merge_frame(pending.clone())
             }
             ResolutionFrame::MultiDraw(frame) => {
-                let mut runtime_frame = frame.clone();
-                if let Some(pending) = runtime_frame.pending_connive_reentry.take() {
-                    set_once(
-                        &mut projected.pending_connive_reentry,
-                        pending,
-                        "MultiDraw connive re-entry",
-                    )?;
-                }
-                projected.resolution_stack.push_multi_draw(runtime_frame);
+                projected.resolution_stack.push_multi_draw(frame.clone())
             }
-            ResolutionFrame::ConniveReentry(pending) => set_once(
-                &mut projected.pending_connive_reentry,
-                pending.clone(),
-                "ConniveReentry",
-            )?,
+            ResolutionFrame::ConniveReentry(pending) => projected
+                .resolution_stack
+                .push_connive_reentry(pending.clone()),
             ResolutionFrame::LifeTotalAssignment(pending) => set_once(
                 &mut projected.pending_life_total_assignment,
                 pending.clone(),
@@ -3055,7 +3069,6 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.pending_connive_reentry = None;
     state.pending_life_total_assignment = None;
     state.pending_spell_resolution = None;
 }
@@ -3270,7 +3283,7 @@ mod tests {
         draw_sequences.push(PlayerId(0), 1);
         ResolutionFrame::MultiDraw(MultiDrawFrame {
             draw_sequences,
-            pending_connive_reentry: None,
+            connive_reentry: None,
         })
     }
 
@@ -4700,18 +4713,23 @@ mod tests {
 
         let mut connive = GameScenario::new();
         let conniver = connive.add_creature(PlayerId(0), "Conniver", 1, 1).id();
-        let mut connive = connive.state;
-        connive.pending_connive_reentry = Some(PendingConniveReentry {
+        let connive = connive.state;
+        let pending_connive_reentry = PendingConniveReentry {
             conniver: connive
                 .capture_connive_subject(conniver)
                 .expect("fixture conniver exists"),
             count: 0,
             applied: HashSet::new(),
-        });
-        let mut connive = restore_v1_fixture(connive);
+        };
+        let mut connive = serde_json::to_value(connive).expect("legacy connive fixture serializes");
+        connive["pending_connive_reentry"] =
+            serde_json::to_value(pending_connive_reentry).expect("legacy connive tail serializes");
+        connive["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let mut connive = serde_json::from_value::<ResolutionStateWire>(connive)
+            .expect("v1 connive fixture restores")
+            .into_game_state();
         let pending = connive
-            .pending_connive_reentry
-            .take()
+            .take_active_connive_reentry()
             .expect("v1 fixture restores the exact connive subject");
         crate::game::effects::connive::propose_connive(
             &mut connive,
@@ -4721,7 +4739,7 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("connive fixture re-enters through the production proposer");
-        assert!(connive.pending_connive_reentry.is_none());
+        assert!(connive.active_connive_reentry().is_none());
         assert_reserializes_v2_only(connive);
 
         let mut life = GameState::new_two_player(141);

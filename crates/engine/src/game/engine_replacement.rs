@@ -86,7 +86,7 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
 
 /// CR 701.50a + CR 614.5 + CR 616.1f: drain a deferred connive whose leading
 /// Draw link parked a replacement-ordering choice. Runs only when the dedicated
-/// `pending_connive_reentry` slot is set (the connive applier's parked-draw
+/// stack-owned Connive re-entry is set (the connive applier's parked-draw
 /// path). `propose_connive` re-enters with the already-applied rids excluded
 /// (CR 614.5) so the CR 616.1f repeat covers the remaining connive replacements.
 /// Called from BOTH the Execute arm (the leading draw delivered) and the
@@ -98,7 +98,7 @@ pub(crate) fn drain_pending_connive_reentry(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let reentry = state.pending_connive_reentry.take()?;
+    let reentry = state.take_active_connive_reentry()?;
     let _ = crate::game::effects::connive::propose_connive(
         state,
         reentry.conniver,
@@ -1170,7 +1170,7 @@ pub(super) fn handle_replacement_choice(
             // ReplacementChoice — surface it. If the slot is None (every
             // non-connive Prevented resolution) skip entirely so control falls
             // through to the existing pending-* blocks unchanged.
-            if state.pending_connive_reentry.is_some() {
+            if state.active_connive_reentry().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
