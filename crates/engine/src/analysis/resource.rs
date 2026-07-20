@@ -2553,7 +2553,8 @@ fn board_has_event_observer(
     repl_event: ReplacementEvent,
 ) -> bool {
     for obj in state.objects.values() {
-        for (_, def) in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
+        for active in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
+            let def = active.definition;
             // CR 603.4 / CR 113.6: only a trigger that FUNCTIONS in its source's current zone.
             if !crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone) {
                 continue;

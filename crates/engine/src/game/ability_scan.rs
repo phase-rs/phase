@@ -1845,7 +1845,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
                 sibling: false,
                 projected: false,
             };
-            acc = acc.or(scan_player_filter(filter));
+            acc = acc.or(scan_player_filter(filter, mode));
             acc
         }
         QuantityRef::CountersOn { scope, .. } => {
@@ -2607,7 +2607,11 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
                 sibling: false,
                 projected: false,
             };
-            acc = acc.or(scan_target_filter(filter));
+            acc = acc.or(scan_target_filter(
+                filter,
+                FilterReadContext::SnapshotOrEvent,
+                mode,
+            ));
             acc
         }
         AbilityCondition::ZoneChangeObjectMatchesFilter {
@@ -5004,6 +5008,9 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
+        // CR 612.8 / CR 613.1c: a literal-name text-changing effect reads no board
+        // aggregate or projected resource (sibling of `SetChosenName`).
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }

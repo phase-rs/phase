@@ -1672,7 +1672,25 @@ pub(crate) fn etb_observer_provably_excludes_class(
     ) && def.zone_change_clauses.is_empty()
         && def.destination == Some(Zone::Battlefield)
         && def.valid_card.is_some()
-        && !crate::game::trigger_matchers::valid_card_matches(def, state, class_member, source_id)
+        && {
+            // `valid_card_matches` takes an observation-time source-context snapshot
+            // (upstream's LKI-by-incarnation refactor) rather than a bare id, so
+            // source-relative refs in the `valid_card` filter resolve against the
+            // source's characteristics. Project the live functioning source the same
+            // way the trigger pipeline does (`trigger_source_context_for_latch`).
+            // `source_id` is the object being scanned, so it is always present;
+            // fail-closed (keep the veto) if it somehow isn't.
+            let Some(source) = state.objects.get(&source_id) else {
+                return false;
+            };
+            let source_context = trigger_source_context_for_latch(state, source);
+            !crate::game::trigger_matchers::valid_card_matches(
+                def,
+                state,
+                class_member,
+                &source_context,
+            )
+        }
 }
 
 fn source_was_not_co_departed_into_zone(
