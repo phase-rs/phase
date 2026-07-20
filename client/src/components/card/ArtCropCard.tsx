@@ -95,20 +95,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     );
   }
 
-  // Resolution finished with no image (issue #6156 — a token with no official
-  // paper printing, e.g. Kibo, Uktabi Prince's Banana). This is the *default*
-  // battlefield renderer, so collapsing it into the pulse branch above is what
-  // made artless tokens show as featureless dark squares for most players.
-  if (!obj.face_down && !src) {
-    return (
-      <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
-        <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
-          <CardArtFallback name={cardName} variant="artCrop" className="w-full h-full rounded-[4.5px]" />
-        </div>
-      </div>
-    );
-  }
-
   const renderedSrc = obj.face_down ? CARD_BACK_URL : (src ?? "");
   const headerHeight = isCompactHeight
     ? "clamp(8px, calc(var(--art-crop-h) * 0.16), 12px)"
@@ -176,12 +162,24 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           {/* 4. ART AREA */}
           <div className="flex-1 w-full px-[2px] pb-[2px] flex flex-col relative z-0">
             <div className="w-full h-full relative rounded-[1.5px] overflow-hidden border border-black/80 shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)] bg-black">
-              <img
-                src={renderedSrc}
-                alt={cardName}
-                draggable={false}
-                className="absolute inset-0 w-full h-full object-cover"
-              />
+              {/* Issue #6156: a token with no official paper printing (Kibo,
+                  Uktabi Prince's Banana) resolves to a null src, as does any
+                  card whose art fetch is rejected. Swapping only the art —
+                  rather than returning a bare tile before the frame — keeps the
+                  header name, P/T box, counters and loyalty badge on screen, so
+                  an artless permanent loses its picture but never its game
+                  state. `src` is non-null for face-down cards (CARD_BACK_URL),
+                  so those still render the card back here. */}
+              {src ? (
+                <img
+                  src={renderedSrc}
+                  alt={cardName}
+                  draggable={false}
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+              ) : (
+                <CardArtFallback name={cardName} variant="artCrop" className="absolute inset-0 w-full h-full" />
+              )}
 
               <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />
 

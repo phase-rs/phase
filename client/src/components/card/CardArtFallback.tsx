@@ -32,12 +32,17 @@ export interface CardArtFallbackProps {
  * paper printing, e.g. Kibo, Uktabi Prince's Banana) or because the resolved
  * image failed to load.
  *
- * Single authority for every artless render. `CardImage` (full-card board and
- * modals) and `ArtCropCard` (the *default* battlefield renderer) both route
- * their "no art" and "broken art" cases here, so an artless permanent stays
- * identifiable by name in every place it can appear rather than rendering as a
- * blank/black square. Keeping both failure modes in one component is what
- * guarantees the two renders can't drift apart again.
+ * Shared by the two board renderers: `CardImage` (full-card board and modals)
+ * and `ArtCropCard` (the *default* battlefield renderer) route both their "no
+ * art" and "broken art" cases here, so an artless permanent stays identifiable
+ * by name wherever it appears rather than rendering as a blank/black square,
+ * and the two renders cannot drift apart.
+ *
+ * `CardPreview` deliberately keeps its own placeholder: the hover preview is
+ * an order of magnitude larger and centres a single name at `text-sm`, which
+ * this tile's top-aligned heading would not reproduce. It mirrors the `role`
+ * and `aria-label` here so assistive tech announces an artless card the same
+ * way in both places.
  */
 export function CardArtFallback({
   name,

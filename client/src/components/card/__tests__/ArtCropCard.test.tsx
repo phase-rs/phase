@@ -108,7 +108,12 @@ describe("ArtCropCard", () => {
       display_source: "Token",
       transformed: false,
       back_face: null,
-      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Food"] },
+      power: 2,
+      toughness: 3,
+      base_power: 2,
+      base_toughness: 3,
+      counters: { p1p1: 1 },
+      card_types: { supertypes: [], core_types: ["Artifact", "Creature"], subtypes: ["Food"] },
     };
     useGameStore.setState({
       gameState: {
@@ -118,8 +123,21 @@ describe("ArtCropCard", () => {
 
     render(<ArtCropCard objectId={101} />);
 
+    // The art slot carries the fallback tile instead of a blank/black box...
     expect(screen.getByRole("img", { name: "Banana" })).toBeInTheDocument();
-    expect(screen.getByText("Banana")).toBeInTheDocument();
+    // ...and no <img> is emitted, so nothing can paint as a broken square.
+    expect(document.querySelector("img")).toBeNull();
+
+    // Critically, the CARD FRAME survives: swapping only the art (rather than
+    // returning a bare tile before the frame) is what keeps game state on
+    // screen. An artless creature token must still show its P/T and counters —
+    // hiding those would trade one information loss for another, and the same
+    // path is taken by EVERY permanent when an art fetch is rejected.
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("/")).toBeInTheDocument();
+    // Name appears in both the frame header and the fallback tile's label.
+    expect(screen.getAllByText("Banana").length).toBeGreaterThan(0);
   });
 
   it("still pulses while art is genuinely resolving", () => {

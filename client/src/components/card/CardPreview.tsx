@@ -689,6 +689,8 @@ function CardImagePreview({
         {imgError || !src ? (
           <div
             className={`${frameClass} flex items-center justify-center rounded-[4%] border border-gray-600 bg-gray-800 p-4 text-center`}
+            role="img"
+            aria-label={cardName}
           >
             <span className="text-sm font-medium text-gray-300">{cardName}</span>
           </div>
