@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -251,6 +252,12 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
           <ManaCostPips cost={displayManaCost} size="xs" className="absolute right-[5%] top-[2.5%]" />
         )}
       </div>
+
+      {/* Badge: unimplemented-mechanics warning (issue #4711). Hand and
+          battlefield cards already surface this through CardImage; a spell is
+          most consequential while it is on the stack about to resolve, so the
+          same badge is shown here from the same engine-provided projection. */}
+      <UnimplementedMechanicsBadge mechanics={sourceObj?.unimplemented_mechanics} variant="corner" />
 
       {/* Badge: ×N coalesce count for engine-grouped mass triggers. */}
       {groupCount > 1 && (

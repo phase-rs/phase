@@ -7,6 +7,7 @@ import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 import { CardArtFallback } from "./CardArtFallback.tsx";
+import { UnimplementedMechanicsBadge } from "./UnimplementedMechanicsBadge.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 
 interface CardImageProps {
@@ -131,14 +132,7 @@ export function CardImage({
           style={borderStyle ?? { border: "1px solid #4b5563" }}
         />
       )}
-      {unimplementedMechanics && unimplementedMechanics.length > 0 && (
-        <span
-          className="absolute top-0.5 left-0.5 bg-amber-500 text-black text-[8px] font-bold rounded-sm px-0.5 leading-tight"
-          title={t("card.unimplemented", { mechanics: unimplementedMechanics.join(", ") })}
-        >
-          !
-        </span>
-      )}
+      <UnimplementedMechanicsBadge mechanics={unimplementedMechanics} variant="overlay" />
       {tapIndicator && (
         <span
           className="absolute top-1 right-1 flex items-center justify-center rounded-full bg-black/70 p-1 shadow-md ring-1 ring-white/20"
