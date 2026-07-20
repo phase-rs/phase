@@ -47,7 +47,10 @@ pub(super) fn handle_optional_effect_choice(
         // optional-effect frame continuation.
     } else {
         set_active_priority(state);
-        if state.pending_repeated_optional_payment.is_some() {
+        if state
+            .active_repeated_optional_payment_frame()
+            .is_some_and(|frame| frame.pending.is_some())
+        {
             effects::resolve_repeated_optional_payment_choice(state, accept, events)
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
         } else if let Some(frame) = state

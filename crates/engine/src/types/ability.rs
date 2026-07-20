@@ -5993,9 +5993,9 @@ pub enum QuantityRef {
     /// CR 603.12a: Number of times the controller paid the repeated optional
     /// cost during THIS ability's resolution ("you may pay {C} up to N times").
     /// Resolution-local and transient: read from
-    /// `GameState::optional_cost_payments_this_resolution`, which is cleared at
-    /// the `depth == 0` prelude of `resolve_ability_chain` and incremented once
-    /// per successful payment. Distinct from the cast-time `CostXPaid` /
+    /// the active repeated-optional-payment frame, which is incremented once
+    /// per successful payment and released after its reflexive modal prompt.
+    /// Distinct from the cast-time `CostXPaid` /
     /// `KickerCount` / `AdditionalCostPaymentCount` tallies, which are read from
     /// the source spell/object at announcement (CR 601.2 / 702.33 / 702.51).
     /// Used to size a reflexive "choose up to that many" modal (CR 700.2d).

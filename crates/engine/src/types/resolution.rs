@@ -17,9 +17,8 @@ use crate::types::game_state::{
     PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
     PendingCounterRemovalQueue, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
     PendingMutateMerge, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
-    PendingProliferateActions, PendingRepeatIteration, PendingRepeatUntil,
-    PendingRepeatedOptionalPayment, PendingSpellResolution, PendingVoteBallotIteration,
-    PostReplacementDrainStack, ResolvingTriggerContext, WaitingFor,
+    PendingProliferateActions, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
+    PendingVoteBallotIteration, PostReplacementDrainStack, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 
@@ -37,11 +36,18 @@ pub struct MultiDrawFrame {
     pub pending_connive_reentry: Option<PendingConniveReentry>,
 }
 
-/// The persisted payload for a parked repeated optional-payment decision.
-///
-/// The count remains in a legacy runtime register until that family migrates,
-/// but it is part of the same resolution lifetime and therefore travels with
-/// this frame on the wire.
+/// CR 603.12a + CR 608.2c: A repeated optional-cost process parked at one
+/// payment decision. The count belongs to this one process and remains in its
+/// frame through the reflexive modal prompt after the last payment driver has
+/// completed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRepeatedOptionalPayment {
+    pub payment_unit: Box<ResolvedAbility>,
+    pub reflexive: Box<ResolvedAbility>,
+    pub remaining: u32,
+}
+
+/// The complete parked repeated optional-payment authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepeatedOptionalPaymentFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1107,6 +1113,69 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the repeated optional-payment owner only when it owns the
+    /// stack top.
+    pub fn active_repeated_optional_payment(&self) -> Option<&RepeatedOptionalPaymentFrame> {
+        match self.last() {
+            Some(ResolutionFrame::RepeatedOptionalPayment(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active repeated optional-payment owner.
+    pub fn active_repeated_optional_payment_mut(
+        &mut self,
+    ) -> Option<&mut RepeatedOptionalPaymentFrame> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::RepeatedOptionalPayment(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active repeated optional-payment owner.
+    pub fn take_active_repeated_optional_payment(
+        &mut self,
+    ) -> Result<Option<RepeatedOptionalPaymentFrame>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::RepeatedOptionalPayment(_)) => {
+                let ResolutionFrame::RepeatedOptionalPayment(frame) =
+                    self.pop_expected(FrameKind::RepeatedOptionalPayment)?
+                else {
+                    unreachable!("checked repeated optional-payment frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::RepeatedOptionalPayment,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks a newly active repeated optional-payment owner.
+    pub fn push_repeated_optional_payment(&mut self, frame: RepeatedOptionalPaymentFrame) {
+        self.push_inner(ResolutionFrame::RepeatedOptionalPayment(frame));
+    }
+
+    /// Re-parks the active repeated optional-payment owner after it advances
+    /// to the next payment prompt.
+    pub fn replace_active_repeated_optional_payment(
+        &mut self,
+        frame: RepeatedOptionalPaymentFrame,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::RepeatedOptionalPayment(_)) => {
+                self.replace_active(ResolutionFrame::RepeatedOptionalPayment(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::RepeatedOptionalPayment,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns the optional-effect owner only when it owns the stack top.
     pub fn active_optional_effect(&self) -> Option<&OptionalEffectFrame> {
         match self.last() {
@@ -1591,6 +1660,8 @@ impl ResolutionStateWire {
                     LegacyPerPlayerZoneChoiceWire::from_value(&value)?;
                 let legacy_per_category_zone_choice =
                     LegacyPerCategoryZoneChoiceWire::from_value(&value)?;
+                let legacy_repeated_optional_payment =
+                    LegacyRepeatedOptionalPaymentWire::from_value(&value)?;
                 let legacy_optional_effect = LegacyOptionalEffectWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
@@ -1614,6 +1685,8 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_vote_ballot_iteration");
                 legacy_object.remove("pending_per_player_zone_choice");
                 legacy_object.remove("pending_per_category_zone_choice");
+                legacy_object.remove("pending_repeated_optional_payment");
+                legacy_object.remove("optional_cost_payments_this_resolution");
                 legacy_object.remove("pending_optional_effect");
                 legacy_object.remove("pending_optional_trigger_event");
                 legacy_object.remove("pending_optional_trigger_match_count");
@@ -1664,6 +1737,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_per_category_zone_choice.into_frame() {
                     legacy.push_per_category_zone_choice(frame);
+                }
+                if let Some(frame) = legacy_repeated_optional_payment.into_frame() {
+                    legacy.push_repeated_optional_payment_frame(frame);
                 }
                 if let Some(frame) = legacy_optional_effect.into_frame()? {
                     legacy.push_optional_effect_frame(frame);
@@ -2003,6 +2079,31 @@ struct LegacyPerCategoryZoneChoiceWire {
     pending_per_category_zone_choice: Option<PendingPerCategoryZoneChoice>,
 }
 
+/// v1-only repeated optional-payment authority. Runtime state keeps both the
+/// current driver and its resolution-local count in one frame.
+#[derive(Deserialize)]
+struct LegacyRepeatedOptionalPaymentWire {
+    #[serde(default)]
+    pending_repeated_optional_payment: Option<Box<PendingRepeatedOptionalPayment>>,
+    #[serde(default)]
+    optional_cost_payments_this_resolution: u32,
+}
+
+impl LegacyRepeatedOptionalPaymentWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<RepeatedOptionalPaymentFrame> {
+        (self.pending_repeated_optional_payment.is_some()
+            || self.optional_cost_payments_this_resolution != 0)
+            .then_some(RepeatedOptionalPaymentFrame {
+                pending: self.pending_repeated_optional_payment,
+                optional_cost_payments_this_resolution: self.optional_cost_payments_this_resolution,
+            })
+    }
+}
+
 /// v1-only optional-effect authority. Runtime state keeps the ability and its
 /// trigger event/count context together in an `OptionalEffect` frame.
 #[derive(Deserialize)]
@@ -2122,6 +2223,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
                 | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
                 | ResolutionFrame::OptionalEffect(_)
         ) {
             return Err(format!(
@@ -2169,18 +2271,6 @@ fn push_legacy_direct_choice_frames(
         .iter()
         .filter(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)))
         .count();
-    if state.pending_repeated_optional_payment.is_some()
-        || state.optional_cost_payments_this_resolution != 0
-    {
-        direct_choice_count += 1;
-        frames.push_inner(ResolutionFrame::RepeatedOptionalPayment(
-            RepeatedOptionalPaymentFrame {
-                pending: state.pending_repeated_optional_payment.clone(),
-                optional_cost_payments_this_resolution: state
-                    .optional_cost_payments_this_resolution,
-            },
-        ));
-    }
     if let Some(pending) = state.pending_coin_flip.clone() {
         direct_choice_count += 1;
         frames.push_inner(ResolutionFrame::CoinFlip(pending));
@@ -2251,15 +2341,7 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::RepeatFor(pending) => projected.push_repeat_for(pending.clone()),
             ResolutionFrame::RepeatUntil(pending) => projected.push_repeat_until(pending.clone()),
             ResolutionFrame::RepeatedOptionalPayment(frame) => {
-                if let Some(pending) = frame.pending.clone() {
-                    set_once(
-                        &mut projected.pending_repeated_optional_payment,
-                        pending,
-                        "RepeatedOptionalPayment",
-                    )?;
-                }
-                projected.optional_cost_payments_this_resolution =
-                    frame.optional_cost_payments_this_resolution;
+                projected.push_repeated_optional_payment_frame(frame.clone());
             }
             ResolutionFrame::ChangeZone(frame) => {
                 projected
@@ -2357,8 +2439,6 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.pending_repeated_optional_payment = None;
-    state.optional_cost_payments_this_resolution = 0;
     state.pending_coin_flip = None;
     state.pending_proliferate_actions = None;
     state.draw_sequences = DrawSequenceStack::default();
@@ -2494,9 +2574,9 @@ mod tests {
         PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMutateMerge,
         PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingProliferateActions,
-        PendingRepeatIteration, PendingRepeatUntil, PendingRepeatedOptionalPayment,
-        PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-        ResidentDrainPolicy, ZoneDeliveryExileTracking,
+        PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
+        PendingVoteBallotIteration, PostReplacementDrain, ResidentDrainPolicy,
+        ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
@@ -2648,6 +2728,38 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("v2 optional-effect fixture restores for the runtime action path")
+            .into_game_state()
+    }
+
+    fn restore_v1_repeated_optional_payment_fixture(
+        state: GameState,
+        frame: RepeatedOptionalPaymentFrame,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_repeated_optional_payment"] =
+            serde_json::to_value(frame.pending).expect("legacy repeated-payment serializes");
+        v1["optional_cost_payments_this_resolution"] =
+            Value::from(frame.optional_cost_payments_this_resolution);
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        let wire: ResolutionStateWire = serde_json::from_value(v1)
+            .expect("v1 repeated-payment fixture converts through the wire");
+        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        assert_eq!(
+            v2["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(v2.get("resolution_frames").is_some());
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                v2.get(*field).is_none(),
+                "v2 fixture must not write legacy field {field}"
+            );
+        }
+
+        serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("v2 repeated-payment fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -3294,10 +3406,10 @@ mod tests {
 
     #[test]
     fn resolution_state_wire_keeps_payment_count_after_its_driver_has_finished() {
-        let mut state = GameState::new_two_player(45);
-        state.optional_cost_payments_this_resolution = 2;
+        let state = GameState::new_two_player(45);
 
         let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
+        v1["optional_cost_payments_this_resolution"] = Value::from(2);
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         let wire: ResolutionStateWire =
             serde_json::from_value(v1).expect("v1 payment count converts through frames");
@@ -3309,8 +3421,9 @@ mod tests {
         assert_eq!(
             restored
                 .into_game_state()
-                .optional_cost_payments_this_resolution,
-            2
+                .active_repeated_optional_payment_frame()
+                .map(|frame| frame.optional_cost_payments_this_resolution),
+            Some(2)
         );
     }
 
@@ -3393,25 +3506,29 @@ mod tests {
     #[test]
     fn v1_direct_choice_fixtures_resume_on_the_real_action_path() {
         let mut repeated = GameState::new_two_player(100);
-        repeated.pending_repeated_optional_payment =
-            Some(Box::new(PendingRepeatedOptionalPayment {
-                payment_unit: Box::new(resolved_draw(100)),
-                reflexive: Box::new(resolved_draw(101)),
-                remaining: 0,
-            }));
         repeated.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
             description: None,
             may_trigger_key: None,
         };
-        let mut repeated = restore_v1_fixture(repeated);
+        let mut repeated = restore_v1_repeated_optional_payment_fixture(
+            repeated,
+            RepeatedOptionalPaymentFrame {
+                pending: Some(Box::new(PendingRepeatedOptionalPayment {
+                    payment_unit: Box::new(resolved_draw(100)),
+                    reflexive: Box::new(resolved_draw(101)),
+                    remaining: 0,
+                })),
+                optional_cost_payments_this_resolution: 0,
+            },
+        );
         apply_as_current(
             &mut repeated,
             GameAction::DecideOptionalEffect { accept: false },
         )
         .expect("repeated-payment fixture resumes through the real optional-choice action");
-        assert!(repeated.pending_repeated_optional_payment.is_none());
+        assert!(repeated.active_repeated_optional_payment_frame().is_none());
         assert_reserializes_v2_only(repeated);
 
         let mut optional = GameState::new_two_player(102);

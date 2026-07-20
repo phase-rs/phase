@@ -23,14 +23,15 @@ use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation, PendingCopyTokenBatch,
     PendingCostMoveResume, PendingPlayerScopeSacrificeChoice,
-    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    PendingRepeatedOptionalPayment, WaitingFor, ZoneChangeRecord,
+    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp, WaitingFor,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
-    AbilityContinuationFrame, OptionalEffectFrame, ResolutionFrame, ResolutionStack,
+    AbilityContinuationFrame, OptionalEffectFrame, PendingRepeatedOptionalPayment,
+    RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack,
 };
 use crate::types::zones::Zone;
 
@@ -833,8 +834,9 @@ pub(crate) fn resume_resolution_frames(
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
-            // The optional-effect action owns both the next payment prompt and
-            // its reflexive tail; a priority boundary has nothing to resume.
+            // The payment action owns the next offer and its reflexive tail.
+            // Its completed AfterChild form is settled by the reflexive mode
+            // action after that action has consumed the dynamic modal cap.
         }
         ResolutionFrame::BatchDelivery(_) => {
             crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
@@ -5286,11 +5288,14 @@ fn drive_repeated_optional_payment(
     // depth==0 prelude and must not re-gate each individual {1} payment.
     payment_unit.condition = None;
 
-    state.pending_repeated_optional_payment = Some(Box::new(PendingRepeatedOptionalPayment {
-        payment_unit: Box::new(payment_unit),
-        reflexive: Box::new((**reflexive).clone()),
-        remaining: (n - 1) as u32,
-    }));
+    state.push_repeated_optional_payment_frame(RepeatedOptionalPaymentFrame {
+        pending: Some(Box::new(PendingRepeatedOptionalPayment {
+            payment_unit: Box::new(payment_unit),
+            reflexive: Box::new((**reflexive).clone()),
+            remaining: (n - 1) as u32,
+        })),
+        optional_cost_payments_this_resolution: 0,
+    });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: ability.controller,
         source_id: ability.source_id,
@@ -5311,7 +5316,10 @@ pub(super) fn resolve_repeated_optional_payment_choice(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let Some(pending) = state.pending_repeated_optional_payment.take() else {
+    let Some(pending) = state
+        .active_repeated_optional_payment_frame_mut()
+        .and_then(|frame| frame.pending.take())
+    else {
         return Ok(());
     };
     let PendingRepeatedOptionalPayment {
@@ -5325,14 +5333,25 @@ pub(super) fn resolve_repeated_optional_payment_choice(
         // prior iteration's failure can't be misread as this payment's outcome
         // (which would under-count K on a fail-then-succeed sweep).
         state.cost_payment_failed_flag = false;
-        // CR 118.1: pay the cost. Depth >= 1 keeps the resolution-
-        // local K counter (cleared only by the depth==0 prelude) alive.
+        // CR 118.1: pay the cost. Depth >= 1 keeps the resolution-local
+        // frame authority alive.
         resolve_ability_chain(state, &payment_unit, events, 1)?;
         // CR 603.12a: count only successful payments toward K.
         if !state.cost_payment_failed_flag {
-            state.optional_cost_payments_this_resolution = state
-                .optional_cost_payments_this_resolution
-                .saturating_add(1);
+            let optional_cost_payments_this_resolution = {
+                let frame = state
+                    .active_repeated_optional_payment_frame_mut()
+                    .ok_or_else(|| {
+                        EffectError::InvalidParam(
+                            "repeated optional-payment frame must remain active during payment"
+                                .to_string(),
+                        )
+                    })?;
+                frame.optional_cost_payments_this_resolution = frame
+                    .optional_cost_payments_this_resolution
+                    .saturating_add(1);
+                frame.optional_cost_payments_this_resolution
+            };
             // CR 118.3 + CR 603.12a: only a payment that actually succeeded can
             // lead to another "you may pay {1} [again]" offer. A failed payment
             // — the player accepted but lacked the resources (CR 118.3) — does
@@ -5344,12 +5363,16 @@ pub(super) fn resolve_repeated_optional_payment_choice(
                 let player = payment_unit.controller;
                 let source_id = payment_unit.source_id;
                 let description = payment_unit.description.clone();
-                state.pending_repeated_optional_payment =
-                    Some(Box::new(PendingRepeatedOptionalPayment {
-                        payment_unit,
-                        reflexive,
-                        remaining: remaining - 1,
-                    }));
+                state
+                    .replace_active_repeated_optional_payment_frame(RepeatedOptionalPaymentFrame {
+                        pending: Some(Box::new(PendingRepeatedOptionalPayment {
+                            payment_unit,
+                            reflexive,
+                            remaining: remaining - 1,
+                        })),
+                        optional_cost_payments_this_resolution,
+                    })
+                    .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
                 state.waiting_for = WaitingFor::OptionalEffectChoice {
                     player,
                     source_id,
@@ -5362,6 +5385,15 @@ pub(super) fn resolve_repeated_optional_payment_choice(
     }
     // CR 603.12a: a decline ends the repeated payment early; either way the
     // reflexive resolves exactly once iff at least one payment succeeded.
+    if state
+        .active_repeated_optional_payment_frame()
+        .is_some_and(|frame| frame.optional_cost_payments_this_resolution == 0)
+    {
+        state
+            .take_active_repeated_optional_payment_frame()
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        return Ok(());
+    }
     finish_repeated_optional_payment(state, &reflexive, events)
 }
 
@@ -5374,7 +5406,10 @@ fn finish_repeated_optional_payment(
     reflexive: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    if state.optional_cost_payments_this_resolution >= 1 {
+    if state
+        .active_repeated_optional_payment_frame()
+        .is_some_and(|frame| frame.optional_cost_payments_this_resolution >= 1)
+    {
         // CR 608.2c: clear the per-iteration failure flag before the reflexive so
         // a loop-terminating decline can't suppress it. (The WhenYouDo gate is
         // flag-independent for the reflexive's `GenericEffect`, but clear
@@ -6896,13 +6931,17 @@ pub fn resolve_ability_chain(
         // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
-        // CR 603.12a: the repeated-optional-payment count is resolution-local.
-        // Reset it per top-level resolution so a prior Hawkeye/Frillback tap
-        // can't leak K into the next one. MUST be depth-0 only: the
-        // repeated-optional-payment driver resolves its reflexive modal at
-        // depth >= 1 so `modal_choice_for_player` reads the live K before this
-        // prelude can wipe it (CR 700.2d clamp).
-        state.optional_cost_payments_this_resolution = 0;
+        // CR 603.12a: a completed repeated-payment frame retains K while its
+        // reflexive modal is open. The next top-level resolution no longer
+        // needs that cap, so discard only an owner whose driver is absent.
+        if state
+            .active_repeated_optional_payment_frame()
+            .is_some_and(|frame| frame.pending.is_none())
+        {
+            state
+                .take_active_repeated_optional_payment_frame()
+                .expect("completed repeated-payment frame must remain active");
+        }
         // CR 608.2e: The clause-local equalization snapshot is resolution-
         // scoped. It is overwritten per `player_scope` link within a chain
         // (and survives the interactive `EffectZoneChoice` drain, which
