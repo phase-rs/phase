@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-07-19T00:00:00Z",
+  "updated": "2026-07-20T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -20,7 +20,35 @@
       "main": [
         {
           "count": 4,
-          "name": "Burst Lightning"
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 3,
+          "name": "Ramunap Ruins"
+        },
+        {
+          "count": 3,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 4,
+          "name": "Bonecrusher Giant"
         },
         {
           "count": 2,
@@ -28,43 +56,23 @@
         },
         {
           "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 3,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Ramunap Ruins"
-        },
-        {
-          "count": 4,
           "name": "Kumano Faces Kakkazan"
-        },
-        {
-          "count": 1,
-          "name": "Rockface Village"
         },
         {
           "count": 1,
           "name": "Sokenzan, Crucible of Defiance"
         },
         {
+          "count": 2,
+          "name": "Monstrous Rage"
+        },
+        {
           "count": 4,
-          "name": "Sunspine Lynx"
+          "name": "Emberheart Challenger"
         },
         {
           "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 9,
-          "name": "Mountain"
+          "name": "Rockface Village"
         },
         {
           "count": 1,
@@ -76,15 +84,7 @@
         },
         {
           "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 2,
-          "name": "Monstrous Rage"
+          "name": "Mountain"
         },
         {
           "count": 4,
@@ -92,29 +92,25 @@
         },
         {
           "count": 4,
-          "name": "Bonecrusher Giant"
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Sunspine Lynx"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Scorching Shot"
+          "name": "Pyroclasm"
         },
         {
           "count": 2,
           "name": "Redcap Melee"
-        },
-        {
-          "count": 2,
-          "name": "Magebane Lizard"
-        },
-        {
-          "count": 2,
-          "name": "Magebane Lizard"
-        },
-        {
-          "count": 2,
-          "name": "Pyroclasm"
         },
         {
           "count": 2,
@@ -123,6 +119,14 @@
         {
           "count": 3,
           "name": "Flowstone Infusion"
+        },
+        {
+          "count": 4,
+          "name": "Magebane Lizard"
+        },
+        {
+          "count": 2,
+          "name": "Scorching Shot"
         }
       ]
     },
@@ -1169,6 +1173,161 @@
       ]
     },
     {
+      "name": "Izzet Lessons",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Divide by Zero"
+        },
+        {
+          "count": 2,
+          "name": "Igneous Inspiration"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 2,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 3,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 3,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 4,
+          "name": "Gran-Gran"
+        },
+        {
+          "count": 2,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 4,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 4,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 2,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
+        },
+        {
+          "count": 1,
+          "name": "Great Hall of the Biblioplex"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 2,
+          "name": "Test of Talents"
+        },
+        {
+          "count": 1,
+          "name": "Brazen Borrower"
+        },
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 1,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Improvisation Capstone"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        }
+      ]
+    },
+    {
       "name": "Mono-Black Midrange",
       "author": "MTGGoldfish",
       "colors": [
@@ -1347,161 +1506,6 @@
         {
           "count": 2,
           "name": "Unlicensed Hearse"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Lessons",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Divide by Zero"
-        },
-        {
-          "count": 2,
-          "name": "Igneous Inspiration"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 2,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 3,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 3,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 2,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 4,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 1,
-          "name": "Great Hall of the Biblioplex"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 2,
-          "name": "Test of Talents"
-        },
-        {
-          "count": 1,
-          "name": "Brazen Borrower"
-        },
-        {
-          "count": 2,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Improvisation Capstone"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
         }
       ]
     }
