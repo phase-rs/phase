@@ -14039,9 +14039,7 @@ impl GameState {
     /// re-entry can start a fresh draw; otherwise retain the live draw stack.
     /// No parent search or object-id rebind occurs.
     pub fn take_active_connive_reentry(&mut self) -> Option<PendingConniveReentry> {
-        if self.active_connive_reentry().is_none() {
-            return None;
-        }
+        self.active_connive_reentry()?;
         if let Some(frame) = self.active_multi_draw_frame_mut() {
             let pending = frame.connive_reentry.take();
             if pending.is_some() && self.active_draw_sequences_are_empty() {
@@ -14104,9 +14102,7 @@ impl GameState {
     /// operations remain above this frame until they finish; no frame search is
     /// permitted to reach through them.
     pub fn take_active_spell_resolution(&mut self) -> Option<PendingSpellResolution> {
-        if self.active_spell_resolution().is_none() {
-            return None;
-        }
+        self.active_spell_resolution()?;
         self.resolution_stack
             .take_active_spell_resolution()
             .expect("the active spell-resolution frame must be structurally consumable")
