@@ -9,18 +9,19 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::types::ability::ResolvedAbility;
+use crate::types::ability::{AbilityDefinition, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrawSequenceStack, GameState, PendingBatchDeliveries, PendingChangeZoneIteration,
-    PendingChooseOneOf, PendingCoinFlip, PendingConniveReentry, PendingContinuation,
-    PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
-    PendingCounterRemovalQueue, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
-    PendingMutateMerge, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
-    PendingProliferateActions, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
-    PendingVoteBallotIteration, PostReplacementDrainStack, ResolvingTriggerContext, WaitingFor,
+    PendingChooseOneOf, PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
+    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMutateMerge,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingProliferateActions,
+    PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+    PostReplacementDrainStack, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 
 /// The complete shipped draw authority carried by one `MultiDraw` frame.
 ///
@@ -63,6 +64,39 @@ pub struct OptionalEffectFrame {
     pub trigger_event: Option<GameEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_match_count: Option<u32>,
+}
+
+/// CR 705.1 + CR 614.1a: Discriminates which multi-flip resolver paused for a
+/// Krark's Thumb keep-one choice, carrying the loop position needed to re-enter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingCoinFlipKind {
+    /// `Effect::FlipCoin` — a single logical flip.
+    Single,
+    /// `Effect::FlipCoins { count }` — `remaining` flips still to perform after
+    /// the one currently paused for a keep choice.
+    FlipN { remaining: u32 },
+    /// `Effect::FlipCoinUntilLose` — `wins_so_far` flips won before the one
+    /// currently paused for a keep choice.
+    UntilLose { wins_so_far: u32 },
+}
+
+/// CR 705.1 + CR 614.1a: Full resolution context and loop position for a
+/// multi-flip resolver paused at a Krark's Thumb keep-one choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCoinFlip {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    /// CR 705.2: The player who flips (and therefore wins or loses) the coin.
+    /// Defaults to the controller for in-flight states serialized before this
+    /// field existed.
+    #[serde(default)]
+    pub flipper: PlayerId,
+    pub targets: Vec<TargetRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub win_effect: Option<Box<AbilityDefinition>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lose_effect: Option<Box<AbilityDefinition>>,
+    pub kind: PendingCoinFlipKind,
 }
 
 /// The ChangeZone owner plus the only sidecar that is not already embedded in
@@ -1235,6 +1269,66 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the coin-flip owner only when it owns the stack top.
+    pub fn active_coin_flip(&self) -> Option<&PendingCoinFlip> {
+        match self.last() {
+            Some(ResolutionFrame::CoinFlip(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active coin-flip owner.
+    pub fn active_coin_flip_mut(&mut self) -> Option<&mut PendingCoinFlip> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::CoinFlip(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active coin-flip owner after a kept result is
+    /// selected.
+    pub fn take_active_coin_flip(
+        &mut self,
+    ) -> Result<Option<PendingCoinFlip>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::CoinFlip(_)) => {
+                let ResolutionFrame::CoinFlip(frame) = self.pop_expected(FrameKind::CoinFlip)?
+                else {
+                    unreachable!("checked coin-flip frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::CoinFlip,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks one Krark's Thumb keep-choice resolution.
+    pub fn push_coin_flip(&mut self, frame: PendingCoinFlip) {
+        self.push_inner(ResolutionFrame::CoinFlip(frame));
+    }
+
+    /// Re-parks the active coin-flip owner without exposing an empty-stack
+    /// interval between consecutive keep choices.
+    pub fn replace_active_coin_flip(
+        &mut self,
+        frame: PendingCoinFlip,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::CoinFlip(_)) => {
+                self.replace_active(ResolutionFrame::CoinFlip(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::CoinFlip,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns the multi-player choose-one owner only when it owns the stack
     /// top.
     pub fn active_choose_one_of(&self) -> Option<&PendingChooseOneOf> {
@@ -1663,6 +1757,7 @@ impl ResolutionStateWire {
                 let legacy_repeated_optional_payment =
                     LegacyRepeatedOptionalPaymentWire::from_value(&value)?;
                 let legacy_optional_effect = LegacyOptionalEffectWire::from_value(&value)?;
+                let legacy_coin_flip = LegacyCoinFlipWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -1690,6 +1785,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_optional_effect");
                 legacy_object.remove("pending_optional_trigger_event");
                 legacy_object.remove("pending_optional_trigger_match_count");
+                legacy_object.remove("pending_coin_flip");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -1743,6 +1839,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_optional_effect.into_frame()? {
                     legacy.push_optional_effect_frame(frame);
+                }
+                if let Some(frame) = legacy_coin_flip.into_frame() {
+                    legacy.push_coin_flip_frame(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -2089,6 +2188,24 @@ struct LegacyRepeatedOptionalPaymentWire {
     optional_cost_payments_this_resolution: u32,
 }
 
+/// v1-only coin-flip authority. Runtime state keeps the keep-choice resolver
+/// in a typed `CoinFlip` frame.
+#[derive(Deserialize)]
+struct LegacyCoinFlipWire {
+    #[serde(default)]
+    pending_coin_flip: Option<PendingCoinFlip>,
+}
+
+impl LegacyCoinFlipWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingCoinFlip> {
+        self.pending_coin_flip
+    }
+}
+
 impl LegacyRepeatedOptionalPaymentWire {
     fn from_value(value: &Value) -> Result<Self, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
@@ -2225,6 +2342,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::PerCategoryZoneChoice(_)
                 | ResolutionFrame::RepeatedOptionalPayment(_)
                 | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
         ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
@@ -2271,10 +2389,6 @@ fn push_legacy_direct_choice_frames(
         .iter()
         .filter(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)))
         .count();
-    if let Some(pending) = state.pending_coin_flip.clone() {
-        direct_choice_count += 1;
-        frames.push_inner(ResolutionFrame::CoinFlip(pending));
-    }
     if let Some(pending) = state.pending_proliferate_actions.clone() {
         direct_choice_count += 1;
         frames.push_inner(ResolutionFrame::Proliferate(pending));
@@ -2387,11 +2501,7 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::OptionalEffect(frame) => {
                 projected.push_optional_effect_frame(frame.clone());
             }
-            ResolutionFrame::CoinFlip(pending) => set_once(
-                &mut projected.pending_coin_flip,
-                pending.clone(),
-                "CoinFlip",
-            )?,
+            ResolutionFrame::CoinFlip(pending) => projected.push_coin_flip_frame(pending.clone()),
             ResolutionFrame::Proliferate(pending) => set_once(
                 &mut projected.pending_proliferate_actions,
                 pending.clone(),
@@ -2439,7 +2549,6 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.pending_coin_flip = None;
     state.pending_proliferate_actions = None;
     state.draw_sequences = DrawSequenceStack::default();
     state.legacy_pending_multi_draw = None;
@@ -2570,13 +2679,12 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
         CastingVariant, CopyChosenStage, DrainStatus, GameState, PendingBatchDeliveries,
-        PendingChooseOneOf, PendingCoinFlip, PendingCoinFlipKind, PendingCopyTokenResolution,
-        PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
-        PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMutateMerge,
-        PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingProliferateActions,
-        PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
-        PendingVoteBallotIteration, PostReplacementDrain, ResidentDrainPolicy,
-        ZoneDeliveryExileTracking,
+        PendingChooseOneOf, PendingCopyTokenResolution, PendingCounterAdditionQueue,
+        PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
+        PendingLifeTotalAssignment, PendingMutateMerge, PendingPerCategoryZoneChoice,
+        PendingPerPlayerZoneChoice, PendingProliferateActions, PendingRepeatIteration,
+        PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+        PostReplacementDrain, ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
@@ -2760,6 +2868,33 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("v2 repeated-payment fixture restores for the runtime action path")
+            .into_game_state()
+    }
+
+    fn restore_v1_coin_flip_fixture(state: GameState, pending: PendingCoinFlip) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_coin_flip"] =
+            serde_json::to_value(pending).expect("legacy coin-flip serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        let wire: ResolutionStateWire =
+            serde_json::from_value(v1).expect("v1 coin-flip fixture converts through the wire");
+        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        assert_eq!(
+            v2["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(v2.get("resolution_frames").is_some());
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                v2.get(*field).is_none(),
+                "v2 fixture must not write legacy field {field}"
+            );
+        }
+
+        serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("v2 coin-flip fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -3281,7 +3416,12 @@ mod tests {
     #[test]
     fn resolution_state_wire_converts_v1_to_v2_without_legacy_projection() {
         let mut state = GameState::new_two_player(42);
-        state.pending_coin_flip = Some(PendingCoinFlip {
+        state.waiting_for = WaitingFor::CoinFlipKeepChoice {
+            player: PlayerId(0),
+            results: vec![true, false],
+            keep_count: 1,
+        };
+        let pending = PendingCoinFlip {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             flipper: PlayerId(0),
@@ -3289,18 +3429,15 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
-        });
-        state.waiting_for = WaitingFor::CoinFlipKeepChoice {
-            player: PlayerId(0),
-            results: vec![true, false],
-            keep_count: 1,
         };
 
         let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
+        v1["pending_coin_flip"] =
+            serde_json::to_value(&pending).expect("legacy coin flip serializes");
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         let wire: ResolutionStateWire =
             serde_json::from_value(v1).expect("v1 legacy state converts through frames");
-        assert!(wire.game_state().pending_coin_flip.is_some());
+        assert_eq!(wire.game_state().active_coin_flip_frame(), Some(&pending));
 
         let v2 = serde_json::to_value(&wire).expect("v2 wire serializes");
         assert_eq!(
@@ -3311,8 +3448,11 @@ mod tests {
         assert!(v2.get("pending_coin_flip").is_none());
 
         let restored: ResolutionStateWire =
-            serde_json::from_value(v2).expect("v2 frame state projects for legacy runtime");
-        assert!(restored.into_game_state().pending_coin_flip.is_some());
+            serde_json::from_value(v2).expect("v2 frame state restores for the runtime action");
+        assert_eq!(
+            restored.into_game_state().active_coin_flip_frame(),
+            Some(&pending)
+        );
     }
 
     #[test]
@@ -3555,21 +3695,23 @@ mod tests {
         assert_reserializes_v2_only(optional);
 
         let mut coin = GameState::new_two_player(103);
-        coin.pending_coin_flip = Some(PendingCoinFlip {
-            source_id: ObjectId(103),
-            controller: PlayerId(0),
-            flipper: PlayerId(0),
-            targets: Vec::new(),
-            win_effect: None,
-            lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
-        });
         coin.waiting_for = WaitingFor::CoinFlipKeepChoice {
             player: PlayerId(0),
             results: vec![true, false],
             keep_count: 1,
         };
-        let mut coin = restore_v1_fixture(coin);
+        let mut coin = restore_v1_coin_flip_fixture(
+            coin,
+            PendingCoinFlip {
+                source_id: ObjectId(103),
+                controller: PlayerId(0),
+                flipper: PlayerId(0),
+                targets: Vec::new(),
+                win_effect: None,
+                lose_effect: None,
+                kind: PendingCoinFlipKind::Single,
+            },
+        );
         apply_as_current(
             &mut coin,
             GameAction::SelectCoinFlips {
@@ -3577,7 +3719,7 @@ mod tests {
             },
         )
         .expect("coin-flip fixture resumes through the real keep-choice action");
-        assert!(coin.pending_coin_flip.is_none());
+        assert!(coin.active_coin_flip_frame().is_none());
         assert_reserializes_v2_only(coin);
 
         let mut proliferate = GameState::new_two_player(104);
@@ -4185,8 +4327,8 @@ mod tests {
         invalid_version_type["resolution_state_version"] = Value::from("two");
         assert!(serde_json::from_value::<ResolutionStateWire>(invalid_version_type).is_err());
 
-        let mut multiple_direct = GameState::new_two_player(151);
-        multiple_direct.pending_coin_flip = Some(PendingCoinFlip {
+        let multiple_direct = GameState::new_two_player(151);
+        let pending_coin_flip = PendingCoinFlip {
             source_id: ObjectId(151),
             controller: PlayerId(0),
             flipper: PlayerId(0),
@@ -4194,13 +4336,17 @@ mod tests {
             win_effect: None,
             lose_effect: None,
             kind: PendingCoinFlipKind::Single,
-        });
-        multiple_direct.pending_proliferate_actions = Some(PendingProliferateActions {
-            actor: PlayerId(0),
-            source_id: ObjectId(151),
-            remaining: 0,
-        });
+        };
         let mut multiple_direct = serde_json::to_value(multiple_direct).expect("v1 serializes");
+        multiple_direct["pending_coin_flip"] =
+            serde_json::to_value(pending_coin_flip).expect("legacy coin flip serializes");
+        multiple_direct["pending_proliferate_actions"] =
+            serde_json::to_value(PendingProliferateActions {
+                actor: PlayerId(0),
+                source_id: ObjectId(151),
+                remaining: 0,
+            })
+            .expect("legacy proliferate serializes");
         multiple_direct["resolution_state_version"] =
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         assert!(serde_json::from_value::<ResolutionStateWire>(multiple_direct).is_err());

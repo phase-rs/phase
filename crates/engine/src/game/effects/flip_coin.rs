@@ -8,12 +8,11 @@ use crate::types::ability::{
     AbilityDefinition, CoinFlipResult, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{
-    GameState, PendingCoinFlip, PendingCoinFlipKind, ResolutionCoinFlip, WaitingFor,
-};
+use crate::types::game_state::{GameState, ResolutionCoinFlip, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolution::{PendingCoinFlip, PendingCoinFlipKind};
 
 use super::resolve_ability_chain;
 
@@ -168,7 +167,7 @@ pub fn resolve(
             // `resume_after_keep` can run the kept flip's branch. `EffectResolved`
             // is deferred until the keep choice resolves. CR 705.2: the kept flip's
             // `CoinFlipped` is recorded for the `flipper`, not the controller.
-            state.pending_coin_flip = Some(PendingCoinFlip {
+            state.push_coin_flip_frame(PendingCoinFlip {
                 source_id: ability.source_id,
                 controller: ability.controller,
                 flipper,
@@ -259,7 +258,7 @@ pub fn resolve_flip_coins(
             CoinFlipOutcome::Suspended => {
                 // CR 614.1a: doubled flip — stash loop position and resume after
                 // the keep choice. `remaining` excludes the paused flip itself.
-                state.pending_coin_flip = Some(PendingCoinFlip {
+                state.push_coin_flip_frame(PendingCoinFlip {
                     source_id: ability.source_id,
                     controller: ability.controller,
                     flipper,
@@ -343,7 +342,7 @@ pub fn resolve_until_lose(
 
 /// CR 705 + CR 614.1a: Flip-until-lose loop body, returning `Some(win_count)`
 /// when the losing flip was reached, or `None` if a flip suspended for a keep
-/// choice (in which case `pending_coin_flip` is stashed). `wins_so_far` seeds
+/// choice (in which case the coin-flip frame is parked). `wins_so_far` seeds
 /// the win count when re-entered from `resume_after_keep`.
 fn flip_until_lose_loop(
     state: &mut GameState,
@@ -364,7 +363,7 @@ fn flip_until_lose_loop(
             // CR 614.6: a prevented flip is neither a win nor the losing flip.
             CoinFlipOutcome::Prevented => continue,
             CoinFlipOutcome::Suspended => {
-                state.pending_coin_flip = Some(PendingCoinFlip {
+                state.push_coin_flip_frame(PendingCoinFlip {
                     source_id,
                     controller,
                     // CR 705: "flip a coin until you lose" is always the controller.
@@ -428,7 +427,7 @@ fn finish_until_lose(
 /// Emits EXACTLY ONE `CoinFlipped` for the kept flip (the ignored flips never
 /// "happen", CR 614.6), runs that flip's branch, then continues the resolver's
 /// loop from the stashed position. Each re-entered flip may itself re-suspend and
-/// re-stash `pending_coin_flip`.
+/// re-park the coin-flip frame.
 ///
 /// Returns `Ok(Some(wf))` when the resolver re-suspended for another interactive
 /// choice (`wf` is the new `WaitingFor` — a fresh `CoinFlipKeepChoice` or an
@@ -527,7 +526,7 @@ pub fn resume_after_keep(
                     }
                     CoinFlipOutcome::Prevented => continue,
                     CoinFlipOutcome::Suspended => {
-                        state.pending_coin_flip = Some(PendingCoinFlip {
+                        state.push_coin_flip_frame(PendingCoinFlip {
                             source_id,
                             controller,
                             flipper,

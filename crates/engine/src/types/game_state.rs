@@ -44,8 +44,8 @@ use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
-    AbilityContinuationFrame, ChangeZoneFrame, OptionalEffectFrame, RepeatedOptionalPaymentFrame,
-    ResolutionStack, ResolutionStackError, ResolutionStateWire,
+    AbilityContinuationFrame, ChangeZoneFrame, OptionalEffectFrame, PendingCoinFlip,
+    RepeatedOptionalPaymentFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -1903,40 +1903,6 @@ pub struct PendingRepeatIteration {
     pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
-}
-
-/// CR 705.1 + CR 614.1a: Discriminates which multi-flip resolver paused for a
-/// Krark's Thumb keep-1 choice, carrying the loop position needed to re-enter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PendingCoinFlipKind {
-    /// `Effect::FlipCoin` — a single logical flip.
-    Single,
-    /// `Effect::FlipCoins { count }` — `remaining` flips still to perform after
-    /// the one currently paused for a keep choice.
-    FlipN { remaining: u32 },
-    /// `Effect::FlipCoinUntilLose` — `wins_so_far` flips won before the one
-    /// currently paused for a keep choice.
-    UntilLose { wins_so_far: u32 },
-}
-
-/// CR 705.1 + CR 614.1a: Full resolution context + loop position for a
-/// multi-flip resolver paused mid-loop for a Krark's Thumb keep-1 choice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingCoinFlip {
-    pub source_id: ObjectId,
-    pub controller: PlayerId,
-    /// CR 705.2: The player who flips (and therefore wins/loses) the coin — the
-    /// already-resolved `Effect::FlipCoin::flipper`. The kept Krark's-Thumb flip's
-    /// `CoinFlipped` is recorded for this player, not `controller`. Defaults to
-    /// the controller for in-flight states serialized before this field existed.
-    #[serde(default)]
-    pub flipper: PlayerId,
-    pub targets: Vec<TargetRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub win_effect: Option<Box<AbilityDefinition>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lose_effect: Option<Box<AbilityDefinition>>,
-    pub kind: PendingCoinFlipKind,
 }
 
 /// CR 705.2: The controller-relevant result of the most recent coin flip
@@ -11764,13 +11730,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_card_component_route: Option<MergedCardComponentRoute>,
 
-    /// CR 705.1 + CR 614.1a: Pending multi-flip coin resolver paused mid-loop
-    /// for a Krark's Thumb keep-1 choice. Stashes the full resolution context +
-    /// loop position so `resume_after_keep` can re-enter the flip loop after the
-    /// player's `CoinFlipKeepChoice`. See [`PendingCoinFlip`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_coin_flip: Option<PendingCoinFlip>,
-
     /// CR 705.2: Result of the most recent coin flip in the current resolution,
     /// carrying the flipper so `AbilityCondition::CoinFlipOutcome` is
     /// controller-relative. Written by the flip authority and read when a
@@ -13966,6 +13925,39 @@ impl GameState {
         self.resolution_stack.take_active_optional_effect()
     }
 
+    /// Returns the parked coin-flip authority only when its keep-choice frame
+    /// owns the stack top.
+    pub fn active_coin_flip_frame(&self) -> Option<&PendingCoinFlip> {
+        self.resolution_stack.active_coin_flip()
+    }
+
+    /// Mutably accesses only the active coin-flip frame.
+    pub fn active_coin_flip_frame_mut(&mut self) -> Option<&mut PendingCoinFlip> {
+        self.resolution_stack.active_coin_flip_mut()
+    }
+
+    /// Parks one Krark's Thumb keep-choice resolution.
+    pub fn push_coin_flip_frame(&mut self, pending: PendingCoinFlip) {
+        self.resolution_stack.push_coin_flip(pending);
+    }
+
+    /// Re-parks the active coin-flip owner after it suspends for another keep
+    /// choice.
+    pub fn replace_active_coin_flip_frame(
+        &mut self,
+        pending: PendingCoinFlip,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_coin_flip(pending)
+    }
+
+    /// Consumes exactly the active coin-flip frame when the player keeps a
+    /// result.
+    pub fn take_active_coin_flip_frame(
+        &mut self,
+    ) -> Result<Option<PendingCoinFlip>, ResolutionStackError> {
+        self.resolution_stack.take_active_coin_flip()
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14642,7 +14634,6 @@ impl GameState {
             resolution_stack: ResolutionStack::default(),
             resolving_continuation_attach_host: None,
             merged_card_component_route: None,
-            pending_coin_flip: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
             pending_scoped_library_search: None,
@@ -15751,7 +15742,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolution_stack: _,
         resolving_continuation_attach_host: _,
         merged_card_component_route: _,
-        pending_coin_flip: _,
         resolution_coin_flip: _,
         pending_proliferate_actions: _,
         may_trigger_auto_choices: _,
@@ -16045,7 +16035,6 @@ impl PartialEq for GameState {
             && self.public_revealed_cards == other.public_revealed_cards
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.pending_resolution_completion == other.pending_resolution_completion
-            && self.pending_coin_flip == other.pending_coin_flip
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).

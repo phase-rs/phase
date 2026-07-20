@@ -1343,9 +1343,12 @@ pub(super) fn handle_resolution_choice(
                 }
             }
             let kept: Vec<bool> = keep_indices.iter().map(|&index| results[index]).collect();
-            let pending = state.pending_coin_flip.take().ok_or_else(|| {
-                EngineError::InvalidAction("No pending coin flip to resume".to_string())
-            })?;
+            let pending = state
+                .take_active_coin_flip_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No active coin-flip frame to resume".to_string())
+                })?;
             let next =
                 crate::game::effects::flip_coin::resume_after_keep(state, pending, kept, events)
                     .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
