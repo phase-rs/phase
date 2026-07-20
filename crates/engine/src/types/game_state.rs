@@ -11861,14 +11861,9 @@ pub struct GameState {
 
     /// CR 701.55d: Pending continuation of a multi-player ChooseOneOf after a
     /// selected branch has finished resolving, including any nested choices.
-    /// CR 701.38d + CR 608.2c: Per-ballot vote iteration paused by an
-    /// interactive choice. Drained after `pending_change_zone_iteration` and
-    /// before the repeat-for frame.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_vote_ballot_iteration: Option<PendingVoteBallotIteration>,
     /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { EachPlayer }`
     /// iteration paused by the current player's interactive choice. Drained
-    /// alongside `pending_vote_ballot_iteration`, BEFORE `pending_continuation`
+    /// alongside the vote-ballot frame, before the ability-continuation frame
     /// runs, so every player's graveyard pick accumulates into the chain's
     /// tracked set before "put those cards onto the battlefield" resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -13646,6 +13641,32 @@ impl GameState {
         self.resolution_stack.push_choose_one_of(pending);
     }
 
+    /// Returns the vote-ballot owner only when it owns the stack top.
+    pub fn active_vote_ballot(&self) -> Option<&PendingVoteBallotIteration> {
+        self.resolution_stack.active_vote_ballot()
+    }
+
+    /// Consume exactly the active vote-ballot frame.
+    pub fn take_active_vote_ballot(
+        &mut self,
+    ) -> Result<Option<PendingVoteBallotIteration>, ResolutionStackError> {
+        self.resolution_stack.take_active_vote_ballot()
+    }
+
+    /// Park a paused per-ballot vote iteration.
+    pub fn push_vote_ballot(&mut self, pending: PendingVoteBallotIteration) {
+        self.resolution_stack.push_vote_ballot(pending);
+    }
+
+    /// Insert a vote-ballot parent directly below the child it suspended for.
+    pub fn insert_vote_ballot_parent_of_active(
+        &mut self,
+        pending: PendingVoteBallotIteration,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .insert_parent_of_active(super::resolution::ResolutionFrame::VoteBallot(pending))
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14341,7 +14362,6 @@ impl GameState {
             pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
             resolution_coin_flip: None,
-            pending_vote_ballot_iteration: None,
             pending_per_player_zone_choice: None,
             pending_player_scope_sacrifice_choice: None,
             pending_scoped_library_search: None,
@@ -15463,7 +15483,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_each_player_copy_chosen: _,
         pending_coin_flip: _,
         resolution_coin_flip: _,
-        pending_vote_ballot_iteration: _,
         pending_per_player_zone_choice: _,
         pending_per_category_zone_choice: _,
         pending_counter_moves: _,
@@ -15790,7 +15809,6 @@ impl PartialEq for GameState {
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).
             && self.resolution_coin_flip == other.resolution_coin_flip
-            && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration
             && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice

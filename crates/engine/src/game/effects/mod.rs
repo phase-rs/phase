@@ -755,8 +755,8 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
     // choice resolves. Must run after change_zone_iteration (which may be
     // nested inside a ballot body) and before repeat_iteration.
-    if !waits_for_resolution_choice(&state.waiting_for) {
-        vote::drain_pending_vote_ballot_iteration(state, events);
+    if !waits_for_resolution_choice(&state.waiting_for) && state.active_vote_ballot().is_some() {
+        vote::drain_active_vote_ballot(state, events);
     }
     // CR 608.2c + CR 109.5: After the per-iteration chain drains, drive any
     // remaining `repeat_for` iterations. Each resumed iteration may itself
@@ -852,7 +852,7 @@ pub(crate) fn resume_resolution_frames(
         }
         ResolutionFrame::ChooseOneOf(_) => choose_one_of::resume_pending(state, events),
         ResolutionFrame::VoteBallot(_) => {
-            vote::drain_pending_vote_ballot_iteration(state, events);
+            vote::drain_active_vote_ballot(state, events);
         }
         ResolutionFrame::PerPlayerZoneChoice(_) => {
             choose_from_zone::drain_pending_per_player_zone_choice(state, &[], events);

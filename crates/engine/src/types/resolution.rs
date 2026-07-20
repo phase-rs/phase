@@ -514,6 +514,40 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::ChooseOneOf(frame));
     }
 
+    /// Returns the vote-ballot owner only when it owns the stack top.
+    pub fn active_vote_ballot(&self) -> Option<&PendingVoteBallotIteration> {
+        match self.last() {
+            Some(ResolutionFrame::VoteBallot(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active vote-ballot frame.
+    pub fn take_active_vote_ballot(
+        &mut self,
+    ) -> Result<Option<PendingVoteBallotIteration>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::VoteBallot(_)) => {
+                let ResolutionFrame::VoteBallot(frame) =
+                    self.pop_expected(FrameKind::VoteBallot)?
+                else {
+                    unreachable!("checked vote-ballot frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::VoteBallot,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a paused per-ballot vote iteration.
+    pub fn push_vote_ballot(&mut self, frame: PendingVoteBallotIteration) {
+        self.push_inner(ResolutionFrame::VoteBallot(frame));
+    }
+
     /// Returns only the immediate predecessor of the active frame.
     ///
     /// This is intentionally narrower than a frame search: the only Phase-2
@@ -751,6 +785,7 @@ impl ResolutionStateWire {
                 let legacy_repeat_for = LegacyRepeatForWire::from_value(&value)?;
                 let legacy_repeat_until = LegacyRepeatUntilWire::from_value(&value)?;
                 let legacy_choose_one_of = LegacyChooseOneOfWire::from_value(&value)?;
+                let legacy_vote_ballot = LegacyVoteBallotWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -761,6 +796,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_repeat_iteration");
                 legacy_object.remove("pending_repeat_until");
                 legacy_object.remove("pending_choose_one_of");
+                legacy_object.remove("pending_vote_ballot_iteration");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -774,6 +810,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_choose_one_of.into_frame() {
                     legacy.push_choose_one_of(frame);
+                }
+                if let Some(frame) = legacy_vote_ballot.into_frame() {
+                    legacy.push_vote_ballot(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -957,6 +996,23 @@ struct LegacyChooseOneOfWire {
     pending_choose_one_of: Option<PendingChooseOneOf>,
 }
 
+/// v1-only vote-ballot field. Runtime state carries it only as a typed frame.
+#[derive(Deserialize)]
+struct LegacyVoteBallotWire {
+    #[serde(default)]
+    pending_vote_ballot_iteration: Option<PendingVoteBallotIteration>,
+}
+
+impl LegacyVoteBallotWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingVoteBallotIteration> {
+        self.pending_vote_ballot_iteration
+    }
+}
+
 impl LegacyChooseOneOfWire {
     fn from_value(value: &Value) -> Result<Self, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
@@ -1007,6 +1063,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::RepeatFor(_)
                 | ResolutionFrame::RepeatUntil(_)
                 | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
         ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
@@ -1060,9 +1117,6 @@ fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStac
     }
     if let Some(pending) = state.pending_each_player_copy_chosen.clone() {
         frames.push_inner(ResolutionFrame::EachPlayerCopyChosen(pending));
-    }
-    if let Some(pending) = state.pending_vote_ballot_iteration.clone() {
-        frames.push_inner(ResolutionFrame::VoteBallot(pending));
     }
     if let Some(pending) = state.pending_per_player_zone_choice.clone() {
         frames.push_inner(ResolutionFrame::PerPlayerZoneChoice(pending));
@@ -1229,11 +1283,7 @@ fn project_frames_into_legacy_state(
                 "EachPlayerCopyChosen",
             )?,
             ResolutionFrame::ChooseOneOf(pending) => projected.push_choose_one_of(pending.clone()),
-            ResolutionFrame::VoteBallot(pending) => set_once(
-                &mut projected.pending_vote_ballot_iteration,
-                pending.clone(),
-                "VoteBallot",
-            )?,
+            ResolutionFrame::VoteBallot(pending) => projected.push_vote_ballot(pending.clone()),
             ResolutionFrame::PerPlayerZoneChoice(pending) => set_once(
                 &mut projected.pending_per_player_zone_choice,
                 pending.clone(),
@@ -1317,7 +1367,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.pending_counter_additions = None;
     state.pending_copy_token_resolution = None;
     state.pending_each_player_copy_chosen = None;
-    state.pending_vote_ballot_iteration = None;
     state.pending_per_player_zone_choice = None;
     state.pending_per_category_zone_choice = None;
     state.pending_optional_effect = None;
@@ -1634,6 +1683,21 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 choose-one-of fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_vote_ballot_fixture(
+        state: GameState,
+        pending: PendingVoteBallotIteration,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_vote_ballot_iteration"] =
+            serde_json::to_value(pending).expect("legacy vote-ballot serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 vote-ballot fixture converts through the wire")
             .into_game_state()
     }
 
@@ -2401,16 +2465,21 @@ mod tests {
         assert!(choose_one_of.active_choose_one_of().is_none());
         assert_reserializes_v2_only(choose_one_of);
 
-        let mut vote = GameState::new_two_player(132);
-        vote.pending_vote_ballot_iteration = Some(PendingVoteBallotIteration {
-            ability_template: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
-            remaining_voters: Vec::new(),
-            source_id: ObjectId(132),
-            controller: PlayerId(0),
-        });
-        let mut vote = restore_v1_fixture(vote);
-        crate::game::effects::vote::drain_pending_vote_ballot_iteration(&mut vote, &mut Vec::new());
-        assert!(vote.pending_vote_ballot_iteration.is_none());
+        let vote = GameState::new_two_player(132);
+        let mut vote = restore_v1_vote_ballot_fixture(
+            vote,
+            PendingVoteBallotIteration {
+                ability_template: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::NoOp,
+                )),
+                remaining_voters: Vec::new(),
+                source_id: ObjectId(132),
+                controller: PlayerId(0),
+            },
+        );
+        crate::game::effects::vote::drain_active_vote_ballot(&mut vote, &mut Vec::new());
+        assert!(vote.active_vote_ballot().is_none());
         assert_reserializes_v2_only(vote);
 
         let choose_from_zone = resolved_effect(
