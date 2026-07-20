@@ -13,8 +13,8 @@ use crate::types::actions::GameAction;
 use crate::types::game_state::{GameState, TriggerOrderGroup, YieldTarget};
 use crate::types::identifiers::CardId;
 
-/// Minimal injected trigger context. `apply_trigger_order_template` reads only
-/// `source_id`, `source_incarnation` and `source_card_id`; the effect is inert
+/// Minimal injected trigger context. `apply_trigger_order_template` reads the
+/// source id and exact trigger source; the effect is inert
 /// (a distinct `count` only matters where a test drives `begin_trigger_ordering`).
 fn mk_ctx(
     source_id: u64,
@@ -31,8 +31,12 @@ fn mk_ctx(
         ObjectId(source_id),
         PlayerId(0),
     );
-    ability.source_incarnation = incarnation;
-    ability.source_card_id = card_id.map(CardId);
+    if let Some(incarnation) = incarnation {
+        ability.set_test_trigger_source_recursive(
+            incarnation,
+            card_id.map(CardId).unwrap_or(CardId(0)),
+        );
+    }
     PendingTriggerContext {
         pending: PendingTrigger {
             source_id: ObjectId(source_id),
@@ -259,7 +263,7 @@ fn submitted_persistent_template_reapplies_in_saved_order() {
 
     // A fresh batch of those two card identities, in placement order [A, B], auto-orders
     // to the saved order [B, A] via the gate's 3rd arm — and the matcher reads
-    // `source_card_id`, which equals the Save-derived card_id by construction.
+    // source context's card id, which equals the Save-derived card id by construction.
     let mut fresh = group(vec![
         mk_named_ctx(5, Some(0), CARD_A, "A trigger", 1),
         mk_named_ctx(6, Some(0), CARD_B, "B trigger", 2),

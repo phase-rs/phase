@@ -787,9 +787,18 @@ fn altair_ibn_la_ahad_for_each_exile_memory_counter_copy_parses() {
         .sub_ability
         .as_deref()
         .expect("delayed end-of-combat cleanup");
-    let Effect::CreateDelayedTrigger { effect, .. } = delayed.effect.as_ref() else {
+    let Effect::CreateDelayedTrigger {
+        effect,
+        uses_tracked_set,
+        ..
+    } = delayed.effect.as_ref()
+    else {
         panic!("expected delayed cleanup trigger, got {:?}", delayed.effect);
     };
+    assert!(
+        *uses_tracked_set,
+        "Altaïr 'those tokens' cleanup must set uses_tracked_set=true"
+    );
     let Effect::ChangeZone {
         target,
         origin: Some(Zone::Battlefield),
@@ -798,11 +807,16 @@ fn altair_ibn_la_ahad_for_each_exile_memory_counter_copy_parses() {
     } = effect.effect.as_ref()
     else {
         panic!(
-            "expected LastCreated Battlefield->Exile cleanup, got {:?}",
+            "expected TrackedSet Battlefield->Exile cleanup, got {:?}",
             effect.effect
         );
     };
-    assert_eq!(*target, TargetFilter::LastCreated);
+    assert_eq!(
+        *target,
+        TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0)
+        }
+    );
 }
 
 /// CR 702.34a / CR 702.128a / CR 702.180a: the three self-cost graveyard
@@ -3751,6 +3765,51 @@ fn modal_spell_block_keeps_mode_branches_separate() {
             ..
         }
     ));
+}
+
+/// Issue #5979 (modal-card context): "play up to <n> additional lands this
+/// turn" also reaches the additional-land grammar as a modal mode bullet, not
+/// only as a standalone sentence. Journey of Discovery's second mode ("You may
+/// play up to two additional lands this turn.") must parse — through the
+/// production card parser — to the `AdditionalLandDrop { count: 2 }` grant, not
+/// misroute to `CastFromZone`. Entwine is a keyword line and adds no mode.
+#[test]
+fn journey_of_discovery_modal_up_to_two_additional_lands() {
+    use crate::types::statics::StaticMode;
+    let r = parse(
+        "Choose one —\n• Search your library for up to two basic land cards, reveal them, put them into your hand, then shuffle.\n• You may play up to two additional lands this turn.\nEntwine {2}{G}",
+        "Journey of Discovery",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    let modal = r.modal.expect("Journey of Discovery is a modal spell");
+    assert_eq!(
+        modal.mode_count, 2,
+        "Entwine must not register as a third mode"
+    );
+    assert_eq!(
+        r.abilities.len(),
+        2,
+        "one ability per mode: {:?}",
+        r.abilities
+    );
+
+    // Second mode: the turn-scoped additional-land grant (count 2).
+    match &*r.abilities[1].effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => assert!(
+            static_abilities
+                .iter()
+                .any(|d| d.mode == StaticMode::AdditionalLandDrop { count: 2 }),
+            "expected AdditionalLandDrop {{ count: 2 }} in second mode, got {static_abilities:?}"
+        ),
+        other => {
+            panic!("expected GenericEffect additional-land grant as second mode, got {other:?}")
+        }
+    }
 }
 
 #[test]
@@ -14635,11 +14694,31 @@ fn twinflame_full_parse() {
         .expect("CreateDelayedTrigger sub-ability");
     match &*delayed.effect {
         Effect::CreateDelayedTrigger {
-            uses_tracked_set, ..
-        } => assert!(
-            *uses_tracked_set,
-            "'those tokens' must mark uses_tracked_set=true"
-        ),
+            uses_tracked_set,
+            effect: inner,
+            ..
+        } => {
+            assert!(
+                *uses_tracked_set,
+                "'those tokens' must mark uses_tracked_set=true"
+            );
+            match &*inner.effect {
+                Effect::ChangeZone {
+                    target,
+                    destination: Zone::Exile,
+                    ..
+                } => {
+                    assert_eq!(
+                        *target,
+                        TargetFilter::TrackedSet {
+                            id: crate::types::identifiers::TrackedSetId(0)
+                        },
+                        "Twinflame 'those tokens' exile must bind TrackedSet (issue #5972)"
+                    );
+                }
+                other => panic!("expected inner ChangeZone exile, got {other:?}"),
+            }
+        }
         other => panic!("expected CreateDelayedTrigger, got {other:?}"),
     }
 }

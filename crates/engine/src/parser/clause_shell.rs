@@ -453,13 +453,18 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
 fn parse_additional_land_head(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
-    use nom::combinator::value;
+    use nom::combinator::{opt, value};
     alt((
         value((), tag("play an additional land")),
+        // CR 305.2: "play <n> additional lands" and the equivalent
+        // "play up to <n> additional lands" (Summer Bloom) — the "up to" is
+        // redundant grammar (land plays are already optional), so it grants the
+        // same +n land-play allowance.
         value(
             (),
             (
                 tag("play "),
+                opt(tag("up to ")),
                 crate::parser::oracle_nom::primitives::parse_number,
                 tag(" additional lands"),
             ),

@@ -694,6 +694,11 @@ impl<'a> PlannerServices<'a> {
             b.prior
                 .partial_cmp(&a.prior)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                // Issue #4878: without this tie-break, a prior tie falls back
+                // to `priors`' pre-sort order, ultimately traceable to the
+                // engine's unsorted `candidate_actions(state)` — mirrors
+                // search.rs:1956/2205 and the sibling fix in `rank_candidates`.
+                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
         });
         priors
             .into_iter()
@@ -1323,6 +1328,10 @@ where
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            // Issue #4878: without this tie-break, equal-score candidates fall
+            // back to `ranked`'s pre-sort (enumeration) order, which is not
+            // guaranteed stable across processes — mirrors search.rs:1956/2205.
+            .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
     });
     ranked.truncate(limit);
     ranked
@@ -1664,6 +1673,46 @@ mod tests {
             ranked[0].candidate.action,
             GameAction::MulliganDecision { .. }
         ));
+    }
+
+    /// Issue #4878: on an exact score tie, `rank_candidates`' tie-break must
+    /// be `GameAction::cmp_stable` (a total order), not `ranked`'s pre-sort
+    /// (encounter) order. Reverting the `.then_with(cmp_stable)` tie-break
+    /// makes this test flip: `sort_by` is stable, so two calls differing only
+    /// in input order would then rank the same tied pair differently.
+    #[test]
+    fn rank_candidates_ties_break_by_cmp_stable_not_encounter_order() {
+        let pass = CandidateAction {
+            action: GameAction::PassPriority,
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Pass,
+            },
+        };
+        let mulligan = CandidateAction {
+            action: GameAction::MulliganDecision {
+                choice: MulliganChoice::Keep,
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Selection,
+            },
+        };
+        let tied_scorer = |_candidate: &CandidateAction| 1.0;
+
+        let forward = rank_candidates(vec![pass.clone(), mulligan.clone()], tied_scorer, 2);
+        let reversed = rank_candidates(vec![mulligan, pass], tied_scorer, 2);
+
+        let forward_actions: Vec<_> = forward.iter().map(|r| r.candidate.action.clone()).collect();
+        let reversed_actions: Vec<_> = reversed
+            .iter()
+            .map(|r| r.candidate.action.clone())
+            .collect();
+
+        assert_eq!(
+            forward_actions, reversed_actions,
+            "tied candidates must rank identically regardless of input encounter order"
+        );
     }
 
     #[test]

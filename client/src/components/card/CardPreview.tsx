@@ -14,6 +14,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
+import { CardArtFallback } from "./CardArtFallback.tsx";
 import { ReportCardButton, type CardReportContext } from "./ReportCardButton.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
@@ -464,7 +465,7 @@ function MobilePreviewOverlay({
   report?: CardReportContext;
 }) {
   const { t } = useTranslation("game");
-  const { src, isRotated, isFlip } = useCardImage(cardName, {
+  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
     size: "normal",
     faceIndex,
     isToken: obj?.display_source === "Token",
@@ -474,6 +475,20 @@ function MobilePreviewOverlay({
     faceName: obj?.printed_ref?.face_name,
     sourcePrinting,
   });
+
+  // Issue #6156 on the mobile path: both arms below used to gate the art on
+  // `src &&`, so an artless token (no official paper printing) opened an
+  // overlay containing nothing at all — the reported blank square, reproduced
+  // on phones. Track load failures too, so a resolved-but-404 URL degrades to
+  // the same named tile instead of the browser's broken-image glyph.
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [src]);
+  // `isLoading` is load-bearing, not decoration: `useCardImage` assigns `src`
+  // in a post-render effect, so `src` is null on EVERY first paint. Deriving
+  // the fallback from `!src` alone would flash the "no art" tile before every
+  // normal card's art — the same conflation this PR fixed on the board
+  // renderers. Only a settled lookup with no art gets the tile.
+  const showArtFallback = !isLoading && (!src || artError);
 
   // Mobile has no Ctrl key, so a Kamigawa flip card's 180° spin is a tap toggle
   // (desktop holds Ctrl). Only the full-screen modal layout can host the button —
@@ -510,12 +525,22 @@ function MobilePreviewOverlay({
         className="pointer-events-none fixed inset-0 z-[100] flex items-center justify-center p-4"
         data-card-preview
       >
-        {src && (
+        {showArtFallback ? (
+          <CardArtFallback
+            name={cardName}
+            className="pointer-events-auto aspect-[5/7] max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl"
+          />
+        ) : !src ? (
+          // Still resolving. The compact peek is a non-blocking overlay, so it
+          // stays empty rather than flashing a skeleton over the board.
+          null
+        ) : (
           <img
             src={src}
             alt={cardName}
             draggable={false}
             onPointerDown={onDismiss}
+            onError={() => setArtError(true)}
             className={
               isRotated
                 ? "pointer-events-auto max-h-[58vw] max-w-[80vh] rotate-90 rounded-xl border border-white/15 object-contain shadow-2xl"
@@ -535,37 +560,46 @@ function MobilePreviewOverlay({
       data-card-preview
       onPointerDown={onDismiss}
     >
-      {src && (
-        <div
-          className={isRotated
-            ? "relative h-[min(60vw,300px)] w-[min(84vw,420px)] max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"
-            : "relative max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
+      <div
+        className={isRotated
+          ? "relative h-[min(60vw,300px)] w-[min(84vw,420px)] max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"
+          : "relative max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        {showArtFallback ? (
+          <CardArtFallback
+            name={cardName}
+            className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg"
+          />
+        ) : !src ? (
+          // Still resolving — skeleton, not the artless tile.
+          <div className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full animate-pulse rounded-lg bg-gray-700" />
+        ) : (
           <img
             src={src}
             alt={cardName}
             draggable={false}
+            onError={() => setArtError(true)}
             className={isRotated
               ? "absolute left-1/2 top-1/2 h-[min(84vw,420px)] w-[min(60vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
               : `max-h-[calc(100dvh-2rem)] max-w-full object-contain${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
           />
-          {isFlip && (
-            <button
-              type="button"
-              onClick={() => setFlipped((f) => !f)}
-              className="pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/20 bg-black/70 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur active:bg-black/80"
-            >
-              ⟳ {t("preview.flip")}
-            </button>
-          )}
-          {report && (
-            <div className="absolute bottom-3 left-3 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 shadow-lg backdrop-blur">
-              <ReportCardButton key={report.oracleId || report.name} {...report} />
-            </div>
-          )}
-        </div>
-      )}
+        )}
+        {isFlip && (
+          <button
+            type="button"
+            onClick={() => setFlipped((f) => !f)}
+            className="pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/20 bg-black/70 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur active:bg-black/80"
+          >
+            ⟳ {t("preview.flip")}
+          </button>
+        )}
+        {report && (
+          <div className="absolute bottom-3 left-3 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 shadow-lg backdrop-blur">
+            <ReportCardButton key={report.oracleId || report.name} {...report} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -671,7 +705,11 @@ function CardImagePreview({
       ? (effectiveCost ?? obj?.mana_cost)
       : null;
 
-  if (isLoading || !src) {
+  // Only a genuinely in-flight lookup pulses. A finished lookup with no art
+  // (issue #6156) falls through to the named placeholder below — previously it
+  // was collapsed in here, which left this component's own placeholder dead
+  // code for artless tokens and pulsed forever in the hover preview.
+  if (isLoading) {
     return (
       <div
         className={`${frameClass} ${isRotated ? "" : "aspect-[5/7]"} rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`}
@@ -682,9 +720,16 @@ function CardImagePreview({
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
       <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
-        {imgError ? (
+        {imgError || !src ? (
           <div
-            className={`${frameClass} flex items-center justify-center rounded-[4%] border border-gray-600 bg-gray-800 p-4 text-center`}
+            // `frameClass` is width-only when upright — the <img> normally
+            // supplies the height, so without an aspect ratio this placeholder
+            // collapses to a squat strip. The loading branch above compensates
+            // the same way; this branch now carries the headline #6156 case
+            // (`!src`), so it needs it too.
+            className={`${frameClass} ${isRotated ? "" : "aspect-[5/7]"} flex items-center justify-center rounded-[4%] border border-gray-600 bg-gray-800 p-4 text-center`}
+            role="img"
+            aria-label={cardName}
           >
             <span className="text-sm font-medium text-gray-300">{cardName}</span>
           </div>

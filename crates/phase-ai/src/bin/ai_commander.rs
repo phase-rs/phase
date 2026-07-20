@@ -21,7 +21,7 @@ use engine::game::deck_loading::{
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::run_ai_actions;
+use phase_ai::auto_play::{driver_step, run_ai_actions};
 use phase_ai::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -155,6 +155,24 @@ fn main() {
     };
     let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
 
+    // Post-resolution deck-count line (plan §3.9): `resolve_deck_list` silently
+    // skips any name the card database doesn't recognize, so the pre-resolution
+    // "main: N cards" print above can't prove a deck actually loaded full-size.
+    // Print the resolved per-seat counts too, so a harness parsing stdout can
+    // detect silent-skip drift (a resolved count short of the pre-resolution
+    // one) without needing engine internals.
+    println!("Resolved deck sizes (post name-resolution, 0-indexed by seat):");
+    for (i, seat) in [&payload.player, &payload.opponent]
+        .into_iter()
+        .chain(payload.ai_decks.iter())
+        .enumerate()
+    {
+        let main_count: u32 = seat.main_deck.iter().map(|e| e.count).sum();
+        let commander_count: u32 = seat.commander.iter().map(|e| e.count).sum();
+        println!("  P{i}  main={main_count:>3}  commander={commander_count}");
+    }
+    println!();
+
     let mut state = GameState::new(FormatConfig::commander(), 4, seed);
     load_deck_into_state(&mut state, &payload);
 
@@ -180,6 +198,10 @@ fn main() {
     let mut aborted = false;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+    // phase#6080: the reason the most recent `run_ai_actions` batch broke
+    // early (one of its three break doors), so a stall can be diagnosed from
+    // the game output alone instead of a `tracing::error` no harness captures.
+    let mut last_break_reason = None;
 
     loop {
         let mut results = run_ai_actions(
@@ -189,9 +211,6 @@ fn main() {
             &mut ai_rng,
             &ai_session,
         );
-        if results.is_empty() {
-            break;
-        }
         if dump_log_path.is_some() {
             for r in &mut results {
                 game_log.extend(std::mem::take(&mut r.log_entries));
@@ -202,7 +221,6 @@ fn main() {
                 actions_log.push(format!("{:?}", r.action));
             }
         }
-        total_actions += results.len();
 
         if state.turn_number != last_turn_reported {
             last_turn_reported = state.turn_number;
@@ -222,6 +240,20 @@ fn main() {
             let _ = std::io::stdout().flush();
         }
 
+        // phase#6080 follow-up: a batch can complete one or more actions and
+        // still carry a break_reason (e.g. ApplyFailed/ChooseActionNone hits
+        // after earlier actions in the same batch applied cleanly). Capture
+        // that reason from EVERY batch — not only empty ones — and stop the
+        // driver at this batch boundary, after this batch's completed
+        // actions are already retained above, so the stall report below
+        // reflects the original break door instead of a later, unrelated one.
+        let step = driver_step(results);
+        total_actions += step.actions_taken;
+        if step.break_reason.is_some() {
+            last_break_reason = step.break_reason;
+            break;
+        }
+
         if total_actions >= MAX_TOTAL_ACTIONS {
             aborted = true;
             println!();
@@ -238,6 +270,7 @@ fn main() {
     println!("Turns played: {}", state.turn_number);
     println!();
 
+    let mut stalled = false;
     match &state.waiting_for {
         WaitingFor::GameOver { winner } => {
             println!(
@@ -246,6 +279,39 @@ fn main() {
             );
         }
         other => {
+            stalled = true;
+            // phase#6080: an empty AI-action batch while parked on anything
+            // but GameOver is a driver stall, not a normal game end (the
+            // family of p0-softlock issues #5250/#4345/#5958/#6172/#3886/
+            // #3919/#3233). Print a machine-readable line with enough context
+            // to reproduce (waiting_for variant, turn, active/priority
+            // player, pending-cast summary) plus which break door fired, then
+            // exit with a distinct code — the caller must not silently treat
+            // this as a completed game.
+            println!(
+                "STALL: waiting_for={} turn={} active=P{} priority=P{} pending_cast={}",
+                other.variant_name(),
+                state.turn_number,
+                state.active_player.0,
+                state.priority_player.0,
+                state
+                    .pending_cast
+                    .as_ref()
+                    .map(|pc| format!(
+                        "object={:?} card={:?} variant={:?}",
+                        pc.object_id, pc.card_id, pc.casting_variant
+                    ))
+                    .unwrap_or_else(|| "none".to_string()),
+            );
+            match &last_break_reason {
+                Some(reason) => println!("STALL: break_reason={reason:?}"),
+                None => println!(
+                    "STALL: break_reason=unknown (run_ai_actions batch was non-empty; \
+                     stall detected on a later empty batch this process did not observe)"
+                ),
+            }
+            // Preserved verbatim: pod-lab's runner.py classifies outcomes by
+            // matching this exact substring in stdout — do not reword it.
             println!("Game did NOT reach GameOver. waiting_for = {other:?}");
         }
     }
@@ -286,6 +352,12 @@ fn main() {
     if aborted {
         std::process::exit(2);
     }
+    // Distinct from a clean exit (0) and an action-cap abort (2): a stall
+    // must never be mistaken for either by a caller keying off exit status
+    // alone (phase#6080).
+    if stalled {
+        std::process::exit(3);
+    }
 }
 
 /// Reads an opt-in dump-destination env var once at startup. Absence is a
@@ -301,13 +373,35 @@ fn read_dump_env(key: &str) -> Option<String> {
         .expect("invalid Unicode in dump-destination env var")
 }
 
+/// Every label `AiDifficulty::from_label` (the crate's single-authority
+/// label parser) maps to a real difficulty rather than falling back to its
+/// own unknown-label default (`Medium`). Kept as an explicit list rather than
+/// derived from the enum so a hard-error message can name every accepted
+/// spelling; a new arm added to `from_label` must be mirrored here to be
+/// reachable from this binary's `--difficulty` flag.
+const ACCEPTED_DIFFICULTY_LABELS: &[&str] =
+    &["VeryEasy", "Easy", "Medium", "Hard", "VeryHard", "CEDH"];
+
+/// Parses a `--difficulty` value. Delegates the actual label→enum mapping to
+/// `AiDifficulty::from_label` (the crate's single authority — see its doc
+/// comment) so this binary's understanding of each label can never drift from
+/// every other transport that parses one. Unlike `from_label` itself, which
+/// silently downgrades an unrecognized label to `Medium`, an unrecognized
+/// label here is a hard startup error: silently running a garbled
+/// `--difficulty` value would poison an entire batch of games with a
+/// mislabeled skill tier with no indication anything went wrong (phase#6080
+/// diagnosis; pod-lab gauntlet plan §3.8/§4.5, whose local tier-echo guard
+/// exists precisely because this class of silent downgrade was possible).
 fn parse_difficulty(s: &str) -> AiDifficulty {
-    match s {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Easy,
+    if !ACCEPTED_DIFFICULTY_LABELS
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(s.trim()))
+    {
+        eprintln!(
+            "error: unrecognized --difficulty {s:?}; accepted values: {}",
+            ACCEPTED_DIFFICULTY_LABELS.join(", ")
+        );
+        std::process::exit(1);
     }
+    AiDifficulty::from_label(s)
 }

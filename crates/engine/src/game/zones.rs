@@ -1,11 +1,9 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-#[cfg(test)]
-use crate::types::game_state::ZoneChangeRecord;
 use crate::types::game_state::{
     GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -109,6 +107,7 @@ pub(crate) fn capture_attachment_snapshot(
             };
             Some(crate::types::game_state::AttachmentSnapshot {
                 object_id: *id,
+                identity: Some(ObjectIncarnationRef::from_object(att)),
                 controller: att.controller,
                 kind,
             })
@@ -635,7 +634,7 @@ pub(crate) fn record_resolution_source_relatch(
         .resolving_stack_entry
         .as_ref()
         .and_then(StackEntry::ability)
-        .map(|a| (a.source_id, a.source_incarnation))
+        .map(|a| (a.source_id, a.trigger_source_incarnation()))
     else {
         return;
     };
@@ -806,6 +805,13 @@ pub fn move_to_zone(
     // with" cards here, before CR 400.7 cleanup prunes `TrackedBySource`.
     zone_change_record.linked_exile_snapshot =
         capture_linked_exile_snapshot(state, object_id, from);
+    zone_change_record.sync_trigger_source_exiled_cards(
+        state
+            .cards_exiled_with_source_this_turn
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default(),
+    );
     // CR 607.2b + CR 603.10e: Persist the linked-exile snapshot as last-known
     // information so a self-sacrifice ability that refers to "cards exiled with
     // this permanent" (Rod of Absorption) still resolves correctly after its own
@@ -828,6 +834,7 @@ pub fn move_to_zone(
     } else {
         capture_combat_status(state, object_id)
     };
+    zone_change_record.sync_trigger_source_context();
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
@@ -1136,7 +1143,7 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
     mark_simultaneous_departures(slice, &departed);
 }
 
-fn capture_linked_exile_snapshot(
+pub(crate) fn capture_linked_exile_snapshot(
     state: &GameState,
     source_id: ObjectId,
     from: Zone,
@@ -1206,7 +1213,10 @@ fn sever_battlefield_attachment_graph_on_exit(
     }
 }
 
-fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCombatStatus {
+pub(crate) fn capture_combat_status(
+    state: &GameState,
+    object_id: ObjectId,
+) -> ZoneChangeCombatStatus {
     let Some(combat) = &state.combat else {
         return ZoneChangeCombatStatus::default();
     };
@@ -1314,6 +1324,14 @@ pub fn move_to_library_at_index(
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+    zone_change_record.sync_trigger_source_exiled_cards(
+        state
+            .cards_exiled_with_source_this_turn
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    zone_change_record.sync_trigger_source_context();
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
@@ -1580,6 +1598,7 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         .find(|record| record.object_id == object_id && record.to_zone == Zone::Battlefield)
     {
         record.controller = controller;
+        record.sync_trigger_source_context();
     }
 
     if let Some(record) = state
@@ -1602,6 +1621,7 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         )
     }) {
         record.controller = controller;
+        record.sync_trigger_source_context();
     }
 }
 
@@ -2432,18 +2452,25 @@ mod tests {
         move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
 
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0],
-            GameEvent::ZoneChanged {
-                object_id: id,
-                from: Some(Zone::Hand),
-                to: Zone::Graveyard,
-                record: Box::new(ZoneChangeRecord {
-                    name: "Card".to_string(),
-                    ..ZoneChangeRecord::test_minimal(id, Some(Zone::Hand), Zone::Graveyard)
-                }),
-            }
-        );
+        let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            record,
+        } = &events[0]
+        else {
+            panic!("move_to_zone must emit ZoneChanged");
+        };
+        assert_eq!(*object_id, id);
+        assert_eq!(*from, Some(Zone::Hand));
+        assert_eq!(*to, Zone::Graveyard);
+        assert_eq!(record.name, "Card");
+        let context = record
+            .trigger_source_context()
+            .expect("real zone-change events carry their source context");
+        assert_eq!(context.identity.reference.object_id, id);
+        assert_eq!(context.identity.expected_zone, Zone::Hand);
+        assert_eq!(context.card_id, CardId(1));
     }
 
     #[test]

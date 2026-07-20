@@ -39437,7 +39437,8 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     // (3) WGD entered → fire + resolve its ETB (exile all other permanents you
     // control). CR 400.7: the Aura, the plain land, and Piranha Marsh are exiled;
     // WGD itself is exempt ("all OTHER permanents").
-    crate::game::triggers::process_triggers(&mut state, &etb_ev);
+    let mut trigger_events = Vec::new();
+    let _ = crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut trigger_events);
     assert_eq!(
         state.stack.len(),
         1,
@@ -39564,7 +39565,6 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     // return events INTO THE SAME vec (mirroring `engine_priority.rs:177-210`). It
     // must be passed the vec that actually contains WGD's leave event — a fresh vec
     // would silently no-op. CR 610.3: the exiled cards return.
-    let events_before_returns = sac_ev.len();
     crate::game::engine::check_exile_returns(&mut state, &mut sac_ev);
     crate::game::layers::evaluate_layers(&mut state);
 
@@ -39629,20 +39629,20 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     );
 
     // (6) The returned permanents are new objects (CR 400.7) whose own ETBs re-fire
-    // on re-entry. Scan the return events that `check_exile_returns` appended into
-    // `sac_ev` (mirroring the second trigger-detection pass at
-    // engine_priority.rs:195-210). Now that the Aura re-enters too, TWO of P0's
+    // on re-entry. Their logical return owner has queued those events for the
+    // deferred-trigger drain. Now that the Aura re-enters too, TWO of P0's
     // permanents produce an ETB simultaneously — Piranha Marsh's "target player
     // loses 1 life" and the returned Aura's reanimation ETB — so P0 must order them
     // (CR 603.3b) before either reaches the stack.
-    let return_events: Vec<_> = sac_ev[events_before_returns..].to_vec();
     let p1_life_before = state
         .players
         .iter()
         .find(|p| p.id == PlayerId(1))
         .unwrap()
         .life;
-    crate::game::triggers::process_triggers(&mut state, &return_events);
+    let mut return_trigger_events = Vec::new();
+    let _ =
+        crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut return_trigger_events);
     // Reach-guard: the co-triggered ETBs surface as a CR 603.3b ordering prompt.
     // If PR #6072 were reverted, the Aura would stay in exile and only Piranha's
     // single ETB would fire — no ordering prompt, so this `matches!` would flip.

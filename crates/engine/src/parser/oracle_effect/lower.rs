@@ -3032,15 +3032,26 @@ pub(super) fn rewrite_parent_target_to_last_created(
         Effect::ChangeZone { target, origin, .. }
             if matches!(
                 target,
-                TargetFilter::ParentTarget
-                    | TargetFilter::TriggeringSource
-                    | TargetFilter::TrackedSet { .. }
+                TargetFilter::ParentTarget | TargetFilter::TriggeringSource
             ) =>
         {
-            // CR 603.7c: In the gated post-token scope, both singular
-            // anaphors and plural "those tokens" refer to the token(s) just
-            // created and must still be in the battlefield zone at cleanup.
+            // CR 603.7c: In the gated post-token scope, singular "it"/"that
+            // token" anaphors refer to the one just-created token and must
+            // still be on the battlefield at cleanup — bind `LastCreated`.
+            // Plural "those tokens" is already rewritten to `TrackedSet` by
+            // `rewrite_parent_targets_to_tracked_set` (Saheeli -7, Twinflame);
+            // do not stomp it here — `LastCreated` only snapshots the last
+            // token in a multi-token batch (issue #5972).
             rewrite_change_zone_cleanup_to_last_created(target, origin);
+        }
+        Effect::ChangeZone {
+            target: TargetFilter::TrackedSet { .. },
+            origin,
+            ..
+        } => {
+            // CR 603.7c: plural token cleanup stays on `TrackedSet`; stamp the
+            // battlefield as the expected origin at firing time (issue #5972).
+            origin.get_or_insert(Zone::Battlefield);
         }
         _ => {}
     }

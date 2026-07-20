@@ -11,6 +11,7 @@ use super::ability::{
 };
 use super::card::{PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
+use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaType, UnitDecision};
@@ -482,6 +483,11 @@ pub enum ProposedEvent {
     /// already resolved from `QuantityExpr` at propose time.
     Connive {
         object_id: ObjectId,
+        /// CR 400.7 + CR 701.50b/f: the exact permanent that proposed this
+        /// action. A replacement-ordering pause must not recapture a later
+        /// incarnation that reused `object_id`. Intentionally no serde default:
+        /// a legacy raw-id-only parked event cannot reconstruct this authority.
+        subject: Box<EventObjectSnapshot>,
         count: u32,
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -910,14 +916,14 @@ impl ProposedEvent {
             | ProposedEvent::TurnFaceUp { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
-            | ProposedEvent::Explore { object_id, .. }
-            // CR 701.50a: The conniving permanent's controller is the affected
-            // player — they draw/discard and choose the connive replacement order.
-            | ProposedEvent::Connive { object_id, .. } => state
+            | ProposedEvent::Explore { object_id, .. } => state
                 .objects
                 .get(object_id)
                 .map(|o| o.controller)
                 .unwrap_or(PlayerId(0)),
+            // CR 701.50a: The conniving permanent's controller is the affected
+            // player — they draw/discard and choose the connive replacement order.
+            ProposedEvent::Connive { subject, .. } => subject.controller,
             ProposedEvent::AddCounter { placement, .. } => match placement {
                 CounterPlacement::Object { object_id, .. } => state
                     .objects

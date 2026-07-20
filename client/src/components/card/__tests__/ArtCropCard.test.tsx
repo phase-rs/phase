@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
@@ -88,6 +88,136 @@ describe("ArtCropCard", () => {
         faceIndex: 1,
       }),
     );
+  });
+
+  it("renders a name tile for an artless token instead of a blank square (issue #6156)", () => {
+    // `art_crop` is the DEFAULT battlefield display, so this is the render path
+    // most players actually see. A token with no official paper printing (Kibo,
+    // Uktabi Prince's Banana) resolves to a null src with no in-flight lookup;
+    // collapsing that into the loading branch is what produced the reported
+    // featureless dark square.
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    const token = {
+      ...transformedPermanent(),
+      name: "Banana",
+      display_source: "Token",
+      transformed: false,
+      back_face: null,
+      power: 2,
+      toughness: 3,
+      base_power: 2,
+      base_toughness: 3,
+      counters: { p1p1: 1 },
+      card_types: { supertypes: [], core_types: ["Artifact", "Creature"], subtypes: ["Food"] },
+    };
+    useGameStore.setState({
+      gameState: {
+        objects: { [token.id]: token },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    // The art slot carries the fallback tile instead of a blank/black box...
+    expect(screen.getByRole("img", { name: "Banana" })).toBeInTheDocument();
+    // ...and no <img> is emitted, so nothing can paint as a broken square.
+    expect(document.querySelector("img")).toBeNull();
+
+    // Critically, the CARD FRAME survives: swapping only the art (rather than
+    // returning a bare tile before the frame) is what keeps game state on
+    // screen. An artless creature token must still show its P/T and counters —
+    // hiding those would trade one information loss for another, and the same
+    // path is taken by EVERY permanent when an art fetch is rejected.
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("/")).toBeInTheDocument();
+    // The +1/+1 counter badge lives in the art area, as a sibling of the very
+    // element the fix swaps — so it is the piece most at risk from a future
+    // refactor of that slot.
+    expect(screen.getByText("1")).toBeInTheDocument();
+    // Name appears in both the frame header and the fallback tile's label.
+    expect(screen.getAllByText("Banana").length).toBeGreaterThan(0);
+  });
+
+  it("falls back to the tile when resolved art fails to load", () => {
+    // A URL that resolves but 404s (future-dated set, stale token image ref).
+    // Without an onError handler the default renderer would show the browser's
+    // broken-image glyph — the same defect issue #6156 reports.
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/kuruk.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    const img = document.querySelector("img");
+    expect(img).not.toBeNull();
+    fireEvent.error(img!);
+
+    expect(screen.getByRole("img", { name: "Kuruk, the Mastodon" })).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
+    // Frame survives here too.
+    expect(screen.getByText("/")).toBeInTheDocument();
+  });
+
+  it("re-tries the art when the source changes after a load failure", () => {
+    // Mirrors CardImage's equivalent. Without the reset effect a permanent
+    // whose front-face art 404s would stay latched on the text tile across a
+    // DFC transform forever, even once a loadable face arrives.
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/front.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+    fireEvent.error(document.querySelector("img")!);
+    expect(document.querySelector("img")).toBeNull();
+
+    // ArtCropCard is memo()'d on `objectId`, so re-rendering with identical
+    // props bails out before the hook is re-read. Push a fresh object identity
+    // through the store instead — the same thing a real transform does.
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/back.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          objects: { 101: { ...transformedPermanent(), timestamp: 2 } },
+        } as never,
+      });
+    });
+
+    const img = document.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img!.getAttribute("src")).toBe("https://example.invalid/back.png");
+  });
+
+  it("still pulses while art is genuinely resolving", () => {
+    // The companion to the case above: an in-flight lookup must NOT jump
+    // straight to the name tile, or every card flashes text before its art.
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: true,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    const { container } = render(<ArtCropCard objectId={101} />);
+
+    expect(container.querySelector(".animate-pulse")).not.toBeNull();
+    expect(screen.queryByRole("img")).toBeNull();
   });
 
   it("renders the card back for face-down permanents", () => {

@@ -18,6 +18,9 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::resolution::canonicalize_legacy_resolution_state;
+#[cfg(debug_assertions)]
+use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -272,6 +275,8 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         finalize_display_state(state);
     }
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
+    #[cfg(debug_assertions)]
+    debug_assert_runtime_resolution_invariants(state);
     Ok(result)
 }
 
@@ -2293,6 +2298,11 @@ pub(super) fn resume_pending_continuation_if_priority(
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         effects::drain_pending_continuation(state, events);
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let frames =
+                canonicalize_legacy_resolution_state(state).map_err(EngineError::InvalidAction)?;
+            effects::resume_resolution_frames(state, &frames, events);
+        }
         // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
         // boundary only after ordinary continuations drain. The shared typed
         // dispatcher owns the remaining eligible payment roots.
@@ -7198,6 +7208,26 @@ fn apply_action(
         return Ok(ActionResult {
             events,
             waiting_for: wf,
+            log_entries: vec![],
+        });
+    }
+
+    // CR 603.2 + CR 603.3b + CR 608.2g: a cast made during an unresolved
+    // effect can leave the reducer at that effect's next choice (not Priority).
+    // Park its SpellCast observers now; they are drained only when the parent
+    // resolution reaches a genuine priority boundary.
+    if let Some(waiting_for) =
+        engine_resolution_choices::park_cast_during_resolution_cast_observers(
+            state,
+            &mut events,
+            0,
+            &waiting_for,
+        )?
+    {
+        state.waiting_for = waiting_for.clone();
+        return Ok(ActionResult {
+            events,
+            waiting_for,
             log_entries: vec![],
         });
     }

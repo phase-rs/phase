@@ -173,37 +173,38 @@ fn resolved_ability_axes(a: &ResolvedAbility) -> Axes {
         mode_abilities,
         // ---- read-free: concrete ids / cast-time snapshots / flags / links,
         //      none of which express a resolution-time dynamic read ----
-        targets: _,               // concrete announced target refs (already resolved)
-        source_id: _,             // object id
-        source_incarnation: _,    // epoch guard token
-        source_card_id: _,        // latched card identity token (AllCopies yield), no read
-        controller: _,            // player id
-        original_controller: _,   // player id
-        scoped_player: _,         // player id (iteration binding)
-        kind: _,                  // AbilityKind tag (no payload)
-        context: _,               // SpellContext: cast-time fact snapshot, not a live read
-        optional_targeting: _,    // bool
-        optional: _,              // bool
-        optional_for: _,          // OpponentMayScope: AnyOpponent/AnyPlayer, no read
-        target_choice_timing: _,  // Stack/Resolution tag
-        description: _,           // display string
-        selected_mode_labels: _,  // display strings, no dynamic read
-        min_x_value: _,           // u32
-        cant_be_copied: _,        // bool
-        copy_count_status: _,     // status tag
-        forward_result: _,        // bool
-        distribution: _,          // concrete pre-assigned (TargetRef, u32) portions
-        chosen_x: _,              // concrete cast-time X
-        cost_paid_object: _,      // concrete captured-object snapshot
-        cost_paid_object_ids: _,  // concrete captured-object ids (issue #4948)
-        effect_context_object: _, // concrete captured-object snapshot
-        amassed_army_object: _,   // concrete captured-object snapshot
-        ability_index: _,         // usize provenance
-        may_trigger_origin: _,    // provenance tag
-        target_selection_mode: _, // Chosen/Random tag
-        chosen_players: _,        // concrete chosen player ids
-        replacement_applied: _,   // replacement provenance set, no dynamic read
-        sub_link: _,              // SubAbilityLink kind tag
+        targets: _,                // concrete announced target refs (already resolved)
+        source_id: _,              // object id
+        source_incarnation: _,     // self-transform epoch latch, no dynamic read
+        trigger_source: _,         // exact triggered-source authority, no dynamic read
+        trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
+        controller: _,             // player id
+        original_controller: _,    // player id
+        scoped_player: _,          // player id (iteration binding)
+        kind: _,                   // AbilityKind tag (no payload)
+        context: _,                // SpellContext: cast-time fact snapshot, not a live read
+        optional_targeting: _,     // bool
+        optional: _,               // bool
+        optional_for: _,           // OpponentMayScope: AnyOpponent/AnyPlayer, no read
+        target_choice_timing: _,   // Stack/Resolution tag
+        description: _,            // display string
+        selected_mode_labels: _,   // display strings, no dynamic read
+        min_x_value: _,            // u32
+        cant_be_copied: _,         // bool
+        copy_count_status: _,      // status tag
+        forward_result: _,         // bool
+        distribution: _,           // concrete pre-assigned (TargetRef, u32) portions
+        chosen_x: _,               // concrete cast-time X
+        cost_paid_object: _,       // concrete captured-object snapshot
+        cost_paid_object_ids: _,   // concrete captured-object ids (issue #4948)
+        effect_context_object: _,  // concrete captured-object snapshot
+        amassed_army_object: _,    // concrete captured-object snapshot
+        ability_index: _,          // usize provenance
+        may_trigger_origin: _,     // provenance tag
+        target_selection_mode: _,  // Chosen/Random tag
+        chosen_players: _,         // concrete chosen player ids
+        replacement_applied: _,    // replacement provenance set, no dynamic read
+        sub_link: _,               // SubAbilityLink kind tag
         parent_target_missing_reason: _, // seam flag
     } = a;
 
@@ -4762,8 +4763,9 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
-        source_incarnation: _, // epoch guard token
-        source_card_id: _, // latched card identity token (AllCopies yield), no choice
+        source_incarnation: _, // self-transform epoch latch, no resolution-time choice
+        trigger_source: _, // exact triggered-source authority, no choice
+        trigger_definition_ref: _, // exact trigger occurrence, no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)

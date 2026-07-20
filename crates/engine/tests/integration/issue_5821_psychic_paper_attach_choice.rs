@@ -64,10 +64,10 @@ fn psychic_paper_equip_prompts_name_then_type_and_binds_both_on_attach() {
     match &runner.state().waiting_for {
         WaitingFor::NamedChoice {
             choice_type: ChoiceType::CardName,
-            source_id: Some(source),
+            source: Some(source),
             ..
         } => assert_eq!(
-            *source, paper,
+            source.prompt.identity.reference.object_id, paper,
             "the card-name choice must bind to Psychic Paper"
         ),
         other => panic!("expected NamedChoice(CardName) right after attaching, got {other:?}"),
@@ -82,10 +82,10 @@ fn psychic_paper_equip_prompts_name_then_type_and_binds_both_on_attach() {
     match &runner.state().waiting_for {
         WaitingFor::NamedChoice {
             choice_type: ChoiceType::CreatureType { .. },
-            source_id: Some(source),
+            source: Some(source),
             ..
         } => assert_eq!(
-            *source, paper,
+            source.prompt.identity.reference.object_id, paper,
             "the creature-type choice must bind to Psychic Paper"
         ),
         other => panic!("expected NamedChoice(CreatureType) after the card name, got {other:?}"),

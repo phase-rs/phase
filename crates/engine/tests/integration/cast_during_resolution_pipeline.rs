@@ -15,7 +15,9 @@
 //! reason this class of bug shipped.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{CastingPermission, Effect};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, CastingPermission, Effect, ReplacementDefinition, TargetFilter,
+};
 use engine::types::actions::{CastChoice, GameAction};
 use engine::types::game_state::{
     CastOfferKind, CastPaymentMode, GameState, StackEntryKind, WaitingFor,
@@ -23,7 +25,37 @@ use engine::types::game_state::{
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::zones::Zone;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
+
+const THRUMMING_STONE_ORACLE: &str = "Spells you cast have ripple 4. (When you cast a spell, you may reveal the top four cards of your library. You may cast any revealed cards with the same name as the cast spell without paying their mana costs. Put the rest on the bottom of your library in any order.)";
+const RAT_COLONY_ORACLE: &str = "Rat Colony gets +1/+0 for each other Rat you control named Rat Colony.\nA deck can have any number of cards named Rat Colony.";
+const AETHERFLUX_RESERVOIR_ORACLE: &str = "Whenever you cast a spell, you gain 1 life for each spell you've cast this turn.\nPay 50 life: This artifact deals 50 damage to any target.";
+
+/// CR 614.1a: a synthetic global Library-destination redirect used to force a
+/// genuine CR 616.1 ordering choice in the terminal Ripple bottom batch.
+fn redirect_library_move_to(destination: Zone) -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Library)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+}
 
 fn red_pool(scenario: &mut GameScenario, count: usize) {
     let units: Vec<ManaUnit> = (0..count)
@@ -49,6 +81,560 @@ fn has_exile_alt_cost(state: &GameState, id: ObjectId) -> bool {
         .casting_permissions
         .iter()
         .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. }))
+}
+
+/// CR 702.60a-b + CR 603.3b: a Ripple-found Rat Colony is cast while the
+/// parent Ripple still has another offer open. Its own Ripple trigger must be
+/// deferred, then put above the newly cast spell after that parent finishes.
+#[test]
+fn thrumming_stone_ripple_retriggers_for_each_cast_rat_colony() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+
+    let stone = scenario
+        .add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE)
+        .id();
+    let rat_a = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    // Add bottom first: Ripple reveals B then C, leaving C available for B's
+    // own trigger after A's outstanding offer is declined.
+    let rat_c = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let rat_b = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        engine::game::zones::remove_from_zone(state, rat_b, Zone::Hand, P0);
+        engine::game::zones::add_to_zone(state, rat_b, Zone::Library, P0);
+        state.objects.get_mut(&rat_b).expect("rat B").zone = Zone::Library;
+        engine::game::zones::remove_from_zone(state, rat_c, Zone::Hand, P0);
+        engine::game::zones::add_to_zone(state, rat_c, Zone::Library, P0);
+        state.objects.get_mut(&rat_c).expect("rat C").zone = Zone::Library;
+    }
+    assert!(
+        !runner.state().objects[&stone].static_definitions.is_empty(),
+        "exact Thrumming Stone Oracle text must parse to its static Ripple grant"
+    );
+    assert!(
+        !runner.state().objects[&rat_a].static_definitions.is_empty(),
+        "exact Rat Colony Oracle text must parse both of its static abilities"
+    );
+    assert!(
+        runner.state().objects[&rat_a]
+            .abilities
+            .iter()
+            .all(|ability| { !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }) }),
+        "exact Rat Colony Oracle text must not leak an unimplemented spell ability"
+    );
+
+    let card_id = runner.state().objects[&rat_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rat_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Rat Colony");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { hit_card, .. },
+            ..
+        } if hit_card == rat_b
+    ));
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast first revealed Rat Colony");
+
+    // B was announced, but A's Ripple resolution is still offering C. B's
+    // trigger must be parked rather than lost or placed early.
+    assert_eq!(runner.state().objects[&rat_b].zone, Zone::Stack);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { hit_card, .. },
+            ..
+        } if hit_card == rat_c
+    ));
+    assert!(
+        !runner.state().stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, ability, .. }
+                if *source_id == rat_b && matches!(ability.effect, Effect::Ripple { .. })
+        )),
+        "B's Ripple trigger cannot be put on the stack before A's Ripple finishes"
+    );
+
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast A's final revealed Rat Colony");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OrderTriggers { ref triggers, .. } if triggers.len() == 2
+    ));
+    runner
+        .act(GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("order the combined B/C Ripple trigger batch");
+    let retrigger_sources: Vec<_> = runner
+        .state()
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id, ability, ..
+            } if matches!(ability.effect, Effect::Ripple { .. }) => Some(*source_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retrigger_sources.iter().filter(|&&id| id == rat_b).count(),
+        1,
+        "B's parked Ripple must join the terminal cast batch exactly once"
+    );
+    assert_eq!(
+        retrigger_sources.iter().filter(|&&id| id == rat_c).count(),
+        1,
+        "C's SpellCast Ripple must join B's parked trigger before either is ordered"
+    );
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the terminal accepted cast must settle the one deferred trigger batch"
+    );
+    assert!(
+        runner.state().pending_resolution_completion.is_none(),
+        "the terminal settlement marker must clear only after C is announced"
+    );
+    let b_stack_index = runner
+        .state()
+        .stack
+        .iter()
+        .position(|entry| entry.id == rat_b)
+        .expect("B remains on the stack beneath its trigger");
+    let c_stack_index = runner
+        .state()
+        .stack
+        .iter()
+        .position(|entry| entry.id == rat_c)
+        .expect("C remains on the stack beneath its trigger");
+    let first_retrigger_index = runner
+        .state()
+        .stack
+        .iter()
+        .position(|entry| {
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, ability, .. }
+                    if (*source_id == rat_b || *source_id == rat_c)
+                        && matches!(ability.effect, Effect::Ripple { .. })
+            )
+        })
+        .expect("the combined Ripple trigger batch is on the stack");
+    assert!(
+        first_retrigger_index > b_stack_index && first_retrigger_index > c_stack_index,
+        "the combined B/C trigger batch must be above both cast Rat Colonies"
+    );
+    assert_eq!(runner.state().objects[&rat_c].zone, Zone::Stack);
+}
+
+/// CR 702.60a + CR 603.3b + CR 616.1: a terminal accepted Ripple cast whose
+/// miss bottom batch pauses for competing replacements keeps the typed terminal
+/// completion through the prompt, then puts B/C's exactly-once Ripple triggers
+/// above both spells after the final cast actually completes.
+#[test]
+fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    let rat_a = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let rat_c = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let miss = scenario
+        .add_spell_to_hand_from_oracle(P0, "Terminal Ripple Miss", true, "Draw a card.")
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let rat_b = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    for (name, destination) in [
+        ("Ripple Library Redirect to Hand", Zone::Hand),
+        ("Ripple Library Redirect to Graveyard", Zone::Graveyard),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_library_move_to(destination));
+    }
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for id in [rat_b, miss, rat_c] {
+            engine::game::zones::remove_from_zone(state, id, Zone::Hand, P0);
+            engine::game::zones::add_to_zone(state, id, Zone::Library, P0);
+            state.objects.get_mut(&id).expect("library card").zone = Zone::Library;
+        }
+    }
+
+    let card_id = runner.state().objects[&rat_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rat_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Rat Colony");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { hit_card, .. },
+            ..
+        } if hit_card == rat_b
+    ));
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("accept B");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { hit_card, .. },
+            ..
+        } if hit_card == rat_c
+    ));
+
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("accept terminal C until bottom replacement choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        matches!(
+            runner
+                .state()
+                .pending_batch_deliveries
+                .as_ref()
+                .and_then(|batch| batch.completion.as_ref()),
+            Some(engine::types::game_state::BatchCompletion::RippleTerminalComplete {
+                player: P0,
+                source_id: _,
+                final_cast: Some(id),
+            }) if *id == rat_c
+        ),
+        "the terminal batch completion must survive the replacement prompt"
+    );
+    assert!(
+        matches!(
+            runner.state().pending_resolution_completion,
+            Some(engine::types::game_state::PendingResolutionCompletion {
+                player: P0,
+                final_cast: Some(id),
+                ..
+            }) if id == rat_c
+        ),
+        "the terminal marker must survive the replacement prompt until C reaches the stack"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("resolve terminal bottom replacement");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OrderTriggers { ref triggers, .. } if triggers.len() == 2
+    ));
+    runner
+        .act(GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("order the combined B/C Ripple trigger batch");
+    let retrigger_sources: Vec<_> = runner
+        .state()
+        .stack
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id, ability, ..
+            } if matches!(ability.effect, Effect::Ripple { .. }) => Some(*source_id),
+            _ => None,
+        })
+        .collect();
+    for id in [rat_b, rat_c] {
+        assert_eq!(
+            retrigger_sources
+                .iter()
+                .filter(|&&source| source == id)
+                .count(),
+            1,
+            "each accepted Ripple cast must contribute exactly one trigger after the pause"
+        );
+        let spell_index = runner
+            .state()
+            .stack
+            .iter()
+            .position(|entry| entry.id == id)
+            .expect("accepted Rat remains on the stack");
+        let trigger_index = runner
+            .state()
+            .stack
+            .iter()
+            .position(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { source_id, ability, .. }
+                        if *source_id == id && matches!(ability.effect, Effect::Ripple { .. })
+                )
+            })
+            .expect("accepted Rat's Ripple trigger is on the stack");
+        assert!(
+            trigger_index > spell_index,
+            "trigger must be above its spell"
+        );
+    }
+    assert!(runner.state().deferred_triggers.is_empty());
+    assert!(runner.state().pending_resolution_completion.is_none());
+    assert!(runner.state().pending_batch_deliveries.is_none());
+}
+
+/// CR 603.2 + CR 603.3b + CR 608.2g + CR 616.1: terminal Ripple settlement
+/// must not re-collect the resumed final cast merely because the earlier,
+/// parked observer is a different source. Aetherflux Reservoir is a distinct
+/// battlefield source, so its exactly-once B/C triggers prove the synthetic
+/// terminal SpellCast collector keys on the event, not `source_id == final_cast`.
+#[test]
+fn terminal_ripple_replacement_resume_collects_distinct_spell_cast_observer() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    let observer = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Aetherflux Reservoir",
+            0,
+            0,
+            AETHERFLUX_RESERVOIR_ORACLE,
+        )
+        .as_enchantment()
+        .id();
+    let rat_a = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .with_keyword(engine::types::keywords::Keyword::Ripple(4))
+        .id();
+    let rat_c = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let miss = scenario
+        .add_spell_to_hand_from_oracle(P0, "Terminal Observer Miss", true, "Draw a card.")
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let rat_b = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    for (name, destination) in [
+        ("Observer Library Redirect to Hand", Zone::Hand),
+        ("Observer Library Redirect to Graveyard", Zone::Graveyard),
+    ] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_library_move_to(destination));
+    }
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for id in [rat_b, miss, rat_c] {
+            engine::game::zones::remove_from_zone(state, id, Zone::Hand, P0);
+            engine::game::zones::add_to_zone(state, id, Zone::Library, P0);
+            state.objects.get_mut(&id).expect("library card").zone = Zone::Library;
+        }
+    }
+    assert!(
+        runner.state().objects[&observer]
+            .trigger_definitions
+            .as_slice()
+            .iter()
+            .any(|trigger| matches!(
+                trigger.definition.mode,
+                engine::types::triggers::TriggerMode::SpellCast
+            )),
+        "exact Aetherflux Reservoir Oracle text must parse to its SpellCast observer"
+    );
+    assert_ne!(
+        observer, rat_c,
+        "the observer must be a distinct battlefield object from the terminal Rat"
+    );
+
+    let card_id = runner.state().objects[&rat_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rat_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Rat Colony");
+
+    // Put Aetherflux's initial-cast trigger below A's Ripple so it remains a
+    // live, distinct observer while Ripple performs the terminal free cast.
+    let initial_order = match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers { triggers, .. } => {
+            let observer_index = triggers
+                .iter()
+                .position(|trigger| trigger.source_id == observer)
+                .expect("Aetherflux observes the initial Rat cast");
+            let ripple_index = triggers
+                .iter()
+                .position(|trigger| trigger.source_id == rat_a)
+                .expect("Rat A's granted Ripple observes its own cast");
+            vec![observer_index, ripple_index]
+        }
+        waiting_for => panic!("expected initial observer/Ripple ordering, got {waiting_for:?}"),
+    };
+    runner
+        .act(GameAction::OrderTriggers {
+            order: initial_order,
+        })
+        .expect("place initial observer below Ripple");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { hit_card, .. },
+            ..
+        } if hit_card == rat_b
+    ));
+
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("accept B while A's Ripple still offers C");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { hit_card, .. },
+            ..
+        } if hit_card == rat_c
+    ));
+    assert_eq!(
+        runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .filter(|context| context.pending.source_id == observer)
+            .count(),
+        1,
+        "B's observer trigger must park while A's Ripple keeps offering cards"
+    );
+
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("accept terminal C until bottom replacement choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("resolve the terminal bottom replacement");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    let first_accepted_rat_index = runner
+        .state()
+        .stack
+        .iter()
+        .position(|entry| entry.id == rat_b)
+        .expect("B remains on the stack");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .skip(first_accepted_rat_index + 1)
+            .filter(|entry| entry.source_id == observer)
+            .count(),
+        2,
+        "Aetherflux contributes exactly one observer trigger for each accepted B/C cast"
+    );
+}
+
+/// CR 113.2c + CR 702.60b: two independent Thrumming Stones grant two Ripple
+/// instances, each of which must become a distinct trigger when a Rat is cast.
+#[test]
+fn two_thrumming_stones_preserve_two_ripple_instances() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    let rat = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&rat].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rat,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Rat Colony");
+    let ripple_triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, ability, .. }
+                    if *source_id == rat && matches!(ability.effect, Effect::Ripple { count: 4 })
+            )
+        })
+        .count();
+    assert_eq!(
+        ripple_triggers, 2,
+        "two Stones must create two Ripple triggers"
+    );
 }
 
 /// CR 608.2g + CR 702.85a: accepting a cascade offer casts the hit DURING

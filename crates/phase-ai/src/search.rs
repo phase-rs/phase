@@ -250,7 +250,7 @@ fn random_card_predicate_guess(
         player,
         choice_type,
         options,
-        source_id: Some(source_id),
+        source: Some(source),
         persist_player: _,
     } = &state.waiting_for
     else {
@@ -259,8 +259,7 @@ fn random_card_predicate_guess(
     if *player != ai_player || !choice_type.is_card_predicate_guess() {
         return None;
     }
-    let source = state.objects.get(source_id)?;
-    if source.controller == ai_player || options.is_empty() {
+    if source.prompt.controller == ai_player || options.is_empty() {
         return None;
     }
     let index = rng.random_range(0..options.len());
@@ -268,8 +267,8 @@ fn random_card_predicate_guess(
     tracing::info!(
         target: "phase_ai::choice",
         ai_player = ai_player.0,
-        source_id = source_id.0,
-        source_name = %source.name,
+        source_id = source.prompt.identity.reference.object_id.0,
+        source_name = %source.prompt.display_name,
         guess = %choice,
         "AI randomly guessed card predicate"
     );
@@ -3100,15 +3099,18 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::ChoiceType;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
         Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
         TargetRef, TypedFilter,
     };
+    use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
-    use engine::types::game_state::{StackEntry, StackEntryKind};
+    use engine::types::game_state::{
+        NamedChoiceSource, NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource,
+        PromptSourceBinding, StackEntry, StackEntryKind,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
     use engine::types::phase::Phase;
@@ -3130,6 +3132,14 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn resolution_choice_source(state: &GameState, object_id: ObjectId) -> NamedChoiceSource {
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            state,
+            state.objects.get(&object_id).unwrap(),
+        );
+        NamedChoiceSource::from_trigger_source(context, NamedChoiceSourceBinding::ResolutionContext)
     }
 
     #[test]
@@ -5258,7 +5268,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source_id: Some(source_id),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
@@ -5283,6 +5293,63 @@ mod tests {
     }
 
     #[test]
+    fn opponent_guess_ai_choice_is_independent_of_private_answer_authority() {
+        let mut state = make_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(0x0A11),
+            PlayerId(1),
+            "Private guess source".to_string(),
+            Zone::Battlefield,
+        );
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source_id).expect("source exists"),
+        );
+        state.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: vec!["greater".to_string(), "not greater".to_string()],
+            choice_type: ChoiceType::Labeled {
+                options: vec!["greater".to_string(), "not greater".to_string()],
+            },
+            source: OpponentGuessSource {
+                prompt: PromptSourceBinding::from_trigger_source(&context),
+            },
+            owner: Some(OpponentGuessOwner {
+                context: context.clone(),
+                committed_choice: Some(ChosenAttribute::Number(7)),
+            }),
+            proposition_truth: Some(true),
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut first_rng = SmallRng::seed_from_u64(71);
+        let first = choose_action(&state, PlayerId(0), &config, &mut first_rng)
+            .expect("the guesser receives a legal option");
+
+        let WaitingFor::OpponentGuess {
+            owner,
+            proposition_truth,
+            ..
+        } = &mut state.waiting_for
+        else {
+            unreachable!("fixture remains an opponent guess");
+        };
+        *owner = Some(OpponentGuessOwner {
+            context,
+            committed_choice: Some(ChosenAttribute::Number(1)),
+        });
+        *proposition_truth = Some(false);
+        let mut second_rng = SmallRng::seed_from_u64(71);
+        let second = choose_action(&state, PlayerId(0), &config, &mut second_rng)
+            .expect("the guesser receives a legal option after private facts change");
+
+        assert_eq!(
+            first, second,
+            "the seeded AI may use only public options, never private truth or committed choice"
+        );
+    }
+
+    #[test]
     fn ai_regular_land_nonland_choice_does_not_use_guess_randomizer() {
         let mut state = make_state();
         let source_id = create_object(
@@ -5300,7 +5367,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source_id: Some(source_id),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let mut rng = SmallRng::seed_from_u64(1);

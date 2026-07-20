@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4758
-- **Total card appearances across root causes:** 4792 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4755
+- **Total card appearances across root causes:** 4789 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -13,7 +13,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 746 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 606 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 604 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 330 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
@@ -39,7 +39,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 25 | Wrong / dropped effect duration | 29 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
-| 28 | Trigger/activation timing or ordinal restriction dropped | 17 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
+| 28 | Trigger/activation timing or ordinal restriction dropped | 16 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 10 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 5 | manual triage |
 
@@ -805,7 +805,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (605 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (603 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1224,7 +1224,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Quicksilver Servitor
 - Quilled Charger
 - Rage Extractor
-- Raging Battle Mouse
 - Rakdos, Lord of Riots
 - Rakish Scoundrel
 - Ramses, Assassin Lord
@@ -1364,7 +1363,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Unyaro
 - Urborg Stalker
 - Urza's Miter
-- Uthros Psionicist
 - Vadrik, Astral Archmage
 - Valakut Exploration
 - Valiant Emberkin
@@ -5073,7 +5071,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 28. Trigger/activation timing or ordinal restriction dropped  (15 cards)
+### 28. Trigger/activation timing or ordinal restriction dropped  (14 cards)
 
 **Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
 
@@ -5086,7 +5084,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Goremand
 - Grizzled Wolverine
 - Hermit of the Natterknolls
-- Highspire Bell-Ringer
 - Hurkyl's Final Meditation
 - Ichneumon Druid
 - MACH-1, Swooping Scoundrel
