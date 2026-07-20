@@ -380,11 +380,23 @@ jobs:
                     exit 0
                     ;;
                   cancelled|skipped|stale|neutral)
-                    # A cancelled/superseded run is not a real failure signal:
-                    # main may have been re-pushed, cancelling this commit's run.
-                    # Keep polling for a conclusive result instead of failing the
-                    # nightly, and fall back to the deadline if none ever arrives.
-                    echo "CI for $RELEASE_SHA is completed/$conclusion (non-conclusive); continuing to wait: $url"
+                    # ci.yml uses cancel-in-progress on the shared CI-<ref> group,
+                    # so any later push to main cancels this commit's run. Tell that
+                    # benign supersession apart from a genuine transient cancel by
+                    # asking whether main has advanced *past* the release commit.
+                    git fetch --force origin main
+                    if [ "$(git rev-parse origin/main)" != "$RELEASE_SHA" ] \
+                       && git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+                      # main advanced past the release commit, so its own CI was
+                      # superseded. Its base was a merge_group-gated (green) main tip
+                      # and its delta is version-files only, so a superseded run is
+                      # not a real failure — proceed to tag the landed release commit.
+                      echo "CI for $RELEASE_SHA was superseded by a later push to main; release commit is a green ancestor, proceeding: $url"
+                      exit 0
+                    fi
+                    # Cancelled while still at main's tip: not a concurrency
+                    # supersession, so treat as transient and keep polling.
+                    echo "CI for $RELEASE_SHA is completed/$conclusion while still at main's tip (transient); continuing to wait: $url"
                     ;;
                   *)
                     echo "::error::CI completed with $conclusion for $RELEASE_SHA: $url"
@@ -413,8 +425,13 @@ jobs:
           set -euo pipefail
           RELEASE_SHA=$(git rev-parse HEAD)
           git fetch --force origin main
-          if [ "$(git rev-parse origin/main)" != "$RELEASE_SHA" ]; then
-            echo "::error::origin/main no longer points at release commit $RELEASE_SHA"
+          # The tag points at the release commit, which is a permanent ancestor of
+          # main once pushed — it does NOT need to be main's current tip. main
+          # legitimately advances during the up-to-1h CI wait. Only fail if the
+          # release commit is no longer contained in main (orphaned by a revert or
+          # history rewrite), which would leave the tag pointing off-branch.
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+            echo "::error::release commit $RELEASE_SHA is not contained in origin/main (reverted or history rewritten)"
             exit 1
           fi
           git push "https://x-access-token:${RELEASE_BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$TAG"
