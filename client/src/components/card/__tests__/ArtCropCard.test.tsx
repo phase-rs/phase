@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
@@ -165,6 +165,43 @@ describe("ArtCropCard", () => {
     expect(document.querySelector("img")).toBeNull();
     // Frame survives here too.
     expect(screen.getByText("/")).toBeInTheDocument();
+  });
+
+  it("re-tries the art when the source changes after a load failure", () => {
+    // Mirrors CardImage's equivalent. Without the reset effect a permanent
+    // whose front-face art 404s would stay latched on the text tile across a
+    // DFC transform forever, even once a loadable face arrives.
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/front.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+    fireEvent.error(document.querySelector("img")!);
+    expect(document.querySelector("img")).toBeNull();
+
+    // ArtCropCard is memo()'d on `objectId`, so re-rendering with identical
+    // props bails out before the hook is re-read. Push a fresh object identity
+    // through the store instead — the same thing a real transform does.
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/back.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    act(() => {
+      useGameStore.setState({
+        gameState: {
+          objects: { 101: { ...transformedPermanent(), timestamp: 2 } },
+        } as never,
+      });
+    });
+
+    const img = document.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img!.getAttribute("src")).toBe("https://example.invalid/back.png");
   });
 
   it("still pulses while art is genuinely resolving", () => {
