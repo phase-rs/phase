@@ -23,7 +23,7 @@ impl SacrificeValuePolicy {
         let WaitingFor::OptionalEffectChoice { source_id, .. } = &ctx.decision.waiting_for else {
             return None;
         };
-        let ability = ctx.state.pending_optional_effect.as_deref()?;
+        let ability = ctx.state.active_optional_effect_frame()?.ability.as_ref();
         if ability.source_id != *source_id || ability.controller != ctx.ai_player {
             return None;
         }
@@ -240,7 +240,11 @@ mod tests {
             source,
             PlayerId(0),
         )));
-        state.pending_optional_effect = Some(Box::new(sacrifice));
+        state.push_optional_effect_frame(engine::types::OptionalEffectFrame {
+            ability: Box::new(sacrifice),
+            trigger_event: None,
+            trigger_match_count: None,
+        });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: source,
@@ -319,7 +323,10 @@ mod tests {
     fn optional_source_preservation_guard_does_not_block_explicit_self_sacrifice() {
         let (mut state, _) = optional_sacrifice_for_card_state();
         let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
-        let ability = state.pending_optional_effect.as_mut().unwrap();
+        let ability = &mut state
+            .active_optional_effect_frame_mut()
+            .expect("fixture parks an optional-effect frame")
+            .ability;
         let Effect::Sacrifice { target, .. } = &mut ability.effect else {
             panic!("fixture must contain a sacrifice effect");
         };
