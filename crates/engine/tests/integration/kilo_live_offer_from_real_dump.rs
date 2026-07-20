@@ -23,8 +23,8 @@ use engine::game::engine::apply;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    GameState, LoopAction, LoopActionContext, ManaChoice, PayCostKind, PersistedGameState,
-    WaitingFor,
+    GameState, LoopAction, LoopActionContext, ManaChoice, PayCostKind, PayableResource,
+    PersistedGameState, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType;
@@ -322,6 +322,28 @@ fn drive_all_accept(state: &mut GameState) {
     }
 }
 
+/// Pass priority (for whichever seat holds it) until the next CR 500.5 phase/step boundary raises
+/// the deferred-collapse prompt. No player re-drives the loop — the accept cleared the recorded
+/// `last_loop_action_sequence` — so the phase simply ends and the boundary drain surfaces the
+/// `PayAmountChoice { LoopCollapse }` prompt for the stash-holder.
+fn drive_to_collapse_boundary(state: &mut GameState) {
+    for _ in 0..200 {
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::LoopCollapse,
+                ..
+            } => return,
+            WaitingFor::Priority { player } => {
+                let p = *player;
+                apply(state, p, GameAction::PassPriority)
+                    .expect("pass priority toward the CR 500.5 collapse boundary");
+            }
+            other => panic!("unexpected beat while driving to the collapse boundary: {other:?}"),
+        }
+    }
+    panic!("did not reach the LoopCollapse boundary prompt within the beat cap");
+}
+
 /// DISPLAY-render acceptance (CR 732.2a / CR 701.34a): accepting the Kilo proliferate ∞-charge
 /// loop marks Pentad Prism's charge counter as an unbounded DISPLAY target — so the frontend
 /// renders `∞` on that pill — WITHOUT mutating the real charge count. Composite of the new
@@ -414,5 +436,116 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
     assert!(
         !empty_json.contains("unbounded_counters"),
         "the field is omitted (skip_serializing_if) when empty"
+    );
+}
+
+/// PERSISTENT-AXIS BOUNDARY COLLAPSE (CR 732.2a / CR 500.5 / CR 701.34a): the accepted Kilo
+/// proliferate ∞-charge loop is PROMPTED at the next phase/step boundary to name a finite N, then
+/// resolves to EXACTLY N more charge counters on Pentad Prism — driven end-to-end through the
+/// public `apply()` boundary from the real 4p dump.
+///
+/// WHY THIS TEST EXISTS (the gap it closes): every OTHER committed Counters/Life/DriveSequence
+/// collapse test manually GRAFTS the deferred stash onto an offer state (`register_pending_
+/// materialization` / `pending_unbounded_materialization` graft), BYPASSING the real accept-time
+/// δ-capture + routing in `materialize_object_growth_shortcut` (engine.rs:
+/// `current_period_counter_growth` + `counter_growth_is_observed` ⇒ `register_pending_
+/// materialization(DriveSequence{..})`). This test drives that REAL registration — it never grafts
+/// a stash — so a regression that stops registering the DriveSequence for observed counter loops
+/// is caught here (and ONLY here).
+///
+/// REVERT-PROBE (measured, non-vacuous): disabling the DriveSequence registration in
+/// `materialize_object_growth_shortcut` (engine.rs, the `if counter_observed || life_observed`
+/// arm's `state.register_pending_materialization(.. DriveSequence ..)` push) leaves the Kilo
+/// counter loop with NO deferred stash ⇒ `next_apnap_player_with_pending_materialization` finds
+/// nothing at the CR 500.5 boundary ⇒ the `PayAmountChoice { LoopCollapse }` prompt never fires
+/// (priority advances straight into combat) ⇒ the boundary reach-guard (2) FLIPS to a panic.
+#[test]
+fn kilo_accept_collapses_at_boundary_to_exactly_n_counters() {
+    use engine::game::derived_views::derive_views;
+    use engine::types::counter::CounterType;
+
+    const N: u32 = 5;
+    let charge = CounterType::Generic("charge".into());
+
+    let mut state = load_migrated_dump();
+    drive_one_live_cycle(&mut state);
+
+    // (1) Reach-guard (gates everything downstream): the ∞-charge offer surfaced for P0.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the CR 732.2a ∞-charge offer for P0, got {:?}",
+        state.waiting_for
+    );
+    // Baseline: the REAL charge count at the offer (grew 3→4 in the driven cycle). Neither accept
+    // nor the boundary collapse may touch this until N is named.
+    let baseline = state.objects[&PENTAD]
+        .counters
+        .get(&charge)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        baseline, 4,
+        "Pentad carries 4 real charge counters at the offer"
+    );
+
+    // Accept the ∞-charge shortcut through the REAL APNAP pipeline — routes through
+    // `materialize_object_growth_shortcut`, where `counter_growth_is_observed` is true for the
+    // real proliferate loop, so a DriveSequence stash is REGISTERED (not grafted). Accept is
+    // display-only: the real count is deferred to the boundary.
+    drive_all_accept(&mut state);
+    assert_eq!(
+        state.objects[&PENTAD].counters.get(&charge).copied(),
+        Some(baseline),
+        "accept is display-only: the real charge count is untouched until the boundary collapse"
+    );
+
+    // Drive priority to the next CR 500.5 boundary (PreCombatMain → BeginCombat). The deferred
+    // DriveSequence stash makes the boundary drain prompt P0 for the finite collapse count.
+    drive_to_collapse_boundary(&mut state);
+
+    // (2) THE BOUNDARY PROMPT (FLIPS on revert of the DriveSequence registration): P0 is asked to
+    // name the finite count the accepted ∞-charge loop collapses into (CR 732.2a).
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { resource: PayableResource::LoopCollapse, player, .. }
+                if player == P0
+        ),
+        "at the CR 500.5 boundary P0 is prompted to name the finite collapse count, got {:?}",
+        state.waiting_for
+    );
+
+    // (3) SUBMIT N: the collapse replays N REAL proliferate cycles (drive_persistent_axis_collapse),
+    // each firing CR 701.34a proliferate and adding +1 charge.
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: N })
+        .expect("P0 names the finite collapse count N");
+
+    // (4) EXACTLY +N counters (the measured 4→9 for N=5): the persistent axis collapsed to a
+    // finite, rules-correct count — not ∞, not off-by-one.
+    assert_eq!(
+        state.objects[&PENTAD].counters.get(&charge).copied(),
+        Some(baseline + N),
+        "the accepted ∞-charge loop collapsed to EXACTLY baseline+N charge counters"
+    );
+
+    // (5) THE ∞ DISPLAY PILL CLEARS once the axis collapses to a finite N — both the raw field
+    // (`clear_collapsed_materializations`) and the derived FE projection — so the pill renders 9
+    // not ∞.
+    assert!(
+        !state.unbounded_counter_targets.contains_key(&P0),
+        "the collapsed ∞ counter target is cleared for P0, got {:?}",
+        state.unbounded_counter_targets.get(&P0)
+    );
+    assert_eq!(
+        derive_views(&state, None).unbounded_counters.get(&PENTAD),
+        None,
+        "the derived ∞-counter view no longer projects Pentad after the collapse"
+    );
+
+    // (6) The boundary protocol closed cleanly back to ordinary priority (CR 800.4a).
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "after the collapse submit, priority is restored, got {:?}",
+        state.waiting_for
     );
 }

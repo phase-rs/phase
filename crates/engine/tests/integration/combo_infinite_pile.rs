@@ -40,7 +40,9 @@ use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, LoopDetectionMode, PayableResource, WaitingFor};
+use engine::types::game_state::{
+    GameState, LoopDetectionMode, PayableResource, PersistentAxisMaterialization, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
@@ -682,6 +684,87 @@ fn real_4p_basalt_power_artifact_refills_colorless_only() {
 // matched mana NEGATIVE discriminator.
 
 /// Every battlefield Saproling P0 controls (tapped or not) — the mint oracle.
+/// PR-7 v4 (CR 732.2a) — the OBSERVED-growth DRIVE path: a loop whose growing axis is observed is
+/// collapsed by ONE `DriveSequence` that REPLAYS the captured period N times through real `apply()`
+/// at the boundary (observers fire each cycle), NOT a batched N×δ. Real 4p offer dump → real accept
+/// → graft the `DriveSequence` the observed accept route emits over the REAL captured recast period
+/// → real boundary → `apply(SubmitPayAmount{3})`. The replay re-casts the real Sprout Swarm buyback
+/// period 3× and mints exactly 3 real Saproling tokens (one per driven cycle), and the collapsed
+/// axes cash out.
+///
+/// This drives the `drive_persistent_axis_collapse` production seam through the real `apply()`
+/// pipeline — the serde round-trip test only proves the stash payload survives; the routing unit
+/// test only proves the accept route CHOOSES DriveSequence. REVERT-PROBE (discriminating): stub the
+/// `drive_persistent_axis_collapse(..)` call in the `DriveSequence` submit arm to a no-op ⇒ 0 tokens
+/// mint ⇒ assertion (1) FLIPS (base + 0 ≠ base + 3). MEASURED: N=3 ⇒ +3 Saprolings.
+#[test]
+fn real_4p_observed_drive_sequence_replays_captured_period_n_times() {
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    let seq = state.last_loop_action_sequence.clone();
+    assert!(
+        !seq.is_empty(),
+        "the offer carries the real recast period the DriveSequence replays"
+    );
+    drive_all_accept(&mut state);
+
+    // An OBSERVED loop's accept registers ONE DriveSequence over the whole loop (all axes) instead
+    // of the batched Tokens/Counters/Life. Emulate that route: drop the batched token stash the
+    // accept wrote for THIS (unobserved) fixture and graft the DriveSequence the observed route
+    // would emit, carrying the SAME ∞ axes the token loop marked.
+    let collapsed_axes: Vec<_> = state
+        .unbounded_resources
+        .get(&P0)
+        .expect("the accepted loop marked P0's ∞ axes")
+        .iter()
+        .cloned()
+        .collect();
+    state.pending_unbounded_materialization.clear();
+    state.register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::DriveSequence {
+            sequence: seq,
+            collapsed_axes: collapsed_axes.clone(),
+        },
+    );
+
+    drive_priority_to_next_boundary(&mut state);
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+                if player == P0
+        ),
+        "the boundary prompts P0 for the DriveSequence LoopCollapse count, got {:?}",
+        state.waiting_for
+    );
+
+    let saps_before = p0_saproling_ids(&state).len();
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 3 })
+        .expect("P0 submits the finite DriveSequence collapse count");
+
+    // (1) DISCRIMINATOR: the DriveSequence REPLAYED the captured recast period 3× through real
+    //     apply(), minting exactly 3 real Saproling tokens (one per driven cycle).
+    assert_eq!(
+        p0_saproling_ids(&state).len(),
+        saps_before + 3,
+        "SubmitPayAmount{{3}} replays the captured period 3× ⇒ 3 real Saprolings (stub drive ⇒ 0)"
+    );
+    // (2) the collapsed ∞ axes cash out; Priority restored.
+    assert!(
+        collapsed_axes.iter().all(|ax| !state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|a| a.contains(ax))),
+        "the DriveSequence collapses its ∞ axes"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the boundary fixpoint restores Priority, got {:?}",
+        state.waiting_for
+    );
+}
+
 fn p0_saproling_ids(state: &GameState) -> BTreeSet<ObjectId> {
     state
         .battlefield
@@ -1075,7 +1158,7 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
         replacement_definitions: std::sync::Arc::default(),
         static_definitions: std::sync::Arc::default(),
     });
-    state.register_pending_materialization(P0, profile);
+    state.register_pending_materialization(P0, PersistentAxisMaterialization::Tokens(profile));
 
     // Seed so the drain has a real delta.
     refill_infinite_mana(&mut state);
@@ -1475,5 +1558,261 @@ fn build_fresh_convoke_none_untapped_growth_does_not_seed_tapped_pile() {
         count_battlefield_saprolings(runner.state()),
         sap_pre_accept,
         "the Saproling count is UNCHANGED across accept — no spurious seed mint (buggy guard → +2)"
+    );
+}
+
+// ─────────── PR-7 v4 (CR 732.2a): batched persistent-axis boundary collapse (counter + life) ───────────
+
+/// PR-7 v4 (CR 732.2a / CR 122.1 / CR 119.3): the boundary collapse batches N×δ for the beneficial
+/// COUNTER axis and — in the SAME submit — DECLINES the LIFE axis because the real 4p board carries
+/// a functioning life observer. Real 4p offer dump → real accept → graft a +1/+1 counter axis +
+/// a life axis onto the accepted token loop (`mark_unbounded_loop` + `register_pending_materialization`
+/// are the standard Part-2 accept writers) → real boundary → `apply(SubmitPayAmount{5})`.
+///
+/// MEASURED on this fixture (throwaway probe, then removed): post-accept `counter_growth_is_observed
+/// == false`, `life_growth_is_observed == true` — the board has NO counter observer but a REAL life
+/// observer. So this one submit exercises BOTH firewall branches at once and PROVES the firewall is
+/// AXIS-SPECIFIC, not a coarse OR: the counter batches (unobserved) while the life is vetoed
+/// (observed) — a coarse OR would wrongly veto the counter too.
+///
+/// REVERT-PROBE (discriminating):
+///  - delete the `PersistentAxisMaterialization::Counters` submit arm ⇒ the +1/+1 counter is
+///    unchanged ⇒ assertion (1) FLIPS.
+///  - replace the per-axis `counter_observed_now` with the coarse OR (`counter_observed || life`)
+///    ⇒ the counter is wrongly declined ⇒ assertion (1) FLIPS. Axis-specificity is load-bearing.
+///  - delete the `life_observed_now` re-check ⇒ the observed life wrongly batches (+15) ⇒
+///    assertion (2) FLIPS.
+///
+/// The token mint (assertion 3) is the positive reach-guard proving the submit ran past any
+/// short-circuit; no assertion is vacuous.
+#[test]
+fn real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_life() {
+    use engine::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::CounterGrowth;
+
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    drive_all_accept(&mut state);
+
+    // Graft a beneficial +1/+1 counter axis (UNOBSERVED on this board) and a life axis (OBSERVED)
+    // onto the accepted token loop — the SAME single-authority writers the accept path uses.
+    let creature = *p0_saproling_ids(&state)
+        .iter()
+        .next()
+        .expect("P0 controls at least one Saproling to bear a +1/+1 counter");
+    let base_counters = 1u32;
+    state
+        .objects
+        .get_mut(&creature)
+        .unwrap()
+        .counters
+        .insert(CounterType::Plus1Plus1, base_counters);
+    let p0_life_before = state.players.iter().find(|p| p.id == P0).unwrap().life;
+
+    state.mark_unbounded_loop(
+        P0,
+        &[
+            ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+            ResourceAxis::Life(P0),
+        ],
+    );
+    state.register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+            object: creature,
+            counter: CounterType::Plus1Plus1,
+            per_cycle_delta: 2,
+        }]),
+    );
+    state.register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::Life {
+            player: P0,
+            per_cycle_delta: 3,
+        },
+    );
+
+    drive_priority_to_next_boundary(&mut state);
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+                if player == P0
+        ),
+        "the boundary must prompt P0 for the multi-axis LoopCollapse count, got {:?}",
+        state.waiting_for
+    );
+
+    let saps_before = p0_saproling_ids(&state);
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 5 })
+        .expect("P0 submits the finite multi-axis loop-collapse count");
+
+    // (1) COUNTER axis (UNOBSERVED): +1/+1 grew by N×δ = 5×2 = 10 (base 1 → 11). The batched-path
+    //     DISCRIMINATOR + axis-specificity discriminator (a coarse OR would veto this too).
+    assert_eq!(
+        state
+            .objects
+            .get(&creature)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        base_counters + 5 * 2,
+        "SubmitPayAmount{{5}} adds 5×2 = 10 +1/+1 counters (unobserved axis batches)"
+    );
+    // (2) LIFE axis (OBSERVED on the real board): DECLINED — life UNCHANGED, axis stays ∞. The
+    //     finding-#4 re-check DISCRIMINATOR (delete it ⇒ +15 wrongly applies).
+    assert_eq!(
+        state.players.iter().find(|p| p.id == P0).unwrap().life,
+        p0_life_before,
+        "the real board's life observer ⇒ the batched life collapse is DECLINED (unchanged)"
+    );
+    // (3) TOKEN axis still mints N (positive reach-guard; multi-item dispatch unregressed).
+    assert_eq!(
+        p0_saproling_ids(&state).len(),
+        saps_before.len() + 5,
+        "5 tapped Saproling tokens mint alongside the counter collapse"
+    );
+    // (4) Axis-scoped cash-out: the collapsed counter axis is gone, the DECLINED life axis stays ∞.
+    assert!(
+        state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|a| a.contains(&ResourceAxis::Life(P0))),
+        "the declined life axis stays ∞-marked for manual play (CR 732.2a / CR 732.2b)"
+    );
+    assert!(
+        !state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|a| a.contains(&ResourceAxis::Counter(
+                CounterClass::Plus1Plus1,
+                ObjectClass::Creature
+            ))),
+        "the collapsed counter axis cashes out of the ∞ status"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the boundary fixpoint restores Priority, got {:?}",
+        state.waiting_for
+    );
+}
+
+/// PR-7 v4 (CR 732.2a) — FINDING #4 (accept→boundary observer-drift): the observed-growth firewall
+/// runs at ACCEPT, but the controller could cast an observer of the growing class BEFORE the
+/// boundary. Because the batched `apply_counter_addition` bypasses the counter doubler pipeline, a
+/// lump N×δ apply would mis-honor a newly-present observer. The submit handler RE-CHECKS the
+/// firewall per-axis and DECLINES the batched COUNTER collapse when an observer appeared, leaving
+/// the ∞ axis for manual play (CR 732.2a / CR 732.2b never force a shortcut) — unambiguously sound.
+///
+/// MATCHED PAIR with `real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_life`
+/// (no counter observer ⇒ the counter batches 5×2): the SAME grafted +1/+1 counter loop, WITH a
+/// `CounterAdded` observer (Corpsejack-like) grafted into the accept→boundary window, DECLINES
+/// (counter unchanged, axis stays ∞). MEASURED: this fixture's post-accept
+/// `counter_growth_is_observed == false`, so WITHOUT the graft the counter batches — the graft is
+/// LOAD-BEARING (the drift, not an incidental board observer, flips the outcome). REVERT-PROBE
+/// (discriminating): delete the `counter_observed_now` re-check ⇒ the batched counter wrongly grows
+/// (+10) and the axis clears ⇒ assertion (1) FLIPS. The token mint (assertion 2) is the positive
+/// reach-guard proving the submit ran past the short-circuit.
+#[test]
+fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_mints_tokens() {
+    use engine::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
+    use engine::types::ability::TriggerDefinition;
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::CounterGrowth;
+    use engine::types::triggers::TriggerMode;
+
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    drive_all_accept(&mut state);
+
+    // Graft a +1/+1 counter axis (UNOBSERVED at accept — MEASURED counter_growth_is_observed=false).
+    let creature = *p0_saproling_ids(&state)
+        .iter()
+        .next()
+        .expect("P0 controls at least one Saproling to bear a +1/+1 counter");
+    let base_counters = 1u32;
+    state
+        .objects
+        .get_mut(&creature)
+        .unwrap()
+        .counters
+        .insert(CounterType::Plus1Plus1, base_counters);
+    state.mark_unbounded_loop(
+        P0,
+        &[ResourceAxis::Counter(
+            CounterClass::Plus1Plus1,
+            ObjectClass::Creature,
+        )],
+    );
+    state.register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+            object: creature,
+            counter: CounterType::Plus1Plus1,
+            per_cycle_delta: 2,
+        }]),
+    );
+
+    // FINDING #4: simulate the controller casting a counter observer (Corpsejack) in the
+    // accept→boundary window — attach a `CounterAdded` trigger to a P0 battlefield permanent AFTER
+    // the accept-time firewall already ran. WITHOUT this graft the counter batches (matched pair).
+    let observer_host = *p0_saproling_ids(&state)
+        .iter()
+        .find(|id| **id != creature)
+        .unwrap_or(&creature);
+    state
+        .objects
+        .get_mut(&observer_host)
+        .unwrap()
+        .trigger_definitions = vec![TriggerDefinition::new(TriggerMode::CounterAdded)].into();
+
+    drive_priority_to_next_boundary(&mut state);
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+                if player == P0
+        ),
+        "the token axis still prompts LoopCollapse at the boundary, got {:?}",
+        state.waiting_for
+    );
+
+    let saps_before = p0_saproling_ids(&state);
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 5 })
+        .expect("P0 submits the loop-collapse count");
+
+    // (1) DISCRIMINATOR: the batched counter collapse is DECLINED (an observer appeared in the
+    //     window) — +1/+1 UNCHANGED, and the counter ∞ axis stays MARKED for manual play.
+    assert_eq!(
+        state
+            .objects
+            .get(&creature)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        base_counters,
+        "a counter observer drifted into the accept→boundary window ⇒ batched counter DECLINED"
+    );
+    assert!(
+        state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|a| a.contains(&ResourceAxis::Counter(
+                CounterClass::Plus1Plus1,
+                ObjectClass::Creature
+            ))),
+        "the declined counter axis stays ∞-marked for manual play (CR 732.2a / CR 732.2b)"
+    );
+    // (2) POSITIVE reach-guard: the Tokens axis STILL mints N (tokens honor observers via real ETB
+    //     events, so they always proceed) — proves the submit ran and the negative is non-vacuous.
+    assert_eq!(
+        p0_saproling_ids(&state).len(),
+        saps_before.len() + 5,
+        "the token axis still mints 5 (only the observer-drifted counter axis is declined)"
     );
 }

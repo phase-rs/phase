@@ -47,7 +47,7 @@ use super::resolution::ResolutionStateWire;
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
-use crate::analysis::resource::ResourceAxis;
+use crate::analysis::resource::{object_class, CounterClass, ObjectClass, ResourceAxis};
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
@@ -3367,6 +3367,51 @@ pub struct PendingCopyTokenBatch {
     pub owner: PlayerId,
     pub copy: Box<CopyTokenSpec>,
     pub count: u32,
+}
+
+/// CR 732.2a: one deferred finite-N materialization of an accepted unbounded loop's
+/// persistent-growth axis, applied at the CR 500.5 step/phase boundary at the
+/// controller-named N. Generalizes the shipped token-only deferred materialization to
+/// the whole persistent-materialization class (tokens, beneficial-growable counters,
+/// life gain) plus the observed-growth discrete-cycle replay. A future persistent axis
+/// is a new leaf variant + one submit arm + one clear arm (exhaustive `match` keeps
+/// every seam honest — a new variant will not compile until classified).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PersistentAxisMaterialization {
+    /// CR 707.2 + CR 111.1: mint N tapped copy-tokens of this fodder profile
+    /// (the `TokensCreated` axis).
+    Tokens(Box<CopiableValues>),
+    /// CR 122.1 / CR 701.34a: apply `per_cycle_delta × N` counters to each captured
+    /// target (the beneficial-growable counter axis: Generic / +1/+1 / loyalty / defense).
+    Counters(Vec<CounterGrowth>),
+    /// CR 119.3: gain `per_cycle_delta × N` life for `player` via the life-gain authority.
+    Life {
+        player: PlayerId,
+        per_cycle_delta: u32,
+    },
+    /// CR 732.2a: an OBSERVED-growth loop cannot be single-batched (a per-cycle
+    /// trigger/replacement reads or reacts to the growing axis, e.g. Heliod on life gain
+    /// or Corpsejack on counter placement). Replay this captured action `sequence` N
+    /// times through real `apply()` at the boundary so each observer fires each cycle.
+    /// The `sequence` is CLONED into the stash (it serializes; round-trip verified) so the
+    /// boundary read survives save/reload and does NOT rely on the serde-skipped live
+    /// `last_loop_action_sequence` (sidesteps the Kilo FIX-3 drop-on-load scar).
+    /// `collapsed_axes` is the exact ∞-mark set this loop set (== `proposal.unbounded`),
+    /// captured at accept for a scoped clear.
+    DriveSequence {
+        sequence: Vec<LoopActionContext>,
+        collapsed_axes: Vec<ResourceAxis>,
+    },
+}
+
+/// CR 122.1: one object's per-cycle beneficial counter growth captured at accept, for
+/// the unobserved batched path. `per_cycle_delta` is multiplied by the controller-named
+/// N at the boundary and applied via the single counter authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CounterGrowth {
+    pub object: ObjectId,
+    pub counter: CounterType,
+    pub per_cycle_delta: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11454,8 +11499,8 @@ pub struct GameState {
     /// `turns` end-of-step keep gate read (CR 500.5 suppressed for that player
     /// only — a debug-only departure from the rules). Written ONLY through
     /// `mark_unbounded_loop` (the sole write authority) and cleared through
-    /// `clear_unbounded_loop` (whole-player), `clear_unbounded_token_loop`
-    /// (token-axis-scoped), and `clear_unbounded_mana_loop` (mana-axis-scoped).
+    /// `clear_unbounded_loop` (whole-player), `clear_collapsed_materializations`
+    /// (persistent-axis-scoped), and `clear_unbounded_mana_loop` (mana-axis-scoped).
     ///
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same family as `static_gate_truth` /
@@ -11526,27 +11571,32 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_counter_targets: BTreeMap<PlayerId, BTreeSet<(ObjectId, CounterType)>>,
 
-    /// CR 732.2a / CR 707.2: for each controller that accepted an object-growth
-    /// loop shortcut (Part 1 marks the `TokensCreated` ∞ axis and mints ZERO
-    /// objects), the copiable profile of the fodder the period reproduces. Stored
-    /// at accept and consumed at the next phase/step boundary, where the controller
-    /// is prompted (`PayableResource::LoopCollapse`) for a finite N and N tapped
-    /// copy-tokens are minted from this profile (the CR 732.2a deferred count).
-    /// A `CopiableValues` mint recipe, NOT an `ObjectId` (the board is not frozen
-    /// accept→boundary — the controller acts at priority in between) and NOT a
-    /// `ResidualPermanent` (a token's `oracle_id` is empty, insufficient to
-    /// recreate it). Written ONLY by `register_pending_materialization`; taken by
-    /// `take_pending_materialization`; cleared axis-scoped by
-    /// `clear_unbounded_token_loop` (and, whole-player, by `clear_unbounded_loop`).
+    /// CR 732.2a: for each controller that accepted an unbounded loop shortcut, the
+    /// list of deferred persistent-axis materializations captured at accept. Part 1
+    /// marks the ∞ axes and mutates NOTHING (or, for a token loop, seeds a display
+    /// anchor); the concrete finite growth is applied at the next phase/step boundary,
+    /// where the controller is prompted (`PayableResource::LoopCollapse`) for a finite
+    /// N. Each element is one `PersistentAxisMaterialization` — an unobserved loop
+    /// registers per-axis batched items (`Tokens` mint recipe / `Counters` δ / `Life` δ)
+    /// that apply N×δ; an OBSERVED loop registers one `DriveSequence` that replays N real
+    /// cycles so every per-cycle observer fires. The token profile is a `CopiableValues`
+    /// mint recipe, NOT an `ObjectId` (the board is not frozen accept→boundary) and NOT a
+    /// `ResidualPermanent` (a token's `oracle_id` is empty). Written ONLY by
+    /// `register_pending_materialization` (push); taken by `take_pending_materialization`;
+    /// cleared axis-scoped by `clear_collapsed_materializations` (and, whole-player, by
+    /// `clear_unbounded_loop`).
     ///
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same unbounded family as `unbounded_resources` /
     /// `unbounded_loop_enablers` / `unbounded_loop_pile`): deferred-materialization
     /// annotation, not rules state for equality — a populated live state must still
     /// compare equal to the empty ring snapshots, or CR 104.4b loop detection
-    /// yields false negatives.
+    /// yields false negatives. NOTE: the `DriveSequence.sequence` payload IS
+    /// load-bearing across save/reload (unlike the serde-skipped live
+    /// `last_loop_action_sequence`) — it lives IN this serialized stash and drives the
+    /// boundary replay; round-trip is verified in the integration suite.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub pending_unbounded_materialization: BTreeMap<PlayerId, Box<CopiableValues>>,
+    pub pending_unbounded_materialization: BTreeMap<PlayerId, Vec<PersistentAxisMaterialization>>,
 
     /// Oracle ids (fallback: object names) of cards whose abilities hit
     /// `Effect::Unimplemented` at resolution this game. Diagnostics only —
@@ -15361,30 +15411,33 @@ impl GameState {
             .insert(controller, targets.into_iter().collect());
     }
 
-    /// CR 732.2a / CR 707.2: single write authority for
-    /// `pending_unbounded_materialization` — only
-    /// `game::engine::materialize_object_growth_shortcut` calls this, at accept,
-    /// with the fodder's copiable profile. Consumed at the next phase/step boundary
-    /// (`take_pending_materialization`) to mint the deferred finite count of tokens.
-    /// Overwrites (idempotent re-registration for the same controller).
+    /// CR 732.2a: single write authority for `pending_unbounded_materialization` — only
+    /// `game::engine::materialize_object_growth_shortcut` calls this, at accept, PUSHING
+    /// one deferred axis materialization onto the controller's list. An unobserved loop
+    /// pushes per-axis batched items (`Tokens` / `Counters` / `Life`); an observed loop
+    /// pushes one `DriveSequence`. Consumed at the next phase/step boundary
+    /// (`take_pending_materialization`) to apply the deferred finite growth. Appends
+    /// (multiple axes of one loop, or two accepts by the same controller, coexist).
     pub fn register_pending_materialization(
         &mut self,
         controller: PlayerId,
-        profile: Box<CopiableValues>,
+        item: PersistentAxisMaterialization,
     ) {
         self.pending_unbounded_materialization
-            .insert(controller, profile);
+            .entry(controller)
+            .or_default()
+            .push(item);
     }
 
-    /// CR 732.2a: take (remove and return) the deferred materialization profile for
-    /// `controller`, if any. Removing on take is load-bearing for the boundary
-    /// collapse fixpoint (§7): the `LoopCollapse` submit handler must clear the
-    /// stash — even on its error path — so the phase-transition re-drain terminates
-    /// rather than re-prompting forever.
+    /// CR 732.2a: take (remove and return) the whole deferred materialization list for
+    /// `controller`, if any. Removing on take is load-bearing for the boundary collapse
+    /// fixpoint (§7): the `LoopCollapse` submit handler must clear the stash — even on
+    /// its error path — so the phase-transition re-drain terminates rather than
+    /// re-prompting forever.
     pub fn take_pending_materialization(
         &mut self,
         controller: PlayerId,
-    ) -> Option<Box<CopiableValues>> {
+    ) -> Option<Vec<PersistentAxisMaterialization>> {
         self.pending_unbounded_materialization.remove(&controller)
     }
 
@@ -15400,24 +15453,117 @@ impl GameState {
         self.pending_unbounded_materialization.remove(&controller);
     }
 
-    /// CR 732.2a: end ONLY the accepted object-growth (token) loop for `controller`
-    /// after its deferred count has been materialized — an AXIS-SCOPED collapse, not
-    /// the whole-player `clear_unbounded_loop`. Removes the `TokensCreated` axis from
-    /// `unbounded_resources` (dropping the player key iff its axis set becomes empty),
-    /// the deferred materialization stash, and the token-specific `unbounded_loop_pile`
-    /// entry. PRESERVES any coexisting unbounded axis for the same controller (e.g. a
-    /// debug `SetInfiniteMana` `Mana(_)` axis, reachable during playtest) and the
-    /// `unbounded_loop_enablers` annotation. Collapsing the token loop must end that
-    /// loop and nothing else (build for the class, not the single-combo case).
-    pub fn clear_unbounded_token_loop(&mut self, controller: PlayerId) {
+    /// CR 732.2a: end the ACTUALLY-collapsed persistent axes for `controller` after
+    /// their deferred growth has been materialized — an AXIS-SCOPED collapse, not the
+    /// whole-player `clear_unbounded_loop`. Scoped to `collapsed`, the exact set of
+    /// `PersistentAxisMaterialization` items that were applied at this boundary:
+    /// - `Tokens(_)` ⇒ remove `ResourceAxis::TokensCreated` and the token `unbounded_loop_pile`.
+    /// - `Counters(growths)` ⇒ remove each `(object, counter)` display pair and the
+    ///   `Counter(CounterClass, ObjectClass)` axes those growths back that no SURVIVING
+    ///   display target still backs (a coexisting uncollapsed Generic counter loop keeps
+    ///   its axis + pill).
+    /// - `Life { player, .. }` ⇒ remove `ResourceAxis::Life(player)`.
+    /// - `DriveSequence { collapsed_axes, .. }` ⇒ remove exactly `collapsed_axes` and the
+    ///   display targets those axes back (the driven loop collapses whole).
+    ///
+    /// PRESERVES any coexisting NON-collapsed axis (a debug `SetInfiniteMana` `Mana(_)`
+    /// axis, or a second uncollapsed loop): the collapsed set never contains a `Mana(_)`
+    /// axis, so mana is preserved by construction. Drops `unbounded_resources[controller]`
+    /// (and its `unbounded_loop_enablers` entry in CR 104.4b/CR 110.1 lockstep, mirroring
+    /// `clear_unbounded_mana_loop`) only when its axis set becomes empty. Always removes
+    /// the whole `pending_unbounded_materialization` list (owned by `take_` at the submit
+    /// site). Leaves `clear_unbounded_mana_loop` / `clear_unbounded_loop` untouched.
+    pub fn clear_collapsed_materializations(
+        &mut self,
+        controller: PlayerId,
+        collapsed: &[PersistentAxisMaterialization],
+    ) {
+        // The `unbounded_resources` axis a counter of `ct` on `obj_id` backs — mirrors
+        // `ResourceVector::snapshot`'s `(CounterClass, ObjectClass)` keying. A vanished
+        // token bearer (CR 400.7) has unknowable class ⇒ `Other` (removing a non-present
+        // axis is a harmless no-op; the surviving-target guard below re-preserves any that
+        // is still backed).
+        fn counter_axis(state: &GameState, obj_id: ObjectId, ct: &CounterType) -> ResourceAxis {
+            let oc = state
+                .objects
+                .get(&obj_id)
+                .map(|o| object_class(o.card_types.core_types.as_slice()))
+                .unwrap_or(ObjectClass::Other);
+            ResourceAxis::Counter(CounterClass::from_counter_type(ct), oc)
+        }
+
+        // --- Phase 1 (reads): what to remove ---
+        let mut axes_to_remove: BTreeSet<ResourceAxis> = BTreeSet::new();
+        let mut collapsed_pairs: BTreeSet<(ObjectId, CounterType)> = BTreeSet::new();
+        let mut driven_axes: BTreeSet<ResourceAxis> = BTreeSet::new();
+        let mut drop_token_pile = false;
+        for item in collapsed {
+            match item {
+                PersistentAxisMaterialization::Tokens(_) => {
+                    axes_to_remove.insert(ResourceAxis::TokensCreated);
+                    drop_token_pile = true;
+                }
+                PersistentAxisMaterialization::Counters(growths) => {
+                    for g in growths {
+                        axes_to_remove.insert(counter_axis(self, g.object, &g.counter));
+                        collapsed_pairs.insert((g.object, g.counter.clone()));
+                    }
+                }
+                PersistentAxisMaterialization::Life { player, .. } => {
+                    axes_to_remove.insert(ResourceAxis::Life(*player));
+                }
+                PersistentAxisMaterialization::DriveSequence { collapsed_axes, .. } => {
+                    for ax in collapsed_axes {
+                        axes_to_remove.insert(*ax);
+                        driven_axes.insert(*ax);
+                        if matches!(ax, ResourceAxis::TokensCreated) {
+                            drop_token_pile = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Surviving Generic display targets = current minus collapsed pairs minus the
+        // driven loop's targets. A Counter axis still backed by one of these is NOT
+        // collapsed (coexisting uncollapsed loop keeps its ∞ pill).
+        let surviving_targets: BTreeSet<(ObjectId, CounterType)> = self
+            .unbounded_counter_targets
+            .get(&controller)
+            .map(|ts| {
+                ts.iter()
+                    .filter(|(obj, ct)| {
+                        !collapsed_pairs.contains(&(*obj, ct.clone()))
+                            && !driven_axes.contains(&counter_axis(self, *obj, ct))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let backed: BTreeSet<ResourceAxis> = surviving_targets
+            .iter()
+            .map(|(obj, ct)| counter_axis(self, *obj, ct))
+            .collect();
+        axes_to_remove.retain(|ax| !backed.contains(ax));
+
+        // --- Phase 2 (mutations) ---
+        if surviving_targets.is_empty() {
+            self.unbounded_counter_targets.remove(&controller);
+        } else {
+            self.unbounded_counter_targets
+                .insert(controller, surviving_targets);
+        }
+        if drop_token_pile {
+            self.unbounded_loop_pile.remove(&controller);
+        }
         if let Some(axes) = self.unbounded_resources.get_mut(&controller) {
-            axes.remove(&ResourceAxis::TokensCreated);
+            axes.retain(|a| !axes_to_remove.contains(a));
             if axes.is_empty() {
                 self.unbounded_resources.remove(&controller);
+                self.unbounded_loop_enablers.remove(&controller); // CR 104.4b / CR 110.1 lockstep
             }
         }
         self.pending_unbounded_materialization.remove(&controller);
-        self.unbounded_loop_pile.remove(&controller);
     }
 
     /// CR 500.5 + CR 106.4: end a loop-backed ∞-mana capability at a step/phase boundary — an
@@ -17478,7 +17624,10 @@ mod tests {
 
         let a = GameState::new_two_player(7);
         let mut b = a.clone();
-        b.register_pending_materialization(PlayerId(0), dummy_copiable_profile("Saproling"));
+        b.register_pending_materialization(
+            PlayerId(0),
+            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+        );
         // Sanity: the populated field really does differ between the two states.
         assert_ne!(
             a.pending_unbounded_materialization, b.pending_unbounded_materialization,
@@ -17532,18 +17681,71 @@ mod tests {
         );
     }
 
-    /// PR-7 Part 2 (CR 732.2a): `clear_unbounded_token_loop` is AXIS-SCOPED — it
-    /// ends ONLY the accepted token loop (the `TokensCreated` axis + stash + token
-    /// pile) and PRESERVES any coexisting unbounded axis for the same controller
-    /// (e.g. a debug `SetInfiniteMana` `Mana(_)` axis). This is the building block
-    /// that keeps a token-loop collapse from wiping a coexisting infinite-mana
-    /// capability — collapse the token loop and nothing else.
+    /// PR-7 v4 (CR 732.2a): the deferred-materialization stash round-trips through serde
+    /// byte-for-byte — LOAD-BEARING for the observed-growth `DriveSequence` (its `sequence`
+    /// lives IN the serialized stash, not the serde-skipped live `last_loop_action_sequence`,
+    /// sidestepping the FIX-3 drop-on-load scar). A mixed `Vec` (Counters + Life +
+    /// DriveSequence) survives serialize → deserialize equal, so a save captured
+    /// mid-materialization drives correctly on reload.
+    ///
+    /// REVERT-PROBE (documented): remove the `Serialize`/`Deserialize` derive from
+    /// `PersistentAxisMaterialization`, or the `#[serde(default, skip_serializing_if)]` from
+    /// the field, and this round-trip fails to compile / drops the payload. The populated
+    /// (non-empty) fixture proves the payload is not silently dropped on load.
+    #[test]
+    fn persistent_axis_materialization_stash_round_trips_through_serde() {
+        let mut state = GameState::new_two_player(7);
+        let seq = vec![LoopActionContext {
+            card_id: CardId(42),
+            controller: PlayerId(0),
+            action: LoopAction::Recast {
+                from_zone: Zone::Hand,
+                uses_buyback: BuybackUsage::NotUsed,
+            },
+            convoke: None,
+            pins: vec![],
+        }];
+        let items = vec![
+            PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+                object: ObjectId(7),
+                counter: CounterType::Plus1Plus1,
+                per_cycle_delta: 2,
+            }]),
+            PersistentAxisMaterialization::Life {
+                player: PlayerId(0),
+                per_cycle_delta: 3,
+            },
+            PersistentAxisMaterialization::DriveSequence {
+                sequence: seq,
+                collapsed_axes: vec![ResourceAxis::Life(PlayerId(0)), ResourceAxis::TokensCreated],
+            },
+        ];
+        state
+            .pending_unbounded_materialization
+            .insert(PlayerId(0), items.clone());
+
+        let json = serde_json::to_string(&state).expect("GameState serializes");
+        let reloaded: GameState =
+            serde_json::from_str(&json).expect("GameState deserializes with the populated stash");
+        assert_eq!(
+            reloaded.pending_unbounded_materialization.get(&PlayerId(0)),
+            Some(&items),
+            "the mixed Counters+Life+DriveSequence stash round-trips byte-equal (DriveSequence is load-bearing)"
+        );
+    }
+
+    /// PR-7 Part 2 (CR 732.2a): `clear_collapsed_materializations` is AXIS-SCOPED — it
+    /// ends ONLY the collapsed axes (here a `Tokens` item ⇒ the `TokensCreated` axis +
+    /// stash + token pile) and PRESERVES any coexisting unbounded axis for the same
+    /// controller (a debug `SetInfiniteMana` `Mana(_)` axis). Collapse the token loop
+    /// and nothing else. Take-first (register → take → clear) drives the real submit API
+    /// path, so the clear is scoped to the ACTUALLY-taken item (never vacuous).
     ///
     /// REVERT-PROBE (discriminating): swap the impl to the whole-player
     /// `clear_unbounded_loop(PlayerId(0))` → `unbounded_resources[P0]` is removed
     /// entirely → assertion (1) FLIPS (the mana axis is wrongly wiped).
     #[test]
-    fn clear_unbounded_token_loop_preserves_coexisting_mana_axis() {
+    fn clear_collapsed_materializations_preserves_coexisting_mana_axis() {
         use crate::analysis::resource::ResourceAxis;
         use crate::types::mana::ManaType;
 
@@ -17557,16 +17759,23 @@ mod tests {
                 ResourceAxis::Mana(ManaType::Colorless),
             ],
         );
-        state.register_pending_materialization(PlayerId(0), dummy_copiable_profile("Saproling"));
+        state.register_pending_materialization(
+            PlayerId(0),
+            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+        );
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
 
-        state.clear_unbounded_token_loop(PlayerId(0));
+        // Take-first: the submit path takes the whole stash, then clears exactly it.
+        let collapsed = state
+            .take_pending_materialization(PlayerId(0))
+            .expect("a Tokens item was registered");
+        state.clear_collapsed_materializations(PlayerId(0), &collapsed);
 
         // (1) the coexisting mana axis SURVIVES (the discriminating assertion).
         assert_eq!(
             state.unbounded_resources.get(&PlayerId(0)),
             Some(&BTreeSet::from([ResourceAxis::Mana(ManaType::Colorless)])),
-            "clear_unbounded_token_loop must preserve the coexisting Mana axis"
+            "clear_collapsed_materializations must preserve the coexisting Mana axis"
         );
         // the token stash + token ∞ pile are gone.
         assert!(
@@ -17581,18 +17790,25 @@ mod tests {
         );
     }
 
-    /// `clear_unbounded_token_loop` drops the player key entirely when
-    /// `TokensCreated` was the ONLY axis (no coexisting capability) — parity with
-    /// the whole-player clear for the common single-loop case.
+    /// `clear_collapsed_materializations` drops the player key entirely when the
+    /// collapsed axis (`TokensCreated`) was the ONLY axis (no coexisting capability) —
+    /// parity with the whole-player clear for the common single-loop case. Take-first so
+    /// the clear is scoped to the taken item.
     #[test]
-    fn clear_unbounded_token_loop_drops_key_when_only_axis() {
+    fn clear_collapsed_materializations_drops_key_when_only_axis() {
         use crate::analysis::resource::ResourceAxis;
 
         let mut state = GameState::new_two_player(7);
         state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
-        state.register_pending_materialization(PlayerId(0), dummy_copiable_profile("Saproling"));
+        state.register_pending_materialization(
+            PlayerId(0),
+            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+        );
 
-        state.clear_unbounded_token_loop(PlayerId(0));
+        let collapsed = state
+            .take_pending_materialization(PlayerId(0))
+            .expect("a Tokens item was registered");
+        state.clear_collapsed_materializations(PlayerId(0), &collapsed);
 
         assert!(
             !state.unbounded_resources.contains_key(&PlayerId(0)),
@@ -17603,6 +17819,83 @@ mod tests {
                 .pending_unbounded_materialization
                 .contains_key(&PlayerId(0)),
             "the deferred materialization stash must be removed"
+        );
+    }
+
+    /// PR-7 v4 (CR 732.2a / CR 122.1): `clear_collapsed_materializations` collapses a
+    /// `Counters` item's `Counter(cc, oc)` axis while PRESERVING a coexisting UNCOLLAPSED
+    /// Generic counter loop that still backs its own axis via a surviving display target.
+    /// This is the scoped-clear building block for the beneficial-counter axis (the
+    /// probe-proven +1/+1 / loyalty / defense / charge class), not just tokens.
+    ///
+    /// REVERT-PROBE (discriminating): drop the surviving-target guard (unconditionally
+    /// remove every collapsed `Counter` axis) → the coexisting Generic axis is wrongly
+    /// wiped → assertion (1) FLIPS.
+    #[test]
+    fn clear_collapsed_materializations_scopes_counter_axis_to_collapsed_growths() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
+
+        let mut state = GameState::new_two_player(7);
+        // Two counter objects: a creature bearing a +1/+1 counter (the collapsed loop)
+        // and an artifact bearing a Generic "charge" counter (a coexisting UNCOLLAPSED
+        // loop still displayed via `unbounded_counter_targets`).
+        let mut creature = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            PlayerId(0),
+            "Beast".to_string(),
+            Zone::Battlefield,
+        );
+        creature.card_types.core_types = vec![CoreType::Creature];
+        state.objects.insert(ObjectId(10), creature);
+        state.battlefield.push_back(ObjectId(10));
+        let mut artifact = GameObject::new(
+            ObjectId(11),
+            CardId(11),
+            PlayerId(0),
+            "Pentad Prism".to_string(),
+            Zone::Battlefield,
+        );
+        artifact.card_types.core_types = vec![CoreType::Artifact];
+        state.objects.insert(ObjectId(11), artifact);
+        state.battlefield.push_back(ObjectId(11));
+
+        let plus1_axis = ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature);
+        let generic_axis = ResourceAxis::Counter(CounterClass::Other, ObjectClass::Other);
+        state.mark_unbounded_loop(PlayerId(0), &[plus1_axis, generic_axis]);
+        // The Generic loop's surviving display target (kept — NOT collapsed here).
+        state.register_unbounded_counter_targets(
+            PlayerId(0),
+            vec![(ObjectId(11), CounterType::Generic("charge".to_string()))],
+        );
+        // Register + take-first the +1/+1 collapse only.
+        state.register_pending_materialization(
+            PlayerId(0),
+            PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+                object: ObjectId(10),
+                counter: CounterType::Plus1Plus1,
+                per_cycle_delta: 1,
+            }]),
+        );
+        let collapsed = state
+            .take_pending_materialization(PlayerId(0))
+            .expect("a Counters item was registered");
+        state.clear_collapsed_materializations(PlayerId(0), &collapsed);
+
+        // (1) the coexisting UNCOLLAPSED Generic axis SURVIVES; the collapsed +1/+1 axis is gone.
+        assert_eq!(
+            state.unbounded_resources.get(&PlayerId(0)),
+            Some(&BTreeSet::from([generic_axis])),
+            "only the collapsed +1/+1 axis is removed; the backed Generic axis survives"
+        );
+        // the surviving Generic display pill is retained.
+        assert_eq!(
+            state.unbounded_counter_targets.get(&PlayerId(0)),
+            Some(&BTreeSet::from([(
+                ObjectId(11),
+                CounterType::Generic("charge".to_string())
+            )])),
+            "the coexisting Generic loop's display target is preserved"
         );
     }
 
@@ -17643,7 +17936,10 @@ mod tests {
                 ResourceAxis::TokensCreated,
             ],
         );
-        state.register_pending_materialization(PlayerId(0), dummy_copiable_profile("Saproling"));
+        state.register_pending_materialization(
+            PlayerId(0),
+            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+        );
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
         // Non-vacuity: the pre-state really holds both axes + pile + stash.
         assert_eq!(

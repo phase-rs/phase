@@ -282,16 +282,21 @@ fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) 
     drain_pending_phase_transition_progress(state, events);
 }
 
-/// CR 732.2a: the APNAP-first player (turn order) who still holds a deferred
-/// object-growth materialization stash, or `None`. Filters `players::apnap_order`
-/// — the same helper `enter_phase` uses to seed the mana-empty drain — to the
-/// players with a `pending_unbounded_materialization` entry, so token collapse
-/// resolves in the same turn-based order and supports 2+ players (one prompt per
-/// drain iteration, each to its own controller).
+/// CR 732.2a: the APNAP-first player (turn order) who still holds a non-empty deferred
+/// persistent-axis materialization stash (one or more `PersistentAxisMaterialization`
+/// items — tokens, counters, life, or a drive sequence), or `None`. Filters
+/// `players::apnap_order` — the same helper `enter_phase` uses to seed the mana-empty
+/// drain — so the collapse resolves in the same turn-based order and supports 2+ players
+/// (one prompt per drain iteration, each to its own controller). Guards on a NON-EMPTY
+/// list so a stale empty-`Vec` entry (never produced by the register/take/clear API) could
+/// not re-prompt forever.
 fn next_apnap_player_with_pending_materialization(state: &GameState) -> Option<PlayerId> {
-    super::players::apnap_order(state)
-        .into_iter()
-        .find(|p| state.pending_unbounded_materialization.contains_key(p))
+    super::players::apnap_order(state).into_iter().find(|p| {
+        state
+            .pending_unbounded_materialization
+            .get(p)
+            .is_some_and(|items| !items.is_empty())
+    })
 }
 
 /// CR 703.4q + CR 616.1: Per-phase APNAP-queue drain. Pops players one at a
@@ -335,10 +340,11 @@ pub(super) fn drain_pending_phase_transition_progress(
                 state.clear_unbounded_mana_loop(pid);
             }
             // CR 732.2a: SECOND pass, after the CR 500.5 mana-empty APNAP drain
-            // above — resolve any deferred object-growth (token) materializations
-            // from accepted loop shortcuts, in APNAP turn order. A stash is present
-            // iff a token loop was accepted (§4/§5), so it is always a
-            // `TokensCreated` profile; prompt its controller for the finite count.
+            // above — resolve any deferred persistent-axis materializations (one or
+            // more of tokens / beneficial counters / life gain / an observed-growth
+            // drive sequence) from accepted loop shortcuts, in APNAP turn order. A
+            // populated stash is present iff a materializable loop was accepted (§5);
+            // prompt its controller for the finite count N.
             if let Some(controller) = next_apnap_player_with_pending_materialization(state) {
                 state.waiting_for = WaitingFor::PayAmountChoice {
                     player: controller,

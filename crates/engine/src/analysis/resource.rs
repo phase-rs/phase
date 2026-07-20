@@ -572,7 +572,7 @@ pub enum ResourceAxis {
 }
 
 /// CR 122.1: classify a counter-bearing object by its core types.
-fn object_class(core_types: &[CoreType]) -> ObjectClass {
+pub(crate) fn object_class(core_types: &[CoreType]) -> ObjectClass {
     if core_types.contains(&CoreType::Creature) {
         ObjectClass::Creature
     } else if core_types.contains(&CoreType::Planeswalker) {
@@ -1334,6 +1334,93 @@ pub(crate) fn grown_generic_counter_targets(
         }
     }
     targets
+}
+
+/// CR 122.1 + CR 732.2a: the wildcard-free partition of `CounterType`s whose per-cycle
+/// growth is a BENEFICIAL persistent artifact materializable N×δ at the CR 500.5 boundary
+/// (the batched-collapse path). SEPARATE from `generic_counter_is_growable` (the cover
+/// partition, unchanged): the cover only equalizes `Generic` markers, but +1/+1 / loyalty
+/// / defense counters are projected out by `project_out_resources` and are equally
+/// materializable. A new `CounterType` variant will not compile until classified here.
+pub(crate) fn counter_is_beneficial_materializable(ct: &CounterType) -> bool {
+    match ct {
+        // CR 122.1: pure markers (charge / burden / oil / quest) — beneficial, monotone.
+        CounterType::Generic(_) => true,
+        // CR 122.1a + CR 613.4c: a +1/+1 counter is beneficial P/T growth.
+        CounterType::Plus1Plus1 => true,
+        // CR 306.5b: loyalty counters (proliferate-reachable planeswalker growth).
+        CounterType::Loyalty => true,
+        // CR 310.4c: defense counters (proliferate-reachable battle growth).
+        CounterType::Defense => true,
+        // CR 704.5f + CR 122.1a: a -1/-1 counter kills via toughness ≤ 0 — a loss axis (SBA),
+        // never a beneficial materialization.
+        CounterType::Minus1Minus1 => false,
+        // CR 122.1a + CR 613.4c: asymmetric / possibly-harmful, sign-dependent, rare —
+        // non-materialized (ponytail: upgrade only if a real +X/+Y-counter growth loop appears).
+        CounterType::PowerToughness { .. } => false,
+        // CR 122.1b/c/d/h + CR 702.32a + CR 702.24a + CR 714.3: SBA-/duration-gating counters
+        // (keyword / stun / lore / time / fade / age / shield / finality) — a loop moving one
+        // is a real board change, never a beneficial materialization.
+        CounterType::Stun
+        | CounterType::Lore
+        | CounterType::Time
+        | CounterType::Fade
+        | CounterType::Age
+        | CounterType::Shield
+        | CounterType::Finality
+        | CounterType::Keyword(_) => false,
+    }
+}
+
+/// CR 122.1 + CR 732.2a: the per-object `(ObjectId, CounterType, delta)` triples whose
+/// BENEFICIAL-materializable counters strictly grew across one accepted period (`current`
+/// vs `prior`) — the batched-collapse δ source. The beneficial analog of
+/// `grown_generic_counter_targets` (Generic-only for the DISPLAY channel); this widens to
+/// +1/+1 / loyalty / defense via `counter_is_beneficial_materializable`. A CLONE, not a
+/// refactor: the display/cover Generic partition must stay narrow. Iterates the CURRENT
+/// side (strict growth ⇒ the grown counter is present in `current`); only SHARED objects
+/// contribute (a fresh object is caught by the object-set cover, not this axis).
+pub(crate) fn grown_beneficial_counter_deltas(
+    prior: &GameState,
+    current: &GameState,
+) -> Vec<(ObjectId, CounterType, u32)> {
+    let mut deltas = Vec::new();
+    for (id, co) in current.objects.iter() {
+        let Some(po) = prior.objects.get(id) else {
+            continue;
+        };
+        for (ct, &a) in co.counters.iter() {
+            if !counter_is_beneficial_materializable(ct) {
+                continue;
+            }
+            let b = po.counters.get(ct).copied().unwrap_or(0);
+            if a > b {
+                deltas.push((*id, ct.clone(), a - b));
+            }
+        }
+    }
+    deltas
+}
+
+/// CR 119.3 + CR 732.2a: the per-player life GAIN (`> 0`) across one accepted period
+/// (`current` vs `prior`) — the batched-collapse δ source for the life axis. A life LOSS
+/// stays a loss/SBA axis (CR 704.5a) and is not returned. Mirrors the counter δ source:
+/// snapshot the per-cycle delta once, multiply by the controller-named N at the boundary.
+pub(crate) fn grown_life_deltas(prior: &GameState, current: &GameState) -> Vec<(PlayerId, u32)> {
+    let mut deltas = Vec::new();
+    for after in &current.players {
+        let before_life = prior
+            .players
+            .iter()
+            .find(|p| p.id == after.id)
+            .map(|p| p.life)
+            .unwrap_or(after.life);
+        let gained = after.life - before_life;
+        if gained > 0 {
+            deltas.push((after.id, gained as u32));
+        }
+    }
+    deltas
 }
 
 /// CR 122.1: return a clone of `current` with every SHARED object's `Generic`
@@ -2454,6 +2541,86 @@ fn fire_time_conditions_read_projected_resource(state: &GameState) -> bool {
         }
     }
     false
+}
+
+/// CR 732.2a / CR 603.4 / CR 614.1: does any battlefield/command-FUNCTIONING trigger fire on
+/// `trig_key`, or any active battlefield/command replacement replace `repl_event`? The shared
+/// per-event observer scan for the axis-specific firewalls, classifying triggers via the same
+/// `keys_from_trigger_def` registry the trigger index uses.
+fn board_has_event_observer(
+    state: &GameState,
+    trig_key: crate::types::triggers::TriggerEventKey,
+    repl_event: ReplacementEvent,
+) -> bool {
+    for obj in state.objects.values() {
+        for (_, def) in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
+            // CR 603.4 / CR 113.6: only a trigger that FUNCTIONS in its source's current zone.
+            if !crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone) {
+                continue;
+            }
+            if crate::game::trigger_index::keys_from_trigger_def(def)
+                .0
+                .contains(&trig_key)
+            {
+                return true;
+            }
+        }
+    }
+    for (_, obj, def) in crate::game::functioning_abilities::active_replacements(state) {
+        // CR 614.1 / CR 113.6: `active_replacements` is all-zones; a life/counter-event
+        // replacement functions on the battlefield or in the command zone.
+        if matches!(obj.zone, Zone::Battlefield | Zone::Command) && def.event == repl_event {
+            return true;
+        }
+    }
+    false
+}
+
+/// CR 732.2a + CR 122.1 / CR 701.34a: is the growing COUNTER axis OBSERVED — does any live
+/// trigger, replacement, or count-reader react to a counter placement each cycle? A sound
+/// OVER-approximation: a true result ROUTES the loop to the discrete N-cycle driver (always safe),
+/// never a wrong single-batch. Returns true iff ANY:
+/// - [`fire_time_conditions_read_growing_class`] — counter count-readers (a charge-count static;
+///   a counter-reading condition / body / cost). Retained from the fodder firewall.
+/// - a battlefield-functioning `CounterAdded` trigger ("whenever a +1/+1 counter is put …").
+/// - an active battlefield/command `AddCounter` replacement (Corpsejack's counter doubler).
+///
+/// The batched N×δ counter collapse is sound ONLY when this is false: `apply_counter_addition`
+/// emits one lump `CounterAdded` bypassing the replacement doubler pipeline. AXIS-SPECIFIC: a
+/// life observer does NOT make counter growth observed (they read different mutation events), so a
+/// pure counter loop still batches on a board carrying only a life observer.
+pub(crate) fn counter_growth_is_observed(state: &GameState) -> bool {
+    use crate::types::triggers::TriggerEventKey;
+    fire_time_conditions_read_growing_class(state, None)
+        || board_has_event_observer(
+            state,
+            TriggerEventKey::CounterAdded,
+            ReplacementEvent::AddCounter,
+        )
+}
+
+/// CR 732.2a + CR 119.3: is the growing LIFE axis OBSERVED — does any live trigger, replacement,
+/// or projected-life-total reader react to a life gain each cycle? A sound OVER-approximation
+/// (true ⇒ drive, always safe). Returns true iff ANY:
+/// - a player-level projected life-total read off-stack
+///   ([`fire_time_conditions_read_projected_resource`]) or on-stack
+///   ([`stack_entry_reads_projected_resource`]) — a life-total condition / static / replacement body.
+/// - a battlefield-functioning `LifeChanged` trigger (Heliod "whenever you gain life …"; also
+///   `LifeLost`/`LifeChanged` via the shared event key — an over-approximation, still safe).
+/// - an active battlefield/command `GainLife` replacement (Rhox's life-gain doubler).
+///
+/// The batched N×δ life collapse is sound ONLY when this is false: `apply_life_gain` re-runs the
+/// replacement pipeline, so a lump gain fires a life observer ONCE not N×. AXIS-SPECIFIC: a
+/// counter observer does NOT make life growth observed.
+pub(crate) fn life_growth_is_observed(state: &GameState) -> bool {
+    use crate::types::triggers::TriggerEventKey;
+    fire_time_conditions_read_projected_resource(state)
+        || state.stack.iter().any(stack_entry_reads_projected_resource)
+        || board_has_event_observer(
+            state,
+            TriggerEventKey::LifeChanged,
+            ReplacementEvent::GainLife,
+        )
 }
 
 /// The proposed-event class a life-affecting `ReplacementEvent` watches. CR 616.1
@@ -6355,6 +6522,164 @@ mod tests {
         assert!(
             !fodder_cover(&p2, &c2),
             "(b) a heterogeneous activation (ability_index 0→1) must REJECT (F1 COMPARED conjunct)"
+        );
+    }
+
+    // ─────── PR-7 v4 (CR 732.2a): persistent-axis collapse routing + δ + partition ───────
+
+    /// CR 732.2a: `counter_growth_is_observed` / `life_growth_is_observed` ROUTE an accepted loop —
+    /// false ⇒ batched N×δ (sound only when that axis is unobserved), true ⇒ the discrete N-cycle
+    /// driver. The firewall is AXIS-SPECIFIC: a life observer must NOT veto a batched counter gain
+    /// and vice-versa (an incidental board observer of one axis never mis-routes a disjoint-axis
+    /// loop). Matched pairs: a benign board is UNOBSERVED on both axes; adding a per-event observer
+    /// of ONE class (Heliod-like `LifeGained` / `CounterAdded` trigger, or a `GainLife`/`AddCounter`
+    /// replacement) FLIPS ONLY that axis. This is the CORRECTNESS gate — the batched apply fires a
+    /// lump observer once, not N×.
+    ///
+    /// REVERT-PROBE (discriminating): delete the per-event trigger scan (block 2) ⇒ the
+    /// `LifeGained` / `CounterAdded` rows flip to false; delete the replacement scan (block 3) ⇒
+    /// the `GainLife` / `AddCounter` rows flip to false. Each observer row is reach-guarded by the
+    /// benign-false row (proves the fixtures otherwise pass the firewall) AND by the CROSS-axis
+    /// false assertion (proves the flip is axis-scoped, not a coarse OR).
+    #[test]
+    fn persistent_axis_growth_is_observed_routes_on_observer() {
+        use crate::types::ability::{ReplacementDefinition, TriggerDefinition};
+        use crate::types::triggers::TriggerMode;
+
+        // Reach-guard: a battlefield permanent with a BENIGN (non-life/non-counter) trigger is
+        // UNOBSERVED on both axes — the batched fast path is taken.
+        let mut benign = GameState::new_two_player(7);
+        let id = bf_object(&mut benign, 100);
+        benign.objects.get_mut(&id).unwrap().trigger_definitions =
+            vec![TriggerDefinition::new(TriggerMode::ChangesZone)].into();
+        assert!(
+            !counter_growth_is_observed(&benign) && !life_growth_is_observed(&benign),
+            "a benign ChangesZone trigger observes neither axis (batched path)"
+        );
+
+        // Returns (counter_observed, life_observed) so each row asserts the flipped axis AND the
+        // untouched cross-axis stays false.
+        let observed_with = |set: fn(&mut GameObject)| {
+            let mut state = GameState::new_two_player(7);
+            let id = bf_object(&mut state, 100);
+            set(state.objects.get_mut(&id).unwrap());
+            (
+                counter_growth_is_observed(&state),
+                life_growth_is_observed(&state),
+            )
+        };
+
+        // (life trigger) Heliod-like "whenever you gain life …" ⇒ LIFE observed, COUNTER not.
+        assert_eq!(
+            observed_with(|o| o.trigger_definitions =
+                vec![TriggerDefinition::new(TriggerMode::LifeGained)].into()),
+            (false, true),
+            "a LifeGained trigger (Heliod) observes ONLY the life axis"
+        );
+        // (counter trigger) "whenever a +1/+1 counter is put …" ⇒ COUNTER observed, LIFE not.
+        assert_eq!(
+            observed_with(|o| o.trigger_definitions =
+                vec![TriggerDefinition::new(TriggerMode::CounterAdded)].into()),
+            (true, false),
+            "a CounterAdded trigger observes ONLY the counter axis"
+        );
+        // (life replacement) Rhox-like life-gain replacement ⇒ LIFE observed, COUNTER not.
+        assert_eq!(
+            observed_with(|o| o.replacement_definitions =
+                vec![ReplacementDefinition::new(ReplacementEvent::GainLife)].into()),
+            (false, true),
+            "a GainLife replacement (Rhox) observes ONLY the life axis"
+        );
+        // (counter replacement) Corpsejack-like counter-placement doubler ⇒ COUNTER observed, LIFE not.
+        assert_eq!(
+            observed_with(|o| o.replacement_definitions =
+                vec![ReplacementDefinition::new(ReplacementEvent::AddCounter)].into()),
+            (true, false),
+            "an AddCounter replacement (Corpsejack) observes ONLY the counter axis"
+        );
+    }
+
+    /// CR 732.2a: `counter_is_beneficial_materializable` is the wildcard-free batched-collapse
+    /// partition — Generic / +1/+1 / loyalty / defense are materializable; every harmful /
+    /// duration / SBA-gating counter is NOT. REVERT-PROBE: flip the `{Plus1Plus1, Loyalty,
+    /// Defense}` arms to false ⇒ the beneficial rows flip (the probe-proven +1/+1 / loyalty /
+    /// defense gap re-opens).
+    #[test]
+    fn counter_is_beneficial_materializable_partition() {
+        use crate::types::keywords::KeywordKind;
+        for ct in [
+            CounterType::Generic("charge".to_string()),
+            CounterType::Plus1Plus1,
+            CounterType::Loyalty,
+            CounterType::Defense,
+        ] {
+            assert!(
+                counter_is_beneficial_materializable(&ct),
+                "{ct:?} is a beneficial-materializable counter"
+            );
+        }
+        for ct in [
+            CounterType::Minus1Minus1,
+            CounterType::PowerToughness {
+                power: 1,
+                toughness: 0,
+            },
+            CounterType::Stun,
+            CounterType::Lore,
+            CounterType::Time,
+            CounterType::Fade,
+            CounterType::Age,
+            CounterType::Shield,
+            CounterType::Finality,
+            CounterType::Keyword(KeywordKind::Flying),
+        ] {
+            assert!(
+                !counter_is_beneficial_materializable(&ct),
+                "{ct:?} is NOT a beneficial-materializable counter"
+            );
+        }
+    }
+
+    /// CR 122.1 + CR 119.3: the batched δ capture — `grown_beneficial_counter_deltas` returns the
+    /// per-object beneficial counter growth, `grown_life_deltas` the per-player life gain, each as
+    /// the exact per-cycle δ (multiplied by N at the boundary). Only GROWTH (a > b / gain > 0) is
+    /// returned; a shrink/loss is a distinct SBA axis, never a batched gain.
+    #[test]
+    fn beneficial_counter_and_life_deltas_capture_growth_only() {
+        let mut prior = GameState::new_two_player(7);
+        let cid = bf_object(&mut prior, 200);
+        prior
+            .objects
+            .get_mut(&cid)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 3);
+        let mut current = prior.clone();
+        current
+            .objects
+            .get_mut(&cid)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 5); // +2
+        current.players[0].life += 4;
+
+        assert_eq!(
+            grown_beneficial_counter_deltas(&prior, &current),
+            vec![(cid, CounterType::Plus1Plus1, 2)],
+            "captures the +2 per-cycle +1/+1 growth"
+        );
+        assert_eq!(
+            grown_life_deltas(&prior, &current),
+            vec![(current.players[0].id, 4)],
+            "captures the +4 per-cycle life gain"
+        );
+
+        // Reach-guard: a life LOSS is not a gain axis (empty δ).
+        let mut shrink = prior.clone();
+        shrink.players[0].life -= 2;
+        assert!(
+            grown_life_deltas(&prior, &shrink).is_empty(),
+            "a life LOSS yields no batched gain δ"
         );
     }
 }
