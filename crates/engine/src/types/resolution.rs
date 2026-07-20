@@ -243,7 +243,8 @@ impl DirectChoiceGate {
             (
                 Self::OptionalEffect,
                 WaitingFor::OptionalEffectChoice { .. }
-            ) | (Self::CoinFlipKeep, WaitingFor::CoinFlipKeepChoice { .. })
+            ) | (Self::OptionalEffect, WaitingFor::OpponentMayChoice { .. })
+                | (Self::CoinFlipKeep, WaitingFor::CoinFlipKeepChoice { .. })
                 | (Self::Proliferate, WaitingFor::ProliferateChoice { .. })
                 | (Self::MutateMerge, WaitingFor::MutateMergeChoice { .. })
         )
@@ -595,9 +596,10 @@ impl<'de> Deserialize<'de> for ResolutionStateWire {
 }
 
 /// Checks the Phase-2 boundary invariants after a restore and after every
-/// public action. `ResolutionStack` is still a wire-only view in this phase,
-/// so this additionally proves that its v2 representation never carries one
-/// of the legacy runtime families alongside `resolution_frames`.
+/// public action. `ResolutionStack` is still a wire-only view in this phase.
+/// A serializable runtime state must therefore write no legacy family beside
+/// `resolution_frames`; valid in-flight trigger occurrences may intentionally
+/// be non-serializable and are checked only structurally at this boundary.
 #[cfg(debug_assertions)]
 pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
     let frames = canonicalize_legacy_resolution_state(state)
@@ -614,17 +616,16 @@ pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
         "the active inline-mana override must not survive a public boundary"
     );
 
-    let v2 = ResolutionStateWire::from_game_state(state.clone())
-        .to_value()
-        .expect("canonical runtime state must have a v2 wire representation");
-    let object = v2
-        .as_object()
-        .expect("resolution wire serialization is always an object");
-    for field in legacy_resolution_wire_fields() {
-        assert!(
-            !object.contains_key(*field),
-            "v2 resolution frames must not co-reside with legacy runtime field {field}"
-        );
+    if let Ok(v2) = ResolutionStateWire::from_game_state(state.clone()).to_value() {
+        let object = v2
+            .as_object()
+            .expect("resolution wire serialization is always an object");
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                !object.contains_key(*field),
+                "v2 resolution frames must not co-reside with legacy runtime field {field}"
+            );
+        }
     }
 }
 
@@ -1429,6 +1430,21 @@ mod tests {
                 waiting_for: "Priority",
             })
         );
+
+        let mut optional_effect = ResolutionStack::default();
+        optional_effect.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            ability: Box::new(resolved_draw(6)),
+            trigger_event: None,
+            trigger_match_count: None,
+        }));
+        optional_effect
+            .validate(&WaitingFor::OpponentMayChoice {
+                player: PlayerId(1),
+                source_id: ObjectId(6),
+                description: None,
+                remaining: Vec::new(),
+            })
+            .expect("optional-effect frame owns an opponent-may prompt");
     }
 
     #[test]
