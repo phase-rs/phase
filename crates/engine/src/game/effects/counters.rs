@@ -2371,8 +2371,8 @@ pub(crate) fn validate_counter_selection(
     Ok(total)
 }
 
-/// CR 107.1c: Validate a submitted `RemoveCountersChoice` answer and stash the
-/// per-type removals into `pending_counter_removals` for
+/// CR 107.1c: Validate a submitted `RemoveCountersChoice` answer and park the
+/// per-type removals in the typed `CounterRemovals` frame for
 /// `drain_pending_counter_removals` to apply. Mirrors
 /// `validate_and_queue_counter_move_distribution` so the `apply()` handler stays
 /// a thin dispatcher.
@@ -2388,7 +2388,7 @@ pub(crate) fn validate_and_queue_counter_removal(
         .iter()
         .map(|s| (s.counter_type.clone(), s.count))
         .collect();
-    state.pending_counter_removals = Some(PendingCounterRemovalQueue {
+    state.push_counter_removals(PendingCounterRemovalQueue {
         remaining,
         source_id,
         effect_kind: EffectKind::from(&pending_effect.effect),
@@ -2407,11 +2407,15 @@ pub(crate) fn validate_and_queue_counter_removal(
 /// `EffectResolved` so a downstream "create that many" / "add that much" rider
 /// reading `QuantityRef::EventContextAmount` picks up the removed count.
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.pending_counter_removals.take() {
+    while let Some(mut queue) = state.active_counter_removals().cloned() {
         let Some((counter_type, count)) = queue.remaining.first().cloned() else {
             // CR 608.2h: ordering invariant — stamp the total removed before the
             // terminating EffectResolved (and thus before the continuation drains).
             state.last_effect_count = Some(queue.total as i32);
+            state
+                .take_active_counter_removals()
+                .expect("settled counter-removals queue must own the active frame")
+                .expect("settled counter-removals frame must exist");
             events.push(GameEvent::EffectResolved {
                 kind: queue.effect_kind,
                 source_id: queue.source_ability_id,
@@ -2421,7 +2425,9 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
         };
         queue.remaining.remove(0);
         let source_id = queue.source_id;
-        state.pending_counter_removals = Some(queue);
+        state
+            .replace_active_counter_removals(queue)
+            .expect("re-parked counter-removals queue must own the active frame");
         // CR 614.1: single-authority remove pipeline (applies prevention /
         // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
         remove_counter_with_replacement(state, source_id, counter_type, count, events);
@@ -2440,7 +2446,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         ControllerRef, FilterProp, QuantityExpr, QuantityModification, ReplacementDefinition,
-        TargetChoiceTiming, TargetFilter, TypedFilter,
+        ReplacementMode, TargetChoiceTiming, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -2601,6 +2607,25 @@ mod tests {
             .push(
                 ReplacementDefinition::new(ReplacementEvent::AddCounter)
                     .quantity_modification(QuantityModification::Plus { value: 1 }),
+            );
+    }
+
+    fn install_counter_removal_optional_replacement(state: &mut GameState) {
+        let replacement_id = create_object(
+            state,
+            CardId(902),
+            PlayerId(0),
+            "Counter Removal Optional".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_id)
+            .expect("counter-removal replacement exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::RemoveCounter)
+                    .mode(ReplacementMode::Optional { decline: None }),
             );
     }
 
@@ -4153,6 +4178,106 @@ mod tests {
                 > 2,
             "both counter moves must complete through the chosen replacement paths"
         );
+    }
+
+    /// CR 107.1c + CR 608.2h + CR 616.1: the production counter-removal choice
+    /// parks its selected tail in CounterRemovals while each removal offers its
+    /// applicable optional replacement. v2 restores that real replacement prompt
+    /// before the production actions finish the queue and stamp its total.
+    #[test]
+    fn counter_removals_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(912),
+            PlayerId(0),
+            "Counter Removal Source".to_string(),
+            Zone::Battlefield,
+        );
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let source = state
+                .objects
+                .get_mut(&source_id)
+                .expect("counter-removal source exists");
+            source.counters.insert(CounterType::Plus1Plus1, 1);
+            source.counters.insert(charge.clone(), 1);
+        }
+        install_counter_removal_optional_replacement(&mut state);
+        state.waiting_for = WaitingFor::RemoveCountersChoice {
+            player: PlayerId(0),
+            source_id,
+            counter_type: None,
+            available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            pending_effect: Box::new(make_counter_ability(
+                Effect::RemoveCounter {
+                    counter_type: None,
+                    count: QuantityExpr::Fixed { value: -1 },
+                    target: TargetFilter::Any,
+                },
+                source_id,
+            )),
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseCountersToRemove {
+                selections: vec![
+                    CounterRemoveChoice {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: 1,
+                    },
+                    CounterRemoveChoice {
+                        counter_type: charge.clone(),
+                        count: 1,
+                    },
+                ],
+            },
+        )
+        .expect("production removal choice creates its first replacement prompt");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CounterRemovals(_))
+        ));
+        assert_eq!(
+            state
+                .active_counter_removals()
+                .expect("counter-removals queue owns its prompt")
+                .remaining
+                .len(),
+            1
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("paused CounterRemovals prompt serializes as v2");
+        assert_eq!(saved["resolution_state_version"], 2);
+        assert!(saved.get("pending_counter_removals").is_none());
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("v2 CounterRemovals prompt restores");
+        let mut state = restored.into_game_state();
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("production replacement action resumes the counter-removals queue");
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                assert!(matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::CounterRemovals(_))
+                ));
+            }
+        }
+
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(state.objects[&source_id].counters.is_empty());
     }
 
     #[test]

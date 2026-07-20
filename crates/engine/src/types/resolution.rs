@@ -659,6 +659,69 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the CounterRemovals queue only when its typed frame owns the
+    /// stack top. A buried counter queue is a parent dependency, never a
+    /// fallback.
+    pub fn active_counter_removals(&self) -> Option<&PendingCounterRemovalQueue> {
+        match self.last() {
+            Some(ResolutionFrame::CounterRemovals(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable top-only access to the active CounterRemovals queue.
+    pub fn active_counter_removals_mut(&mut self) -> Option<&mut PendingCounterRemovalQueue> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::CounterRemovals(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active CounterRemovals queue after its final entry
+    /// settles.
+    pub fn take_active_counter_removals(
+        &mut self,
+    ) -> Result<Option<PendingCounterRemovalQueue>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::CounterRemovals(_)) => {
+                let ResolutionFrame::CounterRemovals(frame) =
+                    self.pop_expected(FrameKind::CounterRemovals)?
+                else {
+                    unreachable!("checked counter-removals frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::CounterRemovals,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a new CounterRemovals queue as the active inner frame.
+    pub fn push_counter_removals(&mut self, pending: PendingCounterRemovalQueue) {
+        self.push_inner(ResolutionFrame::CounterRemovals(pending));
+    }
+
+    /// Re-park the active CounterRemovals queue after it advances or pauses
+    /// again.
+    pub fn replace_active_counter_removals(
+        &mut self,
+        pending: PendingCounterRemovalQueue,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::CounterRemovals(_)) => {
+                self.replace_active(ResolutionFrame::CounterRemovals(pending))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::CounterRemovals,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Mutably accesses only the active repeat-until owner.
     pub fn active_repeat_until_mut(&mut self) -> Option<&mut PendingRepeatUntil> {
         match self.frames.last_mut() {
@@ -1114,6 +1177,7 @@ impl ResolutionStateWire {
                 let legacy_change_zone = LegacyChangeZoneWire::from_value(&value)?;
                 let legacy_batch_delivery = LegacyBatchDeliveryWire::from_value(&value)?;
                 let legacy_counter_moves = LegacyCounterMovesWire::from_value(&value)?;
+                let legacy_counter_removals = LegacyCounterRemovalsWire::from_value(&value)?;
                 let legacy_choose_one_of = LegacyChooseOneOfWire::from_value(&value)?;
                 let legacy_vote_ballot = LegacyVoteBallotWire::from_value(&value)?;
                 let legacy_per_player_zone_choice =
@@ -1134,6 +1198,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_batch_deliveries");
                 legacy_object.remove("pending_mill_deliveries");
                 legacy_object.remove("pending_counter_moves");
+                legacy_object.remove("pending_counter_removals");
                 legacy_object.remove("pending_choose_one_of");
                 legacy_object.remove("pending_vote_ballot_iteration");
                 legacy_object.remove("pending_per_player_zone_choice");
@@ -1157,6 +1222,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_counter_moves.into_frame() {
                     legacy.push_counter_moves(frame);
+                }
+                if let Some(frame) = legacy_counter_removals.into_frame() {
+                    legacy.push_counter_removals(frame);
                 }
                 if let Some(frame) = legacy_choose_one_of.into_frame() {
                     legacy.push_choose_one_of(frame);
@@ -1405,6 +1473,24 @@ impl LegacyCounterMovesWire {
     }
 }
 
+/// v1-only CounterRemovals field. Runtime state carries the queue only in its
+/// typed frame.
+#[derive(Deserialize)]
+struct LegacyCounterRemovalsWire {
+    #[serde(default)]
+    pending_counter_removals: Option<PendingCounterRemovalQueue>,
+}
+
+impl LegacyCounterRemovalsWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingCounterRemovalQueue> {
+        self.pending_counter_removals
+    }
+}
+
 /// v1-only choose-one-of field. Runtime state carries it only as a typed frame.
 #[derive(Deserialize)]
 struct LegacyChooseOneOfWire {
@@ -1515,6 +1601,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::ChangeZone(_)
                 | ResolutionFrame::BatchDelivery(_)
                 | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
@@ -1549,9 +1636,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_counter_removals.clone() {
-        frames.push_inner(ResolutionFrame::CounterRemovals(pending));
-    }
     if let Some(pending) = state.pending_counter_additions.clone() {
         frames.push_inner(ResolutionFrame::CounterAdditions(pending));
     }
@@ -1689,11 +1773,11 @@ fn project_frames_into_legacy_state(
                     .resolution_stack
                     .push_counter_moves(pending.clone());
             }
-            ResolutionFrame::CounterRemovals(pending) => set_once(
-                &mut projected.pending_counter_removals,
-                pending.clone(),
-                "CounterRemovals",
-            )?,
+            ResolutionFrame::CounterRemovals(pending) => {
+                projected
+                    .resolution_stack
+                    .push_counter_removals(pending.clone());
+            }
             ResolutionFrame::CounterAdditions(pending) => set_once(
                 &mut projected.pending_counter_additions,
                 pending.clone(),
@@ -1780,7 +1864,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
     state.pending_repeated_optional_payment = None;
     state.optional_cost_payments_this_resolution = 0;
-    state.pending_counter_removals = None;
     state.pending_counter_additions = None;
     state.pending_copy_token_resolution = None;
     state.pending_each_player_copy_chosen = None;
@@ -2071,6 +2154,21 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 counter-moves fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_counter_removals_fixture(
+        state: GameState,
+        pending: PendingCounterRemovalQueue,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_counter_removals"] =
+            serde_json::to_value(pending).expect("legacy counter-removals serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 counter-removals fixture converts through the wire")
             .into_game_state()
     }
 
@@ -2863,16 +2961,18 @@ mod tests {
         assert!(counter_moves.active_counter_moves().is_none());
         assert_reserializes_v2_only(counter_moves);
 
-        let mut counter_removals = GameState::new_two_player(115);
-        counter_removals.pending_counter_removals = Some(PendingCounterRemovalQueue {
-            remaining: Vec::new(),
-            source_id: ObjectId(115),
-            effect_kind: EffectKind::RemoveCounter,
-            source_ability_id: ObjectId(115),
-            total: 0,
-        });
-        let counter_removals = resume_priority_fixture(restore_v1_fixture(counter_removals));
-        assert!(counter_removals.pending_counter_removals.is_none());
+        let counter_removals = GameState::new_two_player(115);
+        let counter_removals = resume_priority_fixture(restore_v1_counter_removals_fixture(
+            counter_removals,
+            PendingCounterRemovalQueue {
+                remaining: Vec::new(),
+                source_id: ObjectId(115),
+                effect_kind: EffectKind::RemoveCounter,
+                source_ability_id: ObjectId(115),
+                total: 0,
+            },
+        ));
+        assert!(counter_removals.active_counter_removals().is_none());
         assert_reserializes_v2_only(counter_removals);
 
         let mut counter_additions = GameState::new_two_player(116);

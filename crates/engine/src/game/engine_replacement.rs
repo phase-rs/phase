@@ -890,7 +890,7 @@ pub(super) fn handle_replacement_choice(
             // drain the parked tail (which re-parks if the next removal surfaces
             // its own choice, setting state.waiting_for for us to propagate).
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_counter_removals.is_some()
+                && state.active_counter_removals().is_some()
             {
                 effects::counters::drain_pending_counter_removals(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {

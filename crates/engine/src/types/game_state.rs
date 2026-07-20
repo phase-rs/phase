@@ -4156,9 +4156,8 @@ pub struct PendingCounterMoveQueue {
 /// "create that many" / "add that much" rider (Tetravus, storage lands) reading
 /// `QuantityRef::EventContextAmount` picks up the count removed.
 ///
-/// Serialized (like the `CounterMoves` frame) so a mid-batch re-park survives the
-/// server→client→server state round-trip a `ReplacementChoice` requires; the
-/// `skip_serializing_if` on the field keeps it off the wire when `None`.
+/// Serialized in the `CounterRemovals` frame so a mid-batch re-park survives the
+/// server→client→server state round-trip a `ReplacementChoice` requires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCounterRemovalQueue {
     /// Remaining per-type removals to apply to `source_id`.
@@ -11857,14 +11856,6 @@ pub struct GameState {
     /// CR 616.1: search-found replacement batch parked across a choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
-    /// CR 107.1c + CR 608.2h: Pending per-type counter removals selected during a
-    /// "remove any number of counters" resolution-time prompt. Drained before
-    /// normal pending continuations (so a "create that many" rider sees the
-    /// stamped `last_effect_count`), and re-parked when a per-removal replacement
-    /// surfaces a `ReplacementChoice`. See [`PendingCounterRemovalQueue`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_counter_removals: Option<PendingCounterRemovalQueue>,
-
     /// CR 122.1 + CR 616.1e: Pending counter-addition batch paused by a
     /// replacement choice. Drained before normal pending continuations so
     /// multi-recipient effects such as proliferate and double counters resume
@@ -13647,6 +13638,40 @@ impl GameState {
         self.resolution_stack.take_active_counter_moves()
     }
 
+    /// Returns the CounterRemovals queue only when its typed frame owns the
+    /// stack top.
+    pub fn active_counter_removals(&self) -> Option<&PendingCounterRemovalQueue> {
+        self.resolution_stack.active_counter_removals()
+    }
+
+    /// Mutably accesses only the active CounterRemovals queue.
+    pub fn active_counter_removals_mut(&mut self) -> Option<&mut PendingCounterRemovalQueue> {
+        self.resolution_stack.active_counter_removals_mut()
+    }
+
+    /// Park a new CounterRemovals queue as the active inner frame.
+    pub fn push_counter_removals(&mut self, pending: PendingCounterRemovalQueue) {
+        self.resolution_stack.push_counter_removals(pending);
+    }
+
+    /// Re-park the active CounterRemovals queue after it advances or pauses
+    /// again.
+    pub fn replace_active_counter_removals(
+        &mut self,
+        pending: PendingCounterRemovalQueue,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .replace_active_counter_removals(pending)
+    }
+
+    /// Consume exactly the active CounterRemovals queue after its final entry
+    /// settles.
+    pub fn take_active_counter_removals(
+        &mut self,
+    ) -> Result<Option<PendingCounterRemovalQueue>, ResolutionStackError> {
+        self.resolution_stack.take_active_counter_removals()
+    }
+
     /// Returns the repeat-for iteration only when its typed frame owns the
     /// stack top.
     pub fn active_repeat_for(&self) -> Option<&PendingRepeatIteration> {
@@ -14501,7 +14526,6 @@ impl GameState {
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
             pending_search_found_batch: None,
-            pending_counter_removals: None,
             pending_counter_additions: None,
             pending_proliferate_actions: None,
             pending_optional_effect: None,
@@ -15612,7 +15636,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_each_player_copy_chosen: _,
         pending_coin_flip: _,
         resolution_coin_flip: _,
-        pending_counter_removals: _,
         pending_counter_additions: _,
         pending_proliferate_actions: _,
         pending_optional_effect: _,
@@ -15923,7 +15946,6 @@ impl PartialEq for GameState {
             && self.pending_scoped_library_search == other.pending_scoped_library_search
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch
-            && self.pending_counter_removals == other.pending_counter_removals
             && self.pending_counter_additions == other.pending_counter_additions
             && self.pending_proliferate_actions == other.pending_proliferate_actions
             && self.pending_cost_move_resume == other.pending_cost_move_resume
