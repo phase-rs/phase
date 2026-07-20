@@ -690,6 +690,7 @@ mod palisade_giant_redirect;
 mod panther_habit_equipped_prevention_scope;
 mod peer_into_the_abyss;
 mod pendrell_flux_unless_pay_own_cost;
+mod perrie_the_pulverizer_attack_trigger_6219;
 mod peter_parker_modal_back_face_cast;
 mod phantom_general_token_anthem;
 mod phyrexian_fleshgorger_ward;

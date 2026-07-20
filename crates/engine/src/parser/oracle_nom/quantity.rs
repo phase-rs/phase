@@ -1468,7 +1468,16 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // generic controlled-type/type-filter arms whose leading token would
         // otherwise commit. Nested together to stay within nom's top-level `alt`
         // arity (nom 8.0 max: 21 items).
-        alt((parse_distinct_subtypes_among, parse_turns_taken_this_game)),
+        //
+        // CR 122.1: "different kind[s] of counters {on|among} <filter>" — the
+        // dynamic-quantity reading of the counter-kind cardinality (Perrie, the
+        // Pulverizer: "X is the number of different kinds of counters among
+        // permanents you control") — shares this nest for the same reason.
+        alt((
+            parse_distinct_subtypes_among,
+            parse_turns_taken_this_game,
+            parse_distinct_counter_kinds_among_tail,
+        )),
         // CR 201.2 + CR 603.4: "differently named <type-phrase>" (distinct-by-name)
         // and "different <power|mana value> among <type>" (distinct-by-quality —
         // Celebrate the Harvest's "the number of different powers among ..."
@@ -2254,6 +2263,32 @@ fn parse_distinct_subtypes_objects_source(input: &str) -> OracleResult<'_, CardT
     // difference of their lengths — no pointer arithmetic needed.
     let consumed = type_text.len() - remainder.len();
     Ok((&input[consumed..], CardTypeSetSource::Objects { filter }))
+}
+
+/// CR 122.1: Parse "different kind[s] of counters {on|among} <filter>" after
+/// "the number of" → [`QuantityRef::DistinctCounterKindsAmong`].
+///
+/// Dynamic-quantity counterpart to `parse_for_each_distinct_counter_kinds_among`
+/// (which covers the "for each kind of counter on/among <filter>" repeat-source
+/// reading): same counter-kind cardinality, reached from the "where X is the
+/// number of …" CDA quantity path instead of a `repeat_for` loop. Perrie, the
+/// Pulverizer: "X is the number of different kinds of counters among permanents
+/// you control". Combinator-composed — no string dispatch.
+fn parse_distinct_counter_kinds_among_tail(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("different kind").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" of counter").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = alt((tag("on "), tag("among "))).parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(("", QuantityRef::DistinctCounterKindsAmong { filter }))
 }
 
 /// CR 500: "turns you've taken this game" → [`QuantityRef::TurnsTaken`] (Control
@@ -7104,6 +7139,38 @@ mod tests {
         // "among" surface form + a non-permanent type phrase.
         let (rest, q) =
             parse_for_each_clause_ref("kind of counter among creatures you control").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
+    }
+
+    #[test]
+    fn test_parse_the_number_of_different_kinds_of_counters_among() {
+        // CR 122.1: Perrie, the Pulverizer — "the number of different kinds of
+        // counters among permanents you control" (dynamic-quantity reading, not
+        // a repeat_for iteration source).
+        let (rest, q) = parse_quantity_ref(
+            "the number of different kinds of counters among permanents you control",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctCounterKindsAmong { filter } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed permanent filter, got {other:?}"),
+            },
+            other => panic!("expected DistinctCounterKindsAmong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_the_number_of_different_kind_of_counter_on_singular() {
+        // Singular "kind of counter on" surface form.
+        let (rest, q) =
+            parse_quantity_ref("the number of different kind of counter on creatures you control")
+                .unwrap();
         assert_eq!(rest, "");
         assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
     }
