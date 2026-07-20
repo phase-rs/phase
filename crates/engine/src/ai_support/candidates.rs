@@ -6031,10 +6031,24 @@ mod tests {
     #[test]
     fn exact_selection_count_above_pool_cap_keeps_progress_candidate() {
         let mut state = GameState::new_two_player(42);
+        let conniver_id = ObjectId(100);
+        state.objects.insert(
+            conniver_id,
+            crate::game::game_object::GameObject::new(
+                conniver_id,
+                crate::types::identifiers::CardId(100),
+                PlayerId(0),
+                "Conniver".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(conniver_id);
         let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
         state.waiting_for = WaitingFor::ConniveDiscard {
             player: PlayerId(0),
-            conniver_id: ObjectId(100),
+            conniver: state
+                .capture_connive_subject(conniver_id)
+                .expect("fixture conniver exists"),
             source_id: ObjectId(100),
             cards,
             count: SELECTION_POOL_CAP + 1,

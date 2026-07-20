@@ -129,6 +129,12 @@ fn materialize_predefined_token_payload(
         }
     }
     if let Some(spec) = role_spec {
+        // CR 111.10k: A Monster Role (like every predefined Role) has enchant creature.
+        materialized
+            .keywords
+            .push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
         materialized.static_definitions = spec.statics;
         materialized.trigger_definitions = spec.triggers;
     }
@@ -4859,6 +4865,121 @@ mod tests {
             obj.static_definitions.len(),
             1,
             "Monster Role must carry its enchanted-creature +1/+1-and-trample static"
+        );
+    }
+
+    /// CR 111.10k + CR 704.5m: a Monster Role has enchant creature, so it
+    /// must be put into its owner's graveyard when an animated Mishra's
+    /// Foundry stops being a creature during cleanup. The token then ceases
+    /// to exist, but the battlefield-to-graveyard event still occurs.
+    #[test]
+    fn monster_role_on_animated_foundry_dies_during_cleanup() {
+        let mut state = GameState::new_two_player(42);
+        let foundry = create_object(
+            &mut state,
+            CardId(98),
+            PlayerId(0),
+            "Mishra's Foundry".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&foundry).unwrap();
+            object.card_types.core_types.push(CoreType::Land);
+            object.base_card_types = object.card_types.clone();
+        }
+
+        let animate = ResolvedAbility::new(
+            Effect::Animate {
+                power: Some(PtValue::Fixed(2)),
+                toughness: Some(PtValue::Fixed(2)),
+                types: vec!["Artifact".to_string(), "Creature".to_string()],
+                remove_types: vec![],
+                keywords: vec![],
+                target: TargetFilter::None,
+            },
+            vec![],
+            foundry,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::animate::resolve(&mut state, &animate, &mut events).unwrap();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&foundry]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Mishra's Foundry must be a creature before the Role is created"
+        );
+
+        let create_role = ResolvedAbility::new(
+            Effect::Token {
+                name: "Monster Role".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec![
+                    "Enchantment".to_string(),
+                    "Aura".to_string(),
+                    "Role".to_string(),
+                ],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: Some(TargetFilter::ParentTarget),
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(foundry)],
+            foundry,
+            PlayerId(0),
+        );
+        resolve(&mut state, &create_role, &mut events).unwrap();
+        let role = state.last_created_token_ids[0];
+        assert_eq!(
+            state.objects[&role].attached_to,
+            Some(AttachTarget::Object(foundry)),
+            "Monster Role must enter attached to Mishra's Foundry"
+        );
+        assert!(
+            // allow-raw-authority: the test verifies the exact intrinsic Enchant filter, which the keyword-kind authority cannot inspect
+            state.objects[&role].keywords.iter().any(|keyword| matches!(
+                keyword,
+                Keyword::Enchant(TargetFilter::Typed(filter))
+                    if filter.type_filters.contains(&TypeFilter::Creature)
+            )),
+            "Monster Role must have the intrinsic enchant creature ability"
+        );
+
+        events.clear();
+        assert!(crate::game::turns::execute_cleanup(&mut state, &mut events).is_none());
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.objects[&foundry]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Mishra's Foundry must stop being a creature during cleanup"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == role
+            )),
+            "the illegal Aura must move from the battlefield to its owner's graveyard"
+        );
+        assert!(
+            !state.objects.contains_key(&role),
+            "a Role token put into a graveyard must cease to exist"
         );
     }
 

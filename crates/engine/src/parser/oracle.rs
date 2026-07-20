@@ -916,15 +916,31 @@ fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<St
 /// (e.g., cross-mode conjunctions) emit all their constituent statics
 /// rather than silently dropping the extras.
 ///
-/// When `raw_line_for_cant_cast_gates` is set (oracle dispatch only), cant-cast
-/// gate parentheticals stripped by `strip_reminder_text` are re-applied without
-/// passing raw reminder parentheticals through the general static parser.
+/// When `raw_line_for_cant_cast_gates` is set (oracle dispatch only), rules-
+/// bearing parentheticals stripped by `strip_reminder_text` are recovered for
+/// their specific static forms without feeding reminder text through the
+/// general static parser.
 fn parse_static_line_with_graveyard_keyword_continuation(
     line: &str,
     raw_line_for_cant_cast_gates: Option<&str>,
     card_name_for_cant_cast_gates: Option<&str>,
 ) -> Vec<StaticDefinition> {
-    let mut defs = if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
+    // CR 205.1a + CR 611.3a: a parenthetical subtype-loss rider belongs to
+    // its own conditional type grant, even though reminder stripping removes it
+    // from the general dispatch line (Goddric's Celebration).
+    let raw_conditional_type_grant = raw_line_for_cant_cast_gates
+        .zip(card_name_for_cant_cast_gates)
+        .and_then(|(raw_line, card_name)| {
+            let normalized_raw = normalize_self_refs_for_static(raw_line, card_name);
+            let raw_lower = normalized_raw.to_lowercase();
+            crate::parser::oracle_static::parse_inverted_base_pt_type_grant(
+                &normalized_raw,
+                &raw_lower,
+            )
+        });
+    let mut defs = if let Some(def) = raw_conditional_type_grant {
+        vec![def]
+    } else if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
         vec![def]
     } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
         vec![def]
@@ -4981,8 +4997,8 @@ pub(crate) fn parse_oracle_ir(
                     let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
                     let mut defs = parse_static_line_with_graveyard_keyword_continuation(
                         &effect_static,
-                        None,
-                        None,
+                        Some(raw_line),
+                        Some(card_name),
                     );
                     if !defs.is_empty() {
                         if let Some(cond) = ability_word_to_condition(&aw_name) {

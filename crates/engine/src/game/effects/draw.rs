@@ -282,11 +282,23 @@ pub(crate) fn resume_draw_sequence(
         );
         match result {
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
-                // The unit's delivery may itself have pushed and popped a nested
-                // instruction, so re-address this frame by ID rather than assuming
-                // it is still whatever `active_mut()` returns.
-                if let Some(frame) = state.draw_sequences.active_if(frame_id) {
+                // The unit's delivery may itself have pushed a nested instruction.
+                // Credit this exact frame by identity, but never resume it while
+                // the nested frame remains active.
+                if let Some(frame) = state.draw_sequences.frame_mut(frame_id) {
                     frame.accumulated += unit_drawn;
+                }
+                if state
+                    .draw_sequences
+                    .active()
+                    .is_none_or(|frame| frame.frame_id != frame_id)
+                {
+                    return ReplacementResult::NeedsChoice(
+                        state
+                            .waiting_for
+                            .acting_player()
+                            .unwrap_or(state.active_player),
+                    );
                 }
             }
             // The frame stays parked on the stack; the choice resumes it.
@@ -301,14 +313,13 @@ pub(crate) fn resume_draw_sequence(
         return ReplacementResult::Prevented;
     };
     state.last_effect_count = Some(frame.accumulated as i32);
-
     match frame.origin {
         DrawSequenceOrigin::Plain => {
             // Intentionally no `EffectResolved { Draw }`: no trigger matcher consumes
             // `EffectKind::Draw` today, so wiring that event is out of scope here.
         }
         DrawSequenceOrigin::ConniveTail { conniver, count } => {
-            super::connive::apply_connive_tail(state, conniver, count, events);
+            super::connive::apply_connive_tail(state, *conniver, count, events);
         }
         DrawSequenceOrigin::ScryCompletion { source_id } => {
             events.push(GameEvent::EffectResolved {
@@ -317,6 +328,17 @@ pub(crate) fn resume_draw_sequence(
                 subject: None,
             });
         }
+    }
+
+    // CR 615.5: A `Draw` with a chained follow-up leaves that follow-up in the
+    // normal pending-continuation slot. Keep this paused drain resident until
+    // that chain runs: its `PostReplacementSourceController` read still needs
+    // the prevented-event context. A draw without a parked follow-up is the
+    // terminal action of this dispatch and can retire the exact top entry now.
+    // Nested replacement dispatches retain their own stack entries, so this
+    // never pops an outer paused event context.
+    if state.pending_continuation.is_none() {
+        state.post_replacement_drains.finish_paused_dispatch();
     }
 
     ReplacementResult::Execute(ProposedEvent::Draw {

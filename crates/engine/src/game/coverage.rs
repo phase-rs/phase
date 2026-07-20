@@ -4166,6 +4166,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
     match m {
         ContinuousModification::CopyValues { .. } => "copy values".into(),
         ContinuousModification::SetName { name } => format!("set name {name}"),
+        ContinuousModification::SetTextName { name } => format!("set text name {name}"),
         ContinuousModification::AddPower { value } => format!("power {:+}", value),
         ContinuousModification::AddToughness { value } => format!("toughness {:+}", value),
         ContinuousModification::SetPower { value } => format!("base power {value}"),

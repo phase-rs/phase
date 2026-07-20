@@ -1,9 +1,10 @@
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -90,6 +91,8 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
   });
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [src]);
 
   const isSpell = entry.kind.type === "Spell";
   const displayManaCost =
@@ -220,10 +223,20 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         style={{ width: cardSize.width, height: cardSize.height }}
         className={`overflow-hidden rounded-lg shadow-lg ${ringClass}`}
       >
-        {isLoading || !src ? (
+        {isLoading ? (
           <div
             className="animate-pulse rounded-lg bg-gray-700 border border-gray-600"
             style={{ width: cardSize.width, height: cardSize.height }}
+          />
+        ) : !src || artError ? (
+          // Issue #6156 on the stack: this path is explicitly token-aware
+          // (`sourceIsToken` / `sourceTokenImageRef` above), so an artless
+          // token's triggered or activated ability landed here and pulsed
+          // forever — worse than a blank square, since it implies the art is
+          // still coming. Name the source instead.
+          <CardArtFallback
+            name={sourceName}
+            className="h-full w-full rounded-lg border border-gray-600"
           />
         ) : (
           <img
@@ -231,6 +244,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             alt={sourceName}
             className="h-full w-full object-cover"
             draggable={false}
+            onError={() => setArtError(true)}
           />
         )}
         {isSpell && displayManaCost && (

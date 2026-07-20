@@ -183,6 +183,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
             expr_references_chosen_x(value)
         }
         ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
