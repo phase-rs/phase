@@ -30,7 +30,7 @@ fn bring_the_ending_corrupted_instead_is_a_branch_not_a_sibling() {
         BRING_THE_ENDING,
         "Bring the Ending",
         &[],
-        &["Sorcery".to_string()],
+        &["Instant".to_string()],
         &[],
     );
 
