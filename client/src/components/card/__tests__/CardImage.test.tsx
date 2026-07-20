@@ -111,6 +111,25 @@ describe("CardImage art fallback (issue #6156)", () => {
     expect(screen.getByText("Reveillark")).toBeInTheDocument();
   });
 
+  it("never shows the artless tile while a lookup is still in flight", () => {
+    // Guards a regression this PR briefly shipped on the mobile preview: the
+    // fallback was derived from `!src` alone, but useCardImage assigns `src` in
+    // a post-render effect, so `src` is null on EVERY first paint. Deriving the
+    // tile from `!src` without consulting `isLoading` flashes "no art" before
+    // every normal card's art. Only a SETTLED lookup may show the tile.
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: true,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="Lightning Bolt" />);
+
+    expect(screen.queryByRole("img", { name: "Lightning Bolt" })).toBeNull();
+    expect(screen.getByLabelText("Loading Lightning Bolt")).toBeInTheDocument();
+  });
+
   it("keeps the unimplemented-mechanics badge visible on the fallback tile", () => {
     // The fallback is swapped in place of the <img> rather than early-returned,
     // so the overlay badges survive. An artless card losing its "!" warning

@@ -465,7 +465,7 @@ function MobilePreviewOverlay({
   report?: CardReportContext;
 }) {
   const { t } = useTranslation("game");
-  const { src, isRotated, isFlip } = useCardImage(cardName, {
+  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
     size: "normal",
     faceIndex,
     isToken: obj?.display_source === "Token",
@@ -483,7 +483,12 @@ function MobilePreviewOverlay({
   // the same named tile instead of the browser's broken-image glyph.
   const [artError, setArtError] = useState(false);
   useEffect(() => setArtError(false), [src]);
-  const showArtFallback = !src || artError;
+  // `isLoading` is load-bearing, not decoration: `useCardImage` assigns `src`
+  // in a post-render effect, so `src` is null on EVERY first paint. Deriving
+  // the fallback from `!src` alone would flash the "no art" tile before every
+  // normal card's art — the same conflation this PR fixed on the board
+  // renderers. Only a settled lookup with no art gets the tile.
+  const showArtFallback = !isLoading && (!src || artError);
 
   // Mobile has no Ctrl key, so a Kamigawa flip card's 180° spin is a tap toggle
   // (desktop holds Ctrl). Only the full-screen modal layout can host the button —
@@ -525,6 +530,10 @@ function MobilePreviewOverlay({
             name={cardName}
             className="pointer-events-auto aspect-[5/7] max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl"
           />
+        ) : !src ? (
+          // Still resolving. The compact peek is a non-blocking overlay, so it
+          // stays empty rather than flashing a skeleton over the board.
+          null
         ) : (
           <img
             src={src}
@@ -562,6 +571,9 @@ function MobilePreviewOverlay({
             name={cardName}
             className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg"
           />
+        ) : !src ? (
+          // Still resolving — skeleton, not the artless tile.
+          <div className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full animate-pulse rounded-lg bg-gray-700" />
         ) : (
           <img
             src={src}
