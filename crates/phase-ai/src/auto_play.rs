@@ -130,10 +130,47 @@ pub fn run_ai_actions(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
 ) -> AiActionsRun {
+    // Thin delegate: existing callers get the full safety-cap budget and
+    // exactly the prior semantics.
+    run_ai_actions_bounded(
+        state,
+        ai_players,
+        ai_configs,
+        rng,
+        session,
+        MAX_AI_ACTIONS_PER_SEQUENCE,
+    )
+}
+
+/// Run AI actions like [`run_ai_actions`], but with a caller-supplied upper
+/// bound on how many actions the batch may take.
+///
+/// The effective bound is `min(max_actions, MAX_AI_ACTIONS_PER_SEQUENCE)`: the
+/// module's safety cap remains the single authority — a caller can *shrink* a
+/// batch below it (to honor an action budget) but never *enlarge* one past it.
+/// This function never returns more than that many `AiActionResult`s.
+///
+/// `max_actions == 0` returns an empty run with `break_reason == None` — no
+/// actor is inspected. A caller that loops on this function must therefore
+/// guarantee a positive budget before each call (`ai_commander` does, via its
+/// `total_actions >= action_cap` abort door firing before the next iteration).
+///
+/// The "hit safety cap" warning stays keyed to `MAX_AI_ACTIONS_PER_SEQUENCE`,
+/// not `max_actions`: a small operator budget reaching its bound is expected,
+/// not a pathological infinite loop, so the warning is naturally silent whenever
+/// the clamp is the lower of the two.
+pub fn run_ai_actions_bounded(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+    max_actions: usize,
+) -> AiActionsRun {
     let mut results = Vec::new();
     let mut break_reason = None;
 
-    for _ in 0..MAX_AI_ACTIONS_PER_SEQUENCE {
+    for _ in 0..max_actions.min(MAX_AI_ACTIONS_PER_SEQUENCE) {
         // CR 723.5: Under turn control (Mindslaver, Emrakul), the authorized
         // submitter is the controller — not the active player. Only run AI when
         // that submitter is an AI seat; otherwise wait for the human controller

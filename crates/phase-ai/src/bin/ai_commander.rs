@@ -23,7 +23,7 @@ use engine::game::deck_loading::{
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::{driver_step, run_ai_actions};
+use phase_ai::auto_play::{driver_step, run_ai_actions_bounded};
 use phase_ai::config::{
     create_config_for_players, AiConfig, AiDifficulty, Platform, ACCEPTED_DIFFICULTY_LABELS,
 };
@@ -249,12 +249,21 @@ fn main() {
     let mut last_break_reason = None;
 
     loop {
-        let mut results = run_ai_actions(
+        // Remaining action budget for this batch, so a small --action-cap is
+        // never overshot by up to MAX_AI_ACTIONS_PER_SEQUENCE. Plain subtraction
+        // is deliberate, not saturating_sub: the abort door below breaks at
+        // `total_actions >= action_cap`, and `parse_action_cap` guarantees
+        // `action_cap >= 1`, so `remaining >= 1` whenever the loop body runs.
+        // An underflow here would be a real invariant violation and must panic
+        // rather than be silently masked into a zero-budget no-op.
+        let remaining = action_cap - total_actions;
+        let mut results = run_ai_actions_bounded(
             &mut state,
             &ai_players,
             &ai_configs,
             &mut ai_rng,
             &ai_session,
+            remaining,
         );
         if dump_log_path.is_some() {
             for r in &mut results {
@@ -526,9 +535,9 @@ fn parse_seat_override<'a>(
 /// End-of-run disposition, derived purely from whether the action cap was hit
 /// and where `waiting_for` parked. Drives both the epilogue text and the exit
 /// code. Abort takes precedence: `(aborted, GameOver)` is narrowly reachable —
-/// if the game-ending action is exactly the last of a batch
-/// (`MAX_AI_ACTIONS_PER_SEQUENCE`), the batch exits by count with no break
-/// reason and the cap check can then fire on a `GameOver` state — and it is
+/// if the game-ending action is exactly the last of the remaining budget, the
+/// batch fills `remaining` by count with no break reason and the cap check
+/// (`total_actions >= action_cap`) then fires on a `GameOver` state — and it is
 /// deliberately folded into `Aborted` rather than given a fourth state (exit
 /// code 2 either way; reporting the abort is more self-consistent than claiming
 /// a clean finish for a run the cap cut short).
@@ -601,8 +610,9 @@ mod tests {
     #[test]
     fn classify_run_outcome_aborted_when_cap_hit() {
         // Abort wins over the parked state, and also over the narrowly-reachable
-        // `(aborted, GameOver)` corner (game ends on the last action of a batch,
-        // then the cap fires) — which is deliberately folded into `Aborted`.
+        // `(aborted, GameOver)` corner (game ends on the last action of the
+        // remaining budget, then the cap fires) — which is deliberately folded
+        // into `Aborted`.
         let parked = WaitingFor::Priority {
             player: PlayerId(0),
         };

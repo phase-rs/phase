@@ -18,9 +18,9 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::run_ai_actions;
+use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded};
 use phase_ai::choose_action;
-use phase_ai::config::{create_config, AiDifficulty, Platform};
+use phase_ai::config::{create_config, AiConfig, AiDifficulty, Platform};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
@@ -255,6 +255,95 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
     assert!(
         results.len() <= 200,
         "AI loop should stay within its hard safety cap"
+    );
+}
+
+/// Builds a two-player game with BOTH seats AI, parked at the initial priority,
+/// and each library seeded deep so nobody decks out (draw-from-empty loss) for
+/// many turns. With an effectively empty board the AI's action stream is a long
+/// run of pass-priority / land plays that cycles phases and turns far beyond any
+/// small budget — so any early stop is the budget, not a natural game end. A
+/// bare `GameScenario::new()` has empty libraries and stalls after ~4 actions,
+/// which is why the seeding is load-bearing for the exact-equality assertions.
+fn two_ai_long_stream_runner() -> (GameRunner, HashSet<PlayerId>, HashMap<PlayerId, AiConfig>) {
+    let mut scenario = GameScenario::new();
+    let deck: Vec<&str> = vec!["Forest"; 60];
+    scenario.with_library_top(P0, &deck);
+    scenario.with_library_top(P1, &deck);
+    let runner = scenario.build();
+
+    let ai_players = HashSet::from([P0, P1]);
+    let ai_configs = HashMap::from([
+        (P0, create_config(AiDifficulty::VeryHard, Platform::Native)),
+        (P1, create_config(AiDifficulty::VeryHard, Platform::Native)),
+    ]);
+    (runner, ai_players, ai_configs)
+}
+
+#[test]
+fn run_ai_actions_bounded_stops_exactly_at_budget() {
+    // The stream is effectively unbounded (see helper), so a `results.len() == 3`
+    // outcome with no break reason can only be the budget cutting the stream.
+    let (mut runner, ai_players, ai_configs) = two_ai_long_stream_runner();
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let results = run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        3,
+    );
+
+    assert_eq!(
+        results.len(),
+        3,
+        "bounded run must take exactly its budget of actions"
+    );
+    assert!(
+        results.break_reason.is_none(),
+        "budget cut the stream — the loop did not end for a break-door reason"
+    );
+}
+
+#[test]
+fn small_action_cap_is_never_exceeded_at_driver_boundary() {
+    // Regression for PR #6195 review finding: `--action-cap` did not bound the
+    // configured number of actions — a full batch could run up to 199 actions
+    // past a small cap. Mirror ai_commander's driver arithmetic here and prove a
+    // small cap is honored exactly.
+    let (mut runner, ai_players, ai_configs) = two_ai_long_stream_runner();
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let cap: usize = 5;
+    let mut total: usize = 0;
+    loop {
+        let remaining = cap - total;
+        let batch = run_ai_actions_bounded(
+            runner.state_mut(),
+            &ai_players,
+            &ai_configs,
+            &mut ai_rng,
+            &ai_session,
+            remaining,
+        );
+        total += batch.len();
+        assert!(total <= cap, "cap exceeded: total={total} cap={cap}");
+        if batch.break_reason.is_some() || batch.is_empty() {
+            break;
+        }
+        if total >= cap {
+            break;
+        }
+    }
+
+    assert_eq!(
+        total, cap,
+        "the pass-priority stream is effectively unbounded, so the budget must \
+         be exactly what stopped the driver"
     );
 }
 
