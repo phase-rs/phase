@@ -858,7 +858,7 @@ pub(crate) fn resume_resolution_frames(
             choose_from_zone::drain_active_per_player_zone_choice(state, &[], events);
         }
         ResolutionFrame::PerCategoryZoneChoice(_) => {
-            let _ = choose_from_zone::drain_pending_per_category_zone_choice(state, &[], events);
+            let _ = choose_from_zone::drain_active_per_category_zone_choice(state, &[], events);
         }
         ResolutionFrame::OptionalEffect(_)
         | ResolutionFrame::CoinFlip(_)
@@ -1486,6 +1486,16 @@ pub(crate) fn append_to_pending_continuation(
 }
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
+    if state.active_per_category_zone_choice().is_some() {
+        state
+            .insert_ability_continuation_parent_of_active(PendingContinuation::new(
+                Box::new(head),
+                state,
+            ))
+            .expect("per-category zone choice must retain its continuation as an immediate parent");
+        return;
+    }
+
     if let Some(frame) = state
         .take_active_ability_continuation()
         .expect("continuation prepend may consume only the active continuation frame")

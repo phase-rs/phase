@@ -176,7 +176,7 @@ pub fn resolve_for_each_category_put_counter(
 /// are skipped (CR 608.2c — nothing to exile of that color/type). When no member
 /// remains, emits the resolution event so the parked continuation runs. Drives
 /// both the initial call from `resolve_for_each_category` and each resumed call
-/// from `drain_pending_per_category_zone_choice`.
+/// from `drain_active_per_category_zone_choice`.
 fn prompt_next_category_member(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -250,12 +250,13 @@ fn prompt_next_category_member(
             constraint: None,
             source_id: ability.source_id,
         };
-        state.pending_per_category_zone_choice =
-            Some(crate::types::game_state::PendingPerCategoryZoneChoice {
+        state.push_per_category_zone_choice(
+            crate::types::game_state::PendingPerCategoryZoneChoice {
                 ability: Box::new(ability.clone()),
                 pool: pool.to_vec(),
                 remaining_member_filters,
-            });
+            },
+        );
         return Ok(());
     }
 
@@ -282,12 +283,15 @@ fn prompt_next_category_member(
 /// chain's "cards exiled this way" tracked set (started empty by
 /// `resolve_for_each_category`), then prompts the next member. Mirrors
 /// `drain_active_per_player_zone_choice`.
-pub(crate) fn drain_pending_per_category_zone_choice(
+pub(crate) fn drain_active_per_category_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::BatchMoveResult {
-    let Some(pending) = state.pending_per_category_zone_choice.take() else {
+    let Some(pending) = state
+        .take_active_per_category_zone_choice()
+        .expect("per-category zone-choice drain may consume only its active frame")
+    else {
         return crate::game::zone_pipeline::BatchMoveResult::Done;
     };
     let crate::types::game_state::PendingPerCategoryZoneChoice {
@@ -2294,7 +2298,7 @@ mod tests {
             other => panic!("expected ChooseFromZoneChoice for White member, got {other:?}"),
         }
         assert!(
-            state.pending_per_category_zone_choice.is_some(),
+            state.active_per_category_zone_choice().is_some(),
             "iteration must be parked after the first member"
         );
     }
@@ -2369,7 +2373,7 @@ mod tests {
         }
         // The iteration is complete (no parked member, no choice prompt).
         assert!(
-            state.pending_per_category_zone_choice.is_none(),
+            state.active_per_category_zone_choice().is_none(),
             "iteration must be disposed after every member"
         );
         // The chain tracked set holds exactly the cards exiled this way.
@@ -2464,6 +2468,7 @@ mod tests {
         use crate::types::actions::GameAction;
         use crate::types::identifiers::TrackedSetId;
         use crate::types::mana::ManaColor;
+        use crate::types::resolution::{FrameKind, ResolutionFrame, ResolutionStateWire};
         let mut state = GameState::new_two_player(7);
         let white = make_colored_card(&mut state, 1, "White Card", ManaColor::White);
         let blue = make_colored_card(&mut state, 2, "Blue Card", ManaColor::Blue);
@@ -2515,6 +2520,27 @@ mod tests {
         // would (the parking happens because the first member parks a choice).
         let mut events = Vec::new();
         super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::AbilityContinuation,
+                FrameKind::PerCategoryZoneChoice,
+            ],
+            "the category prompt must remain active above its deferred continuation"
+        );
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("real category prompt serializes as v2");
+        assert!(
+            v2.get("pending_per_category_zone_choice").is_none(),
+            "v2 state must retain the category owner only in resolution_frames"
+        );
+        state = serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("real category prompt round-trips through the v2 wire")
+            .into_game_state();
 
         // Exile each colored card at its member prompt (White then Blue).
         for expected in [white, blue] {
@@ -2537,7 +2563,7 @@ mod tests {
         // CR 608.2c: the iteration is disposed and resolution returned to
         // priority — NOT a dangling member prompt.
         assert!(
-            state.pending_per_category_zone_choice.is_none(),
+            state.active_per_category_zone_choice().is_none(),
             "iteration must be disposed"
         );
         assert!(

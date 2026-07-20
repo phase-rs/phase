@@ -582,6 +582,42 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::PerPlayerZoneChoice(frame));
     }
 
+    /// Returns the per-category zone-choice owner only when it owns the stack top.
+    pub fn active_per_category_zone_choice(&self) -> Option<&PendingPerCategoryZoneChoice> {
+        match self.last() {
+            Some(ResolutionFrame::PerCategoryZoneChoice(frame)) => Some(&frame.pending),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active per-category zone-choice frame.
+    pub fn take_active_per_category_zone_choice(
+        &mut self,
+    ) -> Result<Option<PendingPerCategoryZoneChoice>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::PerCategoryZoneChoice(_)) => {
+                let ResolutionFrame::PerCategoryZoneChoice(frame) =
+                    self.pop_expected(FrameKind::PerCategoryZoneChoice)?
+                else {
+                    unreachable!("checked per-category zone-choice frame kind must match")
+                };
+                Ok(Some(frame.pending))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::PerCategoryZoneChoice,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a per-category zone-choice iteration.
+    pub fn push_per_category_zone_choice(&mut self, pending: PendingPerCategoryZoneChoice) {
+        self.push_inner(ResolutionFrame::PerCategoryZoneChoice(
+            PerCategoryZoneChoiceFrame { pending },
+        ));
+    }
+
     /// Returns only the immediate predecessor of the active frame.
     ///
     /// This is intentionally narrower than a frame search: the only Phase-2
@@ -822,6 +858,8 @@ impl ResolutionStateWire {
                 let legacy_vote_ballot = LegacyVoteBallotWire::from_value(&value)?;
                 let legacy_per_player_zone_choice =
                     LegacyPerPlayerZoneChoiceWire::from_value(&value)?;
+                let legacy_per_category_zone_choice =
+                    LegacyPerCategoryZoneChoiceWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -834,6 +872,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_choose_one_of");
                 legacy_object.remove("pending_vote_ballot_iteration");
                 legacy_object.remove("pending_per_player_zone_choice");
+                legacy_object.remove("pending_per_category_zone_choice");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -853,6 +892,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_per_player_zone_choice.into_frame() {
                     legacy.push_per_player_zone_choice(frame);
+                }
+                if let Some(frame) = legacy_per_category_zone_choice.into_frame() {
+                    legacy.push_per_category_zone_choice(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -1050,6 +1092,23 @@ struct LegacyPerPlayerZoneChoiceWire {
     pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
 }
 
+/// v1-only per-category zone-choice field. Runtime state carries it only as a typed frame.
+#[derive(Deserialize)]
+struct LegacyPerCategoryZoneChoiceWire {
+    #[serde(default)]
+    pending_per_category_zone_choice: Option<PendingPerCategoryZoneChoice>,
+}
+
+impl LegacyPerCategoryZoneChoiceWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingPerCategoryZoneChoice> {
+        self.pending_per_category_zone_choice
+    }
+}
+
 impl LegacyPerPlayerZoneChoiceWire {
     fn from_value(value: &Value) -> Result<Self, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
@@ -1122,6 +1181,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
         ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
@@ -1175,11 +1235,6 @@ fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStac
     }
     if let Some(pending) = state.pending_each_player_copy_chosen.clone() {
         frames.push_inner(ResolutionFrame::EachPlayerCopyChosen(pending));
-    }
-    if let Some(pending) = state.pending_per_category_zone_choice.clone() {
-        frames.push_inner(ResolutionFrame::PerCategoryZoneChoice(
-            PerCategoryZoneChoiceFrame { pending },
-        ));
     }
     if let Some(pending) = state.pending_life_total_assignment.clone() {
         frames.push_inner(ResolutionFrame::LifeTotalAssignment(pending));
@@ -1343,11 +1398,7 @@ fn project_frames_into_legacy_state(
                 projected.push_per_player_zone_choice(pending.clone())
             }
             ResolutionFrame::PerCategoryZoneChoice(frame) => {
-                set_once(
-                    &mut projected.pending_per_category_zone_choice,
-                    frame.pending.clone(),
-                    "PerCategoryZoneChoice",
-                )?;
+                projected.push_per_category_zone_choice(frame.pending.clone())
             }
             ResolutionFrame::OptionalEffect(frame) => {
                 set_once(
@@ -1420,7 +1471,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.pending_counter_additions = None;
     state.pending_copy_token_resolution = None;
     state.pending_each_player_copy_chosen = None;
-    state.pending_per_category_zone_choice = None;
     state.pending_optional_effect = None;
     state.pending_optional_trigger_event = None;
     state.pending_optional_trigger_match_count = None;
@@ -1765,6 +1815,21 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 per-player choice fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_per_category_zone_choice_fixture(
+        state: GameState,
+        pending: PendingPerCategoryZoneChoice,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_per_category_zone_choice"] =
+            serde_json::to_value(pending).expect("legacy per-category choice serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 per-category choice fixture converts through the wire")
             .into_game_state()
     }
 
@@ -2591,19 +2656,21 @@ mod tests {
                 },
             },
         );
-        let mut per_category = GameState::new_two_player(134);
-        per_category.pending_per_category_zone_choice = Some(PendingPerCategoryZoneChoice {
-            ability: Box::new(for_each_category),
-            pool: Vec::new(),
-            remaining_member_filters: Vec::new(),
-        });
-        let mut per_category = restore_v1_fixture(per_category);
-        let _ = crate::game::effects::choose_from_zone::drain_pending_per_category_zone_choice(
+        let per_category = GameState::new_two_player(134);
+        let mut per_category = restore_v1_per_category_zone_choice_fixture(
+            per_category,
+            PendingPerCategoryZoneChoice {
+                ability: Box::new(for_each_category),
+                pool: Vec::new(),
+                remaining_member_filters: Vec::new(),
+            },
+        );
+        let _ = crate::game::effects::choose_from_zone::drain_active_per_category_zone_choice(
             &mut per_category,
             &[],
             &mut Vec::new(),
         );
-        assert!(per_category.pending_per_category_zone_choice.is_none());
+        assert!(per_category.active_per_category_zone_choice().is_none());
         assert_reserializes_v2_only(per_category);
     }
 

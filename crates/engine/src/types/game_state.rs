@@ -11885,16 +11885,6 @@ pub struct GameState {
     /// CR 616.1: search-found replacement batch parked across a choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
-    /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
-    /// `Effect::ForEachCategoryExile` iteration paused by the current member's
-    /// interactive choice ("for each color/card type, you may exile a card of
-    /// that color/type"). Drained alongside the per-player zone-choice frame,
-    /// BEFORE `pending_continuation` runs, so every member's pool pick
-    /// accumulates into the chain's tracked set before a downstream
-    /// "from among them" clause resolves.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_per_category_zone_choice: Option<PendingPerCategoryZoneChoice>,
-
     /// CR 122.5: Pending atomic counter moves selected during a resolution-time
     /// distribution prompt. Drained before normal pending continuations so
     /// replacement choices inside a move resume the remaining selected moves.
@@ -13517,6 +13507,21 @@ impl GameState {
         });
     }
 
+    /// Insert a continuation immediately below the active child that paused
+    /// before its sub-ability was discovered.
+    pub fn insert_ability_continuation_parent_of_active(
+        &mut self,
+        pending: PendingContinuation,
+    ) -> Result<(), ResolutionStackError> {
+        let choose_zone_trigger_context = pending.trigger_context.clone();
+        self.resolution_stack.insert_parent_of_active(
+            super::resolution::ResolutionFrame::AbilityContinuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context,
+            }),
+        )
+    }
+
     /// Re-park the active continuation after its production handler made
     /// progress but raised another prompt.
     pub fn replace_active_ability_continuation(
@@ -13679,6 +13684,23 @@ impl GameState {
     /// Park a per-player zone-choice iteration.
     pub fn push_per_player_zone_choice(&mut self, pending: PendingPerPlayerZoneChoice) {
         self.resolution_stack.push_per_player_zone_choice(pending);
+    }
+
+    /// Returns the per-category zone-choice owner only when it owns the stack top.
+    pub fn active_per_category_zone_choice(&self) -> Option<&PendingPerCategoryZoneChoice> {
+        self.resolution_stack.active_per_category_zone_choice()
+    }
+
+    /// Consume exactly the active per-category zone-choice frame.
+    pub fn take_active_per_category_zone_choice(
+        &mut self,
+    ) -> Result<Option<PendingPerCategoryZoneChoice>, ResolutionStackError> {
+        self.resolution_stack.take_active_per_category_zone_choice()
+    }
+
+    /// Park a per-category zone-choice iteration.
+    pub fn push_per_category_zone_choice(&mut self, pending: PendingPerCategoryZoneChoice) {
+        self.resolution_stack.push_per_category_zone_choice(pending);
     }
 
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
@@ -14380,7 +14402,6 @@ impl GameState {
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
             pending_search_found_batch: None,
-            pending_per_category_zone_choice: None,
             pending_counter_moves: None,
             pending_counter_removals: None,
             pending_batch_deliveries: None,
@@ -15496,7 +15517,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_each_player_copy_chosen: _,
         pending_coin_flip: _,
         resolution_coin_flip: _,
-        pending_per_category_zone_choice: _,
         pending_counter_moves: _,
         pending_counter_removals: _,
         pending_batch_deliveries: _,

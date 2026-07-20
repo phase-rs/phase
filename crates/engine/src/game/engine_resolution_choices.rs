@@ -3524,8 +3524,8 @@ pub(super) fn handle_resolution_choice(
             // the chain's tracked set and prompts the next member, exactly like
             // the per-player path (Sanar, Portent of Calamity). The continuation
             // ("from among them" / "put the rest …") reads that tracked set.
-            if state.pending_per_category_zone_choice.is_some() {
-                match effects::choose_from_zone::drain_pending_per_category_zone_choice(
+            if state.active_per_category_zone_choice().is_some() {
+                match effects::choose_from_zone::drain_active_per_category_zone_choice(
                     state, &chosen, events,
                 ) {
                     crate::game::zone_pipeline::BatchMoveResult::Done => {}
