@@ -104,7 +104,8 @@ pub fn resolve(
     // to resume and therefore no context to carry.
     let trigger_context = ResolvingTriggerContext::capture(state);
     if let Some(frame) = state.active_ability_continuation_frame_mut() {
-        frame.choose_zone_trigger_context = trigger_context;
+        frame.choose_zone_trigger_context =
+            trigger_context.or_else(|| frame.pending.trigger_context.clone());
     }
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
@@ -280,7 +281,7 @@ fn prompt_next_category_member(
 /// current member's pick resolves. Exiles the chosen card and extends the
 /// chain's "cards exiled this way" tracked set (started empty by
 /// `resolve_for_each_category`), then prompts the next member. Mirrors
-/// `drain_pending_per_player_zone_choice`.
+/// `drain_active_per_player_zone_choice`.
 pub(crate) fn drain_pending_per_category_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
@@ -522,12 +523,12 @@ pub(crate) fn resolve_random_in_chain(
 
 /// CR 101.4 + CR 608.2c: Park the next eligible player's `ChooseFromZoneChoice`
 /// for a `ChooseFromZone { zone_owner: EachPlayer }` iteration, stashing the
-/// players still to be prompted in `pending_per_player_zone_choice`. Players
+/// players still to be prompted in a typed per-player zone-choice frame. Players
 /// whose zone holds no matching candidate are skipped (CR 608.2c — there's
 /// nothing to choose). When no eligible player remains, the iteration is
 /// disposed (the parked `pending_continuation` then runs). Drives both the
 /// initial call from `resolve` and each resumed call from
-/// `drain_pending_per_player_zone_choice`.
+/// `drain_active_per_player_zone_choice`.
 fn prompt_next_each_player(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -579,6 +580,16 @@ fn prompt_next_each_player(
         // Multiverse). `Chooser::Opponent` would route to an opponent; honor it.
         let choosing_player = resolve_chooser(state, ability, chooser);
 
+        // CR 608.2: The per-player frame is inserted above the continuation
+        // that runs after every player has chosen. Capture the live trigger
+        // context while that continuation still owns the top, before parking
+        // this child frame (Amy Pond's `EventContextAmount` tail).
+        let trigger_context = ResolvingTriggerContext::capture(state);
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.choose_zone_trigger_context =
+                trigger_context.or_else(|| frame.pending.trigger_context.clone());
+        }
+
         state.waiting_for = WaitingFor::ChooseFromZoneChoice {
             player: choosing_player,
             cards,
@@ -587,12 +598,11 @@ fn prompt_next_each_player(
             constraint,
             source_id: ability.source_id,
         };
-        state.pending_per_player_zone_choice =
-            Some(crate::types::game_state::PendingPerPlayerZoneChoice {
-                ability: Box::new(ability.clone()),
-                remaining_players,
-                accumulated,
-            });
+        state.push_per_player_zone_choice(crate::types::game_state::PendingPerPlayerZoneChoice {
+            ability: Box::new(ability.clone()),
+            remaining_players,
+            accumulated,
+        });
         return Ok(());
     }
 
@@ -600,7 +610,7 @@ fn prompt_next_each_player(
     // `accumulated == false` this is the FIRST resolution of the iteration (no
     // player was ever prompted), so it MUST rebind a FRESH (empty) chain tracked
     // set before the parked continuation runs — mirroring the first-resolution
-    // rebind in `drain_pending_per_player_zone_choice`. Otherwise an EARLIER
+    // rebind in `drain_active_per_player_zone_choice`. Otherwise an EARLIER
     // same-chain producer's tracked set (e.g. Breach the Multiverse's preceding
     // mill) stays bound and a downstream `ChangeZoneAll { TrackedSet }` over-acts
     // on that stale set instead of this iteration's (empty) picks: "those chosen
@@ -625,12 +635,15 @@ fn prompt_next_each_player(
 /// onto the battlefield" reads exactly the cards chosen across all players,
 /// then prompts the next eligible player. Mirrors
 /// `vote::drain_active_vote_ballot` through its typed frame.
-pub(crate) fn drain_pending_per_player_zone_choice(
+pub(crate) fn drain_active_per_player_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(pending) = state.pending_per_player_zone_choice.take() else {
+    let Some(pending) = state
+        .take_active_per_player_zone_choice()
+        .expect("per-player zone-choice drain may consume only its active frame")
+    else {
         return;
     };
 
@@ -1095,7 +1108,20 @@ mod tests {
             runner
                 .state()
                 .active_ability_continuation_frame()
-                .and_then(|frame| frame.choose_zone_trigger_context.as_ref())
+                .map(|frame| &frame.choose_zone_trigger_context)
+                .or_else(|| {
+                    runner
+                        .state()
+                        .resolution_stack
+                        .active_predecessor()
+                        .and_then(|frame| match frame {
+                            crate::types::resolution::ResolutionFrame::AbilityContinuation(
+                                frame,
+                            ) => Some(&frame.choose_zone_trigger_context),
+                            _ => None,
+                        })
+                })
+                .and_then(Option::as_ref)
                 .is_some(),
             "the resolving trigger context must be captured across the pause"
         );
@@ -3072,16 +3098,15 @@ mod tests {
             PlayerId(0),
         );
         // First resolution: no players left to prompt afterwards, accumulated=false.
-        state.pending_per_player_zone_choice =
-            Some(crate::types::game_state::PendingPerPlayerZoneChoice {
-                ability: Box::new(ability),
-                remaining_players: vec![],
-                accumulated: false,
-            });
+        state.push_per_player_zone_choice(crate::types::game_state::PendingPerPlayerZoneChoice {
+            ability: Box::new(ability),
+            remaining_players: vec![],
+            accumulated: false,
+        });
 
         let mut events = Vec::new();
         // The first player DECLINES — an empty "up to one" pick.
-        drain_pending_per_player_zone_choice(&mut state, &[], &mut events);
+        drain_active_per_player_zone_choice(&mut state, &[], &mut events);
 
         let bound = state
             .chain_tracked_set_id

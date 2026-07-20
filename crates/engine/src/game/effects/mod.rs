@@ -681,7 +681,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // player's graveyard pick has accumulated into the tracked set. The
     // per-player drain re-parks the next prompt; this guard ensures the
     // continuation waits for the whole sweep (Breach the Multiverse).
-    if state.pending_per_player_zone_choice.is_some() {
+    if state.active_per_player_zone_choice().is_some() {
         return;
     }
     // CR 608.2c (issue #1093 review) + CR 614.12b + CR 614.1c + CR 614.13:
@@ -855,7 +855,7 @@ pub(crate) fn resume_resolution_frames(
             vote::drain_active_vote_ballot(state, events);
         }
         ResolutionFrame::PerPlayerZoneChoice(_) => {
-            choose_from_zone::drain_pending_per_player_zone_choice(state, &[], events);
+            choose_from_zone::drain_active_per_player_zone_choice(state, &[], events);
         }
         ResolutionFrame::PerCategoryZoneChoice(_) => {
             let _ = choose_from_zone::drain_pending_per_category_zone_choice(state, &[], events);
@@ -1481,10 +1481,7 @@ pub(crate) fn append_to_pending_continuation(
                 .as_mut();
         }
     } else {
-        state.push_ability_continuation(AbilityContinuationFrame {
-            pending: PendingContinuation::new(tail, state),
-            choose_zone_trigger_context: None,
-        });
+        state.park_ability_continuation(PendingContinuation::new(tail, state));
     }
 }
 
@@ -1514,10 +1511,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
     } else {
-        state.push_ability_continuation(AbilityContinuationFrame {
-            pending: PendingContinuation::new(Box::new(head), state),
-            choose_zone_trigger_context: None,
-        });
+        state.park_ability_continuation(PendingContinuation::new(Box::new(head), state));
     }
 }
 
@@ -1913,10 +1907,10 @@ fn try_begin_deferred_else_branch_target_selection(
             })
             .collect();
         if !candidates.is_empty() {
-            state.push_ability_continuation(AbilityContinuationFrame {
-                pending: PendingContinuation::new(Box::new(else_resolved.clone()), state),
-                choose_zone_trigger_context: None,
-            });
+            state.park_ability_continuation(PendingContinuation::new(
+                Box::new(else_resolved.clone()),
+                state,
+            ));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: else_resolved.controller,
                 cards: candidates,
@@ -7697,10 +7691,10 @@ fn resolve_chain_body(
                             if !candidates.is_empty() {
                                 let mut cont = ability.clone();
                                 cont.targets.clear();
-                                state.push_ability_continuation(AbilityContinuationFrame {
-                                    pending: PendingContinuation::new(Box::new(cont), state),
-                                    choose_zone_trigger_context: None,
-                                });
+                                state.park_ability_continuation(PendingContinuation::new(
+                                    Box::new(cont),
+                                    state,
+                                ));
                                 state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                                     player: chosen,
                                     cards: candidates,
@@ -8758,10 +8752,10 @@ fn resolve_chain_body(
                             state.active_ability_continuation().is_none(),
                             "pending_continuation overwritten before consumption — else_ability chain will be lost"
                         );
-                        state.push_ability_continuation(AbilityContinuationFrame {
-                            pending: PendingContinuation::new(Box::new(resolved), state),
-                            choose_zone_trigger_context: None,
-                        });
+                        state.park_ability_continuation(PendingContinuation::new(
+                            Box::new(resolved),
+                            state,
+                        ));
                     } else {
                         resolve_ability_chain(state, &resolved, events, depth + 1)?;
                     }
@@ -8820,10 +8814,10 @@ fn resolve_chain_body(
                                 state.active_ability_continuation().is_none(),
                                 "pending_continuation overwritten before consumption — instead-tail chain will be lost"
                             );
-                            state.push_ability_continuation(AbilityContinuationFrame {
-                                pending: PendingContinuation::new(Box::new(resolved), state),
-                                choose_zone_trigger_context: None,
-                            });
+                            state.park_ability_continuation(PendingContinuation::new(
+                                Box::new(resolved),
+                                state,
+                            ));
                         } else {
                             resolve_ability_chain(state, &resolved, events, depth + 1)?;
                         }

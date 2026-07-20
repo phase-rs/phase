@@ -11859,15 +11859,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_coin_flip: Option<ResolutionCoinFlip>,
 
-    /// CR 701.55d: Pending continuation of a multi-player ChooseOneOf after a
-    /// selected branch has finished resolving, including any nested choices.
     /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { EachPlayer }`
     /// iteration paused by the current player's interactive choice. Drained
     /// alongside the vote-ballot frame, before the ability-continuation frame
     /// runs, so every player's graveyard pick accumulates into the chain's
     /// tracked set before "put those cards onto the battlefield" resolves.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
     /// CR 101.4: If players make choices for one instruction, they choose in
     /// APNAP order before the simultaneous action happens.
     /// CR 701.21a: To sacrifice a permanent, its controller moves it from the
@@ -11892,7 +11888,7 @@ pub struct GameState {
     /// CR 608.2c + CR 105.1 / CR 205.2a: Per-category-member
     /// `Effect::ForEachCategoryExile` iteration paused by the current member's
     /// interactive choice ("for each color/card type, you may exile a card of
-    /// that color/type"). Drained alongside `pending_per_player_zone_choice`,
+    /// that color/type"). Drained alongside the per-player zone-choice frame,
     /// BEFORE `pending_continuation` runs, so every member's pool pick
     /// accumulates into the chain's tracked set before a downstream
     /// "from among them" clause resolves.
@@ -13514,9 +13510,10 @@ impl GameState {
 
     /// Park a freshly created continuation as the active inner frame.
     pub fn park_ability_continuation(&mut self, pending: PendingContinuation) {
+        let choose_zone_trigger_context = pending.trigger_context.clone();
         self.push_ability_continuation(AbilityContinuationFrame {
             pending,
-            choose_zone_trigger_context: None,
+            choose_zone_trigger_context,
         });
     }
 
@@ -13665,6 +13662,23 @@ impl GameState {
     ) -> Result<(), ResolutionStackError> {
         self.resolution_stack
             .insert_parent_of_active(super::resolution::ResolutionFrame::VoteBallot(pending))
+    }
+
+    /// Returns the per-player zone-choice owner only when it owns the stack top.
+    pub fn active_per_player_zone_choice(&self) -> Option<&PendingPerPlayerZoneChoice> {
+        self.resolution_stack.active_per_player_zone_choice()
+    }
+
+    /// Consume exactly the active per-player zone-choice frame.
+    pub fn take_active_per_player_zone_choice(
+        &mut self,
+    ) -> Result<Option<PendingPerPlayerZoneChoice>, ResolutionStackError> {
+        self.resolution_stack.take_active_per_player_zone_choice()
+    }
+
+    /// Park a per-player zone-choice iteration.
+    pub fn push_per_player_zone_choice(&mut self, pending: PendingPerPlayerZoneChoice) {
+        self.resolution_stack.push_per_player_zone_choice(pending);
     }
 
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
@@ -14362,7 +14376,6 @@ impl GameState {
             pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
             resolution_coin_flip: None,
-            pending_per_player_zone_choice: None,
             pending_player_scope_sacrifice_choice: None,
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
@@ -15483,7 +15496,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_each_player_copy_chosen: _,
         pending_coin_flip: _,
         resolution_coin_flip: _,
-        pending_per_player_zone_choice: _,
         pending_per_category_zone_choice: _,
         pending_counter_moves: _,
         pending_counter_removals: _,
@@ -15809,7 +15821,6 @@ impl PartialEq for GameState {
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).
             && self.resolution_coin_flip == other.resolution_coin_flip
-            && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search

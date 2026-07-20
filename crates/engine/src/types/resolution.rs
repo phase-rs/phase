@@ -548,6 +548,40 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::VoteBallot(frame));
     }
 
+    /// Returns the per-player zone-choice owner only when it owns the stack top.
+    pub fn active_per_player_zone_choice(&self) -> Option<&PendingPerPlayerZoneChoice> {
+        match self.last() {
+            Some(ResolutionFrame::PerPlayerZoneChoice(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active per-player zone-choice frame.
+    pub fn take_active_per_player_zone_choice(
+        &mut self,
+    ) -> Result<Option<PendingPerPlayerZoneChoice>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::PerPlayerZoneChoice(_)) => {
+                let ResolutionFrame::PerPlayerZoneChoice(frame) =
+                    self.pop_expected(FrameKind::PerPlayerZoneChoice)?
+                else {
+                    unreachable!("checked per-player zone-choice frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::PerPlayerZoneChoice,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a per-player zone-choice iteration.
+    pub fn push_per_player_zone_choice(&mut self, frame: PendingPerPlayerZoneChoice) {
+        self.push_inner(ResolutionFrame::PerPlayerZoneChoice(frame));
+    }
+
     /// Returns only the immediate predecessor of the active frame.
     ///
     /// This is intentionally narrower than a frame search: the only Phase-2
@@ -786,6 +820,8 @@ impl ResolutionStateWire {
                 let legacy_repeat_until = LegacyRepeatUntilWire::from_value(&value)?;
                 let legacy_choose_one_of = LegacyChooseOneOfWire::from_value(&value)?;
                 let legacy_vote_ballot = LegacyVoteBallotWire::from_value(&value)?;
+                let legacy_per_player_zone_choice =
+                    LegacyPerPlayerZoneChoiceWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -797,6 +833,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_repeat_until");
                 legacy_object.remove("pending_choose_one_of");
                 legacy_object.remove("pending_vote_ballot_iteration");
+                legacy_object.remove("pending_per_player_zone_choice");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -813,6 +850,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_vote_ballot.into_frame() {
                     legacy.push_vote_ballot(frame);
+                }
+                if let Some(frame) = legacy_per_player_zone_choice.into_frame() {
+                    legacy.push_per_player_zone_choice(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -1003,6 +1043,23 @@ struct LegacyVoteBallotWire {
     pending_vote_ballot_iteration: Option<PendingVoteBallotIteration>,
 }
 
+/// v1-only per-player zone-choice field. Runtime state carries it only as a typed frame.
+#[derive(Deserialize)]
+struct LegacyPerPlayerZoneChoiceWire {
+    #[serde(default)]
+    pending_per_player_zone_choice: Option<PendingPerPlayerZoneChoice>,
+}
+
+impl LegacyPerPlayerZoneChoiceWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingPerPlayerZoneChoice> {
+        self.pending_per_player_zone_choice
+    }
+}
+
 impl LegacyVoteBallotWire {
     fn from_value(value: &Value) -> Result<Self, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
@@ -1064,6 +1121,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::RepeatUntil(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
         ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
@@ -1117,9 +1175,6 @@ fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStac
     }
     if let Some(pending) = state.pending_each_player_copy_chosen.clone() {
         frames.push_inner(ResolutionFrame::EachPlayerCopyChosen(pending));
-    }
-    if let Some(pending) = state.pending_per_player_zone_choice.clone() {
-        frames.push_inner(ResolutionFrame::PerPlayerZoneChoice(pending));
     }
     if let Some(pending) = state.pending_per_category_zone_choice.clone() {
         frames.push_inner(ResolutionFrame::PerCategoryZoneChoice(
@@ -1284,11 +1339,9 @@ fn project_frames_into_legacy_state(
             )?,
             ResolutionFrame::ChooseOneOf(pending) => projected.push_choose_one_of(pending.clone()),
             ResolutionFrame::VoteBallot(pending) => projected.push_vote_ballot(pending.clone()),
-            ResolutionFrame::PerPlayerZoneChoice(pending) => set_once(
-                &mut projected.pending_per_player_zone_choice,
-                pending.clone(),
-                "PerPlayerZoneChoice",
-            )?,
+            ResolutionFrame::PerPlayerZoneChoice(pending) => {
+                projected.push_per_player_zone_choice(pending.clone())
+            }
             ResolutionFrame::PerCategoryZoneChoice(frame) => {
                 set_once(
                     &mut projected.pending_per_category_zone_choice,
@@ -1367,7 +1420,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.pending_counter_additions = None;
     state.pending_copy_token_resolution = None;
     state.pending_each_player_copy_chosen = None;
-    state.pending_per_player_zone_choice = None;
     state.pending_per_category_zone_choice = None;
     state.pending_optional_effect = None;
     state.pending_optional_trigger_event = None;
@@ -1698,6 +1750,21 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 vote-ballot fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_per_player_zone_choice_fixture(
+        state: GameState,
+        pending: PendingPerPlayerZoneChoice,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_per_player_zone_choice"] =
+            serde_json::to_value(pending).expect("legacy per-player choice serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 per-player choice fixture converts through the wire")
             .into_game_state()
     }
 
@@ -2496,19 +2563,21 @@ mod tests {
                 constraint: None,
             },
         );
-        let mut per_player = GameState::new_two_player(133);
-        per_player.pending_per_player_zone_choice = Some(PendingPerPlayerZoneChoice {
-            ability: Box::new(choose_from_zone),
-            remaining_players: Vec::new(),
-            accumulated: false,
-        });
-        let mut per_player = restore_v1_fixture(per_player);
-        crate::game::effects::choose_from_zone::drain_pending_per_player_zone_choice(
+        let per_player = GameState::new_two_player(133);
+        let mut per_player = restore_v1_per_player_zone_choice_fixture(
+            per_player,
+            PendingPerPlayerZoneChoice {
+                ability: Box::new(choose_from_zone),
+                remaining_players: Vec::new(),
+                accumulated: false,
+            },
+        );
+        crate::game::effects::choose_from_zone::drain_active_per_player_zone_choice(
             &mut per_player,
             &[],
             &mut Vec::new(),
         );
-        assert!(per_player.pending_per_player_zone_choice.is_none());
+        assert!(per_player.active_per_player_zone_choice().is_none());
         assert_reserializes_v2_only(per_player);
 
         let for_each_category = resolved_effect(

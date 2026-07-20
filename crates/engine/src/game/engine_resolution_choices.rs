@@ -3502,12 +3502,12 @@ pub(super) fn handle_resolution_choice(
             // CR 101.4 + CR 608.2c: A per-player `ChooseFromZone { EachPlayer }`
             // iteration does NOT partition this player's pick into the
             // continuation's target slots — each pick is accumulated into the
-            // chain's tracked set by `drain_pending_per_player_zone_choice`, and
+            // chain's tracked set by `drain_active_per_player_zone_choice`, and
             // the continuation ("put those cards onto the battlefield") reads
             // that tracked set. Hand the choice straight to the drain so it can
             // accumulate and prompt the next player (Breach the Multiverse).
-            if state.pending_per_player_zone_choice.is_some() {
-                effects::choose_from_zone::drain_pending_per_player_zone_choice(
+            if state.active_per_player_zone_choice().is_some() {
+                effects::choose_from_zone::drain_active_per_player_zone_choice(
                     state, &chosen, events,
                 );
                 // Only after every player has been prompted (the drain leaves no
