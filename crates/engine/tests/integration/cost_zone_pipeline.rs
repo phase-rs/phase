@@ -3696,7 +3696,7 @@ fn effect_pay_cost_rider_waits_for_scry_post_effect_before_typed_root_settles() 
             if matches!(pending.resume, ManaAbilityResume::EffectPayCost { .. })
     ));
     assert!(
-        runner.state().pending_continuation.is_none(),
+        runner.state().active_ability_continuation().is_none(),
         "only replacement post-effect work may drain before the typed Effect::PayCost root"
     );
     assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
