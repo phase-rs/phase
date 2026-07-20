@@ -3031,6 +3031,42 @@ export function isStaleActionMessage(message: string): boolean {
 }
 
 /**
+ * Detect the engine's rejection of a `ReorderHand` whose order no longer names
+ * the current hand. `apply_action` formats
+ * `EngineError::InvalidAction("ReorderHand: expected {n} ids, got {m}")` as
+ * `Engine error: ReorderHand: expected ...` and returns it BEFORE mutating any
+ * player state, so — exactly like the actor-authorization rejections above —
+ * nothing changed and there is nothing to recover.
+ *
+ * This is the benign client/engine desync behind issue #5913: a drag computes
+ * its order against the hand as displayed, but a draw or discard can land in
+ * the engine while the client store still holds the pre-animation snapshot
+ * (`dispatch.ts` commits only AFTER the animation window). The client cannot
+ * predict that divergence — the store it would check against is the stale one —
+ * so the honest place to absorb it is here, on the engine's own verdict.
+ *
+ * Hand order carries no game-rules meaning (CR 402.3), so a dropped reorder
+ * costs the player nothing beyond re-dragging.
+ *
+ * Covers BOTH staleness rejections `apply_action` can raise, because a hand can
+ * go stale two ways in the same window:
+ *   - the count changed (a draw or a discard alone) — "expected {n} ids, got
+ *     {m}", a prefix match since the message embeds the counts;
+ *   - the count held but the ids moved (a discard AND a draw) — "order is not a
+ *     permutation of the current hand", matched exactly.
+ *
+ * Deliberately NOT covered: "ReorderHand: actor ... is not a valid player
+ * index". That one means the caller submitted a nonsense seat, which is a real
+ * bug and must keep surfacing.
+ */
+export function isStaleReorderMessage(message: string): boolean {
+  return (
+    message.startsWith("Engine error: ReorderHand: expected ") ||
+    message === "Engine error: ReorderHand: order is not a permutation of the current hand"
+  );
+}
+
+/**
  * Transport-agnostic interface for communicating with the game engine.
  * Phase 1: WasmAdapter (direct WASM calls)
  * Tauri desktop uses the same WasmAdapter path as browser local gameplay.

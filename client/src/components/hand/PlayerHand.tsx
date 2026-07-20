@@ -359,17 +359,24 @@ export function PlayerHand() {
           targetSlot,
           pendingObjectId != null || organizeActive,
         );
-        // The order above is built from the hand this gesture was set up
-        // against. A draw / discard / cast landing mid-drag changes the real
-        // hand, and the engine rejects a `ReorderHand` that is not a permutation
-        // of the CURRENT hand ("expected N ids, got M"), which surfaced to
-        // players as a spurious error flag (issue #5913). Re-read the hand at
-        // drop time — `getState()` is immune to the stale closure an in-flight
-        // drag can hold — and drop the gesture when it no longer matches rather
-        // than replaying a slot index chosen against the old layout.
+        // Re-read the hand at drop time and drop the gesture when it no longer
+        // matches, rather than replaying a slot index chosen against the old
+        // layout. This closes only the narrow window where the store has
+        // committed a new hand but React has not yet re-rendered this callback;
+        // it CANNOT see the client/engine desync that issue #5913 actually
+        // reports, because the store read here is the same snapshot `nextOrder`
+        // was derived from (`dispatch.ts` commits the engine snapshot only
+        // AFTER the animation window, so both are equally stale). That case is
+        // absorbed on the engine's own verdict — see `isStaleReorderMessage`.
+        //
+        // `playerId` is the PERSPECTIVE seat, which is not the local seat while
+        // controlling another player's turn (CR 117 / Mindslaver-style). The
+        // order is built from that seat's hand, so it must be submitted as that
+        // seat too — `dispatchAction` otherwise defaults the actor to the local
+        // player and the engine validates against the wrong hand.
         const currentHand = useGameStore.getState().gameState?.players[playerId]?.hand;
         if (nextOrder && currentHand && isHandPermutation(nextOrder, currentHand)) {
-          dispatchAction({ type: "ReorderHand", data: { order: nextOrder } });
+          dispatchAction({ type: "ReorderHand", data: { order: nextOrder } }, playerId);
         }
         return false;
       }
