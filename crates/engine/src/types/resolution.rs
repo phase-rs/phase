@@ -15,10 +15,9 @@ use crate::types::game_state::{
     DrawSequenceStack, GameState, PendingBatchDeliveries, PendingChangeZoneIteration,
     PendingChooseOneOf, PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
     PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
-    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMutateMerge,
-    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
-    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
-    PostReplacementDrainStack, ResolvingTriggerContext, WaitingFor,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
+    PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
+    PendingVoteBallotIteration, PostReplacementDrainStack, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -107,6 +106,24 @@ pub struct PendingProliferateActions {
     pub actor: PlayerId,
     pub source_id: ObjectId,
     pub remaining: u32,
+}
+
+/// CR 702.140c + CR 730.2a: Context stored when a mutating creature spell
+/// resolves with a legal target. Resolution pauses until the spell's controller
+/// chooses top or bottom via `GameAction::ChooseMutateMergeSide`; the typed
+/// frame remains the sole authority until `merge::handle_mutate_merge_choice`
+/// performs the merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMutateMerge {
+    /// The resolving mutate spell object (the card/token being merged onto the
+    /// target). Retains its original owner so CR 730.3 can route it correctly.
+    pub merging_id: ObjectId,
+    /// The surviving battlefield creature. The merged permanent keeps THIS
+    /// object's `ObjectId` (CR 730.2c continuity).
+    pub target_id: ObjectId,
+    /// The mutate spell's controller — the player who chooses top/bottom
+    /// (CR 702.140c).
+    pub controller: PlayerId,
 }
 
 /// The ChangeZone owner plus the only sidecar that is not already embedded in
@@ -1399,6 +1416,67 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the mutate-merge owner only when it owns the stack top.
+    pub fn active_mutate_merge(&self) -> Option<&PendingMutateMerge> {
+        match self.last() {
+            Some(ResolutionFrame::MutateMerge(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active mutate-merge owner.
+    pub fn active_mutate_merge_mut(&mut self) -> Option<&mut PendingMutateMerge> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::MutateMerge(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active mutate-merge owner after its controller
+    /// chooses which component is on top.
+    pub fn take_active_mutate_merge(
+        &mut self,
+    ) -> Result<Option<PendingMutateMerge>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::MutateMerge(_)) => {
+                let ResolutionFrame::MutateMerge(frame) =
+                    self.pop_expected(FrameKind::MutateMerge)?
+                else {
+                    unreachable!("checked mutate-merge frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::MutateMerge,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks one mutate-merge top/bottom choice resolution.
+    pub fn push_mutate_merge(&mut self, frame: PendingMutateMerge) {
+        self.push_inner(ResolutionFrame::MutateMerge(frame));
+    }
+
+    /// Re-parks the active mutate-merge owner without exposing an empty-stack
+    /// interval.
+    pub fn replace_active_mutate_merge(
+        &mut self,
+        frame: PendingMutateMerge,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::MutateMerge(_)) => {
+                self.replace_active(ResolutionFrame::MutateMerge(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::MutateMerge,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns the multi-player choose-one owner only when it owns the stack
     /// top.
     pub fn active_choose_one_of(&self) -> Option<&PendingChooseOneOf> {
@@ -1829,6 +1907,7 @@ impl ResolutionStateWire {
                 let legacy_optional_effect = LegacyOptionalEffectWire::from_value(&value)?;
                 let legacy_coin_flip = LegacyCoinFlipWire::from_value(&value)?;
                 let legacy_proliferate = LegacyProliferateWire::from_value(&value)?;
+                let legacy_mutate_merge = LegacyMutateMergeWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -1858,6 +1937,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_optional_trigger_match_count");
                 legacy_object.remove("pending_coin_flip");
                 legacy_object.remove("pending_proliferate_actions");
+                legacy_object.remove("pending_mutate_merge");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -1917,6 +1997,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_proliferate.into_frame() {
                     legacy.push_proliferate_frame(frame);
+                }
+                if let Some(frame) = legacy_mutate_merge.into_frame() {
+                    legacy.push_mutate_merge_frame(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -2299,6 +2382,24 @@ impl LegacyProliferateWire {
     }
 }
 
+/// v1-only mutate-merge authority. Runtime state keeps the top/bottom choice
+/// continuation in a typed `MutateMerge` frame.
+#[derive(Deserialize)]
+struct LegacyMutateMergeWire {
+    #[serde(default)]
+    pending_mutate_merge: Option<PendingMutateMerge>,
+}
+
+impl LegacyMutateMergeWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingMutateMerge> {
+        self.pending_mutate_merge
+    }
+}
+
 impl LegacyRepeatedOptionalPaymentWire {
     fn from_value(value: &Value) -> Result<Self, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
@@ -2437,6 +2538,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::OptionalEffect(_)
                 | ResolutionFrame::CoinFlip(_)
                 | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MutateMerge(_)
         ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
@@ -2462,7 +2564,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
             frames.push_inner(ResolutionFrame::ConniveReentry(pending));
         }
     }
-    push_legacy_direct_choice_frames(state, &mut frames)?;
     Ok(frames)
 }
 
@@ -2473,24 +2574,6 @@ fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStac
     if let Some(pending) = state.pending_spell_resolution.clone() {
         frames.push_inner(ResolutionFrame::SpellResolution(pending));
     }
-}
-
-fn push_legacy_direct_choice_frames(
-    state: &GameState,
-    frames: &mut ResolutionStack,
-) -> Result<(), String> {
-    let mut direct_choice_count = frames
-        .iter()
-        .filter(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)))
-        .count();
-    if let Some(pending) = state.pending_mutate_merge.clone() {
-        direct_choice_count += 1;
-        frames.push_inner(ResolutionFrame::MutateMerge(pending));
-    }
-    if direct_choice_count > 1 {
-        return Err("legacy resolution state has multiple direct-choice owners".to_string());
-    }
-    Ok(())
 }
 
 fn classify_draw_and_post_replacement(
@@ -2595,6 +2678,9 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::Proliferate(pending) => {
                 projected.push_proliferate_frame(pending.clone())
             }
+            ResolutionFrame::MutateMerge(pending) => {
+                projected.push_mutate_merge_frame(pending.clone())
+            }
             ResolutionFrame::MultiDraw(frame) => {
                 if !projected.draw_sequences.is_empty()
                     || projected.pending_connive_reentry.is_some()
@@ -2619,11 +2705,6 @@ fn project_frames_into_legacy_state(
                 pending.clone(),
                 "SpellResolution",
             )?,
-            ResolutionFrame::MutateMerge(pending) => set_once(
-                &mut projected.pending_mutate_merge,
-                pending.clone(),
-                "MutateMerge",
-            )?,
             ResolutionFrame::PostReplacement(drains) => {
                 if !projected.post_replacement_drains.is_empty() {
                     return Err("duplicate PostReplacement frame".to_string());
@@ -2642,7 +2723,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.pending_connive_reentry = None;
     state.pending_life_total_assignment = None;
     state.pending_spell_resolution = None;
-    state.pending_mutate_merge = None;
     state.post_replacement_drains = PostReplacementDrainStack::default();
     state.legacy_post_replacement_effect = None;
     state.legacy_post_replacement_resolved_effect = None;
@@ -2768,10 +2848,10 @@ mod tests {
         CastingVariant, CopyChosenStage, DrainStatus, GameState, PendingBatchDeliveries,
         PendingChooseOneOf, PendingCopyTokenResolution, PendingCounterAdditionQueue,
         PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
-        PendingLifeTotalAssignment, PendingMutateMerge, PendingPerCategoryZoneChoice,
-        PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
-        PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-        ResidentDrainPolicy, ZoneDeliveryExileTracking,
+        PendingLifeTotalAssignment, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
+        PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
+        PendingVoteBallotIteration, PostReplacementDrain, ResidentDrainPolicy,
+        ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
@@ -3012,6 +3092,33 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("v2 proliferate fixture restores for the runtime action path")
+            .into_game_state()
+    }
+
+    fn restore_v1_mutate_merge_fixture(state: GameState, pending: PendingMutateMerge) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_mutate_merge"] =
+            serde_json::to_value(pending).expect("legacy mutate-merge serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        let wire: ResolutionStateWire =
+            serde_json::from_value(v1).expect("v1 mutate-merge fixture converts through the wire");
+        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        assert_eq!(
+            v2["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(v2.get("resolution_frames").is_some());
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                v2.get(*field).is_none(),
+                "v2 fixture must not write legacy field {field}"
+            );
+        }
+
+        serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("v2 mutate-merge fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -3866,17 +3973,19 @@ mod tests {
         let merging_id = scenario.add_creature(PlayerId(0), "Rider", 4, 4).id();
         let target_id = scenario.add_creature(PlayerId(0), "Host", 2, 2).id();
         let mut mutate = scenario.state;
-        mutate.pending_mutate_merge = Some(PendingMutateMerge {
-            merging_id,
-            target_id,
-            controller: PlayerId(0),
-        });
         mutate.waiting_for = WaitingFor::MutateMergeChoice {
             player: PlayerId(0),
             merging_id,
             target_id,
         };
-        let mut mutate = restore_v1_fixture(mutate);
+        let mut mutate = restore_v1_mutate_merge_fixture(
+            mutate,
+            PendingMutateMerge {
+                merging_id,
+                target_id,
+                controller: PlayerId(0),
+            },
+        );
         apply_as_current(
             &mut mutate,
             GameAction::ChooseMutateMergeSide {
@@ -3884,7 +3993,7 @@ mod tests {
             },
         )
         .expect("mutate fixture resumes through the real merge-choice action");
-        assert!(mutate.pending_mutate_merge.is_none());
+        assert!(mutate.active_mutate_merge_frame().is_none());
         assert_eq!(
             mutate
                 .objects

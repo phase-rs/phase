@@ -512,7 +512,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             Some(target_id) => {
                 // CR 702.140c: pause for the top/bottom choice. The merging spell
                 // (`entry.id`) has already been popped from the stack.
-                state.pending_mutate_merge = Some(crate::types::game_state::PendingMutateMerge {
+                state.push_mutate_merge_frame(crate::types::resolution::PendingMutateMerge {
                     merging_id: entry.id,
                     target_id,
                     controller: entry.controller,

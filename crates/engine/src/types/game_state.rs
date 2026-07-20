@@ -45,8 +45,8 @@ use super::replacements::ReplacementEvent;
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
     AbilityContinuationFrame, ChangeZoneFrame, OptionalEffectFrame, PendingCoinFlip,
-    PendingProliferateActions, RepeatedOptionalPaymentFrame, ResolutionStack, ResolutionStackError,
-    ResolutionStateWire,
+    PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame, ResolutionStack,
+    ResolutionStackError, ResolutionStateWire,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -10749,13 +10749,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_spell_resolution: Option<PendingSpellResolution>,
 
-    /// CR 702.140c + CR 730.2: Transient context for a mutating creature spell
-    /// whose resolution is paused awaiting the controller's top/bottom merge
-    /// choice. Set in `stack::resolve_top` (legal-target branch), consumed by
-    /// `merge::handle_mutate_merge_choice`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_mutate_merge: Option<PendingMutateMerge>,
-
     /// CR 614.12a + CR 707.9 + CR 603.2: `ZoneChanged`-to-battlefield events
     /// for an object whose entry is paused mid-resolution awaiting an
     /// interactive choice (e.g. `WaitingFor::CopyTargetChoice`). Per CR
@@ -13157,24 +13150,6 @@ pub struct PendingSpellResolution {
     pub convoked_creatures: Vec<ObjectId>,
 }
 
-/// CR 702.140c + CR 730.2: Context stored when a mutating creature spell resolves
-/// with a legal target. Resolution pauses (the stack entry is popped, mirroring
-/// the Clone replacement-needs-choice detour) until the spell's controller chooses
-/// top or bottom via `GameAction::ChooseMutateMergeSide`; then
-/// `merge::handle_mutate_merge_choice` performs the merge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingMutateMerge {
-    /// The resolving mutate spell object (the card/token being merged onto the
-    /// target). Retains its original owner so CR 730.3 can route it correctly.
-    pub merging_id: ObjectId,
-    /// The surviving battlefield creature. The merged permanent keeps THIS
-    /// object's `ObjectId` (CR 730.2c continuity).
-    pub target_id: ObjectId,
-    /// The mutate spell's controller — the player who chooses top/bottom
-    /// (CR 702.140c).
-    pub controller: PlayerId,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTurnControl {
     pub target_player: PlayerId,
@@ -13975,6 +13950,39 @@ impl GameState {
         self.resolution_stack.take_active_proliferate()
     }
 
+    /// Returns the parked mutate-merge authority only when its top/bottom
+    /// choice frame owns the stack top.
+    pub fn active_mutate_merge_frame(&self) -> Option<&PendingMutateMerge> {
+        self.resolution_stack.active_mutate_merge()
+    }
+
+    /// Mutably accesses only the active mutate-merge frame.
+    pub fn active_mutate_merge_frame_mut(&mut self) -> Option<&mut PendingMutateMerge> {
+        self.resolution_stack.active_mutate_merge_mut()
+    }
+
+    /// Parks one mutate-merge top/bottom choice resolution.
+    pub fn push_mutate_merge_frame(&mut self, pending: PendingMutateMerge) {
+        self.resolution_stack.push_mutate_merge(pending);
+    }
+
+    /// Re-parks the active mutate-merge owner without exposing an empty-stack
+    /// interval.
+    pub fn replace_active_mutate_merge_frame(
+        &mut self,
+        pending: PendingMutateMerge,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_mutate_merge(pending)
+    }
+
+    /// Consumes exactly the active mutate-merge frame when its controller
+    /// chooses which component is on top.
+    pub fn take_active_mutate_merge_frame(
+        &mut self,
+    ) -> Result<Option<PendingMutateMerge>, ResolutionStackError> {
+        self.resolution_stack.take_active_mutate_merge()
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14517,7 +14525,6 @@ impl GameState {
             legacy_pending_multi_draw: None,
             pending_life_total_assignment: None,
             pending_spell_resolution: None,
-            pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: LayersDirty::full(),
             static_gate_truth: im::HashMap::new(),
@@ -15616,7 +15623,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         draw_sequences: _,
         pending_life_total_assignment: _,
         pending_spell_resolution: _,
-        pending_mutate_merge: _,
         deferred_entry_events: _,
         layers_dirty: _,
         static_gate_truth: _,
