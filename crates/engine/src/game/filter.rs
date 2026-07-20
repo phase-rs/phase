@@ -3856,6 +3856,10 @@ fn source_context_from_filter<'a>(
                     counters: HashMap::new(),
                     tapped: false,
                     is_suspected: false,
+                    // CR 702.171b: unknown-source placeholder — no saddled
+                    // designation is knowable, so default false (fail-closed,
+                    // matching the pre-existing behavior for absent sources).
+                    is_saddled: false,
                     attachments: Vec::new(),
                 });
             (
@@ -5869,6 +5873,10 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            // CR 702.171b: unknown-source placeholder — no saddled designation
+            // is knowable, so default false (fail-closed, matching the
+            // pre-existing behavior for absent sources).
+            is_saddled: false,
             attachments: Vec::new(),
         });
     SourceContext {
