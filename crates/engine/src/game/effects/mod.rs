@@ -31,7 +31,7 @@ use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
     AbilityContinuationFrame, FrameGate, OptionalEffectFrame, PendingRepeatedOptionalPayment,
-    RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack,
+    RepeatedOptionalPaymentFrame, ResolutionFrame,
 };
 use crate::types::zones::Zone;
 
@@ -752,7 +752,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         if !waits_for_resolution_choice(&state.waiting_for) {
             // CR 615.5: a resumed continuation completes its own paused
             // resident drain only after it has not raised another choice.
-            state.post_replacement_drains.finish_paused_dispatch();
+            state.finish_active_paused_post_replacement_dispatch();
         }
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
@@ -804,26 +804,19 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     }
 }
 
-/// Resume the active typed resolution-frame view through its established legacy
-/// authority while Phase 2 still keeps the mutable runtime slots in `GameState`.
+/// Resume the active typed resolution frame through its runtime stack authority.
 ///
-/// The dispatcher reads only `frames.last()`. The one shipped coupled shape is
+/// The dispatcher reads only the stack top. The one shipped coupled shape is
 /// represented structurally: a `MultiDraw` whose immediate predecessor is a
 /// paused `PostReplacement` drain is a paired child; all other `MultiDraw`
 /// frames are independent roots. Both delegate to `draw::resume_draw_sequence`,
-/// whose existing resident-drain cleanup preserves the paused parent. No frame
-/// is popped here, and the central legacy drains remain authoritative until
-/// Phase 3 owns the stack at runtime.
-pub(crate) fn resume_resolution_frames(
-    state: &mut GameState,
-    frames: &ResolutionStack,
-    events: &mut Vec<GameEvent>,
-) {
+/// which retires only its exact completed child and paired paused parent.
+pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
 
-    let Some(frame) = frames.last() else {
+    let Some(frame) = state.resolution_stack.last().cloned() else {
         return;
     };
 
@@ -873,7 +866,7 @@ pub(crate) fn resume_resolution_frames(
         }
         ResolutionFrame::MultiDraw(_) => {
             let paired_parent = matches!(
-                frames.active_predecessor(),
+                state.resolution_stack.active_predecessor(),
                 Some(ResolutionFrame::PostReplacement(drains))
                     if matches!(
                         drains.resident().map(|drain| &drain.status),
@@ -883,9 +876,12 @@ pub(crate) fn resume_resolution_frames(
             if paired_parent {
                 // The resident drain is retained and retired only by the
                 // existing typed dispatch lifecycle inside the draw authority.
-                debug_assert!(state.post_replacement_drains.resident().is_some());
+                debug_assert!(state
+                    .active_post_replacement_drains()
+                    .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+                    .is_some());
             }
-            if let Some(frame_id) = state.draw_sequences.active().map(|draw| draw.frame_id) {
+            if let Some(frame_id) = state.active_draw_sequence().map(|draw| draw.frame_id) {
                 let _ = draw::resume_draw_sequence(state, frame_id, events);
             }
         }
@@ -906,6 +902,19 @@ pub(crate) fn resume_resolution_frames(
             let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                 state, None, None, None, events,
             );
+            if state
+                .active_post_replacement_drains()
+                .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
+                && matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::PostReplacement(_))
+                )
+            {
+                let _ = state
+                    .resolution_stack
+                    .take_active_post_replacement()
+                    .expect("post-replacement dispatcher may remove only its active frame");
+            }
         }
     }
 }

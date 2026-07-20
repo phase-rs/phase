@@ -488,7 +488,7 @@ pub(super) fn handle_replacement_choice(
                     // this the eventual `last_effect_count` commit would omit every
                     // unit that paused, and a chained "discard that many" would read
                     // short.
-                    if let Some(frame) = state.draw_sequences.active_mut() {
+                    if let Some(frame) = state.active_draw_sequence_mut() {
                         if frame.player == player_id {
                             frame.accumulated += drawn_count;
                         }
@@ -841,7 +841,7 @@ pub(super) fn handle_replacement_choice(
             // sequential re-pauses compose — each resume re-addresses the same
             // frame by ID.
             while matches!(waiting_for, WaitingFor::Priority { .. }) {
-                let Some(frame_id) = state.draw_sequences.active().map(|frame| frame.frame_id)
+                let Some(frame_id) = state.active_draw_sequence().map(|frame| frame.frame_id)
                 else {
                     break;
                 };
@@ -851,8 +851,7 @@ pub(super) fn handle_replacement_choice(
                     break;
                 }
                 if state
-                    .draw_sequences
-                    .active()
+                    .active_draw_sequence()
                     .is_some_and(|frame| frame.frame_id == frame_id)
                 {
                     // No frame completed or paused; avoid retrying a stalled frame.
@@ -1987,12 +1986,14 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // AST that resolves against `source` for ETB / Optional accept.
     let source = state.post_replacement_source().or(object_id);
     let replacement_applied = state
-        .post_replacement_drains
-        .resident_mut()
+        .active_post_replacement_drains_mut()
+        .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
-    let (continuation, dispatch) = state.post_replacement_drains.begin_dispatch()?;
+    let (continuation, dispatch) = state
+        .active_post_replacement_drains_mut()?
+        .begin_dispatch()?;
     let waiting_for = match continuation {
         PostReplacementContinuation::Resolved(resolved) => {
             apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
@@ -2012,12 +2013,17 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // retire its exact `Dispatching` entry below the nested top.
     if waiting_for.is_some()
         && state
-            .post_replacement_drains
-            .dispatch_is_resident_top(dispatch)
+            .active_post_replacement_drains()
+            .is_some_and(|drains| drains.dispatch_is_resident_top(dispatch))
     {
-        state.post_replacement_drains.pause_dispatch(dispatch);
+        let _ = state
+            .active_post_replacement_drains_mut()
+            .is_some_and(|drains| drains.pause_dispatch(dispatch));
     } else {
-        state.post_replacement_drains.finish_dispatch(dispatch);
+        let _ = state
+            .active_post_replacement_drains_mut()
+            .and_then(|drains| drains.finish_dispatch(dispatch));
+        state.remove_empty_active_post_replacement_frame();
     }
     // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
     // here. This drain runs for EVERY replacement continuation — including a
@@ -4311,8 +4317,8 @@ mod tests {
             )),
         );
         state
-            .post_replacement_drains
-            .resident_mut()
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .source = Some(jinnie_source);
 
@@ -5215,8 +5221,8 @@ mod tests {
             draw_then_context_draw,
         )));
         let drain = state
-            .post_replacement_drains
-            .resident_mut()
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("general drain is resident");
         drain.source = Some(shield);
         drain.event_source = Some(damage_source);
@@ -5236,7 +5242,9 @@ mod tests {
         );
         assert!(
             matches!(
-                state.post_replacement_drains.resident(),
+                state
+                    .active_post_replacement_drains()
+                    .and_then(crate::types::game_state::PostReplacementDrainStack::resident),
                 Some(crate::types::game_state::PostReplacementDrain {
                     status: crate::types::game_state::DrainStatus::Paused,
                     ..
@@ -5245,9 +5253,14 @@ mod tests {
             "the paused drain must own its event context across the paused draw"
         );
 
-        let serialized = serde_json::to_string(&state).expect("save paused state");
-        let mut restored: GameState =
-            serde_json::from_str(&serialized).expect("reload paused state");
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("save paused state");
+        let mut restored =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("reload paused state")
+                .into_game_state();
         restored.rehydrate_rng();
         apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
             .expect("resume the paused draw after reload");
@@ -5262,7 +5275,7 @@ mod tests {
             "the resumed PostReplacementSourceController follow-up must draw for P1 from the persisted drain context"
         );
         assert!(
-            restored.post_replacement_drains.is_empty(),
+            restored.active_post_replacement_drains().is_none(),
             "the drain is retired only after its resumed continuation completes"
         );
     }
@@ -5360,7 +5373,9 @@ mod tests {
         );
         assert!(
             matches!(
-                state.post_replacement_drains.resident(),
+                state
+                    .active_post_replacement_drains()
+                    .and_then(crate::types::game_state::PostReplacementDrainStack::resident),
                 Some(crate::types::game_state::PostReplacementDrain {
                     status: crate::types::game_state::DrainStatus::Paused,
                     ..
@@ -5372,40 +5387,9 @@ mod tests {
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("resume the inner draw replacement choice");
         assert!(
-            state.post_replacement_drains.is_empty(),
+            state.active_post_replacement_drains().is_none(),
             "resuming the inner draw retires it without leaving the completed outer drain"
         );
-    }
-
-    /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
-    /// the pre-fold `post_replacement_effect` field (Template binding state)
-    /// migrates into the new unified slot when `finalize_public_state` runs
-    /// (driven here by calling `migrate_post_replacement_continuation`
-    /// directly).
-    #[test]
-    fn migrate_post_replacement_continuation_lifts_legacy_template() {
-        let mut state = GameState::new_two_player(42);
-        let template = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: None,
-            },
-        );
-        // Simulate legacy deserialization: only the legacy slot is populated.
-        state.legacy_post_replacement_effect = Some(Box::new(template.clone()));
-        assert!(!state.has_post_replacement_drain());
-
-        state.migrate_post_replacement_continuation();
-
-        match state.post_replacement_continuation() {
-            Some(PostReplacementContinuation::Template(ref def)) => {
-                assert_eq!(**def, template);
-            }
-            other => panic!("expected Template after migration, got {other:?}"),
-        }
-        assert!(state.legacy_post_replacement_effect.is_none());
-        assert!(state.legacy_post_replacement_resolved_effect.is_none());
     }
 
     /// Issue #575: Non-Moved `Sacrifice { Typed }` post-replacements (Dralnu)
@@ -5522,76 +5506,6 @@ mod tests {
             Zone::Battlefield,
             "devourer must not be auto-sacrificed via source injection"
         );
-    }
-
-    /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
-    /// the pre-fold `post_replacement_resolved_effect` field (Resolved
-    /// binding state) migrates into the new unified slot. Resolved wins over
-    /// Template if both are (impossibly) populated, mirroring the pre-fold
-    /// dispatcher precedence at `apply_pending_post_replacement_effect`.
-    #[test]
-    fn migrate_post_replacement_continuation_lifts_legacy_resolved() {
-        let mut state = GameState::new_two_player(42);
-        let resolved = ResolvedAbility::new(
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: Some(TargetFilter::Controller),
-            },
-            Vec::new(),
-            ObjectId(1),
-            PlayerId(0),
-        );
-        state.legacy_post_replacement_resolved_effect = Some(Box::new(resolved.clone()));
-
-        state.migrate_post_replacement_continuation();
-
-        match state.post_replacement_continuation() {
-            Some(PostReplacementContinuation::Resolved(ref boxed)) => {
-                assert_eq!(**boxed, resolved);
-            }
-            other => panic!("expected Resolved after migration, got {other:?}"),
-        }
-        assert!(state.legacy_post_replacement_effect.is_none());
-        assert!(state.legacy_post_replacement_resolved_effect.is_none());
-    }
-
-    /// 2026-05-09 audit M4 backward-compat (defensive): when both legacy
-    /// slots happen to deserialize alongside a new-shape slot — for instance
-    /// because a producer wrote a hybrid blob — the new slot wins and the
-    /// legacy fields are cleared. Migration is idempotent.
-    #[test]
-    fn migrate_post_replacement_continuation_prefers_new_slot_when_present() {
-        let mut state = GameState::new_two_player(42);
-        let new_template = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 5 },
-                target: None,
-            },
-        );
-        state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(
-            new_template.clone(),
-        )));
-        // Legacy slots also populated (corrupted/hybrid input).
-        state.legacy_post_replacement_effect = Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::SetTapState {
-                target: TargetFilter::SelfRef,
-                scope: EffectScope::Single,
-                state: TapStateChange::Untap,
-            },
-        )));
-
-        state.migrate_post_replacement_continuation();
-
-        match state.post_replacement_continuation() {
-            Some(PostReplacementContinuation::Template(ref def)) => {
-                assert_eq!(**def, new_template);
-            }
-            other => panic!("new slot must survive migration, got {other:?}"),
-        }
-        assert!(state.legacy_post_replacement_effect.is_none());
-        assert!(state.legacy_post_replacement_resolved_effect.is_none());
     }
 
     /// CR 614.12a + CR 707.9 + CR 603.2: Drive Callidus Assassin's full path —

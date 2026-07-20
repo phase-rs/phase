@@ -18,7 +18,6 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::resolution::canonicalize_legacy_resolution_state;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::statics::StaticMode;
@@ -2299,9 +2298,7 @@ pub(super) fn resume_pending_continuation_if_priority(
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         effects::drain_pending_continuation(state, events);
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            let frames =
-                canonicalize_legacy_resolution_state(state).map_err(EngineError::InvalidAction)?;
-            effects::resume_resolution_frames(state, &frames, events);
+            effects::resume_resolution_frames(state, events);
         }
         // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
         // boundary only after ordinary continuations drain. The shared typed

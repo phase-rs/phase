@@ -215,9 +215,7 @@ pub(crate) fn start_draw_sequence_with_origin(
     origin: DrawSequenceOrigin,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    let frame_id = state
-        .draw_sequences
-        .push_with_replacement_applied_and_origin(player, count, applied, origin);
+    let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
     resume_draw_sequence(state, frame_id, events)
 }
 
@@ -254,7 +252,7 @@ pub(crate) fn resume_draw_sequence(
         // Take the next owed unit off the cursor BEFORE attempting it, so a park
         // mid-attempt leaves the frame recording the units AFTER this one. The
         // in-flight unit is settled by the replacement choice that parked it.
-        let Some(frame) = state.draw_sequences.active_if(frame_id) else {
+        let Some(frame) = state.active_draw_sequence_if(frame_id) else {
             debug_assert!(
                 false,
                 "resume_draw_sequence({frame_id:?}) is not the active draw frame — a nested \
@@ -285,12 +283,11 @@ pub(crate) fn resume_draw_sequence(
                 // The unit's delivery may itself have pushed a nested instruction.
                 // Credit this exact frame by identity, but never resume it while
                 // the nested frame remains active.
-                if let Some(frame) = state.draw_sequences.frame_mut(frame_id) {
+                if let Some(frame) = state.draw_sequence_frame_mut(frame_id) {
                     frame.accumulated += unit_drawn;
                 }
                 if state
-                    .draw_sequences
-                    .active()
+                    .active_draw_sequence()
                     .is_none_or(|frame| frame.frame_id != frame_id)
                 {
                     return ReplacementResult::NeedsChoice(
@@ -308,7 +305,7 @@ pub(crate) fn resume_draw_sequence(
         }
     }
 
-    let Some(frame) = state.draw_sequences.pop(frame_id) else {
+    let Some(frame) = state.pop_active_draw_sequence(frame_id) else {
         debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
         return ReplacementResult::Prevented;
     };
@@ -338,7 +335,12 @@ pub(crate) fn resume_draw_sequence(
     // Nested replacement dispatches retain their own stack entries, so this
     // never pops an outer paused event context.
     if state.active_ability_continuation().is_none() {
-        state.post_replacement_drains.finish_paused_dispatch();
+        let completed = state
+            .take_completed_multi_draw_frame()
+            .expect("completed multi-draw frame must remain top-owned");
+        if completed.is_some() {
+            state.finish_active_paused_post_replacement_dispatch();
+        }
     }
 
     ReplacementResult::Execute(ProposedEvent::Draw {

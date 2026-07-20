@@ -2274,18 +2274,18 @@ mod tests {
             ),
         )));
         state
-            .post_replacement_drains
-            .resident_mut()
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .source = Some(o);
         state
-            .post_replacement_drains
-            .resident_mut()
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .event_source = Some(o);
         state
-            .post_replacement_drains
-            .resident_mut()
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .event_target = Some(TargetRef::Object(o));
         // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
@@ -2307,7 +2307,12 @@ mod tests {
         // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
         // single-player-scoped, must clear alongside its siblings via
         // `abandon_post_replacement_continuation` (replacement.rs).
-        state.draw_sequences.push(PlayerId(2), 1);
+        state.push_draw_sequence_with_origin(
+            PlayerId(2),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
         // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
         state.pending_spell_resolution = Some(PendingSpellResolution {
             object_id: o,
@@ -2358,7 +2363,7 @@ mod tests {
             "the eliminated chooser's nested found-card zone completion must be abandoned"
         );
         assert!(
-            state.draw_sequences.is_empty(),
+            state.active_draw_sequence().is_none(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \
              cleared via abandon_post_replacement_continuation, not stranded"
         );
@@ -2462,10 +2467,14 @@ mod tests {
         });
         // CR 121.2: a paused draw instruction owned by the LIVING chooser (P0)
         // must survive a different player's departure — no over-clear.
-        let living_frame = state.draw_sequences.push(PlayerId(0), 2);
+        let living_frame = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            2,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
         state
-            .draw_sequences
-            .active_if(living_frame)
+            .draw_sequence_frame_mut(living_frame)
             .expect("the frame just pushed is active")
             .accumulated = 1;
 
@@ -2501,8 +2510,7 @@ mod tests {
             "an opponent leaving must not tear down the living player's spell-resolution ctx"
         );
         let survivor = state
-            .draw_sequences
-            .active()
+            .active_draw_sequence()
             .expect("an opponent leaving must not clear the living chooser's paused instruction");
         assert_eq!(
             (survivor.player, survivor.remaining, survivor.accumulated),

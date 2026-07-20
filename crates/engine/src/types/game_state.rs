@@ -44,9 +44,9 @@ use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
-    AbilityContinuationFrame, ChangeZoneFrame, OptionalEffectFrame, PendingCoinFlip,
-    PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame, ResolutionStack,
-    ResolutionStackError, ResolutionStateWire,
+    AbilityContinuationFrame, ChangeZoneFrame, MultiDrawFrame, OptionalEffectFrame,
+    PendingCoinFlip, PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame,
+    ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -10630,48 +10630,6 @@ pub struct GameState {
     /// Cleared the moment it is observed. Transient — never serialized.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replacement_may_cost_paused: bool,
-    /// CR 614.6 + CR 615.5: Continuation effect to resolve after a
-    /// replacement's modifications complete. The two binding states (Template
-    /// AST vs. Resolved with captured targets) share one slot via
-    /// `PostReplacementContinuation`. Set by `continue_replacement` for
-    /// Optional replacements and by `apply_single_replacement` for Mandatory
-    /// post-effects; drained by `apply_pending_post_replacement_effect`.
-    ///
-    /// Pre-2026-05-09 audit M4 fold: legacy `post_replacement_effect` and
-    /// `post_replacement_resolved_effect` fields were merged here. Old saved
-    /// JSON migrates via `migrate_post_replacement_continuation`, called from
-    /// `finalize_public_state`.
-    #[serde(default, skip_serializing_if = "PostReplacementDrainStack::is_empty")]
-    pub post_replacement_drains: PostReplacementDrainStack,
-
-    /// Pre-2026-05-09 audit M4 compat: legacy template slot. Read from old
-    /// JSON only; migrated into `post_replacement_drains` by
-    /// `migrate_post_replacement_continuation`. Never written to.
-    #[serde(default, skip_serializing, rename = "post_replacement_effect")]
-    pub(crate) legacy_post_replacement_effect:
-        Option<Box<crate::types::ability::AbilityDefinition>>,
-    /// Pre-2026-05-09 audit M4 compat: legacy resolved slot. Read from old
-    /// JSON only; migrated into `post_replacement_drains` by
-    /// `migrate_post_replacement_continuation`. Never written to.
-    #[serde(default, skip_serializing, rename = "post_replacement_resolved_effect")]
-    pub(crate) legacy_post_replacement_resolved_effect:
-        Option<Box<crate::types::ability::ResolvedAbility>>,
-
-    /// Legacy flat save shape for the drain's companion values, superseded by the
-    /// fields inside [`PostReplacementDrain`]. Read from old JSON only; folded
-    /// into the resident drain by `migrate_post_replacement_continuation`.
-    #[serde(default, skip_serializing, rename = "post_replacement_continuation")]
-    pub(crate) legacy_post_replacement_continuation:
-        Option<crate::types::ability::PostReplacementContinuation>,
-    #[serde(default, skip_serializing, rename = "post_replacement_source")]
-    pub(crate) legacy_post_replacement_source: Option<crate::types::identifiers::ObjectId>,
-    #[serde(default, skip_serializing, rename = "post_replacement_applied")]
-    pub(crate) legacy_post_replacement_applied: HashSet<AppliedReplacementKey>,
-    #[serde(default, skip_serializing, rename = "post_replacement_event_source")]
-    pub(crate) legacy_post_replacement_event_source: Option<crate::types::identifiers::ObjectId>,
-    #[serde(default, skip_serializing, rename = "post_replacement_event_target")]
-    pub(crate) legacy_post_replacement_event_target: Option<crate::types::ability::TargetRef>,
-
     /// CR 614.6 + CR 616.1: When an optional CreateToken replacement defers a
     /// `ChooseOneOf` post-effect (Jinnie Fay class), the chosen branch's token
     /// event must inherit the originating event's applied replacement ids so
@@ -10714,27 +10672,6 @@ pub struct GameState {
     /// `.take()`-cleared at drain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_connive_reentry: Option<PendingConniveReentry>,
-
-    /// CR 121.2 + CR 121.6b + CR 616.1g: draw instructions in flight, innermost
-    /// last. See [`DrawSequenceStack`]. Every pause and resume of a multi-card
-    /// draw addresses a frame here by [`DrawSequenceFrameId`]; the single resume
-    /// authority is `effects::draw::resume_draw_sequence`.
-    ///
-    /// Replaced the single `pending_multi_draw` slot, which could not represent a
-    /// nested instruction (CR 616.1g) — a substituted inner draw overwrote the
-    /// outer frame and its remaining units were silently lost.
-    #[serde(default, skip_serializing_if = "DrawSequenceStack::is_empty")]
-    pub draw_sequences: DrawSequenceStack,
-
-    /// Legacy save shape for the single in-flight multi-card draw, superseded by
-    /// [`Self::draw_sequences`]. JSON only; migrated into the stack by
-    /// [`Self::migrate_pending_multi_draw`]. Never written.
-    #[serde(
-        default,
-        rename = "pending_multi_draw",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub legacy_pending_multi_draw: Option<PendingMultiDraw>,
 
     /// CR 701.12c + CR 616.1: Tail of a life-total assignment that paused on a
     /// gain/loss replacement choice. Drained by `handle_replacement_choice` after
@@ -12771,8 +12708,8 @@ impl PostReplacementDrainStack {
 }
 
 /// Legacy pre-`DrawSequenceStack` save shape: the single in-flight multi-card
-/// draw. Deserialize-only — [`GameState::migrate_pending_multi_draw`] converts it
-/// into a one-frame [`DrawSequenceStack`]. No production writer remains.
+/// draw. Deserialize-only — the v1 resolution-wire reader converts it into a
+/// one-frame [`DrawSequenceStack`]. No production writer remains.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMultiDraw {
     pub player: PlayerId,
@@ -12863,6 +12800,17 @@ pub struct DrawSequenceStack {
 }
 
 impl DrawSequenceStack {
+    pub(crate) fn with_next_frame_id(next_frame_id: u64) -> Self {
+        Self {
+            frames: Vec::new(),
+            next_frame_id,
+        }
+    }
+
+    pub(crate) fn next_frame_id(&self) -> u64 {
+        self.next_frame_id
+    }
+
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
@@ -13983,6 +13931,234 @@ impl GameState {
         self.resolution_stack.take_active_mutate_merge()
     }
 
+    /// Returns the complete draw authority only when its MultiDraw frame owns
+    /// the active resolution stack top.
+    pub fn active_multi_draw_frame(&self) -> Option<&MultiDrawFrame> {
+        self.resolution_stack.active_multi_draw()
+    }
+
+    /// Mutably accesses only the active MultiDraw authority.
+    pub fn active_multi_draw_frame_mut(&mut self) -> Option<&mut MultiDrawFrame> {
+        self.resolution_stack.active_multi_draw_mut()
+    }
+
+    /// Starts an individual-draw sequence in the active MultiDraw frame, or
+    /// installs a new inner MultiDraw frame when this is a fresh draw root.
+    pub fn push_draw_sequence_with_origin(
+        &mut self,
+        player: PlayerId,
+        count: u32,
+        applied: HashSet<AppliedReplacementKey>,
+        origin: DrawSequenceOrigin,
+    ) -> DrawSequenceFrameId {
+        if self.active_multi_draw_frame().is_none() {
+            self.resolution_stack.push_multi_draw(MultiDrawFrame {
+                draw_sequences: DrawSequenceStack::with_next_frame_id(
+                    self.resolution_stack.next_draw_sequence_frame_id(),
+                ),
+                pending_connive_reentry: None,
+            });
+        }
+        let frame_id = self
+            .active_multi_draw_frame_mut()
+            .expect("a newly installed multi-draw frame must be active")
+            .draw_sequences
+            .push_with_replacement_applied_and_origin(player, count, applied, origin);
+        let next_frame_id = self
+            .active_multi_draw_frame()
+            .expect("active multi-draw frame remains resident after push")
+            .draw_sequences
+            .next_frame_id();
+        self.resolution_stack
+            .observe_draw_sequence_frame_id(next_frame_id);
+        frame_id
+    }
+
+    /// Returns the innermost active draw instruction, if MultiDraw owns the
+    /// stack top.
+    pub fn active_draw_sequence(&self) -> Option<&DrawSequenceFrame> {
+        self.active_multi_draw_frame()
+            .and_then(|frame| frame.draw_sequences.active())
+    }
+
+    /// Mutably accesses the innermost active draw instruction.
+    pub fn active_draw_sequence_mut(&mut self) -> Option<&mut DrawSequenceFrame> {
+        self.active_multi_draw_frame_mut()
+            .and_then(|frame| frame.draw_sequences.active_mut())
+    }
+
+    /// Returns the draw instruction only when the active MultiDraw frame owns
+    /// the exact ID that parked the replacement choice.
+    pub fn active_draw_sequence_if(
+        &mut self,
+        frame_id: DrawSequenceFrameId,
+    ) -> Option<&mut DrawSequenceFrame> {
+        self.active_multi_draw_frame_mut()
+            .and_then(|frame| frame.draw_sequences.active_if(frame_id))
+    }
+
+    /// Mutably locates a live draw instruction for completion accounting. This
+    /// never authorizes a resume; only `active_draw_sequence_if` does that.
+    pub fn draw_sequence_frame_mut(
+        &mut self,
+        frame_id: DrawSequenceFrameId,
+    ) -> Option<&mut DrawSequenceFrame> {
+        self.active_multi_draw_frame_mut()
+            .and_then(|frame| frame.draw_sequences.frame_mut(frame_id))
+    }
+
+    /// Pops only the active draw instruction with `frame_id`.
+    pub fn pop_active_draw_sequence(
+        &mut self,
+        frame_id: DrawSequenceFrameId,
+    ) -> Option<DrawSequenceFrame> {
+        self.active_multi_draw_frame_mut()
+            .and_then(|frame| frame.draw_sequences.pop(frame_id))
+    }
+
+    /// True only when the active MultiDraw frame has no remaining draw
+    /// instruction.
+    pub fn active_draw_sequences_are_empty(&self) -> bool {
+        self.active_multi_draw_frame()
+            .is_some_and(|frame| frame.draw_sequences.is_empty())
+    }
+
+    /// Removes a completed independent MultiDraw frame. A frame carrying the
+    /// deferred connive re-entry remains resident until that exact link is
+    /// consumed by its action/resume owner.
+    pub fn take_completed_multi_draw_frame(
+        &mut self,
+    ) -> Result<Option<MultiDrawFrame>, ResolutionStackError> {
+        let Some(frame) = self.active_multi_draw_frame() else {
+            return Ok(None);
+        };
+        if !frame.draw_sequences.is_empty() || frame.pending_connive_reentry.is_some() {
+            return Ok(None);
+        }
+        let next_frame_id = frame.draw_sequences.next_frame_id();
+        if let Some(super::resolution::ResolutionFrame::PostReplacement(drains)) =
+            self.resolution_stack.active_predecessor()
+        {
+            debug_assert!(matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(DrainStatus::Paused | DrainStatus::Dispatching)
+            ));
+            // A synchronous child completes while its outer dispatch is still
+            // running; a parked child has already transitioned that exact
+            // parent to Paused. In both cases the parent remains resident until
+            // its own typed dispatch lifecycle retires it. Do not drop the
+            // whole parent frame as an adjacency shortcut: it may own older
+            // nested dispatch context beneath this resident entry.
+        }
+        self.resolution_stack
+            .observe_draw_sequence_frame_id(next_frame_id);
+        self.resolution_stack.take_active_multi_draw()
+    }
+
+    /// Retires only the exact top general drain whose continuation paused and
+    /// whose MultiDraw child has already completed.
+    pub fn finish_active_paused_post_replacement_dispatch(&mut self) {
+        let finished = self
+            .active_post_replacement_drains_mut()
+            .and_then(PostReplacementDrainStack::finish_paused_dispatch);
+        if finished.is_some() {
+            self.remove_empty_active_post_replacement_frame();
+        }
+    }
+
+    /// Removes an exhausted general-drain frame only when it is the active top.
+    /// A paired parent becomes eligible only after its MultiDraw child has been
+    /// popped; no parent is searched for or removed through an active child.
+    pub fn remove_empty_active_post_replacement_frame(&mut self) {
+        if self
+            .active_post_replacement_drains()
+            .is_some_and(PostReplacementDrainStack::is_empty)
+            && matches!(
+                self.resolution_stack.last(),
+                Some(super::resolution::ResolutionFrame::PostReplacement(_))
+            )
+        {
+            let _ = self
+                .resolution_stack
+                .take_active_post_replacement()
+                .expect("an empty post-replacement owner must be active");
+        }
+    }
+
+    /// Clears only the exact active general post-replacement authority. This
+    /// preserves any independent active child that may be resolving above it.
+    pub fn abandon_active_post_replacement_drains(&mut self) {
+        if let Some(drains) = self.active_post_replacement_drains_mut() {
+            drains.abandon_all();
+        }
+    }
+
+    /// Returns the complete general post-replacement drain authority. The only
+    /// non-top case is the exact immediate paused parent of an active MultiDraw
+    /// child; this is positional pairing, not a generic frame search.
+    pub fn active_post_replacement_drains(&self) -> Option<&PostReplacementDrainStack> {
+        self.resolution_stack
+            .active_post_replacement_or_paired_parent()
+    }
+
+    /// Mutably accesses the active general drain or the exact paused parent of
+    /// the active MultiDraw frame.
+    pub fn active_post_replacement_drains_mut(&mut self) -> Option<&mut PostReplacementDrainStack> {
+        self.resolution_stack
+            .active_post_replacement_or_paired_parent_mut()
+    }
+
+    /// Installs a general replacement drain into its exact active owner, or as
+    /// a fresh inner PostReplacement frame.
+    pub fn install_post_replacement_drain(
+        &mut self,
+        drain: PostReplacementDrain,
+        policy: ResidentDrainPolicy,
+    ) -> bool {
+        if let Some(drains) = self.active_post_replacement_drains_mut() {
+            return drains.install(drain, policy);
+        }
+        let mut drains = PostReplacementDrainStack::default();
+        let installed = drains.install(drain, policy);
+        self.resolution_stack.push_post_replacement(drains);
+        installed
+    }
+
+    /// True when the exact active general drain has ready continuation work.
+    pub fn has_active_post_replacement_drain(&self) -> bool {
+        self.active_post_replacement_drains()
+            .is_some_and(PostReplacementDrainStack::has_ready)
+    }
+
+    /// Clears the active general drain and, when it is paired with an active
+    /// MultiDraw child, clears the child first. Frame IDs remain monotonic
+    /// because `DrawSequenceStack::abandon_all` does not rewind its allocator.
+    pub fn abandon_active_replacement_tails(&mut self) {
+        if self.active_multi_draw_frame().is_some() {
+            let mut frame = self
+                .resolution_stack
+                .take_active_multi_draw()
+                .expect("an active multi-draw frame must be consumable")
+                .expect("the active multi-draw frame was checked");
+            self.resolution_stack
+                .observe_draw_sequence_frame_id(frame.draw_sequences.next_frame_id());
+            frame.draw_sequences.abandon_all();
+            frame.pending_connive_reentry = None;
+        }
+        if matches!(
+            self.resolution_stack.last(),
+            Some(super::resolution::ResolutionFrame::PostReplacement(_))
+        ) {
+            if let Some(mut drains) = self
+                .resolution_stack
+                .take_active_post_replacement()
+                .expect("the active post-replacement frame must be consumable")
+            {
+                drains.abandon_all();
+            }
+        }
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14510,19 +14686,9 @@ impl GameState {
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
             replacement_may_cost_paused: false,
-            post_replacement_drains: PostReplacementDrainStack::default(),
-            legacy_post_replacement_effect: None,
-            legacy_post_replacement_resolved_effect: None,
-            legacy_post_replacement_continuation: None,
-            legacy_post_replacement_source: None,
-            legacy_post_replacement_applied: HashSet::new(),
-            legacy_post_replacement_event_source: None,
-            legacy_post_replacement_event_target: None,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             pending_connive_reentry: None,
-            draw_sequences: DrawSequenceStack::default(),
-            legacy_pending_multi_draw: None,
             pending_life_total_assignment: None,
             pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
@@ -15054,7 +15220,7 @@ impl GameState {
     /// that is mid-dispatch does not count — the old slot was already empty at that
     /// point, because the continuation had been moved out of it before dispatching.
     pub fn has_post_replacement_drain(&self) -> bool {
-        self.post_replacement_drains.has_ready()
+        self.has_active_post_replacement_drain()
     }
 
     /// Install a ready continuation carrying no source, no inherited
@@ -15066,7 +15232,7 @@ impl GameState {
         &mut self,
         continuation: crate::types::ability::PostReplacementContinuation,
     ) {
-        self.post_replacement_drains.install(
+        self.install_post_replacement_drain(
             PostReplacementDrain::ready(continuation),
             ResidentDrainPolicy::Replace,
         );
@@ -15077,14 +15243,14 @@ impl GameState {
     pub fn post_replacement_continuation(
         &self,
     ) -> Option<&crate::types::ability::PostReplacementContinuation> {
-        self.post_replacement_drains
+        self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.ready_continuation())
     }
 
     /// CR 615.5: the resident drain's replacement source (the shield's own object).
     pub fn post_replacement_source(&self) -> Option<crate::types::identifiers::ObjectId> {
-        self.post_replacement_drains
+        self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.source)
     }
@@ -15092,14 +15258,14 @@ impl GameState {
     /// CR 615.5 + CR 609.7: the resident drain's *prevented-event* source — the
     /// damage dealer, not the shield.
     pub fn post_replacement_event_source(&self) -> Option<crate::types::identifiers::ObjectId> {
-        self.post_replacement_drains
+        self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.event_source)
     }
 
     /// CR 615.5: the resident drain's prevented-event target.
     pub fn post_replacement_event_target(&self) -> Option<&crate::types::ability::TargetRef> {
-        self.post_replacement_drains
+        self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.event_target.as_ref())
     }
@@ -15111,90 +15277,11 @@ impl GameState {
     /// caller epilogue drains with the spell-resolution ctx and must not resolve
     /// `SelfRef` against the replacement's source.
     pub fn clear_post_replacement_source(&mut self) {
-        if let Some(drain) = self.post_replacement_drains.resident_mut() {
+        if let Some(drain) = self
+            .active_post_replacement_drains_mut()
+            .and_then(PostReplacementDrainStack::resident_mut)
+        {
             drain.source = None;
-        }
-    }
-
-    pub fn migrate_post_replacement_continuation(&mut self) {
-        // The canonical stack wins outright: every legacy slot is stale.
-        if !self.post_replacement_drains.is_empty() {
-            self.legacy_post_replacement_effect = None;
-            self.legacy_post_replacement_resolved_effect = None;
-            self.legacy_post_replacement_continuation = None;
-            self.legacy_post_replacement_source = None;
-            self.legacy_post_replacement_applied.clear();
-            self.legacy_post_replacement_event_source = None;
-            self.legacy_post_replacement_event_target = None;
-            return;
-        }
-
-        // The continuation itself comes from whichever generation of the save
-        // recorded it. The Resolved arm wins when both pre-fold slots are
-        // (impossibly) populated, mirroring the pre-fold dispatcher precedence.
-        let continuation = self
-            .legacy_post_replacement_continuation
-            .take()
-            .or_else(|| {
-                self.legacy_post_replacement_resolved_effect
-                    .take()
-                    .map(crate::types::ability::PostReplacementContinuation::Resolved)
-            })
-            .or_else(|| {
-                self.legacy_post_replacement_effect
-                    .take()
-                    .map(crate::types::ability::PostReplacementContinuation::Template)
-            });
-        self.legacy_post_replacement_effect = None;
-        self.legacy_post_replacement_resolved_effect = None;
-
-        let Some(continuation) = continuation else {
-            // No continuation means the companion values are orphans; drop them
-            // rather than leaving them to bleed into an unrelated later drain.
-            self.legacy_post_replacement_source = None;
-            self.legacy_post_replacement_applied.clear();
-            self.legacy_post_replacement_event_source = None;
-            self.legacy_post_replacement_event_target = None;
-            return;
-        };
-
-        self.post_replacement_drains.install(
-            PostReplacementDrain {
-                // A legacy save recorded a continuation that had not run, so it
-                // deserializes as `Ready`. A save can never have captured one
-                // mid-dispatch: the old slot was emptied before dispatching.
-                status: DrainStatus::Ready(continuation),
-                source: self.legacy_post_replacement_source.take(),
-                applied: std::mem::take(&mut self.legacy_post_replacement_applied),
-                event_source: self.legacy_post_replacement_event_source.take(),
-                event_target: self.legacy_post_replacement_event_target.take(),
-            },
-            ResidentDrainPolicy::Replace,
-        );
-    }
-
-    /// CR 121.2: Migrate the legacy single-slot `pending_multi_draw` save shape
-    /// into [`Self::draw_sequences`] as a one-frame stack. Idempotent — a no-op
-    /// once the legacy slot is empty (the steady state after one post-load hop).
-    /// Called from `finalize_public_state` alongside
-    /// [`Self::migrate_post_replacement_continuation`], so every deserialize
-    /// boundary (engine-wasm restore, multiplayer host resume, gamePersistence
-    /// rehydration) migrates without per-callsite plumbing.
-    ///
-    /// A legacy save can only ever have recorded ONE in-flight instruction, so it
-    /// converts to exactly one frame. Nesting (CR 616.1g) that the old shape could
-    /// not record is not invented here.
-    pub fn migrate_pending_multi_draw(&mut self) {
-        let Some(legacy) = self.legacy_pending_multi_draw.take() else {
-            return;
-        };
-        // A canonical stack already present wins: the legacy slot is stale.
-        if !self.draw_sequences.is_empty() {
-            return;
-        }
-        let frame_id = self.draw_sequences.push(legacy.player, legacy.remaining);
-        if let Some(frame) = self.draw_sequences.active_if(frame_id) {
-            frame.accumulated = legacy.accumulated;
         }
     }
 
@@ -15609,18 +15696,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         priority_pass_count: _,
         pending_replacement: _,
         replacement_may_cost_paused: _,
-        post_replacement_drains: _,
-        legacy_post_replacement_continuation: _,
-        legacy_post_replacement_effect: _,
-        legacy_post_replacement_resolved_effect: _,
-        legacy_post_replacement_source: _,
-        legacy_post_replacement_applied: _,
-        legacy_post_replacement_event_source: _,
-        legacy_post_replacement_event_target: _,
         post_replacement_token_choice_applied: _,
         pending_connive_reentry: _,
-        legacy_pending_multi_draw: _,
-        draw_sequences: _,
         pending_life_total_assignment: _,
         pending_spell_resolution: _,
         deferred_entry_events: _,
@@ -15918,10 +15995,6 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.pending_connive_reentry == other.pending_connive_reentry
-            // CR 104.4b: position, not history — see `DrawSequenceStack::loop_equal`.
-            // Comparing the stack structurally would fold the monotonic frame-ID
-            // allocator into loop equality and silently disable loop detection.
-            && self.draw_sequences.loop_equal(&other.draw_sequences)
             && self.pending_life_total_assignment == other.pending_life_total_assignment
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
@@ -17820,100 +17893,46 @@ mod tests {
         assert_eq!(state.max_lands_per_turn, 1);
     }
 
-    /// Phase-0 migration oracle for Amendment B's shipped, split authority.
-    /// This is intentionally test-only: Phase 2/3 will replace these labels
-    /// with resolution frames, but must preserve the current nesting order for
-    /// each valid mixed shape. `PostReplacementDrainStack` is positional today
-    /// (there are no drain ids), while draw work is addressed by frame id and
-    /// the connive tail has its dedicated slot.
     #[test]
-    fn phase0_migration_oracle_shipped_mixed_slots_preserve_drain_order() {
-        #[derive(Debug, PartialEq, Eq)]
-        enum ShippedLegacySlot {
-            GeneralPostReplacement,
-            DrawSequence,
-            ConniveTail,
-        }
-
-        fn outer_to_inner(state: &GameState) -> Vec<ShippedLegacySlot> {
-            let mut order = Vec::new();
-            if state.pending_connive_reentry.is_some() {
-                order.push(ShippedLegacySlot::ConniveTail);
-            }
-            if state.post_replacement_drains.has_ready() {
-                order.push(ShippedLegacySlot::GeneralPostReplacement);
-            }
-            if state.draw_sequences.active().is_some() {
-                order.push(ShippedLegacySlot::DrawSequence);
-            }
-            order
-        }
-
-        let draw = |state: &mut GameState| {
-            state.draw_sequences.push(PlayerId(0), 1);
-        };
-        let general = |state: &mut GameState| {
-            state.install_ready_continuation(
-                crate::types::ability::PostReplacementContinuation::Template(Box::new(
-                    crate::types::ability::AbilityDefinition::new(
-                        crate::types::ability::AbilityKind::Spell,
-                        crate::types::ability::Effect::Draw {
-                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                            target: crate::types::ability::TargetFilter::Controller,
-                        },
-                    ),
-                )),
-            );
-        };
-
-        // A general drain that has entered a true draw keeps the general work
-        // outside the draw sequence; the child draw is the active (inner) work.
-        let mut general_then_draw = GameState::new_two_player(42);
-        general(&mut general_then_draw);
-        draw(&mut general_then_draw);
-        assert!(general_then_draw.post_replacement_drains.has_ready());
-        assert!(general_then_draw.draw_sequences.active().is_some());
-        assert_eq!(
-            outer_to_inner(&general_then_draw),
-            vec![
-                ShippedLegacySlot::GeneralPostReplacement,
-                ShippedLegacySlot::DrawSequence,
-            ],
-            "outer-to-inner migration order for a general drain that started a draw"
+    fn multi_draw_authority_is_owned_by_the_active_runtime_frame() {
+        let mut state = GameState::new_two_player(42);
+        let frame_id = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            DrawSequenceOrigin::Plain,
         );
 
-        // Leader-style "draw, then connive" carries its tail separately. The
-        // connive tail is outer work and the draw remains the active inner work.
-        let mut draw_then_connive = GameState::new_two_player(42);
-        let conniver_id = ObjectId(99);
-        draw_then_connive.objects.insert(
-            conniver_id,
-            GameObject::new(
-                conniver_id,
-                CardId(99),
-                PlayerId(0),
-                "Conniver".to_string(),
-                Zone::Battlefield,
-            ),
-        );
-        draw_then_connive.battlefield.push_back(conniver_id);
-        draw(&mut draw_then_connive);
-        draw_then_connive.pending_connive_reentry = Some(PendingConniveReentry {
-            conniver: draw_then_connive
-                .capture_connive_subject(conniver_id)
-                .expect("fixture conniver exists"),
-            count: 1,
-            applied: HashSet::new(),
-        });
-        assert!(draw_then_connive.draw_sequences.active().is_some());
-        assert!(draw_then_connive.pending_connive_reentry.is_some());
         assert_eq!(
-            outer_to_inner(&draw_then_connive),
-            vec![
-                ShippedLegacySlot::ConniveTail,
-                ShippedLegacySlot::DrawSequence,
-            ],
-            "outer-to-inner migration order for the dedicated connive tail and its draw"
+            state.active_draw_sequence().map(|frame| frame.frame_id),
+            Some(frame_id)
+        );
+        assert!(matches!(
+            state.resolution_stack.last(),
+            Some(crate::types::resolution::ResolutionFrame::MultiDraw(_))
+        ));
+    }
+
+    #[test]
+    fn abandoning_a_multi_draw_never_reuses_its_captured_frame_id() {
+        let mut state = GameState::new_two_player(42);
+        let abandoned = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            DrawSequenceOrigin::Plain,
+        );
+        state.abandon_active_replacement_tails();
+
+        let later = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            DrawSequenceOrigin::Plain,
+        );
+        assert!(
+            later > abandoned,
+            "a stale captured draw frame ID must never alias a later instruction"
         );
     }
 
@@ -19588,23 +19607,22 @@ mod tests {
 
     #[test]
     fn persisted_state_decodes_v1_at_the_boundary_and_rewrites_v2_only() {
-        let mut legacy = GameState::new_two_player(43);
-        legacy.legacy_pending_multi_draw = Some(PendingMultiDraw {
+        let mut v1 =
+            serde_json::to_value(GameState::new_two_player(43)).expect("serialize v1 baseline");
+        v1["pending_multi_draw"] = serde_json::to_value(PendingMultiDraw {
             player: PlayerId(0),
             remaining: 2,
             accumulated: 1,
-        });
-
-        let v1 = serde_json::to_value(legacy).expect("legacy state serializes without a marker");
+        })
+        .expect("serialize v1 draw tail");
         assert!(v1.get("resolution_state_version").is_none());
         assert!(v1.get("pending_multi_draw").is_some());
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("persistence boundary supplies the v1 discriminator");
         let resumed = restored.clone().into_game_state();
-        assert!(resumed.legacy_pending_multi_draw.is_none());
         assert_eq!(
-            resumed.draw_sequences.active().map(|frame| frame.remaining),
+            resumed.active_draw_sequence().map(|frame| frame.remaining),
             Some(2)
         );
 
@@ -19691,18 +19709,9 @@ mod tests {
         );
     }
 
-    /// 2026-05-09 audit M4 backward-compat: a JSON snapshot saved before the
-    /// post-replacement-continuation slot fold (with the legacy
-    /// `post_replacement_effect` field) deserializes cleanly and the legacy
-    /// content lifts into the new unified slot once
-    /// `migrate_post_replacement_continuation` runs (called from
-    /// `finalize_public_state` at every deserialize boundary).
     #[test]
-    fn legacy_post_replacement_effect_field_lifts_into_unified_slot() {
-        // Build a baseline state, serialize it, then splice in the legacy
-        // field name so the snapshot mirrors a pre-fold producer.
-        let baseline = GameState::new_two_player(42);
-        let mut snapshot: serde_json::Value = serde_json::to_value(&baseline).unwrap();
+    fn v1_post_replacement_template_lifts_into_a_runtime_frame() {
+        let mut snapshot = serde_json::to_value(GameState::new_two_player(42)).unwrap();
         let template = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::LoseLife {
@@ -19715,14 +19724,11 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("post_replacement_effect".to_string(), template_json);
+        snapshot["resolution_state_version"] = serde_json::Value::from(1);
 
-        let serialized = serde_json::to_string(&snapshot).unwrap();
-        let mut state: GameState = serde_json::from_str(&serialized).unwrap();
-        // Pre-migration: legacy slot populated, unified slot empty.
-        assert!(!state.has_post_replacement_drain());
-        assert!(state.legacy_post_replacement_effect.is_some());
-
-        state.migrate_post_replacement_continuation();
+        let state = serde_json::from_value::<ResolutionStateWire>(snapshot)
+            .expect("v1 post-replacement template restores")
+            .into_game_state();
 
         match state.post_replacement_continuation() {
             Some(PostReplacementContinuation::Template(ref def)) => {
@@ -19730,16 +19736,11 @@ mod tests {
             }
             other => panic!("expected Template after migration, got {other:?}"),
         }
-        assert!(state.legacy_post_replacement_effect.is_none());
     }
 
-    /// 2026-05-09 audit M4 backward-compat (Resolved variant): a pre-fold
-    /// snapshot with `post_replacement_resolved_effect` lifts to
-    /// `PostReplacementContinuation::Resolved` after migration.
     #[test]
-    fn legacy_post_replacement_resolved_effect_field_lifts_into_unified_slot() {
-        let baseline = GameState::new_two_player(42);
-        let mut snapshot: serde_json::Value = serde_json::to_value(&baseline).unwrap();
+    fn v1_post_replacement_resolved_lifts_into_a_runtime_frame() {
+        let mut snapshot = serde_json::to_value(GameState::new_two_player(42)).unwrap();
         let resolved = ResolvedAbility::new(
             Effect::LoseLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -19754,13 +19755,11 @@ mod tests {
             "post_replacement_resolved_effect".to_string(),
             resolved_json,
         );
+        snapshot["resolution_state_version"] = serde_json::Value::from(1);
 
-        let serialized = serde_json::to_string(&snapshot).unwrap();
-        let mut state: GameState = serde_json::from_str(&serialized).unwrap();
-        assert!(!state.has_post_replacement_drain());
-        assert!(state.legacy_post_replacement_resolved_effect.is_some());
-
-        state.migrate_post_replacement_continuation();
+        let state = serde_json::from_value::<ResolutionStateWire>(snapshot)
+            .expect("v1 resolved post-replacement continuation restores")
+            .into_game_state();
 
         match state.post_replacement_continuation() {
             Some(PostReplacementContinuation::Resolved(ref boxed)) => {
@@ -19768,7 +19767,6 @@ mod tests {
             }
             other => panic!("expected Resolved after migration, got {other:?}"),
         }
-        assert!(state.legacy_post_replacement_resolved_effect.is_none());
     }
 
     /// CR 601.2a: A `SpellCastRecord` snapshot from an older serialized state

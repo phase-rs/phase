@@ -369,7 +369,7 @@ fn stash_post_replacement_continuation(
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
 ) {
-    state.post_replacement_drains.install(
+    state.install_post_replacement_drain(
         PostReplacementDrain {
             status: DrainStatus::Ready(continuation),
             source: Some(source),
@@ -432,7 +432,7 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     // The drain owns its source / applied / event-source / event-target, so one
     // call abandons all four. This is precisely the hand-listing hazard the doc
     // above describes: those four could no longer be stranded individually.
-    state.post_replacement_drains.abandon_all();
+    state.abandon_active_replacement_tails();
     state.post_replacement_token_choice_applied = None;
     // CR 614.1a: the Moonlit-scoped "that many" copy count is single-authority
     // abandoned alongside the applied seed it rides with.
@@ -446,7 +446,6 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     //
     // The frame-ID allocator deliberately does NOT rewind: a `DrawSequenceFrameId`
     // captured before the abandonment must never alias a frame allocated after it.
-    state.draw_sequences.abandon_all();
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -8675,7 +8674,7 @@ fn continue_replacement_impl(
         // The drain owns those fields, so replacing it clears them by construction.
         match post_effect {
             Some(def) => {
-                state.post_replacement_drains.install(
+                state.install_post_replacement_drain(
                     PostReplacementDrain {
                         status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
                         source: Some(rid.source),
@@ -8689,7 +8688,7 @@ fn continue_replacement_impl(
             // No post-effect: this branch produces no continuation, so any resident
             // one (and the `applied` set that rode with it) is dropped — exactly
             // what `continuation = None` + `applied.clear()` did before.
-            None => state.post_replacement_drains.abandon_all(),
+            None => state.abandon_active_post_replacement_drains(),
         }
 
         match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
@@ -11637,8 +11636,7 @@ mod tests {
         };
         assert_eq!(chooser, PlayerId(0));
         let parked = state
-            .draw_sequences
-            .active()
+            .active_draw_sequence()
             .expect("the paused instruction must stay on the draw-sequence stack");
         assert_eq!(
             (parked.player, parked.remaining, parked.accumulated),
@@ -11657,9 +11655,9 @@ mod tests {
         .expect("resume the dredge choice");
 
         assert!(
-            state.draw_sequences.is_empty(),
+            state.active_draw_sequence().is_none(),
             "the instruction must fully complete once both units resolve, got {:?}",
-            state.draw_sequences
+            state.active_multi_draw_frame()
         );
         assert!(
             state.players[0].hand.contains(&ObjectId(10)),

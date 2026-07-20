@@ -12,12 +12,13 @@ use serde_json::{Map, Value};
 use crate::types::ability::{AbilityDefinition, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DrawSequenceStack, GameState, PendingBatchDeliveries, PendingChangeZoneIteration,
+    DrainStatus, DrawSequenceStack, GameState, PendingBatchDeliveries, PendingChangeZoneIteration,
     PendingChooseOneOf, PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
     PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
-    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
-    PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
-    PendingVoteBallotIteration, PostReplacementDrainStack, ResolvingTriggerContext, WaitingFor,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
+    PostReplacementDrainStack, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -272,12 +273,12 @@ impl ResolutionFrame {
             | Self::OptionalEffect(_)
             | Self::CoinFlip(_)
             | Self::Proliferate(_)
-            | Self::MutateMerge(_) => true,
-            Self::MultiDraw(_)
-            | Self::ConniveReentry(_)
-            | Self::LifeTotalAssignment(_)
-            | Self::SpellResolution(_)
-            | Self::PostReplacement(_) => false,
+            | Self::MutateMerge(_)
+            | Self::MultiDraw(_)
+            | Self::PostReplacement(_) => true,
+            Self::ConniveReentry(_) | Self::LifeTotalAssignment(_) | Self::SpellResolution(_) => {
+                false
+            }
         }
     }
 
@@ -402,6 +403,10 @@ pub enum ResolutionStackError {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResolutionStack {
     frames: Vec<ResolutionFrame>,
+    /// The monotonic draw-frame allocator survives an abandoned MultiDraw
+    /// frame, so a stale captured ID cannot alias a later instruction.
+    #[serde(default)]
+    next_draw_sequence_frame_id: u64,
 }
 
 impl ResolutionStack {
@@ -415,6 +420,34 @@ impl ResolutionStack {
 
     pub fn last(&self) -> Option<&ResolutionFrame> {
         self.frames.last()
+    }
+
+    pub(crate) fn next_draw_sequence_frame_id(&self) -> u64 {
+        self.next_draw_sequence_frame_id
+    }
+
+    pub(crate) fn restore_next_draw_sequence_frame_id(&mut self, next_frame_id: u64) {
+        self.next_draw_sequence_frame_id = next_frame_id;
+    }
+
+    pub(crate) fn observe_draw_sequence_frame_id(&mut self, next_frame_id: u64) {
+        self.next_draw_sequence_frame_id = self.next_draw_sequence_frame_id.max(next_frame_id);
+    }
+
+    /// Restores a v2 payload written before the outer allocator was serialized.
+    /// The active frame's allocator is the lower bound, never a reset value.
+    fn recover_draw_sequence_allocator(&mut self) {
+        let next_frame_id = self
+            .frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::MultiDraw(draw) => Some(draw.draw_sequences.next_frame_id()),
+                _ => None,
+            })
+            .max();
+        if let Some(next_frame_id) = next_frame_id {
+            self.observe_draw_sequence_frame_id(next_frame_id);
+        }
     }
 
     /// Compares runtime frames with the `GameState` equality contract.
@@ -450,6 +483,11 @@ impl ResolutionStack {
                         return false;
                     }
                 }
+                (
+                    Some(ResolutionFrame::MultiDraw(left)),
+                    Some(ResolutionFrame::MultiDraw(right)),
+                ) if left.draw_sequences.loop_equal(&right.draw_sequences)
+                    && left.pending_connive_reentry == right.pending_connive_reentry => {}
                 (Some(left), Some(right)) if left == right => {}
                 (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => return false,
             }
@@ -1650,6 +1688,148 @@ impl ResolutionStack {
         ));
     }
 
+    /// Returns the complete draw authority only when its MultiDraw frame owns
+    /// the active stack top.
+    pub fn active_multi_draw(&self) -> Option<&MultiDrawFrame> {
+        match self.last() {
+            Some(ResolutionFrame::MultiDraw(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active MultiDraw frame.
+    pub fn active_multi_draw_mut(&mut self) -> Option<&mut MultiDrawFrame> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::MultiDraw(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active MultiDraw frame after all of its draw work
+    /// and any embedded connive link have settled.
+    pub fn take_active_multi_draw(
+        &mut self,
+    ) -> Result<Option<MultiDrawFrame>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::MultiDraw(_)) => {
+                let ResolutionFrame::MultiDraw(frame) = self.pop_expected(FrameKind::MultiDraw)?
+                else {
+                    unreachable!("checked multi-draw frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::MultiDraw,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks a complete in-flight draw authority as the active inner frame.
+    pub fn push_multi_draw(&mut self, frame: MultiDrawFrame) {
+        self.observe_draw_sequence_frame_id(frame.draw_sequences.next_frame_id());
+        self.push_inner(ResolutionFrame::MultiDraw(frame));
+    }
+
+    /// Re-parks the active MultiDraw authority without an empty-stack interval.
+    pub fn replace_active_multi_draw(
+        &mut self,
+        frame: MultiDrawFrame,
+    ) -> Result<(), ResolutionStackError> {
+        self.observe_draw_sequence_frame_id(frame.draw_sequences.next_frame_id());
+        match self.last() {
+            Some(ResolutionFrame::MultiDraw(_)) => {
+                self.replace_active(ResolutionFrame::MultiDraw(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::MultiDraw,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Returns the active general replacement drain. During the one shipped
+    /// G4 topology this is its exact, immediately preceding parent while the
+    /// child starts or remains paused; there is intentionally no general frame
+    /// search.
+    pub fn active_post_replacement_or_paired_parent(&self) -> Option<&PostReplacementDrainStack> {
+        match self.last() {
+            Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
+            Some(ResolutionFrame::MultiDraw(_)) => match self.active_predecessor() {
+                Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
+                Some(_) | None => None,
+            },
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses the active general drain or its exact paired parent.
+    pub fn active_post_replacement_or_paired_parent_mut(
+        &mut self,
+    ) -> Option<&mut PostReplacementDrainStack> {
+        let paired_parent_index = self.frames.len().checked_sub(2);
+        match self.frames.last() {
+            Some(ResolutionFrame::PostReplacement(_)) => match self.frames.last_mut() {
+                Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
+                Some(_) | None => unreachable!("checked post-replacement frame must match"),
+            },
+            Some(ResolutionFrame::MultiDraw(_)) => {
+                let index = paired_parent_index?;
+                match self.frames.get_mut(index) {
+                    Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
+                    Some(_) | None => None,
+                }
+            }
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active general post-replacement frame.
+    pub fn take_active_post_replacement(
+        &mut self,
+    ) -> Result<Option<PostReplacementDrainStack>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::PostReplacement(_)) => {
+                let ResolutionFrame::PostReplacement(frame) =
+                    self.pop_expected(FrameKind::PostReplacement)?
+                else {
+                    unreachable!("checked post-replacement frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::PostReplacement,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks a complete general post-replacement drain as the active inner frame.
+    pub fn push_post_replacement(&mut self, frame: PostReplacementDrainStack) {
+        self.push_inner(ResolutionFrame::PostReplacement(frame));
+    }
+
+    /// Re-parks the active general post-replacement frame without clearing its
+    /// resident event context.
+    pub fn replace_active_post_replacement(
+        &mut self,
+        frame: PostReplacementDrainStack,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::PostReplacement(_)) => {
+                self.replace_active(ResolutionFrame::PostReplacement(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::PostReplacement,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns only the immediate predecessor of the active frame.
     ///
     /// This is intentionally narrower than a frame search: it serves only the
@@ -1664,6 +1844,9 @@ impl ResolutionStack {
 
     /// Park work that is inside the current active operation.
     pub fn push_inner(&mut self, frame: ResolutionFrame) {
+        if let ResolutionFrame::MultiDraw(draw) = &frame {
+            self.observe_draw_sequence_frame_id(draw.draw_sequences.next_frame_id());
+        }
         self.frames.push(frame);
     }
 
@@ -1731,6 +1914,9 @@ impl ResolutionStack {
 
     /// Re-park the current operation without exposing an empty-stack interval.
     pub fn replace_active(&mut self, frame: ResolutionFrame) -> Result<(), ResolutionStackError> {
+        if let ResolutionFrame::MultiDraw(draw) = &frame {
+            self.observe_draw_sequence_frame_id(draw.draw_sequences.next_frame_id());
+        }
         let active = self.frames.last_mut().ok_or(ResolutionStackError::Empty)?;
         *active = frame;
         Ok(())
@@ -1748,6 +1934,10 @@ impl ResolutionStack {
         child: ResolutionFrame,
     ) -> Result<(), ResolutionStackError> {
         validate_shipped_post_replacement_draw_pair(&parent, &child)?;
+        let ResolutionFrame::MultiDraw(draw) = &child else {
+            unreachable!("validated adjacent child must be multi-draw")
+        };
+        self.observe_draw_sequence_frame_id(draw.draw_sequences.next_frame_id());
         self.frames.push(parent);
         self.frames.push(child);
         Ok(())
@@ -1812,10 +2002,18 @@ impl ResolutionStack {
             }
         }
 
-        let has_multi_draw = self
+        let multi_draw_count = self
             .frames
             .iter()
-            .any(|frame| matches!(frame, ResolutionFrame::MultiDraw(_)));
+            .filter(|frame| matches!(frame, ResolutionFrame::MultiDraw(_)))
+            .count();
+        if multi_draw_count > 1 {
+            return Err(ResolutionStackError::InvalidPayload {
+                frame: FrameKind::MultiDraw,
+                message: "multiple multi-draw frames split one draw authority".to_string(),
+            });
+        }
+        let has_multi_draw = multi_draw_count == 1;
         for (index, frame) in self.frames.iter().enumerate() {
             if let ResolutionFrame::MultiDraw(draw) = frame {
                 draw.draw_sequences.validate().map_err(|message| {
@@ -1824,6 +2022,13 @@ impl ResolutionStack {
                         message,
                     }
                 })?;
+                if draw.draw_sequences.next_frame_id() > self.next_draw_sequence_frame_id {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::MultiDraw,
+                        message: "the resolution-stack draw allocator is behind its active frame"
+                            .to_string(),
+                    });
+                }
             }
             if has_multi_draw
                 && matches!(
@@ -1959,6 +2164,7 @@ impl ResolutionStateWire {
                 let legacy_coin_flip = LegacyCoinFlipWire::from_value(&value)?;
                 let legacy_proliferate = LegacyProliferateWire::from_value(&value)?;
                 let legacy_mutate_merge = LegacyMutateMergeWire::from_value(&value)?;
+                let legacy_replacement_tails = LegacyReplacementTailsWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -1989,6 +2195,17 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_coin_flip");
                 legacy_object.remove("pending_proliferate_actions");
                 legacy_object.remove("pending_mutate_merge");
+                legacy_object.remove("draw_sequences");
+                legacy_object.remove("pending_multi_draw");
+                legacy_object.remove("pending_connive_reentry");
+                legacy_object.remove("post_replacement_drains");
+                legacy_object.remove("post_replacement_effect");
+                legacy_object.remove("post_replacement_resolved_effect");
+                legacy_object.remove("post_replacement_continuation");
+                legacy_object.remove("post_replacement_source");
+                legacy_object.remove("post_replacement_applied");
+                legacy_object.remove("post_replacement_event_source");
+                legacy_object.remove("post_replacement_event_target");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -2052,16 +2269,28 @@ impl ResolutionStateWire {
                 if let Some(frame) = legacy_mutate_merge.into_frame() {
                     legacy.push_mutate_merge_frame(frame);
                 }
-                legacy.migrate_post_replacement_continuation();
-                legacy.migrate_pending_multi_draw();
+                let (tail_frames, pending_connive_reentry, next_draw_sequence_frame_id) =
+                    legacy_replacement_tails.into_frames()?;
+                legacy.pending_connive_reentry = pending_connive_reentry;
+                legacy
+                    .resolution_stack
+                    .observe_draw_sequence_frame_id(next_draw_sequence_frame_id);
+                match tail_frames.as_slice() {
+                    [] => {}
+                    [frame] => legacy.resolution_stack.push_inner(frame.clone()),
+                    [parent, child] => legacy
+                        .resolution_stack
+                        .install_adjacent_post_replacement_draw(parent.clone(), child.clone())
+                        .map_err(|error| error.to_string())?,
+                    _ => unreachable!("replacement-tail v1 conversion has at most one paired edge"),
+                }
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
                 frames
                     .validate(&legacy.waiting_for)
                     .map_err(|error| error.to_string())?;
-                let state = project_frames_into_legacy_state(&legacy, &frames)?;
                 #[cfg(debug_assertions)]
-                debug_assert_runtime_resolution_invariants(&state);
-                Ok(Self { state })
+                debug_assert_runtime_resolution_invariants(&legacy);
+                Ok(Self { state: legacy })
             }
             RESOLUTION_STATE_WIRE_VERSION => {
                 if legacy_resolution_wire_field(object).is_some() {
@@ -2070,8 +2299,9 @@ impl ResolutionStateWire {
                 let frames_value = object
                     .get("resolution_frames")
                     .ok_or_else(|| "v2 resolution state is missing resolution_frames".to_string())?;
-                let frames: ResolutionStack = serde_json::from_value(frames_value.clone())
+                let mut frames: ResolutionStack = serde_json::from_value(frames_value.clone())
                     .map_err(|error| error.to_string())?;
+                frames.recover_draw_sequence_allocator();
 
                 let mut state_value = value;
                 let state_object = state_value.as_object_mut().expect("checked JSON object");
@@ -2155,15 +2385,6 @@ pub(crate) fn debug_assert_runtime_resolution_invariants(state: &GameState) {
             );
         }
     }
-}
-
-enum DrawAndPostConversion {
-    Paired {
-        parent: ResolutionFrame,
-        child: Box<ResolutionFrame>,
-    },
-    UnpairedDraw(ResolutionFrame),
-    UnpairedPost(ResolutionFrame),
 }
 
 /// v1-only continuation fields. Runtime state never carries these names after
@@ -2563,10 +2784,137 @@ impl LegacyRepeatForWire {
     }
 }
 
+/// v1-only replacement-tail fields. The shipped model stored the general drain
+/// and draw cursor independently, so this reader is the sole place that
+/// reconstructs their proven paused-parent adjacency.
+#[derive(Deserialize)]
+struct LegacyReplacementTailsWire {
+    #[serde(default)]
+    draw_sequences: DrawSequenceStack,
+    #[serde(default)]
+    pending_multi_draw: Option<PendingMultiDraw>,
+    #[serde(default)]
+    pending_connive_reentry: Option<PendingConniveReentry>,
+    #[serde(default)]
+    post_replacement_drains: PostReplacementDrainStack,
+    #[serde(default)]
+    post_replacement_effect: Option<Box<AbilityDefinition>>,
+    #[serde(default)]
+    post_replacement_resolved_effect: Option<Box<ResolvedAbility>>,
+    #[serde(default)]
+    post_replacement_continuation: Option<crate::types::ability::PostReplacementContinuation>,
+    #[serde(default)]
+    post_replacement_source: Option<ObjectId>,
+    #[serde(default)]
+    post_replacement_applied: HashSet<crate::types::proposed_event::AppliedReplacementKey>,
+    #[serde(default)]
+    post_replacement_event_source: Option<ObjectId>,
+    #[serde(default)]
+    post_replacement_event_target: Option<TargetRef>,
+}
+
+impl LegacyReplacementTailsWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frames(
+        mut self,
+    ) -> Result<(Vec<ResolutionFrame>, Option<PendingConniveReentry>, u64), String> {
+        if self.draw_sequences.is_empty() {
+            if let Some(pending) = self.pending_multi_draw.take() {
+                let frame_id = self.draw_sequences.push(pending.player, pending.remaining);
+                self.draw_sequences
+                    .active_if(frame_id)
+                    .expect("newly restored v1 draw frame must be active")
+                    .accumulated = pending.accumulated;
+            }
+        }
+
+        let continuation = self
+            .post_replacement_continuation
+            .take()
+            .or_else(|| {
+                self.post_replacement_resolved_effect
+                    .take()
+                    .map(crate::types::ability::PostReplacementContinuation::Resolved)
+            })
+            .or_else(|| {
+                self.post_replacement_effect
+                    .take()
+                    .map(crate::types::ability::PostReplacementContinuation::Template)
+            });
+        if self.post_replacement_drains.is_empty() {
+            if let Some(continuation) = continuation {
+                self.post_replacement_drains.install(
+                    PostReplacementDrain {
+                        status: DrainStatus::Ready(continuation),
+                        source: self.post_replacement_source,
+                        applied: self.post_replacement_applied,
+                        event_source: self.post_replacement_event_source,
+                        event_target: self.post_replacement_event_target,
+                    },
+                    ResidentDrainPolicy::Replace,
+                );
+            }
+        }
+
+        let pending_connive_reentry = self.pending_connive_reentry.take();
+        let next_draw_sequence_frame_id = self.draw_sequences.next_frame_id();
+        let draw = (!self.draw_sequences.is_empty()).then(|| {
+            ResolutionFrame::MultiDraw(MultiDrawFrame {
+                draw_sequences: self.draw_sequences,
+                pending_connive_reentry: None,
+            })
+        });
+        let post = (!self.post_replacement_drains.is_empty())
+            .then(|| ResolutionFrame::PostReplacement(self.post_replacement_drains));
+
+        match (post, draw) {
+            (Some(parent), Some(child)) => {
+                let ResolutionFrame::PostReplacement(drains) = &parent else {
+                    unreachable!("post-replacement conversion built the wrong frame kind")
+                };
+                if !matches!(
+                    drains.resident().map(|drain| &drain.status),
+                    Some(DrainStatus::Paused)
+                ) {
+                    return Err(
+                        "legacy post-replacement and multi-draw state is ambiguous without a paused resident drain"
+                            .to_string(),
+                    );
+                }
+                Ok((
+                    vec![parent, child],
+                    pending_connive_reentry,
+                    next_draw_sequence_frame_id,
+                ))
+            }
+            (None, Some(draw)) => Ok((
+                vec![draw],
+                pending_connive_reentry,
+                next_draw_sequence_frame_id,
+            )),
+            (Some(post), None) => Ok((
+                vec![post],
+                pending_connive_reentry,
+                next_draw_sequence_frame_id,
+            )),
+            (None, None) => Ok((
+                Vec::new(),
+                pending_connive_reentry,
+                next_draw_sequence_frame_id,
+            )),
+        }
+    }
+}
+
 pub(crate) fn canonicalize_legacy_resolution_state(
     state: &GameState,
 ) -> Result<ResolutionStack, String> {
     let mut frames = ResolutionStack::default();
+    frames
+        .restore_next_draw_sequence_frame_id(state.resolution_stack.next_draw_sequence_frame_id());
 
     for frame in state.resolution_stack.iter() {
         if !frame.is_runtime_stack_resident() {
@@ -2578,19 +2926,12 @@ pub(crate) fn canonicalize_legacy_resolution_state(
         frames.push_inner(frame.clone());
     }
     push_legacy_after_child_frames(state, &mut frames);
-    if let Some(conversion) = classify_draw_and_post_replacement(state)? {
-        // The paired branch is deliberately first. Once a paused resident drain
-        // proves the adjacency relationship, neither unpaired converter may run.
-        match conversion {
-            DrawAndPostConversion::Paired { parent, child } => frames
-                .install_adjacent_post_replacement_draw(parent, *child)
-                .map_err(|error| error.to_string())?,
-            DrawAndPostConversion::UnpairedDraw(frame) => frames.push_inner(frame),
-            DrawAndPostConversion::UnpairedPost(frame) => frames.push_inner(frame),
-        }
-    }
-    if state.draw_sequences.is_empty() {
-        if let Some(pending) = state.pending_connive_reentry.clone() {
+    if let Some(pending) = state.pending_connive_reentry.clone() {
+        if let Some(draw) = frames.active_multi_draw_mut() {
+            if draw.pending_connive_reentry.replace(pending).is_some() {
+                return Err("duplicate MultiDraw connive re-entry".to_string());
+            }
+        } else {
             frames.push_inner(ResolutionFrame::ConniveReentry(pending));
         }
     }
@@ -2606,50 +2947,15 @@ fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStac
     }
 }
 
-fn classify_draw_and_post_replacement(
-    state: &GameState,
-) -> Result<Option<DrawAndPostConversion>, String> {
-    let draw = (!state.draw_sequences.is_empty()).then(|| {
-        ResolutionFrame::MultiDraw(MultiDrawFrame {
-            draw_sequences: state.draw_sequences.clone(),
-            pending_connive_reentry: state.pending_connive_reentry.clone(),
-        })
-    });
-    let post = (!state.post_replacement_drains.is_empty())
-        .then(|| ResolutionFrame::PostReplacement(state.post_replacement_drains.clone()));
-
-    let conversion = match (post, draw) {
-        (Some(parent), Some(child)) => {
-            let ResolutionFrame::PostReplacement(drains) = &parent else {
-                unreachable!("post frame classifier constructed the wrong frame kind")
-            };
-            if !matches!(
-                drains.resident().map(|drain| &drain.status),
-                Some(crate::types::game_state::DrainStatus::Paused)
-            ) {
-                return Err(
-                    "legacy post-replacement and multi-draw state is ambiguous without a paused resident drain"
-                        .to_string(),
-                );
-            }
-            Some(DrawAndPostConversion::Paired {
-                parent,
-                child: Box::new(child),
-            })
-        }
-        (None, Some(draw)) => Some(DrawAndPostConversion::UnpairedDraw(draw)),
-        (Some(post), None) => Some(DrawAndPostConversion::UnpairedPost(post)),
-        (None, None) => None,
-    };
-    Ok(conversion)
-}
-
 fn project_frames_into_legacy_state(
     state: &GameState,
     frames: &ResolutionStack,
 ) -> Result<GameState, String> {
     let mut projected = state.clone();
     clear_legacy_resolution_slots(&mut projected);
+    projected
+        .resolution_stack
+        .restore_next_draw_sequence_frame_id(frames.next_draw_sequence_frame_id());
     for frame in frames.iter() {
         match frame {
             ResolutionFrame::AbilityContinuation(frame) => {
@@ -2712,13 +3018,15 @@ fn project_frames_into_legacy_state(
                 projected.push_mutate_merge_frame(pending.clone())
             }
             ResolutionFrame::MultiDraw(frame) => {
-                if !projected.draw_sequences.is_empty()
-                    || projected.pending_connive_reentry.is_some()
-                {
-                    return Err("duplicate MultiDraw frame".to_string());
+                let mut runtime_frame = frame.clone();
+                if let Some(pending) = runtime_frame.pending_connive_reentry.take() {
+                    set_once(
+                        &mut projected.pending_connive_reentry,
+                        pending,
+                        "MultiDraw connive re-entry",
+                    )?;
                 }
-                projected.draw_sequences = frame.draw_sequences.clone();
-                projected.pending_connive_reentry = frame.pending_connive_reentry.clone();
+                projected.resolution_stack.push_multi_draw(runtime_frame);
             }
             ResolutionFrame::ConniveReentry(pending) => set_once(
                 &mut projected.pending_connive_reentry,
@@ -2736,10 +3044,9 @@ fn project_frames_into_legacy_state(
                 "SpellResolution",
             )?,
             ResolutionFrame::PostReplacement(drains) => {
-                if !projected.post_replacement_drains.is_empty() {
-                    return Err("duplicate PostReplacement frame".to_string());
-                }
-                projected.post_replacement_drains = drains.clone();
+                projected
+                    .resolution_stack
+                    .push_post_replacement(drains.clone());
             }
         }
     }
@@ -2748,19 +3055,9 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.draw_sequences = DrawSequenceStack::default();
-    state.legacy_pending_multi_draw = None;
     state.pending_connive_reentry = None;
     state.pending_life_total_assignment = None;
     state.pending_spell_resolution = None;
-    state.post_replacement_drains = PostReplacementDrainStack::default();
-    state.legacy_post_replacement_effect = None;
-    state.legacy_post_replacement_resolved_effect = None;
-    state.legacy_post_replacement_continuation = None;
-    state.legacy_post_replacement_source = None;
-    state.legacy_post_replacement_applied.clear();
-    state.legacy_post_replacement_event_source = None;
-    state.legacy_post_replacement_event_target = None;
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), String> {
@@ -3395,19 +3692,15 @@ mod tests {
             unreachable!("helper constructs a multi-draw frame")
         };
         let mut state = GameState::new_two_player(157);
-        state.draw_sequences = draw.draw_sequences.clone();
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(resolved_draw(157)),
             &state,
         ));
+        state.resolution_stack.push_multi_draw(draw);
 
-        let mut frames = ResolutionStack::default();
-        frames.push_inner(continuation_frame(157));
-        frames.push_inner(ResolutionFrame::MultiDraw(draw));
+        crate::game::effects::resume_resolution_frames(&mut state, &mut Vec::new());
 
-        crate::game::effects::resume_resolution_frames(&mut state, &frames, &mut Vec::new());
-
-        assert!(state.draw_sequences.is_empty());
+        assert!(state.active_draw_sequence().is_none());
         assert!(
             state.active_ability_continuation().is_some(),
             "the dispatcher must not search below the active multi-draw frame"
@@ -3423,28 +3716,19 @@ mod tests {
             unreachable!("helper constructs a multi-draw frame")
         };
         let mut state = GameState::new_two_player(158);
-        state.post_replacement_drains = drains.clone();
-        state.draw_sequences = draw.draw_sequences.clone();
-
-        let mut frames = ResolutionStack::default();
-        frames
+        state
+            .resolution_stack
             .install_adjacent_post_replacement_draw(
                 ResolutionFrame::PostReplacement(drains),
                 ResolutionFrame::MultiDraw(draw),
             )
             .expect("fixture installs the shipped adjacent pair");
+        crate::game::effects::resume_resolution_frames(&mut state, &mut Vec::new());
 
-        crate::game::effects::resume_resolution_frames(&mut state, &frames, &mut Vec::new());
-
-        assert!(state.draw_sequences.is_empty());
+        assert!(state.active_draw_sequence().is_none());
         assert!(
-            state.post_replacement_drains.is_empty(),
-            "the draw authority, not a generic frame pop, retires the paused resident"
-        );
-        assert_eq!(
-            frames.len(),
-            2,
-            "the transitional dispatcher does not own frames"
+            state.resolution_stack.is_empty(),
+            "the draw authority retires only its completed child and paused parent"
         );
     }
 
@@ -3829,10 +4113,12 @@ mod tests {
         let ResolutionFrame::MultiDraw(draw) = active_multi_draw_frame() else {
             unreachable!("test helper constructs a multi-draw frame")
         };
-        let mut state = GameState::new_two_player(42);
-        state.post_replacement_drains = drains;
-        state.draw_sequences = draw.draw_sequences;
-        let mut v1 = serde_json::to_value(&state).expect("legacy paired state serializes");
+        let mut v1 = serde_json::to_value(GameState::new_two_player(42))
+            .expect("legacy paired state serializes");
+        v1["post_replacement_drains"] =
+            serde_json::to_value(drains).expect("paused drain serializes");
+        v1["draw_sequences"] =
+            serde_json::to_value(draw.draw_sequences).expect("active draw serializes");
         v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
 
         let wire: ResolutionStateWire =
@@ -4256,8 +4542,7 @@ mod tests {
 
         let mut events = Vec::new();
         for _ in 0..3 {
-            let frames = state.resolution_stack.clone();
-            crate::game::effects::resume_resolution_frames(&mut state, &frames, &mut events);
+            crate::game::effects::resume_resolution_frames(&mut state, &mut events);
         }
         assert!(state.active_each_player_copy_chosen().is_none());
         assert!(state.active_copy_token().is_none());
@@ -4389,10 +4674,17 @@ mod tests {
 
     #[test]
     fn v1_remaining_resolution_frames_resume_via_shipped_authorities() {
-        let mut multi_draw = GameState::new_two_player(140);
-        let outer = multi_draw.draw_sequences.push(PlayerId(0), 0);
-        let inner = multi_draw.draw_sequences.push(PlayerId(0), 0);
-        let mut multi_draw = restore_v1_fixture(multi_draw);
+        let mut draw_sequences = DrawSequenceStack::default();
+        let outer = draw_sequences.push(PlayerId(0), 0);
+        let inner = draw_sequences.push(PlayerId(0), 0);
+        let mut multi_draw = serde_json::to_value(GameState::new_two_player(140))
+            .expect("legacy multi-draw fixture serializes");
+        multi_draw["draw_sequences"] =
+            serde_json::to_value(draw_sequences).expect("legacy draw sequences serialize");
+        multi_draw["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let mut multi_draw = serde_json::from_value::<ResolutionStateWire>(multi_draw)
+            .expect("v1 nested multi-draw fixture restores")
+            .into_game_state();
         let _ = crate::game::effects::draw::resume_draw_sequence(
             &mut multi_draw,
             inner,
@@ -4403,7 +4695,7 @@ mod tests {
             outer,
             &mut Vec::new(),
         );
-        assert!(multi_draw.draw_sequences.is_empty());
+        assert!(multi_draw.active_draw_sequence().is_none());
         assert_reserializes_v2_only(multi_draw);
 
         let mut connive = GameScenario::new();
@@ -4509,14 +4801,22 @@ mod tests {
         assert!(spell.pending_spell_resolution.is_none());
         assert_reserializes_v2_only(spell);
 
-        let mut post_replacement = GameState::new_two_player(144);
-        assert!(post_replacement.post_replacement_drains.install(
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
             PostReplacementDrain::ready(PostReplacementContinuation::Resolved(Box::new(
                 resolved_draw(144),
             ))),
             ResidentDrainPolicy::KeepResident,
         ));
-        let mut post_replacement = restore_v1_fixture(post_replacement);
+        let mut post_replacement = serde_json::to_value(GameState::new_two_player(144))
+            .expect("legacy post-replacement fixture serializes");
+        post_replacement["post_replacement_drains"] =
+            serde_json::to_value(drains).expect("legacy post-replacement drains serialize");
+        post_replacement["resolution_state_version"] =
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let mut post_replacement = serde_json::from_value::<ResolutionStateWire>(post_replacement)
+            .expect("v1 post-replacement fixture restores")
+            .into_game_state();
         assert!(
             crate::game::engine_replacement::apply_pending_post_replacement_effect(
                 &mut post_replacement,
@@ -4527,7 +4827,7 @@ mod tests {
             )
             .is_none()
         );
-        assert!(post_replacement.post_replacement_drains.is_empty());
+        assert!(post_replacement.active_post_replacement_drains().is_none());
         assert_reserializes_v2_only(post_replacement);
     }
 
@@ -4544,17 +4844,23 @@ mod tests {
             .active()
             .expect("fixture draw frame is active")
             .frame_id;
-        let mut paired = GameState::new_two_player(145);
-        paired.post_replacement_drains = drains;
-        paired.draw_sequences = draw.draw_sequences;
-        let mut paired = restore_v1_fixture(paired);
+        let mut paired = serde_json::to_value(GameState::new_two_player(145))
+            .expect("legacy paired fixture serializes");
+        paired["post_replacement_drains"] =
+            serde_json::to_value(drains).expect("paused drain serializes");
+        paired["draw_sequences"] =
+            serde_json::to_value(draw.draw_sequences).expect("active draw serializes");
+        paired["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let mut paired = serde_json::from_value::<ResolutionStateWire>(paired)
+            .expect("v1 paired fixture restores")
+            .into_game_state();
         let _ = crate::game::effects::draw::resume_draw_sequence(
             &mut paired,
             frame_id,
             &mut Vec::new(),
         );
-        assert!(paired.draw_sequences.is_empty());
-        assert!(paired.post_replacement_drains.is_empty());
+        assert!(paired.active_draw_sequence().is_none());
+        assert!(paired.active_post_replacement_drains().is_none());
         assert_reserializes_v2_only(paired);
     }
 
@@ -4652,7 +4958,6 @@ mod tests {
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         assert!(serde_json::from_value::<ResolutionStateWire>(orphan_optional_context).is_err());
 
-        let mut ambiguous_legacy_pair = GameState::new_two_player(154);
         let ResolutionFrame::PostReplacement(ready_drains) = ({
             let mut drains = PostReplacementDrainStack::default();
             assert!(drains.install(
@@ -4668,10 +4973,12 @@ mod tests {
         let ResolutionFrame::MultiDraw(draw) = active_multi_draw_frame() else {
             unreachable!("fixture constructs a multi-draw frame")
         };
-        ambiguous_legacy_pair.post_replacement_drains = ready_drains;
-        ambiguous_legacy_pair.draw_sequences = draw.draw_sequences;
         let mut ambiguous_legacy_pair =
-            serde_json::to_value(ambiguous_legacy_pair).expect("v1 serializes");
+            serde_json::to_value(GameState::new_two_player(154)).expect("v1 serializes");
+        ambiguous_legacy_pair["post_replacement_drains"] =
+            serde_json::to_value(ready_drains).expect("ready drain serializes");
+        ambiguous_legacy_pair["draw_sequences"] =
+            serde_json::to_value(draw.draw_sequences).expect("draw serializes");
         ambiguous_legacy_pair["resolution_state_version"] =
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         assert!(serde_json::from_value::<ResolutionStateWire>(ambiguous_legacy_pair).is_err());
