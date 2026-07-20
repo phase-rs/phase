@@ -297,6 +297,70 @@ impl ResolutionStack {
         self.frames.last()
     }
 
+    /// Returns the active ability-continuation owner, if that family owns the
+    /// stack top. This is deliberately a top-only view; callers must not use
+    /// it to recover a buried parent continuation.
+    pub fn active_ability_continuation(&self) -> Option<&AbilityContinuationFrame> {
+        match self.last() {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable counterpart to [`Self::active_ability_continuation`].
+    ///
+    /// It exposes only the active typed payload, never an arbitrary frame.
+    pub fn active_ability_continuation_mut(&mut self) -> Option<&mut AbilityContinuationFrame> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume the active ability-continuation frame.
+    pub fn take_active_ability_continuation(
+        &mut self,
+    ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::AbilityContinuation(_)) => {
+                let ResolutionFrame::AbilityContinuation(frame) =
+                    self.pop_expected(FrameKind::AbilityContinuation)?
+                else {
+                    unreachable!("checked ability-continuation frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::AbilityContinuation,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a newly active ability continuation.
+    pub fn push_ability_continuation(&mut self, frame: AbilityContinuationFrame) {
+        self.push_inner(ResolutionFrame::AbilityContinuation(frame));
+    }
+
+    /// Re-park the currently active ability continuation without an
+    /// empty-stack interval.
+    pub fn replace_active_ability_continuation(
+        &mut self,
+        frame: AbilityContinuationFrame,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::AbilityContinuation(_)) => {
+                self.replace_active(ResolutionFrame::AbilityContinuation(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::AbilityContinuation,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns only the immediate predecessor of the active frame.
     ///
     /// This is intentionally narrower than a frame search: the only Phase-2
@@ -498,6 +562,7 @@ impl ResolutionStateWire {
         let object = value
             .as_object_mut()
             .ok_or_else(|| "GameState must serialize as a JSON object".to_string())?;
+        object.remove("resolution_stack");
         remove_resolution_wire_fields(object);
         object.insert(
             "resolution_state_version".to_string(),
@@ -526,8 +591,23 @@ impl ResolutionStateWire {
                 if object.contains_key("resolution_frames") {
                     return Err("v1 resolution state must not contain resolution_frames".to_string());
                 }
+                if object.contains_key("resolution_stack") {
+                    return Err("v1 resolution state must not contain resolution_stack".to_string());
+                }
+                let legacy_ability =
+                    LegacyAbilityContinuationWire::from_value(&value)?;
+                let mut legacy_value = value;
+                let legacy_object = legacy_value
+                    .as_object_mut()
+                    .expect("checked JSON object");
+                legacy_object.remove("pending_continuation");
+                legacy_object.remove("search_continuation_attach_host");
+                legacy_object.remove("pending_choose_zone_trigger_context");
                 let mut legacy: GameState =
-                    serde_json::from_value(value).map_err(|error| error.to_string())?;
+                    serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
+                if let Some(frame) = legacy_ability.into_frame()? {
+                    legacy.push_ability_continuation(frame);
+                }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
@@ -553,6 +633,10 @@ impl ResolutionStateWire {
                 let state_object = state_value.as_object_mut().expect("checked JSON object");
                 state_object.remove("resolution_state_version");
                 state_object.remove("resolution_frames");
+                if state_object.remove("resolution_stack").is_some() {
+                    return Err("v2 resolution state must not contain runtime resolution_stack"
+                        .to_string());
+                }
                 let state: GameState =
                     serde_json::from_value(state_value).map_err(|error| error.to_string())?;
                 frames
@@ -638,14 +722,56 @@ enum DrawAndPostConversion {
     UnpairedPost(ResolutionFrame),
 }
 
+/// v1-only continuation fields. Runtime state never carries these names after
+/// the AbilityContinuation migration; this adapter is the sole reader for
+/// historical saves.
+#[derive(Deserialize)]
+struct LegacyAbilityContinuationWire {
+    #[serde(default)]
+    pending_continuation: Option<PendingContinuation>,
+    #[serde(default)]
+    search_continuation_attach_host: Option<crate::game::game_object::AttachTarget>,
+    #[serde(default)]
+    pending_choose_zone_trigger_context: Option<ResolvingTriggerContext>,
+}
+
+impl LegacyAbilityContinuationWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Result<Option<AbilityContinuationFrame>, String> {
+        let Some(mut pending) = self.pending_continuation else {
+            if self.search_continuation_attach_host.is_some()
+                || self.pending_choose_zone_trigger_context.is_some()
+            {
+                return Err(
+                    "legacy ability-continuation sidecar has no continuation owner".to_string(),
+                );
+            }
+            return Ok(None);
+        };
+
+        if let Some(host) = self.search_continuation_attach_host {
+            match pending.search_attach_host {
+                Some(existing) if existing != host => {
+                    return Err("legacy ability-continuation attach hosts disagree".to_string());
+                }
+                Some(_) => {}
+                None => pending.search_attach_host = Some(host),
+            }
+        }
+
+        Ok(Some(AbilityContinuationFrame {
+            pending,
+            choose_zone_trigger_context: self.pending_choose_zone_trigger_context,
+        }))
+    }
+}
+
 pub(crate) fn canonicalize_legacy_resolution_state(
     state: &GameState,
 ) -> Result<ResolutionStack, String> {
-    if state.pending_continuation.is_none() && state.pending_choose_zone_trigger_context.is_some() {
-        return Err(
-            "pending choose-from-zone trigger context has no continuation owner".to_string(),
-        );
-    }
     if state.pending_optional_effect.is_none()
         && (state.pending_optional_trigger_event.is_some()
             || state.pending_optional_trigger_match_count.is_some())
@@ -656,6 +782,15 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     }
     let mut frames = ResolutionStack::default();
 
+    for frame in state.resolution_stack.iter() {
+        if !matches!(frame, ResolutionFrame::AbilityContinuation(_)) {
+            return Err(format!(
+                "runtime resolution stack contains unmigrated {:?} frame",
+                frame.kind()
+            ));
+        }
+        frames.push_inner(frame.clone());
+    }
     push_legacy_after_child_frames(state, &mut frames);
     if let Some(conversion) = classify_draw_and_post_replacement(state)? {
         // The paired branch is deliberately first. Once a paused resident drain
@@ -678,14 +813,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_continuation.clone() {
-        frames.push_inner(ResolutionFrame::AbilityContinuation(
-            AbilityContinuationFrame {
-                pending,
-                choose_zone_trigger_context: state.pending_choose_zone_trigger_context.clone(),
-            },
-        ));
-    }
     if let Some(pending) = state.pending_repeat_iteration.clone() {
         frames.push_inner(ResolutionFrame::RepeatFor(pending));
     }
@@ -828,16 +955,7 @@ fn project_frames_into_legacy_state(
     for frame in frames.iter() {
         match frame {
             ResolutionFrame::AbilityContinuation(frame) => {
-                set_once(
-                    &mut projected.pending_continuation,
-                    frame.pending.clone(),
-                    "AbilityContinuation",
-                )?;
-                if projected.pending_choose_zone_trigger_context.is_some() {
-                    return Err("duplicate AbilityContinuation trigger context".to_string());
-                }
-                projected.pending_choose_zone_trigger_context =
-                    frame.choose_zone_trigger_context.clone();
+                projected.push_ability_continuation(frame.clone());
             }
             ResolutionFrame::RepeatFor(pending) => set_once(
                 &mut projected.pending_repeat_iteration,
@@ -985,7 +1103,7 @@ fn project_frames_into_legacy_state(
 }
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
-    state.pending_continuation = None;
+    state.resolution_stack = ResolutionStack::default();
     state.pending_repeat_iteration = None;
     state.pending_repeat_until = None;
     state.pending_repeated_optional_payment = None;
@@ -1002,7 +1120,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.pending_vote_ballot_iteration = None;
     state.pending_per_player_zone_choice = None;
     state.pending_per_category_zone_choice = None;
-    state.pending_choose_zone_trigger_context = None;
     state.pending_optional_effect = None;
     state.pending_optional_trigger_event = None;
     state.pending_optional_trigger_match_count = None;
@@ -1262,6 +1379,22 @@ mod tests {
             .into_game_state()
     }
 
+    fn restore_v1_ability_fixture(state: GameState, frame: AbilityContinuationFrame) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_continuation"] =
+            serde_json::to_value(frame.pending).expect("legacy continuation serializes");
+        if let Some(context) = frame.choose_zone_trigger_context {
+            v1["pending_choose_zone_trigger_context"] =
+                serde_json::to_value(context).expect("legacy trigger context serializes");
+        }
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 ability fixture converts through the wire")
+            .into_game_state()
+    }
+
     fn assert_reserializes_v2_only(state: GameState) {
         let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
             .expect("resumed fixture serializes as v2");
@@ -1292,7 +1425,7 @@ mod tests {
         };
         let mut state = GameState::new_two_player(157);
         state.draw_sequences = draw.draw_sequences.clone();
-        state.pending_continuation = Some(PendingContinuation::new(
+        state.park_ability_continuation(PendingContinuation::new(
             Box::new(resolved_draw(157)),
             &state,
         ));
@@ -1305,7 +1438,7 @@ mod tests {
 
         assert!(state.draw_sequences.is_empty());
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "the dispatcher must not search below the active multi-draw frame"
         );
     }
@@ -1574,23 +1707,24 @@ mod tests {
 
     #[test]
     fn resolution_state_wire_keeps_choose_from_zone_context_with_its_continuation() {
-        let mut state = GameState::new_two_player(43);
-        state.pending_continuation = Some(PendingContinuation::new(
-            Box::new(resolved_draw(43)),
-            &state,
-        ));
+        let state = GameState::new_two_player(43);
         let context = ResolvingTriggerContext {
             event: None,
             events: Vec::new(),
             match_count: Some(2),
             die_result: None,
         };
-        state.pending_choose_zone_trigger_context = Some(context.clone());
-
-        let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
-        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
-        let wire: ResolutionStateWire =
-            serde_json::from_value(v1).expect("v1 continuation sidecar converts through frames");
+        let restored = restore_v1_ability_fixture(
+            state,
+            AbilityContinuationFrame {
+                pending: PendingContinuation::new(
+                    Box::new(resolved_draw(43)),
+                    &GameState::new_two_player(43),
+                ),
+                choose_zone_trigger_context: Some(context.clone()),
+            },
+        );
+        let wire = ResolutionStateWire::from_game_state(restored);
         let v2 = serde_json::to_value(&wire).expect("v2 wire serializes");
         assert!(v2.get("pending_choose_zone_trigger_context").is_none());
 
@@ -1599,7 +1733,8 @@ mod tests {
         assert_eq!(
             restored
                 .into_game_state()
-                .pending_choose_zone_trigger_context,
+                .active_ability_continuation_frame()
+                .and_then(|frame| frame.choose_zone_trigger_context.clone()),
             Some(context)
         );
     }
@@ -1847,13 +1982,16 @@ mod tests {
 
     #[test]
     fn v1_after_child_fixtures_resume_on_the_real_priority_drain() {
-        let mut continuation = GameState::new_two_player(110);
-        continuation.pending_continuation = Some(PendingContinuation::new(
-            Box::new(resolved_draw(110)),
-            &continuation,
+        let continuation = GameState::new_two_player(110);
+        let pending = PendingContinuation::new(Box::new(resolved_draw(110)), &continuation);
+        let continuation = resume_priority_fixture(restore_v1_ability_fixture(
+            continuation,
+            AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            },
         ));
-        let continuation = resume_priority_fixture(restore_v1_fixture(continuation));
-        assert!(continuation.pending_continuation.is_none());
+        assert!(continuation.active_ability_continuation().is_none());
         assert_reserializes_v2_only(continuation);
 
         let mut repeat_for = GameState::new_two_player(111);
@@ -2301,15 +2439,16 @@ mod tests {
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         assert!(serde_json::from_value::<ResolutionStateWire>(multiple_direct).is_err());
 
-        let mut orphan_choose_context = GameState::new_two_player(152);
-        orphan_choose_context.pending_choose_zone_trigger_context = Some(ResolvingTriggerContext {
+        let orphan_context = ResolvingTriggerContext {
             event: None,
             events: Vec::new(),
             match_count: None,
             die_result: None,
-        });
+        };
         let mut orphan_choose_context =
-            serde_json::to_value(orphan_choose_context).expect("v1 serializes");
+            serde_json::to_value(GameState::new_two_player(152)).expect("v1 serializes");
+        orphan_choose_context["pending_choose_zone_trigger_context"] =
+            serde_json::to_value(orphan_context).expect("legacy trigger context serializes");
         orphan_choose_context["resolution_state_version"] =
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         assert!(serde_json::from_value::<ResolutionStateWire>(orphan_choose_context).is_err());

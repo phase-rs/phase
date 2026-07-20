@@ -29,7 +29,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
-use crate::types::resolution::{ResolutionFrame, ResolutionStack};
+use crate::types::resolution::{AbilityContinuationFrame, ResolutionFrame, ResolutionStack};
 use crate::types::zones::Zone;
 
 pub mod adapt;
@@ -654,12 +654,12 @@ pub(crate) fn candidate_player_scalar_with_state(
 /// `append_to_pending_continuation` has stashed the chain — if no continuation
 /// has been stashed the parent event is dropped (the chain is the carrier).
 pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: EffectKind) {
-    if let Some(cont) = state.pending_continuation.as_mut() {
-        cont.parent_kind = Some(kind);
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame.pending.parent_kind = Some(kind);
     }
 }
 
-/// Drain `state.pending_continuation`: resolve the stashed chain, then emit
+/// Drain the active ability-continuation frame: resolve the stashed chain, then emit
 /// the stashed parent `EffectResolved` event (if any) so trigger matchers
 /// keyed on the outer effect's kind (`EffectKind::Fight`, `DamageAll`,
 /// `DamageEachPlayer`, etc.) fire the same way they do on the non-pause
@@ -700,8 +700,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.pending_change_zone_iteration.is_none()
         && !state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .is_some_and(|continuation| {
                 matches!(continuation.chain.effect, Effect::ChangeZone { .. })
             })
@@ -714,14 +713,18 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // other parked chain — runs only once the inner iteration finished without
     // re-pausing on a further per-target replacement choice.
     if !waits_for_resolution_choice(&state.waiting_for) {
-        if let Some(cont) = state.pending_continuation.take() {
+        if let Some(frame) = state
+            .take_active_ability_continuation()
+            .expect("continuation drain may consume only the active continuation frame")
+        {
+            let cont = frame.pending;
             let PendingContinuation {
                 chain,
                 parent_kind,
                 search_attach_host,
                 trigger_context,
             } = cont;
-            state.search_continuation_attach_host = search_attach_host;
+            state.resolving_continuation_attach_host = search_attach_host;
             let source_id = chain.source_id;
             // CR 608.2: replay the resolving ability's snapshotted trigger
             // context so TargetFilter::TriggeringPlayer (and its siblings)
@@ -733,7 +736,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             if let Some(snapshot) = trigger_snapshot {
                 super::triggers::restore_trigger_event_context(state, snapshot);
             }
-            state.search_continuation_attach_host = None;
+            state.resolving_continuation_attach_host = None;
             if let Some(kind) = parent_kind {
                 events.push(GameEvent::EffectResolved {
                     kind,
@@ -769,7 +772,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // paused "repeat this process" loop — re-set the `ControllerChoice` repeat
     // prompt.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && state.pending_continuation.is_none()
+        && state.active_ability_continuation().is_none()
         && state.pending_repeat_iteration.is_none()
     {
         drain_pending_repeat_until(state);
@@ -784,7 +787,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // repeat iteration, AND no pending repeat-until frame. By this point no
     // ability is still resolving, so no token proposal can still need the seed.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && state.pending_continuation.is_none()
+        && state.active_ability_continuation().is_none()
         && state.pending_repeat_iteration.is_none()
         && state.pending_repeat_until.is_none()
     {
@@ -1327,7 +1330,7 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
             total_iterations,
         } = pending;
         let initial_waiting_for = state.waiting_for.clone();
-        let initial_continuation_present = state.pending_continuation.is_some();
+        let initial_continuation_present = state.active_ability_continuation().is_some();
         let mut iteration = next_iteration;
         let mut paused = false;
         while iteration < total_iterations {
@@ -1374,7 +1377,7 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
             // silently dropped.
             let entered_choice = state.waiting_for != initial_waiting_for;
             let installed_continuation =
-                !initial_continuation_present && state.pending_continuation.is_some();
+                !initial_continuation_present && state.active_ability_continuation().is_some();
             if entered_choice || installed_continuation {
                 let next = iteration + 1;
                 if next < total_iterations {
@@ -1408,8 +1411,8 @@ pub(crate) fn append_to_pending_continuation(
         return;
     };
 
-    if let Some(existing) = state.pending_continuation.as_mut() {
-        let mut cursor = existing.chain.as_mut();
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        let mut cursor = frame.pending.chain.as_mut();
         let tail = Some(tail);
         loop {
             if cursor.sub_ability.is_none() {
@@ -1423,12 +1426,19 @@ pub(crate) fn append_to_pending_continuation(
                 .as_mut();
         }
     } else {
-        state.pending_continuation = Some(PendingContinuation::new(tail, state));
+        state.push_ability_continuation(AbilityContinuationFrame {
+            pending: PendingContinuation::new(tail, state),
+            choose_zone_trigger_context: None,
+        });
     }
 }
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
-    if let Some(existing) = state.pending_continuation.take() {
+    if let Some(frame) = state
+        .take_active_ability_continuation()
+        .expect("continuation prepend may consume only the active continuation frame")
+    {
+        let existing = frame.pending;
         let PendingContinuation {
             chain,
             parent_kind,
@@ -1436,17 +1446,23 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             trigger_context,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
-        state.pending_continuation = Some(PendingContinuation {
-            chain: Box::new(head),
-            parent_kind,
-            search_attach_host,
-            // CR 608.2: carry over the existing stash's trigger context — an
-            // ability's resolution is anchored to its earliest pause, not
-            // re-latched to whatever is live at splice time.
-            trigger_context,
+        state.push_ability_continuation(AbilityContinuationFrame {
+            pending: PendingContinuation {
+                chain: Box::new(head),
+                parent_kind,
+                search_attach_host,
+                // CR 608.2: carry over the existing stash's trigger context — an
+                // ability's resolution is anchored to its earliest pause, not
+                // re-latched to whatever is live at splice time.
+                trigger_context,
+            },
+            choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
     } else {
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(head), state));
+        state.push_ability_continuation(AbilityContinuationFrame {
+            pending: PendingContinuation::new(Box::new(head), state),
+            choose_zone_trigger_context: None,
+        });
     }
 }
 
@@ -1842,10 +1858,10 @@ fn try_begin_deferred_else_branch_target_selection(
             })
             .collect();
         if !candidates.is_empty() {
-            state.pending_continuation = Some(PendingContinuation::new(
-                Box::new(else_resolved.clone()),
-                state,
-            ));
+            state.push_ability_continuation(AbilityContinuationFrame {
+                pending: PendingContinuation::new(Box::new(else_resolved.clone()), state),
+                choose_zone_trigger_context: None,
+            });
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: else_resolved.controller,
                 cards: candidates,
@@ -2304,8 +2320,11 @@ pub(super) fn resolve_optional_effect_decision(
             // performed, propagate the signal into the stashed continuation so
             // its `IfYouDo` gate evaluates true (e.g. Ral, Monsoon Mage:
             // "you may exile Ral. If you do, return him transformed").
-            if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.set_optional_effect_performed_recursive(true);
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                frame
+                    .pending
+                    .chain
+                    .set_optional_effect_performed_recursive(true);
             }
         }
         AutoMayChoice::Decline => {
@@ -6347,8 +6366,11 @@ fn perform_player_scope_sacrifices(
         if let Some(snapshot) =
             parent_referent_context_from_events(state, &events[events_before_sacrifice..])
         {
-            if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.set_effect_context_object_recursive(snapshot);
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                frame
+                    .pending
+                    .chain
+                    .set_effect_context_object_recursive(snapshot);
             }
         }
     }
@@ -6714,8 +6736,11 @@ fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
     }) else {
         return;
     };
-    if let Some(cont) = state.pending_continuation.as_mut() {
-        cont.chain.set_effect_context_object_recursive(snapshot);
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame
+            .pending
+            .chain
+            .set_effect_context_object_recursive(snapshot);
     }
 }
 
@@ -6992,7 +7017,7 @@ fn resolve_chain_body(
     // "outer present, effect replaced it with its own" (e.g. `clash.rs` does a
     // REPLACE, not an append) — both leave `is_some()` true. Comparing the full
     // value catches the replace case correctly (issue #491).
-    let pending_continuation_before = state.pending_continuation.clone();
+    let pending_continuation_before = state.active_ability_continuation().cloned();
 
     // CR 608.2c + CR 701.20b + CR 603.3d: A multi-target reveal-all producer whose
     // per-target referent (the revealed card) is consumed by later co-instructions
@@ -7598,8 +7623,10 @@ fn resolve_chain_body(
                             if !candidates.is_empty() {
                                 let mut cont = ability.clone();
                                 cont.targets.clear();
-                                state.pending_continuation =
-                                    Some(PendingContinuation::new(Box::new(cont), state));
+                                state.push_ability_continuation(AbilityContinuationFrame {
+                                    pending: PendingContinuation::new(Box::new(cont), state),
+                                    choose_zone_trigger_context: None,
+                                });
                                 state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                                     player: chosen,
                                     cards: candidates,
@@ -8648,11 +8675,13 @@ fn resolve_chain_body(
                     // runs after the player responds — not immediately.
                     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                         debug_assert!(
-                            state.pending_continuation.is_none(),
+                            state.active_ability_continuation().is_none(),
                             "pending_continuation overwritten before consumption — else_ability chain will be lost"
                         );
-                        state.pending_continuation =
-                            Some(PendingContinuation::new(Box::new(resolved), state));
+                        state.push_ability_continuation(AbilityContinuationFrame {
+                            pending: PendingContinuation::new(Box::new(resolved), state),
+                            choose_zone_trigger_context: None,
+                        });
                     } else {
                         resolve_ability_chain(state, &resolved, events, depth + 1)?;
                     }
@@ -8708,11 +8737,13 @@ fn resolve_chain_body(
                         );
                         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                             debug_assert!(
-                                state.pending_continuation.is_none(),
+                                state.active_ability_continuation().is_none(),
                                 "pending_continuation overwritten before consumption — instead-tail chain will be lost"
                             );
-                            state.pending_continuation =
-                                Some(PendingContinuation::new(Box::new(resolved), state));
+                            state.push_ability_continuation(AbilityContinuationFrame {
+                                pending: PendingContinuation::new(Box::new(resolved), state),
+                                choose_zone_trigger_context: None,
+                            });
                         } else {
                             resolve_ability_chain(state, &resolved, events, depth + 1)?;
                         }
@@ -8981,8 +9012,8 @@ fn resolve_chain_body(
         //     own `sub_ability` — do NOT skip, or the sub is silently dropped
         //     (issue #491: the `LoseLife→Draw` decline body would lose its
         //     `Draw` while another opponent's iteration is queued).
-        let continuation_installed_by_this_effect = state.pending_continuation.is_some()
-            && state.pending_continuation != pending_continuation_before;
+        let continuation_installed_by_this_effect = state.active_ability_continuation().is_some()
+            && state.active_ability_continuation() != pending_continuation_before.as_ref();
         if continuation_installed_by_this_effect && !waits_for_resolution_choice(&state.waiting_for)
         {
             return Ok(());
@@ -13842,7 +13873,7 @@ mod tests {
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         };
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "LoseLife tail must be stashed as a pending continuation"
         );
 
@@ -13884,7 +13915,7 @@ mod tests {
             "controller should lose life equal to the chosen object's mana value"
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation should be drained after the choice resolves"
         );
     }
@@ -16745,7 +16776,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
         };
-        state.pending_continuation = Some(PendingContinuation::new(
+        state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::Plotted { turn_plotted: 0 },
@@ -17317,7 +17348,7 @@ mod tests {
         // drain's `installed_continuation` predicate must observe this
         // transition and re-stash iteration 2 for the next drain pass.
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "iteration 1 must have installed a synchronous pending_continuation \
              (else_ability of ConditionInstead)"
         );
@@ -21920,7 +21951,7 @@ mod tests {
 
         // Verify the sub-ability was stashed as a pending continuation
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "IfYouDo sub-ability should be stashed as pending_continuation during DiscardChoice"
         );
 

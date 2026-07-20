@@ -1852,7 +1852,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
             ..
         }
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
 }
 
 #[test]
@@ -1898,7 +1898,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
             ..
         }
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
 }
 
 #[test]
@@ -1943,7 +1943,7 @@ fn unless_payment_decline_preserves_nested_effect_zone_choice_continuation() {
             ..
         }
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
 }
 
 /// CR 610.3 + #783: When a permanent that exiled something "until it
@@ -2655,7 +2655,7 @@ fn multi_target_selection_preserves_nested_effect_zone_choice_continuation() {
             ..
         }
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
     assert!(state.objects[&target_id].tapped);
 }
 
@@ -2694,7 +2694,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         is_cost_payment: false,
         enters_modified_if: None,
     };
-    state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+    state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
@@ -3220,7 +3220,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
             ..
         })
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
 }
 
 #[test]

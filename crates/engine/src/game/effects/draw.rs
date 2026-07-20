@@ -337,7 +337,7 @@ pub(crate) fn resume_draw_sequence(
     // terminal action of this dispatch and can retire the exact top entry now.
     // Nested replacement dispatches retain their own stack entries, so this
     // never pops an outer paused event context.
-    if state.pending_continuation.is_none() {
+    if state.active_ability_continuation().is_none() {
         state.post_replacement_drains.finish_paused_dispatch();
     }
 

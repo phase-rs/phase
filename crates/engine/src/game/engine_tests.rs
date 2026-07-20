@@ -8692,7 +8692,7 @@ fn learn_rummage_stashes_draw_continuation() {
     );
 
     // Pre-set pending_continuation to verify it's consumed normally
-    state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+    state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -8719,7 +8719,7 @@ fn learn_rummage_stashes_draw_continuation() {
     assert_eq!(state.players[0].hand.len(), 1);
     assert!(state.players[0].graveyard.contains(&hand_card));
     // The stashed continuation (GainLife) should have been consumed
-    assert!(state.pending_continuation.is_none());
+    assert!(state.active_ability_continuation().is_none());
     // Life should have increased by 1 (from the continuation)
     assert_eq!(state.players[0].life, 21);
     assert!(result.events.iter().any(|e| matches!(

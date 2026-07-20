@@ -998,7 +998,9 @@ fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerI
         return;
     }
 
-    state.pending_continuation = None;
+    let _ = state
+        .clear_active_ability_continuation()
+        .expect("elimination cannot clear a buried ability continuation");
     state.resolving_stack_entry = None;
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
@@ -1022,7 +1024,9 @@ fn abandon_change_zone_family_for_controller(state: &mut GameState, player: Play
     }
 
     state.pending_change_zone_iteration = None;
-    state.pending_continuation = None;
+    let _ = state
+        .clear_active_ability_continuation()
+        .expect("elimination cannot clear a buried ability continuation");
     state.resolving_stack_entry = None;
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
@@ -1588,7 +1592,7 @@ mod tests {
             )),
             persist_player: None,
         };
-        state.pending_continuation = Some(pending_source_bound_continuation(
+        state.park_ability_continuation(pending_source_bound_continuation(
             &state,
             source,
             PlayerId(0),
@@ -1601,7 +1605,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
 
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(state.resolving_stack_entry.is_none());
         assert!(state.resolution_source_relatch.is_none());
         assert!(matches!(
@@ -1624,7 +1628,7 @@ mod tests {
             source: None,
             persist_player: Some(PlayerId(1)),
         };
-        state.pending_continuation = Some(pending_source_bound_continuation(
+        state.park_ability_continuation(pending_source_bound_continuation(
             &state,
             ObjectId(700),
             PlayerId(0),
@@ -1632,7 +1636,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
 
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(matches!(
             state.waiting_for,
             WaitingFor::Priority {
@@ -1667,7 +1671,7 @@ mod tests {
             }),
             proposition_truth: Some(true),
         };
-        state.pending_continuation = Some(pending_source_bound_continuation(
+        state.park_ability_continuation(pending_source_bound_continuation(
             &state,
             source,
             PlayerId(0),
@@ -1675,7 +1679,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
 
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(state.resolving_stack_entry.is_none());
         assert!(matches!(
             state.waiting_for,
@@ -1726,7 +1730,7 @@ mod tests {
         let mut events = Vec::new();
         crate::game::effects::search_library::resolve(&mut state, &search, &mut events)
             .expect("start opponent-library search");
-        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+        state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
             Box::new(shuffle),
             &state,
         ));
@@ -1743,7 +1747,7 @@ mod tests {
 
         assert!(state.active_library_searches.get(&PlayerId(0)).is_none());
         assert!(state.active_search_decision_controls.is_empty());
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(state.pending_search_found_batch.is_none());
         assert!(state.pending_replacement.is_none());
         assert!(events.iter().any(|event| matches!(

@@ -6402,7 +6402,7 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     if is_pending_trigger_construction_active(state) {
         return false;
     }
-    if state.pending_continuation.is_some() {
+    if state.active_ability_continuation().is_some() {
         return false;
     }
     if state.pending_repeat_iteration.is_some() {
@@ -25838,7 +25838,7 @@ pub mod tests {
             make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
             make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
         ];
-        state.pending_continuation = Some(PendingContinuation::new(
+        state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },

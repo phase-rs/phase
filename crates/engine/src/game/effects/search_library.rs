@@ -1664,7 +1664,7 @@ mod tests {
 
         assert_eq!(state.objects[&plains].zone, Zone::Battlefield);
         assert!(state.objects[&plains].tapped);
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(state.pending_repeat_iteration.is_none());
         assert!(state.active_library_searches.is_empty());
         assert!(state.active_search_decision_controls.is_empty());

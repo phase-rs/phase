@@ -98,12 +98,14 @@ pub fn resolve(
     // unconditionally clear the live, resolution-scoped trigger context; preserve
     // it here (this site runs inside `execute_effect`, before that clear) so an
     // `EventContextAmount` ("that many") sub_ability continuation resolves the
-    // triggering event's amount after the pause (Amy Pond). Restored by the
-    // `ChooseFromZoneChoice` handler around the continuation drain. Set
-    // unconditionally on every single-pool raise: `capture` yields `None` for a
-    // non-trigger ChooseFromZone (activated/spell), so a stale value from a prior
-    // resolution can never carry over; consumed by `.take()` in the handler.
-    state.pending_choose_zone_trigger_context = ResolvingTriggerContext::capture(state);
+    // triggering event's amount after the pause (Amy Pond). The context belongs
+    // to that continuation frame, and the `ChooseFromZoneChoice` handler consumes
+    // it around the continuation drain. A standalone choice has no continuation
+    // to resume and therefore no context to carry.
+    let trigger_context = ResolvingTriggerContext::capture(state);
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame.choose_zone_trigger_context = trigger_context;
+    }
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: choosing_player,
@@ -1090,7 +1092,11 @@ mod tests {
             runner.state().waiting_for
         );
         assert!(
-            runner.state().pending_choose_zone_trigger_context.is_some(),
+            runner
+                .state()
+                .active_ability_continuation_frame()
+                .and_then(|frame| frame.choose_zone_trigger_context.as_ref())
+                .is_some(),
             "the resolving trigger context must be captured across the pause"
         );
 
@@ -1125,7 +1131,11 @@ mod tests {
             "Amy Pond's own counters are untouched"
         );
         assert!(
-            runner.state().pending_choose_zone_trigger_context.is_none(),
+            runner
+                .state()
+                .active_ability_continuation_frame()
+                .and_then(|frame| frame.choose_zone_trigger_context.as_ref())
+                .is_none(),
             "the stash is consumed exactly once"
         );
     }
@@ -2695,7 +2705,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), &state));
 
         let ability = ResolvedAbility::new(
             Effect::ForEachCategory {

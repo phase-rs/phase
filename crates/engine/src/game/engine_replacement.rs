@@ -964,7 +964,7 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && (state.pending_continuation.is_some()
+                && (state.active_ability_continuation().is_some()
                     || state.pending_change_zone_iteration.is_some())
                 // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
                 // owns the unpaid cost suffix.  Do not drain the ordinary
@@ -1056,7 +1056,7 @@ pub(super) fn handle_replacement_choice(
             // resume only after the whole typed mana-cost root has either paid
             // or failed its suffix.  This mirrors the prevention path below.
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && (state.pending_continuation.is_some()
+                && (state.active_ability_continuation().is_some()
                     || state.pending_change_zone_iteration.is_some())
             {
                 effects::drain_pending_continuation(state, events);
@@ -1264,7 +1264,7 @@ pub(super) fn handle_replacement_choice(
                 // settles before any ordinary continuation drains.
                 if resumed_mana_ability_cost
                     && matches!(waiting_for, WaitingFor::Priority { .. })
-                    && (state.pending_continuation.is_some()
+                    && (state.active_ability_continuation().is_some()
                         || state.pending_change_zone_iteration.is_some())
                 {
                     effects::drain_pending_continuation(state, events);
@@ -1287,7 +1287,9 @@ pub(super) fn handle_replacement_choice(
             // the next resume's epilogue to drain; on a pause, surface the
             // parked prompt (its resume delivers the chosen event through the
             // ZoneChange arm above).
-            state.pending_continuation = None;
+            let _ = state
+                .clear_active_ability_continuation()
+                .expect("replacement cancellation cannot clear a buried continuation");
             if let Some(ctx) = state.pending_spell_resolution.take() {
                 match crate::game::zone_pipeline::move_object(
                     state,
@@ -4629,7 +4631,9 @@ mod tests {
         });
         // Simulate the moment the review describes: a paused repeat-until
         // continuation re-entering from priority.
-        state.pending_continuation = None;
+        let _ = state
+            .clear_active_ability_continuation()
+            .expect("fixture has no buried continuation");
         state.pending_repeat_iteration = None;
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),

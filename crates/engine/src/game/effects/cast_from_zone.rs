@@ -1869,7 +1869,7 @@ mod tests {
             &state.waiting_for,
             WaitingFor::EffectZoneChoice { .. }
         ));
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::EffectResolved {
@@ -1889,7 +1889,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
 
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert_eq!(state.objects[&cheap].zone, Zone::Hand);
         assert!(state.objects[&cheap].casting_permissions.is_empty());
     }

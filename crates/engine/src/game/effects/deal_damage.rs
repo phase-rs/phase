@@ -2843,8 +2843,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("remaining source must be stashed while first source waits");
         assert_eq!(
             cont.parent_kind,
@@ -2884,7 +2883,7 @@ mod tests {
         );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed after replacement resume"
         );
         assert!(
@@ -3122,8 +3121,7 @@ mod tests {
             "first source's post-replacement damage applies before lifelink pauses"
         );
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("remaining post-replacement survivor must be stashed");
         match &cont.chain.effect {
             Effect::ApplyPostReplacementDamage {
@@ -3244,8 +3242,7 @@ mod tests {
             "first source's damage applies before lifelink gain pauses"
         );
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("remaining post-replacement source must be stashed");
         assert_eq!(
             cont.parent_kind,
@@ -3295,7 +3292,7 @@ mod tests {
         );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed after post-replacement survivor resumes"
         );
         assert!(
@@ -5770,8 +5767,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for remaining batch targets");
 
         // Every remaining creature must be encoded as its own chain node.
@@ -5884,8 +5880,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for remaining batch targets");
         let summary = collect_chain_summary(&cont.chain);
         assert_eq!(
@@ -5926,8 +5921,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for remaining-player damage");
 
         let summary = collect_chain_summary(&cont.chain);
@@ -5989,8 +5983,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for remaining multi-target damage");
         let summary = collect_chain_summary(&cont.chain);
         assert_eq!(summary.len(), 1, "one remaining target; got {summary:?}");
@@ -6068,8 +6061,7 @@ mod tests {
 
         assert_eq!(
             state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .and_then(|c| c.parent_kind),
             Some(EffectKind::DamageAll),
             "the stashed continuation must carry EffectKind::DamageAll so the drain re-emits the parent event",
@@ -6101,7 +6093,7 @@ mod tests {
             result.events,
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed after drain"
         );
     }
@@ -6145,8 +6137,7 @@ mod tests {
 
         assert_eq!(
             state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .and_then(|c| c.parent_kind),
             Some(EffectKind::DamageEachPlayer),
             "the stashed continuation must carry EffectKind::DamageEachPlayer",
@@ -6177,7 +6168,7 @@ mod tests {
             result.events,
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed after drain"
         );
     }

@@ -43,7 +43,9 @@ use super::proposed_event::{
 use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
-use super::resolution::ResolutionStateWire;
+use super::resolution::{
+    AbilityContinuationFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
+};
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
@@ -10405,7 +10407,7 @@ pub struct StaticSourceIndex {
 /// - **Primary / generic** — `PendingContinuation.trigger_context` (this type)
 ///   preserves the trigger context across ANY continuation-based pause, and is
 ///   the mechanism to reach for going forward.
-/// - **Narrower pre-existing #1** — `GameState.pending_choose_zone_trigger_context`
+/// - **Narrower pre-existing #1** — `AbilityContinuationFrame.choose_zone_trigger_context`
 ///   (this type), used only by `ChooseFromZoneChoice`.
 /// - **Narrower pre-existing #2** — `WaitingFor::ChooseObjectsSelection.trigger_event`,
 ///   used only by that specific choice type.
@@ -11756,18 +11758,18 @@ pub struct GameState {
     #[serde(default)]
     pub public_revealed_cards: HashSet<ObjectId>,
 
-    // Pending ability continuation after a player choice (Scry/Dig/Surveil,
-    // SearchChoice, ChooseFromZoneChoice, replacement-choice, etc.) or after
-    // a replacement proposal pauses mid-chain. See `PendingContinuation` for
-    // how parent-kind metadata is carried alongside the chain so the drain
-    // re-emits the parent `EffectResolved` event that the non-pause path
-    // fires at the tail of its resolver.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_continuation: Option<PendingContinuation>,
+    /// Typed suspended-resolution authority. Families move here one at a
+    /// time; an empty stack is omitted from raw live-state snapshots until the
+    /// first migrated family parks work.
+    #[serde(default, skip_serializing_if = "ResolutionStack::is_empty")]
+    pub resolution_stack: ResolutionStack,
 
-    /// CR 303.4f: Attach host captured before SearchChoice replaces parent targets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub search_continuation_attach_host: Option<AttachTarget>,
+    /// Borrowed execution-local view of the active continuation's captured
+    /// Aura host. The authoritative value remains inside
+    /// `AbilityContinuationFrame`; this transient is installed only while its
+    /// chain is executing and is never serialized.
+    #[serde(skip)]
+    pub resolving_continuation_attach_host: Option<AttachTarget>,
 
     /// CR 608.2c + CR 109.5: Pending `repeat_for` iteration loop paused mid-flight
     /// because the inner effect entered an interactive `WaitingFor` state.
@@ -11986,20 +11988,6 @@ pub struct GameState {
     /// `pending_optional_effect`; taken by `handle_optional_effect_choice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_trigger_match_count: Option<u32>,
-
-    /// CR 608.2 + CR 603.2c + CR 706.4: The resolution-scoped trigger context of
-    /// an ability that paused for an interactive `ChooseFromZoneChoice`, captured
-    /// while still live (before `stack::resolve_top` clears it) and restored
-    /// around the continuation drain in the `ChooseFromZoneChoice` handler so an
-    /// `EventContextAmount` ("that many") sub_ability resolves the triggering
-    /// event's amount after the pause (Amy Pond). Set on every single-pool
-    /// `ChooseFromZone` raise (`None` for non-trigger ChooseFromZone) and consumed
-    /// by `.take()` in the handler, so it never persists beyond one round-trip.
-    /// It must survive the pause→answer action boundary, so it is intentionally
-    /// NOT in the `apply()`-top transient clear. Building-block generalization of
-    /// `pending_optional_trigger_event` / `pending_optional_trigger_match_count`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_choose_zone_trigger_context: Option<ResolvingTriggerContext>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
@@ -13520,6 +13508,66 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// Returns the active continuation only when its typed frame is the stack
+    /// top. A buried continuation is an invalid nesting dependency, not a
+    /// fallback lookup opportunity.
+    pub fn active_ability_continuation(&self) -> Option<&PendingContinuation> {
+        self.resolution_stack
+            .active_ability_continuation()
+            .map(|frame| &frame.pending)
+    }
+
+    /// Returns the active continuation payload and its coupled ChooseFromZone
+    /// trigger context only when the typed continuation frame owns the stack
+    /// top.
+    pub fn active_ability_continuation_frame(&self) -> Option<&AbilityContinuationFrame> {
+        self.resolution_stack.active_ability_continuation()
+    }
+
+    /// Mutably accesses only the active continuation frame.
+    pub fn active_ability_continuation_frame_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        self.resolution_stack.active_ability_continuation_mut()
+    }
+
+    /// Park a new continuation as the active inner frame.
+    pub fn push_ability_continuation(&mut self, frame: AbilityContinuationFrame) {
+        self.resolution_stack.push_ability_continuation(frame);
+    }
+
+    /// Park a freshly created continuation as the active inner frame.
+    pub fn park_ability_continuation(&mut self, pending: PendingContinuation) {
+        self.push_ability_continuation(AbilityContinuationFrame {
+            pending,
+            choose_zone_trigger_context: None,
+        });
+    }
+
+    /// Re-park the active continuation after its production handler made
+    /// progress but raised another prompt.
+    pub fn replace_active_ability_continuation(
+        &mut self,
+        frame: AbilityContinuationFrame,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .replace_active_ability_continuation(frame)
+    }
+
+    /// Consume exactly the active continuation frame.
+    pub fn take_active_ability_continuation(
+        &mut self,
+    ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
+        self.resolution_stack.take_active_ability_continuation()
+    }
+
+    /// Clear the active continuation when the enclosing resolution is
+    /// abandoned. A non-continuation frame on top is a structural bug rather
+    /// than an invitation to search below it.
+    pub fn clear_active_ability_continuation(&mut self) -> Result<bool, ResolutionStackError> {
+        Ok(self.take_active_ability_continuation()?.is_some())
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14205,8 +14253,8 @@ impl GameState {
             modal_modes_chosen_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
             public_revealed_cards: HashSet::new(),
-            pending_continuation: None,
-            search_continuation_attach_host: None,
+            resolution_stack: ResolutionStack::default(),
+            resolving_continuation_attach_host: None,
             pending_repeat_iteration: None,
             pending_repeated_optional_payment: None,
             pending_change_zone_iteration: None,
@@ -14233,7 +14281,6 @@ impl GameState {
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
             pending_optional_trigger_match_count: None,
-            pending_choose_zone_trigger_context: None,
             may_trigger_auto_choices: Vec::new(),
             decision_templates: Vec::new(),
             priority_yields: Vec::new(),
@@ -14954,7 +15001,10 @@ impl GameState {
         if let Some(event) = clone.pending_optional_trigger_event.as_ref() {
             record_event(event);
         }
-        if let Some(context) = clone.pending_choose_zone_trigger_context.as_ref() {
+        if let Some(context) = clone
+            .active_ability_continuation_frame()
+            .and_then(|frame| frame.choose_zone_trigger_context.as_ref())
+        {
             if let Some(event) = context.event.as_ref() {
                 record_event(event);
             }
@@ -14963,8 +15013,7 @@ impl GameState {
             }
         }
         if let Some(context) = clone
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .and_then(|continuation| continuation.trigger_context.as_ref())
         {
             if let Some(event) = context.event.as_ref() {
@@ -15329,8 +15378,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         modal_modes_chosen_this_game: _,
         revealed_cards: _,
         public_revealed_cards: _,
-        pending_continuation: _,
-        search_continuation_attach_host: _,
+        resolution_stack: _,
+        resolving_continuation_attach_host: _,
         pending_repeat_iteration: _,
         pending_repeated_optional_payment: _,
         pending_change_zone_iteration: _,
@@ -15353,7 +15402,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_optional_effect: _,
         pending_optional_trigger_event: _,
         pending_optional_trigger_match_count: _,
-        pending_choose_zone_trigger_context: _,
         may_trigger_auto_choices: _,
         decision_templates: _,
         priority_yields: _,
@@ -15644,7 +15692,7 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.revealed_cards == other.revealed_cards
             && self.public_revealed_cards == other.public_revealed_cards
-            && self.pending_continuation == other.pending_continuation
+            && self.resolution_stack == other.resolution_stack
             && self.pending_resolution_completion == other.pending_resolution_completion
             && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_repeated_optional_payment == other.pending_repeated_optional_payment
@@ -15706,8 +15754,6 @@ impl PartialEq for GameState {
             && self.current_trigger_match_count == other.current_trigger_match_count
             && self.pending_optional_trigger_match_count
                 == other.pending_optional_trigger_match_count
-            && self.pending_choose_zone_trigger_context
-                == other.pending_choose_zone_trigger_context
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             // CR 603.12a: K is nonzero AT the per-iteration `OptionalEffectChoice`
             // pause (a serde boundary across separate `apply()` calls). It is

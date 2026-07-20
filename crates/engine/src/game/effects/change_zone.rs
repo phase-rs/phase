@@ -28,7 +28,7 @@ fn forward_result_search_attach_host(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<AttachTarget> {
-    if let Some(host) = state.search_continuation_attach_host {
+    if let Some(host) = state.resolving_continuation_attach_host {
         return Some(host);
     }
     resolve_forward_result_search_attach_host(state, ability)
@@ -8574,7 +8574,7 @@ mod tests {
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "first returned card must pause on its replacement"
         );
-        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+        state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
             Box::new(create_tokens),
             &state,
         ));

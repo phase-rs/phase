@@ -81,8 +81,8 @@ pub fn resolve_combine_host(
                 source: CombineSource::SpecificObject { id: augment_id },
                 host: Box::new(TargetFilter::ParentTarget),
             };
-            state.pending_continuation =
-                Some(PendingContinuation::new(Box::new(continuation), state));
+            state
+                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: hosts,
@@ -147,8 +147,8 @@ pub fn resolve_choose_augment_and_combine(
                 source: CombineSource::ParentTarget,
                 host: Box::new(frozen_host),
             };
-            state.pending_continuation =
-                Some(PendingContinuation::new(Box::new(continuation), state));
+            state
+                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: candidates,
