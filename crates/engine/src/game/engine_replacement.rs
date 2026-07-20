@@ -4579,16 +4579,16 @@ mod tests {
     }
 
     /// Issue #4886 (MED review finding #4): the originating token-choice applied
-    /// seed must survive a `pending_repeat_until` drain. Pre-fix,
+    /// seed must survive a repeat-until frame drain. Pre-fix,
     /// `drain_pending_continuation` cleared the seed BEFORE calling
-    /// `drain_pending_repeat_until`; that drain re-enters `resolve_ability_chain`
+    /// `drain_active_repeat_until`; that drain re-enters `resolve_ability_chain`
     /// (effects/mod.rs:721 / :744) and can emit further token proposals, which
     /// then lost the inherited replacement id and re-prompted the same Jinnie
     /// replacement. The seed must be treated as part of the originating frame
     /// and cleared only once the repeat-until continuation has fully drained or
     /// stopped — i.e. only at true full-drain.
     #[test]
-    fn token_choice_seed_survives_pending_repeat_until_drain() {
+    fn token_choice_seed_survives_repeat_until_frame_drain() {
         use crate::types::ability::{
             AbilityKind, Effect, QuantityExpr, RepeatContinuation, ResolvedAbility,
         };
@@ -4611,7 +4611,7 @@ mod tests {
 
         // A repeat-until ability whose body would propose further tokens if
         // re-entered. `repeat_until: ControllerChoice` re-prompts after each
-        // iteration, so `drain_pending_repeat_until` parks the engine on
+        // iteration, so the repeat-until frame drain parks the engine on
         // `RepeatDecision` — a non-Priority waiting_for that MUST preserve the
         // seed (the controller may accept another iteration that proposes a
         // token carrying the inherited id).
@@ -4626,17 +4626,11 @@ mod tests {
         );
         repeat_ability.kind = AbilityKind::Spell;
         repeat_ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
-        state.pending_repeat_until = Some(PendingRepeatUntil {
+        state.push_repeat_until(PendingRepeatUntil {
             ability: Box::new(repeat_ability),
         });
         // Simulate the moment the review describes: a paused repeat-until
-        // continuation re-entering from priority.
-        let _ = state
-            .clear_active_ability_continuation()
-            .expect("fixture has no buried continuation");
-        let _ = state
-            .take_active_repeat_for()
-            .expect("fixture cannot clear a buried repeat-for frame");
+        // frame re-entering from priority.
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -4649,13 +4643,13 @@ mod tests {
         // pre-fix it was wiped before this drain ran.
         assert!(
             matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
-            "drain_pending_repeat_until must re-prompt the controller for the repeat decision, got {:?}",
+            "repeat-until frame drain must re-prompt the controller for the repeat decision, got {:?}",
             state.waiting_for
         );
         assert_eq!(
             state.post_replacement_token_choice_applied,
             Some(seed),
-            "seed must survive the pending_repeat_until drain (issue #4886 review #4): a repeated iteration may still propose tokens carrying the inherited id"
+            "seed must survive the repeat-until frame drain (issue #4886 review #4): a repeated iteration may still propose tokens carrying the inherited id"
         );
     }
 

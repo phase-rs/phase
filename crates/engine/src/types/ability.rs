@@ -16581,7 +16581,7 @@ impl SubAbilityLink {
 /// the game-state-predicate form ("[if condition,] repeat this process
 /// [once]", `WhileCondition`). The optional-put pause semantics that the
 /// `WhileCondition` loop depends on are shared with `UntilStopConditions` via
-/// the `pending_repeat_until` resume path.
+/// the repeat-until frame resume path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RepeatContinuation {

@@ -10753,7 +10753,7 @@ pub struct GameState {
     /// proposal (`effects/token.rs`), and cleared ONLY at true full-drain
     /// (`effects/mod.rs::drain_pending_continuation`: back at priority with no
     /// ability-continuation frame, no repeat-for frame, AND no
-    /// `pending_repeat_until`). The replacement pipeline and ChooseOneOf
+    /// repeat-until frame). The replacement pipeline and ChooseOneOf
     /// completion NEVER clear it — a branch may stash a token-bearing
     /// sub-ability or pause inside a repeat-until loop that drains only later
     /// via `resolve_ability_chain`, so clearing earlier wipes the seed before
@@ -11860,13 +11860,6 @@ pub struct GameState {
     pub resolution_coin_flip: Option<ResolutionCoinFlip>,
 
     /// CR 608.2c + CR 107.1c: Pending "repeat this process" loop paused because
-    /// an iteration's process entered an interactive `WaitingFor` state.
-    /// Drained by `drain_pending_continuation` after `pending_continuation`,
-    /// so the iteration's player choice fully resolves before the loop decides
-    /// whether to run another pass. See [`PendingRepeatUntil`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_repeat_until: Option<PendingRepeatUntil>,
-
     /// CR 701.55d: Pending continuation of a multi-player ChooseOneOf after a
     /// selected branch has finished resolving, including any nested choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -13600,6 +13593,45 @@ impl GameState {
             .insert_parent_of_active(super::resolution::ResolutionFrame::RepeatFor(pending))
     }
 
+    /// Returns the repeat-until owner only when it owns the stack top.
+    pub fn active_repeat_until(&self) -> Option<&PendingRepeatUntil> {
+        self.resolution_stack.active_repeat_until()
+    }
+
+    /// Mutably accesses only the active repeat-until frame.
+    pub fn active_repeat_until_mut(&mut self) -> Option<&mut PendingRepeatUntil> {
+        self.resolution_stack.active_repeat_until_mut()
+    }
+
+    /// Consume exactly the active repeat-until frame.
+    pub fn take_active_repeat_until(
+        &mut self,
+    ) -> Result<Option<PendingRepeatUntil>, ResolutionStackError> {
+        self.resolution_stack.take_active_repeat_until()
+    }
+
+    /// Park an independent repeat-until frame.
+    pub fn push_repeat_until(&mut self, pending: PendingRepeatUntil) {
+        self.resolution_stack.push_repeat_until(pending);
+    }
+
+    /// Re-park the active repeat-until frame after it advances.
+    pub fn replace_active_repeat_until(
+        &mut self,
+        pending: PendingRepeatUntil,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_repeat_until(pending)
+    }
+
+    /// Insert a repeat-until parent directly below the child it suspended for.
+    pub fn insert_repeat_until_parent_of_active(
+        &mut self,
+        pending: PendingRepeatUntil,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .insert_parent_of_active(super::resolution::ResolutionFrame::RepeatUntil(pending))
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14295,7 +14327,6 @@ impl GameState {
             pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
             resolution_coin_flip: None,
-            pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_vote_ballot_iteration: None,
             pending_per_player_zone_choice: None,
@@ -15419,7 +15450,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_each_player_copy_chosen: _,
         pending_coin_flip: _,
         resolution_coin_flip: _,
-        pending_repeat_until: _,
         pending_choose_one_of: _,
         pending_vote_ballot_iteration: _,
         pending_per_player_zone_choice: _,
@@ -15748,7 +15778,6 @@ impl PartialEq for GameState {
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).
             && self.resolution_coin_flip == other.resolution_coin_flip
-            && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration
             && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice

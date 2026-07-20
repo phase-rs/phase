@@ -1885,7 +1885,7 @@ mod tests {
             "the process stops on the controller's winning flip"
         );
         assert!(
-            runner.state().pending_repeat_until.is_none(),
+            runner.state().active_repeat_until().is_none(),
             "the repeat loop must be fully drained after the winning flip"
         );
     }

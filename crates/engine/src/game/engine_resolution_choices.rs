@@ -1764,7 +1764,7 @@ pub(super) fn handle_resolution_choice(
                 // `repeat_until: Some(ControllerChoice)`, so this hits the
                 // `repeat_until` dispatch, runs `resolve_chain_body` once, and
                 // re-sets `WaitingFor::RepeatDecision` (or, on an inner choice,
-                // pauses and stashes `pending_repeat_until`). depth = 1: each
+                // pauses and parks its repeat-until frame). depth = 1: each
                 // accept is a fresh top-level `apply()`, so depth never
                 // accumulates across prompts and the `depth > 20` guard never
                 // applies — CR 107.1c permits looping a whole library.

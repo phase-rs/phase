@@ -762,7 +762,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // remaining `repeat_for` iterations. Each resumed iteration may itself
     // pause and re-stash via the loop in `resolve_ability_chain`, producing a
     // chain of resumed iterations until the loop completes.
-    if !waits_for_resolution_choice(&state.waiting_for) {
+    if !waits_for_resolution_choice(&state.waiting_for) && state.active_repeat_for().is_some() {
         drain_active_repeat_for(state, events);
     }
     if !waits_for_resolution_choice(&state.waiting_for) {
@@ -775,22 +775,23 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.active_ability_continuation().is_none()
         && state.active_repeat_for().is_none()
+        && state.active_repeat_until().is_some()
     {
-        drain_pending_repeat_until(state);
+        drain_active_repeat_until(state);
     }
     // CR 614.12a + issue #4886 (review #4): the originating token-choice
     // applied seed must outlive EVERY drain in this function — including
-    // `drain_pending_repeat_until`, which re-enters `resolve_ability_chain`
+    // `drain_active_repeat_until`, which re-enters `resolve_ability_chain`
     // (lines 721 / 744) and can emit further token proposals. Clearing before
     // that drain (the previous bug) wiped the seed before a repeated token
     // proposal, reopening the self-replacement loop. Clear ONLY at true
-    // full-drain: back at priority with no pending continuation, no pending
-    // repeat iteration, AND no pending repeat-until frame. By this point no
+    // full-drain: back at priority with no ability-continuation frame, no
+    // repeat-for frame, AND no repeat-until frame. By this point no
     // ability is still resolving, so no token proposal can still need the seed.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.active_ability_continuation().is_none()
         && state.active_repeat_for().is_none()
-        && state.pending_repeat_until.is_none()
+        && state.active_repeat_until().is_none()
     {
         state.post_replacement_token_choice_applied = None;
         // CR 614.1a: the Moonlit-scoped "that many" copy count rides the same
@@ -828,7 +829,7 @@ pub(crate) fn resume_resolution_frames(
             drain_pending_continuation(state, events)
         }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
-        ResolutionFrame::RepeatUntil(_) => drain_pending_continuation(state, events),
+        ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
             // The optional-effect action owns both the next payment prompt and
             // its reflexive tail; a priority boundary has nothing to resume.
@@ -909,8 +910,11 @@ pub(crate) fn resume_resolution_frames(
 /// an iteration's process entered an interactive `WaitingFor` state. Called by
 /// `drain_pending_continuation` once the iteration's choice (and any chained
 /// continuation) has fully drained.
-fn drain_pending_repeat_until(state: &mut GameState) {
-    let Some(pending) = state.pending_repeat_until.take() else {
+fn drain_active_repeat_until(state: &mut GameState) {
+    let Some(pending) = state
+        .take_active_repeat_until()
+        .expect("repeat-until drain may consume only the active repeat-until frame")
+    else {
         return;
     };
     let crate::types::game_state::PendingRepeatUntil { ability } = pending;
@@ -962,6 +966,30 @@ fn drain_pending_repeat_until(state: &mut GameState) {
             let _ = resolve_ability_chain(state, &next, &mut events, 1);
         }
         None => {}
+    }
+}
+
+/// Park a repeat-until parent as the owner of a direct choice, or immediately
+/// below the typed child its iteration raised. The frame count captured before
+/// the body runs distinguishes a new child from an outer parent that was
+/// already active; consumers then remain strictly top-only.
+fn park_repeat_until_after_inner_pause(
+    state: &mut GameState,
+    pending: crate::types::game_state::PendingRepeatUntil,
+    stack_depth_before_iteration: usize,
+) {
+    match state
+        .resolution_stack
+        .len()
+        .cmp(&stack_depth_before_iteration)
+    {
+        std::cmp::Ordering::Less => {
+            panic!("repeat-until iteration removed a parent frame before it could be re-parked")
+        }
+        std::cmp::Ordering::Equal => state.push_repeat_until(pending),
+        std::cmp::Ordering::Greater => state
+            .insert_repeat_until_parent_of_active(pending)
+            .expect("repeat-until parent must be inserted directly below its typed child"),
     }
 }
 
@@ -6913,13 +6941,18 @@ pub fn resolve_ability_chain(
         None => resolve_chain_body(state, ability, events, depth),
         Some(RepeatContinuation::ControllerChoice) => {
             let initial_waiting_for = state.waiting_for.clone();
+            let stack_depth_before_iteration = state.resolution_stack.len();
             resolve_chain_body(state, ability, events, depth)?;
             if state.waiting_for != initial_waiting_for {
                 // Inner pause: stash so the drain re-sets the repeat prompt
                 // after the iteration's player choice resolves.
-                state.pending_repeat_until = Some(crate::types::game_state::PendingRepeatUntil {
-                    ability: Box::new(ability.clone()),
-                });
+                park_repeat_until_after_inner_pause(
+                    state,
+                    crate::types::game_state::PendingRepeatUntil {
+                        ability: Box::new(ability.clone()),
+                    },
+                    stack_depth_before_iteration,
+                );
             } else {
                 // CR 107.1c: after the iteration fully resolved, prompt the
                 // controller to repeat the process or stop.
@@ -6935,11 +6968,16 @@ pub fn resolve_ability_chain(
             stop_on_duplicate_exiled_names,
         }) => loop {
             let initial_waiting_for = state.waiting_for.clone();
+            let stack_depth_before_iteration = state.resolution_stack.len();
             resolve_chain_body(state, ability, events, depth)?;
             if state.waiting_for != initial_waiting_for {
-                state.pending_repeat_until = Some(crate::types::game_state::PendingRepeatUntil {
-                    ability: Box::new(ability.clone()),
-                });
+                park_repeat_until_after_inner_pause(
+                    state,
+                    crate::types::game_state::PendingRepeatUntil {
+                        ability: Box::new(ability.clone()),
+                    },
+                    stack_depth_before_iteration,
+                );
                 return Ok(());
             }
             if should_stop_repeat_until(
@@ -6955,7 +6993,7 @@ pub fn resolve_ability_chain(
         // the whole chain while `condition` holds against the just-resolved
         // state, capped by `max_iterations` additional repeats. Iterates the
         // same `resolve_chain_body` as `UntilStopConditions`, stashing on an
-        // inner pause so `drain_pending_repeat_until` resumes the loop.
+        // inner pause so the repeat-until frame drain resumes the loop.
         Some(RepeatContinuation::WhileCondition {
             condition,
             max_iterations,
@@ -6980,6 +7018,7 @@ pub fn resolve_ability_chain(
                 // iteration's stale result.
                 state.resolution_coin_flip = None;
                 let initial_waiting_for = state.waiting_for.clone();
+                let stack_depth_before_iteration = state.resolution_stack.len();
                 resolve_chain_body(state, ability, events, depth)?;
                 if state.waiting_for != initial_waiting_for {
                     // Inner pause: stash the loop ability with its remaining cap
@@ -6989,10 +7028,13 @@ pub fn resolve_ability_chain(
                         condition: condition.clone(),
                         max_iterations: remaining,
                     });
-                    state.pending_repeat_until =
-                        Some(crate::types::game_state::PendingRepeatUntil {
+                    park_repeat_until_after_inner_pause(
+                        state,
+                        crate::types::game_state::PendingRepeatUntil {
                             ability: Box::new(paused),
-                        });
+                        },
+                        stack_depth_before_iteration,
+                    );
                     return Ok(());
                 }
                 if !should_repeat_while_condition(state, ability, &condition, &mut remaining) {
@@ -16232,7 +16274,7 @@ mod tests {
     #[test]
     fn repeat_until_paused_resume_resets_prompt_after_inner_choice() {
         // CR 107.1c: when a `ControllerChoice` iteration pauses on an inner
-        // player choice, `pending_repeat_until` is stashed and
+        // player choice, the repeat-until frame is parked and
         // `drain_pending_continuation` re-sets `WaitingFor::RepeatDecision`
         // once the choice drains.
         let mut state = GameState::new_two_player(42);
@@ -16251,7 +16293,7 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        state.pending_repeat_until = Some(crate::types::game_state::PendingRepeatUntil {
+        state.push_repeat_until(crate::types::game_state::PendingRepeatUntil {
             ability: Box::new(ability),
         });
 
@@ -16259,7 +16301,7 @@ mod tests {
         drain_pending_continuation(&mut state, &mut events);
 
         assert!(
-            state.pending_repeat_until.is_none(),
+            state.active_repeat_until().is_none(),
             "the resume slot must be consumed by the drain",
         );
         assert!(

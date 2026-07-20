@@ -24993,7 +24993,7 @@ fn try_parse_repeat_until_stop_conditions(
 /// Distinguishes the three back-reference forms so the chunk loop can both
 /// CONSUME the directive (it never produces an independent effect) and apply the
 /// right chain-level `repeat_until`:
-/// - `Continuation(c)` — a loop predicate was recognized; set `pending_repeat_until`.
+/// - `Continuation(c)` — a loop predicate was recognized; set `repeat_until`.
 /// - `FixedCount(q)` — a pure "<q> more time[s]" count was recognized (Another
 ///   Round: "repeat this process X more times"). `q` is the TOTAL iteration count
 ///   (`Offset(inner, +1)` = "once + q more"), stamped onto the root clause's

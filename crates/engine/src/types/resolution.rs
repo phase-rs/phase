@@ -420,6 +420,65 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the repeat-until owner only when it owns the stack top.
+    pub fn active_repeat_until(&self) -> Option<&PendingRepeatUntil> {
+        match self.last() {
+            Some(ResolutionFrame::RepeatUntil(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active repeat-until owner.
+    pub fn active_repeat_until_mut(&mut self) -> Option<&mut PendingRepeatUntil> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::RepeatUntil(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active repeat-until frame.
+    pub fn take_active_repeat_until(
+        &mut self,
+    ) -> Result<Option<PendingRepeatUntil>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::RepeatUntil(_)) => {
+                let ResolutionFrame::RepeatUntil(frame) =
+                    self.pop_expected(FrameKind::RepeatUntil)?
+                else {
+                    unreachable!("checked repeat-until frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::RepeatUntil,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a newly active repeat-until owner.
+    pub fn push_repeat_until(&mut self, frame: PendingRepeatUntil) {
+        self.push_inner(ResolutionFrame::RepeatUntil(frame));
+    }
+
+    /// Replace the active repeat-until owner after it re-pauses.
+    pub fn replace_active_repeat_until(
+        &mut self,
+        frame: PendingRepeatUntil,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::RepeatUntil(_)) => {
+                self.replace_active(ResolutionFrame::RepeatUntil(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::RepeatUntil,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns only the immediate predecessor of the active frame.
     ///
     /// This is intentionally narrower than a frame search: the only Phase-2
@@ -655,6 +714,7 @@ impl ResolutionStateWire {
                 }
                 let legacy_ability = LegacyAbilityContinuationWire::from_value(&value)?;
                 let legacy_repeat_for = LegacyRepeatForWire::from_value(&value)?;
+                let legacy_repeat_until = LegacyRepeatUntilWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -663,6 +723,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("search_continuation_attach_host");
                 legacy_object.remove("pending_choose_zone_trigger_context");
                 legacy_object.remove("pending_repeat_iteration");
+                legacy_object.remove("pending_repeat_until");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -670,6 +731,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_repeat_for.into_frame() {
                     legacy.push_repeat_for(frame);
+                }
+                if let Some(frame) = legacy_repeat_until.into_frame() {
+                    legacy.push_repeat_until(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -839,6 +903,23 @@ struct LegacyRepeatForWire {
     pending_repeat_iteration: Option<PendingRepeatIteration>,
 }
 
+/// v1-only repeat-until field. Runtime state carries it only as a typed frame.
+#[derive(Deserialize)]
+struct LegacyRepeatUntilWire {
+    #[serde(default)]
+    pending_repeat_until: Option<PendingRepeatUntil>,
+}
+
+impl LegacyRepeatUntilWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingRepeatUntil> {
+        self.pending_repeat_until
+    }
+}
+
 impl LegacyRepeatForWire {
     fn from_value(value: &Value) -> Result<Self, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
@@ -865,7 +946,9 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     for frame in state.resolution_stack.iter() {
         if !matches!(
             frame,
-            ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::RepeatFor(_)
+            ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
         ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
@@ -896,9 +979,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_repeat_until.clone() {
-        frames.push_inner(ResolutionFrame::RepeatUntil(pending));
-    }
     if state.pending_change_zone_iteration.is_some() || state.devour_eligible_snapshot.is_some() {
         frames.push_inner(ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: state.pending_change_zone_iteration.clone(),
@@ -1038,11 +1118,7 @@ fn project_frames_into_legacy_state(
                 projected.push_ability_continuation(frame.clone());
             }
             ResolutionFrame::RepeatFor(pending) => projected.push_repeat_for(pending.clone()),
-            ResolutionFrame::RepeatUntil(pending) => set_once(
-                &mut projected.pending_repeat_until,
-                pending.clone(),
-                "RepeatUntil",
-            )?,
+            ResolutionFrame::RepeatUntil(pending) => projected.push_repeat_until(pending.clone()),
             ResolutionFrame::RepeatedOptionalPayment(frame) => {
                 if let Some(pending) = frame.pending.clone() {
                     set_once(
@@ -1180,7 +1256,6 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.pending_repeat_until = None;
     state.pending_repeated_optional_payment = None;
     state.optional_cost_payments_this_resolution = 0;
     state.pending_change_zone_iteration = None;
@@ -1482,6 +1557,18 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 repeat-for fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_repeat_until_fixture(state: GameState, pending: PendingRepeatUntil) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_repeat_until"] =
+            serde_json::to_value(pending).expect("legacy repeat-until serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 repeat-until fixture converts through the wire")
             .into_game_state()
     }
 
@@ -2098,13 +2185,15 @@ mod tests {
         assert!(repeat_for.active_repeat_for().is_none());
         assert_reserializes_v2_only(repeat_for);
 
-        let mut repeat_until = GameState::new_two_player(112);
+        let repeat_until = GameState::new_two_player(112);
         let mut repeat_ability = resolved_draw(112);
         repeat_ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
-        repeat_until.pending_repeat_until = Some(PendingRepeatUntil {
-            ability: Box::new(repeat_ability),
-        });
-        let mut repeat_until = resume_priority_fixture(restore_v1_fixture(repeat_until));
+        let mut repeat_until = resume_priority_fixture(restore_v1_repeat_until_fixture(
+            repeat_until,
+            PendingRepeatUntil {
+                ability: Box::new(repeat_ability),
+            },
+        ));
         assert!(matches!(
             repeat_until.waiting_for,
             WaitingFor::RepeatDecision { .. }
@@ -2114,7 +2203,7 @@ mod tests {
             GameAction::DecideOptionalEffect { accept: false },
         )
         .expect("repeat-until fixture resumes through the real repeat decision");
-        assert!(repeat_until.pending_repeat_until.is_none());
+        assert!(repeat_until.active_repeat_until().is_none());
         assert_reserializes_v2_only(repeat_until);
 
         let ResolutionFrame::ChangeZone(change_zone_frame) = change_zone_frame(113) else {
