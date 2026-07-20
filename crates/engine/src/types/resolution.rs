@@ -279,8 +279,9 @@ impl ResolutionFrame {
             | Self::MutateMerge(_)
             | Self::MultiDraw(_)
             | Self::ConniveReentry(_)
+            | Self::LifeTotalAssignment(_)
             | Self::PostReplacement(_) => true,
-            Self::LifeTotalAssignment(_) | Self::SpellResolution(_) => false,
+            Self::SpellResolution(_) => false,
         }
     }
 
@@ -1796,6 +1797,50 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::ConniveReentry(pending));
     }
 
+    /// Returns a life-total assignment tail only when it owns the active stack
+    /// top.
+    pub fn active_life_total_assignment(&self) -> Option<&PendingLifeTotalAssignment> {
+        match self.last() {
+            Some(ResolutionFrame::LifeTotalAssignment(pending)) => Some(pending),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active life-total assignment tail.
+    pub fn active_life_total_assignment_mut(&mut self) -> Option<&mut PendingLifeTotalAssignment> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::LifeTotalAssignment(pending)) => Some(pending),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active life-total assignment frame.
+    pub fn take_active_life_total_assignment(
+        &mut self,
+    ) -> Result<Option<PendingLifeTotalAssignment>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::LifeTotalAssignment(_)) => {
+                let ResolutionFrame::LifeTotalAssignment(pending) =
+                    self.pop_expected(FrameKind::LifeTotalAssignment)?
+                else {
+                    unreachable!("checked life-total assignment frame kind must match")
+                };
+                Ok(Some(pending))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::LifeTotalAssignment,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks a life-total assignment tail above the replacement choice that
+    /// suspended it.
+    pub fn push_life_total_assignment(&mut self, pending: PendingLifeTotalAssignment) {
+        self.push_inner(ResolutionFrame::LifeTotalAssignment(pending));
+    }
+
     /// Returns the active general replacement drain. During the one shipped
     /// G4 topology this is its exact, immediately preceding parent while the
     /// child starts or remains paused; there is intentionally no general frame
@@ -2244,6 +2289,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("draw_sequences");
                 legacy_object.remove("pending_multi_draw");
                 legacy_object.remove("pending_connive_reentry");
+                legacy_object.remove("pending_life_total_assignment");
                 legacy_object.remove("post_replacement_drains");
                 legacy_object.remove("post_replacement_effect");
                 legacy_object.remove("post_replacement_resolved_effect");
@@ -2320,14 +2366,17 @@ impl ResolutionStateWire {
                 legacy
                     .resolution_stack
                     .observe_draw_sequence_frame_id(next_draw_sequence_frame_id);
-                match tail_frames.as_slice() {
-                    [] => {}
-                    [frame] => legacy.resolution_stack.push_inner(frame.clone()),
-                    [parent, child] => legacy
+                if let [parent @ ResolutionFrame::PostReplacement(_), child @ ResolutionFrame::MultiDraw(_)] =
+                    tail_frames.as_slice()
+                {
+                    legacy
                         .resolution_stack
                         .install_adjacent_post_replacement_draw(parent.clone(), child.clone())
-                        .map_err(|error| error.to_string())?,
-                    _ => unreachable!("replacement-tail v1 conversion has at most one paired edge"),
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    for frame in tail_frames {
+                        legacy.resolution_stack.push_inner(frame);
+                    }
                 }
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
                 frames
@@ -2841,6 +2890,8 @@ struct LegacyReplacementTailsWire {
     #[serde(default)]
     pending_connive_reentry: Option<PendingConniveReentry>,
     #[serde(default)]
+    pending_life_total_assignment: Option<PendingLifeTotalAssignment>,
+    #[serde(default)]
     post_replacement_drains: PostReplacementDrainStack,
     #[serde(default)]
     post_replacement_effect: Option<Box<AbilityDefinition>>,
@@ -2904,7 +2955,14 @@ impl LegacyReplacementTailsWire {
 
         let next_draw_sequence_frame_id = self.draw_sequences.next_frame_id();
         let pending_connive_reentry = self.pending_connive_reentry.take();
+        let pending_life_total_assignment = self.pending_life_total_assignment.take();
         if !self.draw_sequences.is_empty() {
+            if pending_life_total_assignment.is_some() {
+                return Err(
+                    "legacy multi-draw state cannot have an independent life-total assignment tail"
+                        .to_string(),
+                );
+            }
             let child = ResolutionFrame::MultiDraw(MultiDrawFrame {
                 draw_sequences: self.draw_sequences,
                 connive_reentry: pending_connive_reentry,
@@ -2938,6 +2996,9 @@ impl LegacyReplacementTailsWire {
         if let Some(pending) = pending_connive_reentry {
             frames.push(ResolutionFrame::ConniveReentry(pending));
         }
+        if let Some(pending) = pending_life_total_assignment {
+            frames.push(ResolutionFrame::LifeTotalAssignment(pending));
+        }
         Ok((frames, next_draw_sequence_frame_id))
     }
 }
@@ -2963,9 +3024,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_life_total_assignment.clone() {
-        frames.push_inner(ResolutionFrame::LifeTotalAssignment(pending));
-    }
     if let Some(pending) = state.pending_spell_resolution.clone() {
         frames.push_inner(ResolutionFrame::SpellResolution(pending));
     }
@@ -3047,11 +3105,9 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::ConniveReentry(pending) => projected
                 .resolution_stack
                 .push_connive_reentry(pending.clone()),
-            ResolutionFrame::LifeTotalAssignment(pending) => set_once(
-                &mut projected.pending_life_total_assignment,
-                pending.clone(),
-                "LifeTotalAssignment",
-            )?,
+            ResolutionFrame::LifeTotalAssignment(pending) => projected
+                .resolution_stack
+                .push_life_total_assignment(pending.clone()),
             ResolutionFrame::SpellResolution(pending) => set_once(
                 &mut projected.pending_spell_resolution,
                 pending.clone(),
@@ -3069,7 +3125,6 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.pending_life_total_assignment = None;
     state.pending_spell_resolution = None;
 }
 
@@ -4742,15 +4797,21 @@ mod tests {
         assert!(connive.active_connive_reentry().is_none());
         assert_reserializes_v2_only(connive);
 
-        let mut life = GameState::new_two_player(141);
-        life.pending_life_total_assignment = Some(PendingLifeTotalAssignment {
+        let life = GameState::new_two_player(141);
+        let pending_life_total_assignment = PendingLifeTotalAssignment {
             completion_player: PlayerId(0),
             remaining: Vec::new(),
             completion: None,
-        });
-        let mut life = restore_v1_fixture(life);
+        };
+        let mut life = serde_json::to_value(life).expect("legacy life fixture serializes");
+        life["pending_life_total_assignment"] = serde_json::to_value(pending_life_total_assignment)
+            .expect("legacy life tail serializes");
+        life["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let mut life = serde_json::from_value::<ResolutionStateWire>(life)
+            .expect("v1 life fixture restores")
+            .into_game_state();
         crate::game::effects::life::drain_pending_life_total_assignment(&mut life, &mut Vec::new());
-        assert!(life.pending_life_total_assignment.is_none());
+        assert!(life.active_life_total_assignment().is_none());
         assert_reserializes_v2_only(life);
 
         let mut spell = GameState::new_two_player(142);

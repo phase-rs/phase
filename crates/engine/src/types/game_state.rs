@@ -10664,13 +10664,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_token_substitution_count: Option<i32>,
 
-    /// CR 701.12c + CR 616.1: Tail of a life-total assignment that paused on a
-    /// gain/loss replacement choice. Drained by `handle_replacement_choice` after
-    /// the chosen replacement finishes, preserving the simultaneous snapshot's
-    /// remaining deltas across the prompt boundary.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_life_total_assignment: Option<PendingLifeTotalAssignment>,
-
     /// Transient: post-resolution context for a permanent spell whose ETB replacement
     /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
     /// after the zone change completes.
@@ -14052,6 +14045,9 @@ impl GameState {
     /// re-entry can start a fresh draw; otherwise retain the live draw stack.
     /// No parent search or object-id rebind occurs.
     pub fn take_active_connive_reentry(&mut self) -> Option<PendingConniveReentry> {
+        if self.active_connive_reentry().is_none() {
+            return None;
+        }
         if let Some(frame) = self.active_multi_draw_frame_mut() {
             let pending = frame.connive_reentry.take();
             if pending.is_some() && self.active_draw_sequences_are_empty() {
@@ -14067,6 +14063,30 @@ impl GameState {
         self.resolution_stack
             .take_active_connive_reentry()
             .expect("the active connive frame must be structurally consumable")
+    }
+
+    /// Returns the life-total assignment tail only when its frame owns the
+    /// active stack top.
+    pub fn active_life_total_assignment(&self) -> Option<&PendingLifeTotalAssignment> {
+        self.resolution_stack.active_life_total_assignment()
+    }
+
+    /// Mutably accesses only the active life-total assignment tail.
+    pub fn active_life_total_assignment_mut(&mut self) -> Option<&mut PendingLifeTotalAssignment> {
+        self.resolution_stack.active_life_total_assignment_mut()
+    }
+
+    /// Parks a life-total assignment tail above the replacement choice that
+    /// suspended it.
+    pub fn push_life_total_assignment(&mut self, pending: PendingLifeTotalAssignment) {
+        self.resolution_stack.push_life_total_assignment(pending);
+    }
+
+    /// Consumes exactly the active life-total assignment tail.
+    pub fn take_active_life_total_assignment(&mut self) -> Option<PendingLifeTotalAssignment> {
+        self.resolution_stack
+            .take_active_life_total_assignment()
+            .expect("the active life-total assignment frame must be structurally consumable")
     }
 
     /// Removes a completed independent MultiDraw frame. A frame carrying the
@@ -14736,7 +14756,6 @@ impl GameState {
             replacement_may_cost_paused: false,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
-            pending_life_total_assignment: None,
             pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: LayersDirty::full(),
@@ -15744,7 +15763,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_replacement: _,
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
-        pending_life_total_assignment: _,
         pending_spell_resolution: _,
         deferred_entry_events: _,
         layers_dirty: _,
@@ -16040,7 +16058,6 @@ impl PartialEq for GameState {
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
-            && self.pending_life_total_assignment == other.pending_life_total_assignment
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty

@@ -907,7 +907,7 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_life_total_assignment.is_some()
+                && state.active_life_total_assignment().is_some()
             {
                 drain_pending_life_total_assignment(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -1179,7 +1179,7 @@ pub(super) fn handle_replacement_choice(
                 }
                 return Ok(state.waiting_for.clone());
             }
-            if state.pending_life_total_assignment.is_some() {
+            if state.active_life_total_assignment().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
