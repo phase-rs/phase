@@ -23,7 +23,7 @@ use engine::game::deck_loading::{
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::{driver_step, run_ai_actions_bounded};
+use phase_ai::auto_play::{run_driver_loop, DriverExit};
 use phase_ai::config::{
     create_config_for_players, AiConfig, AiDifficulty, Platform, ACCEPTED_DIFFICULTY_LABELS,
 };
@@ -233,9 +233,7 @@ fn main() {
     let mut game_log: Vec<engine::types::log::GameLogEntry> = Vec::new();
     let dump_actions_path = read_dump_env("PHASE_DUMP_ACTIONS");
     let mut actions_log: Vec<String> = Vec::new();
-    let mut total_actions: usize = 0;
     let mut last_turn_reported: u32 = 0;
-    let mut aborted = false;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
     // Tracks each seat's is_eliminated (the engine already flips this per
@@ -243,95 +241,86 @@ fn main() {
     // per elimination event instead of re-announcing an already-eliminated
     // seat every batch.
     let mut was_eliminated = [false; 4];
-    // phase#6080: the reason the most recent `run_ai_actions` batch broke
-    // early (one of its three break doors), so a stall can be diagnosed from
-    // the game output alone instead of a `tracing::error` no harness captures.
-    let mut last_break_reason = None;
 
-    loop {
-        // Remaining action budget for this batch, so a small --action-cap is
-        // never overshot by up to MAX_AI_ACTIONS_PER_SEQUENCE. Plain subtraction
-        // is deliberate, not saturating_sub: the abort door below breaks at
-        // `total_actions >= action_cap`, and `parse_action_cap` guarantees
-        // `action_cap >= 1`, so `remaining >= 1` whenever the loop body runs.
-        // An underflow here would be a real invariant violation and must panic
-        // rather than be silently masked into a zero-budget no-op.
-        let remaining = action_cap - total_actions;
-        let mut results = run_ai_actions_bounded(
-            &mut state,
-            &ai_players,
-            &ai_configs,
-            &mut ai_rng,
-            &ai_session,
-            remaining,
-        );
-        if dump_log_path.is_some() {
-            for r in &mut results {
-                game_log.extend(std::mem::take(&mut r.log_entries));
+    // The batch / remaining-budget boundary is owned by `run_driver_loop` (the
+    // single authority — see its doc). This observer carries every per-batch
+    // side effect 1:1; it must NOT read the outer `state`/total (both are owned
+    // by the helper for the duration of the call). It reads the observer's
+    // `state` arg (post-batch) and `total_before` (the PRE-batch running total,
+    // which the turn line and ELIMINATED lines both printed before).
+    let outcome = run_driver_loop(
+        &mut state,
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        action_cap,
+        &mut |results, state, total_before| {
+            if dump_log_path.is_some() {
+                for r in &mut *results {
+                    game_log.extend(std::mem::take(&mut r.log_entries));
+                }
             }
-        }
-        if dump_actions_path.is_some() {
-            for r in &results {
-                actions_log.push(format!("{:?}", r.action));
+            if dump_actions_path.is_some() {
+                for r in &*results {
+                    actions_log.push(format!("{:?}", r.action));
+                }
             }
-        }
 
-        if state.turn_number != last_turn_reported {
-            last_turn_reported = state.turn_number;
-            let snapshot: Vec<String> = state
-                .players
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("P{i}:{}", p.life))
-                .collect();
-            println!(
-                "Turn {:>2} (active P{})  actions={:>6}  elapsed={:>6.1}s  {}",
-                state.turn_number,
-                state.active_player.0,
-                total_actions,
-                start.elapsed().as_secs_f64(),
-                snapshot.join(" ")
-            );
-            let _ = std::io::stdout().flush();
-        }
-
-        // Print one line the moment a seat's is_eliminated first flips, with
-        // turn + wall-clock context so a gauntlet harness can distinguish an
-        // expected early elimination from a stall or a perf regression
-        // without re-deriving it from the per-turn life snapshots above.
-        for (i, was) in was_eliminated.iter_mut().enumerate() {
-            if !*was && state.players[i].is_eliminated {
-                *was = true;
+            if state.turn_number != last_turn_reported {
+                last_turn_reported = state.turn_number;
+                let snapshot: Vec<String> = state
+                    .players
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| format!("P{i}:{}", p.life))
+                    .collect();
                 println!(
-                    "ELIMINATED: P{i}  turn={}  actions={:>6}  elapsed={:.1}s",
+                    "Turn {:>2} (active P{})  actions={:>6}  elapsed={:>6.1}s  {}",
                     state.turn_number,
-                    total_actions,
-                    start.elapsed().as_secs_f64()
+                    state.active_player.0,
+                    total_before,
+                    start.elapsed().as_secs_f64(),
+                    snapshot.join(" ")
                 );
                 let _ = std::io::stdout().flush();
             }
-        }
 
-        // phase#6080 follow-up: a batch can complete one or more actions and
-        // still carry a break_reason (e.g. ApplyFailed/ChooseActionNone hits
-        // after earlier actions in the same batch applied cleanly). Capture
-        // that reason from EVERY batch — not only empty ones — and stop the
-        // driver at this batch boundary, after this batch's completed
-        // actions are already retained above, so the stall report below
-        // reflects the original break door instead of a later, unrelated one.
-        let step = driver_step(results);
-        total_actions += step.actions_taken;
-        if step.break_reason.is_some() {
-            last_break_reason = step.break_reason;
-            break;
-        }
+            // Print one line the moment a seat's is_eliminated first flips, with
+            // turn + wall-clock context so a gauntlet harness can distinguish an
+            // expected early elimination from a stall or a perf regression
+            // without re-deriving it from the per-turn life snapshots above.
+            for (i, was) in was_eliminated.iter_mut().enumerate() {
+                if !*was && state.players[i].is_eliminated {
+                    *was = true;
+                    println!(
+                        "ELIMINATED: P{i}  turn={}  actions={:>6}  elapsed={:.1}s",
+                        state.turn_number,
+                        total_before,
+                        start.elapsed().as_secs_f64()
+                    );
+                    let _ = std::io::stdout().flush();
+                }
+            }
+        },
+    );
 
-        if total_actions >= action_cap {
-            aborted = true;
-            println!();
-            println!("ABORT: hit action cap={action_cap}");
-            break;
-        }
+    let total_actions = outcome.total_actions;
+    let aborted = matches!(outcome.exit, DriverExit::CapReached);
+    // phase#6080: the reason the driver broke early (one of the batch break
+    // doors), so a stall can be diagnosed from the game output alone instead of
+    // a `tracing::error` no harness captures. A cap abort carries no break door.
+    let last_break_reason = match outcome.exit {
+        DriverExit::BatchBreak(reason) => Some(reason),
+        DriverExit::CapReached => None,
+    };
+    // STDOUT PARITY: the abort path prints a blank line + the ABORT line here,
+    // immediately after the driver returns and BEFORE the unconditional blank +
+    // "=== RESULT ===" epilogue below — so an abort prints two blank lines
+    // (this one and the epilogue's), exactly as the pre-refactor in-loop abort did.
+    if aborted {
+        println!();
+        println!("ABORT: hit action cap={action_cap}");
     }
 
     let elapsed = start.elapsed();
@@ -536,8 +525,8 @@ fn parse_seat_override<'a>(
 /// and where `waiting_for` parked. Drives both the epilogue text and the exit
 /// code. Abort takes precedence: `(aborted, GameOver)` is narrowly reachable —
 /// if the game-ending action is exactly the last of the remaining budget, the
-/// batch fills `remaining` by count with no break reason and the cap check
-/// (`total_actions >= action_cap`) then fires on a `GameOver` state — and it is
+/// batch fills `remaining` by count with no break reason and `run_driver_loop`
+/// returns `DriverExit::CapReached` on a `GameOver` state — and it is
 /// deliberately folded into `Aborted` rather than given a fourth state (exit
 /// code 2 either way; reporting the abort is more self-consistent than claiming
 /// a clean finish for a run the cap cut short).
