@@ -2173,6 +2173,71 @@ fn non_fuse_alt_cost_candidate_enumeration_uses_front_half() {
     );
 }
 
+/// Regression: a fusable split card in hand under an ACTIVE Unlimited free-cast
+/// permission (Omniscience) must offer EXACTLY ONE `Normal` option. The Fuse
+/// block pushes `Normal` (front-half printed) and the Omniscience block also
+/// pushes `Normal`; those two pushes are NON-adjacent (Fuse + HandPermission sit
+/// between them), and `casting_variant_choice_set` dedups with consecutive-only
+/// `Vec::dedup` (no preceding sort), so before the guard both identical `Normal`
+/// options survived — a malformed "two Cast Normally buttons" menu. The
+/// `!has_fuse_candidate` guard on the Omniscience-block push suppresses the
+/// duplicate. This asserts `count() == 1` (not `>= 1`), so it fails on the
+/// unfixed code (count 2) and passes after the guard; the `HandPermission` and
+/// `Fuse` presence checks prove the guard didn't drop the free or fused options.
+#[test]
+fn fuse_split_under_unlimited_free_cast_offers_single_normal_option() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    // Breaking // Entering: a real Fuse split card (front Breaking {U}{B}, back
+    // Entering Split half) — `has_fuse_candidate` fires for it.
+    let breaking = sc.add_real_card(P0, "Breaking", Zone::Hand, db);
+    // Enough mana that both the front-half Normal cast and the fused cast are
+    // affordable — so no option is dropped by `can_cast_prepared_now`; the free
+    // (NoCost) HandPermission option is always affordable.
+    fill_mana_for_fused_cast(&mut sc, P0);
+    // Install the real Omniscience static (Unlimited CastFromHandFree) via the
+    // same Oracle text the sibling omniscience menu tests use, so
+    // `unlimited_hand_cast_free_source` recognizes it identically.
+    add_static_permanent(
+        &mut sc,
+        P0,
+        parse_static_line("You may cast spells from your hand without paying their mana costs.")
+            .expect("Omniscience static should parse"),
+    );
+
+    let set = casting_variant_choice_set(&sc.state, P0, breaking, None);
+    let variants: Vec<CastingVariant> = set.options.iter().map(|o| o.variant).collect();
+
+    let normal_count = set
+        .options
+        .iter()
+        .filter(|o| o.variant == CastingVariant::Normal)
+        .count();
+    assert_eq!(
+        normal_count, 1,
+        "a fusable split card under an Unlimited free-cast permission must offer EXACTLY ONE \
+         Normal option; the non-adjacent Fuse-block + Omniscience-block Normal pushes survive \
+         consecutive-only dedup without the guard. Offered: {variants:?}"
+    );
+    assert!(
+        set.options
+            .iter()
+            .any(|o| matches!(o.variant, CastingVariant::HandPermission { .. })),
+        "the free HandPermission option must still be offered. Offered: {variants:?}"
+    );
+    assert!(
+        set.options
+            .iter()
+            .any(|o| o.variant == CastingVariant::Fuse),
+        "the Fuse option must still be offered — the guard must not drop it. Offered: {variants:?}"
+    );
+}
+
 #[test]
 fn foretell_cast_uses_foretell_cost_only_after_current_turn() {
     let mut state = setup_game_at_main_phase();
@@ -14026,11 +14091,12 @@ fn tamiyo_emblem_does_not_free_cast_commander_from_command_zone() {
 /// printed mana cost is unaffordable but whose alternative cost is payable.
 mod omniscience_alt_cost_2432 {
     use super::*;
-    use crate::types::game_state::AlternativeCastKeyword;
+    use crate::types::ability::TargetFilter;
     use crate::types::keywords::{EvokeCost, Keyword};
     use crate::types::mana::{ManaCost, ManaCostShard};
+    use crate::types::statics::{CastFreeOrigin, CastFrequency};
 
-    fn install_omniscience(state: &mut GameState) {
+    fn install_omniscience(state: &mut GameState) -> ObjectId {
         let id = create_object(
             state,
             CardId(2_432_001),
@@ -14044,6 +14110,31 @@ mod omniscience_alt_cost_2432 {
             )
             .expect("Omniscience static should parse"),
         );
+        id
+    }
+
+    /// A plain {1}{U} creature with no alternative-cost keyword.
+    fn create_plain_creature(state: &mut GameState) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(2_432_010),
+            PlayerId(0),
+            "Plain Creature".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj_id
+    }
+
+    fn ample_blue_mana(state: &mut GameState) {
+        add_mana(state, PlayerId(0), ManaType::Colorless, 6);
+        add_mana(state, PlayerId(0), ManaType::Blue, 2);
     }
 
     /// Quantum Riddler class: printed {3}{U}{U}, Warp {1}{U}.
@@ -14100,12 +14191,19 @@ mod omniscience_alt_cost_2432 {
         obj_id
     }
 
+    // Reconciliation (issue #2432, free-cast-election tranche): under an ACTIVE
+    // Unlimited CastFromHandFree permission the casting-method election is the
+    // single N-way `CastingVariantChoice` menu (CR 118.9a — one mutually-exclusive
+    // announcement), NOT the legacy two-slot `AlternativeCastChoice`. These tests
+    // assert the modernized menu shape; semantics (free vs keyword vs printed) are
+    // unchanged.
+
     #[test]
-    fn omniscience_offers_free_normal_when_warp_affordable_but_printed_is_not() {
+    fn omniscience_menu_offers_free_and_warp_when_printed_unaffordable() {
         let mut state = setup_game_at_main_phase();
         install_omniscience(&mut state);
         let riddler = create_quantum_riddler(&mut state);
-        // Enough for Warp {1}{U}, not for {3}{U}{U}.
+        // Enough for Warp {1}{U}, not for printed {3}{U}{U}.
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
         add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
 
@@ -14119,34 +14217,39 @@ mod omniscience_alt_cost_2432 {
         )
         .unwrap();
 
-        match wf {
-            WaitingFor::AlternativeCastChoice {
-                keyword: AlternativeCastKeyword::Warp,
-                normal_cost,
-                alternative_cost,
-                ..
-            } => {
-                assert_eq!(
-                    normal_cost,
-                    ManaCost::NoCost,
-                    "Omniscience must surface NoCost as the normal option"
-                );
-                assert_eq!(
-                    alternative_cost,
-                    Some(ManaCost::Cost {
-                        shards: vec![ManaCostShard::Blue],
-                        generic: 1,
-                    })
-                );
+        let WaitingFor::CastingVariantChoice { options, .. } = wf else {
+            panic!("expected N-way CastingVariantChoice under Omniscience, got {wf:?}");
+        };
+        // CR 118.9: the free option carries the printed-NoCost display and the
+        // Omniscience source id.
+        let free = options
+            .iter()
+            .find(|o| matches!(o.variant, CastingVariant::HandPermission { .. }))
+            .expect("free HandPermission option must be offered");
+        assert_eq!(free.mana_cost, ManaCost::NoCost);
+        // CR 601.2b: the Warp alternative cost path is offered at {1}{U}.
+        let warp = options
+            .iter()
+            .find(|o| o.variant == CastingVariant::Warp)
+            .expect("Warp option must be offered");
+        assert_eq!(
+            warp.mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
             }
-            other => {
-                panic!("expected Warp choice with free normal under Omniscience, got {other:?}")
-            }
-        }
+        );
+        // Single-method degrade: the printed {3}{U}{U} Normal cast is unaffordable
+        // and MUST be dropped (revert of the printed-cost prepare would surface a
+        // spurious free {0} Normal duplicate here).
+        assert!(
+            !options.iter().any(|o| o.variant == CastingVariant::Normal),
+            "unaffordable printed Normal must be dropped, got {options:?}"
+        );
     }
 
     #[test]
-    fn omniscience_offers_free_normal_when_evoke_affordable_but_printed_is_not() {
+    fn omniscience_menu_offers_free_and_evoke_when_printed_unaffordable() {
         let mut state = setup_game_at_main_phase();
         install_omniscience(&mut state);
         let mulldrifter = create_mulldrifter(&mut state);
@@ -14164,75 +14267,234 @@ mod omniscience_alt_cost_2432 {
         )
         .unwrap();
 
-        match wf {
-            WaitingFor::AlternativeCastChoice {
-                keyword: AlternativeCastKeyword::Evoke,
-                normal_cost,
-                alternative_cost,
-                ..
-            } => {
-                assert_eq!(
-                    normal_cost,
-                    ManaCost::NoCost,
-                    "Omniscience must surface NoCost as the normal option"
-                );
-                assert_eq!(
-                    alternative_cost,
-                    Some(ManaCost::Cost {
-                        shards: vec![ManaCostShard::Blue],
-                        generic: 2,
-                    })
-                );
+        let WaitingFor::CastingVariantChoice { options, .. } = wf else {
+            panic!("expected N-way CastingVariantChoice under Omniscience, got {wf:?}");
+        };
+        let free = options
+            .iter()
+            .find(|o| matches!(o.variant, CastingVariant::HandPermission { .. }))
+            .expect("free HandPermission option must be offered");
+        assert_eq!(free.mana_cost, ManaCost::NoCost);
+        let evoke = options
+            .iter()
+            .find(|o| o.variant == CastingVariant::Evoke)
+            .expect("Evoke option must be offered");
+        assert_eq!(
+            evoke.mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
             }
-            other => {
-                panic!("expected Evoke choice with free normal under Omniscience, got {other:?}")
-            }
-        }
+        );
+        assert!(
+            !options.iter().any(|o| o.variant == CastingVariant::Normal),
+            "unaffordable printed Normal must be dropped, got {options:?}"
+        );
     }
 
     #[test]
-    fn omniscience_warp_spell_normal_choice_proceeds_without_mana_payment() {
+    fn omniscience_free_election_proceeds_without_mana_payment() {
         let mut state = setup_game_at_main_phase();
         install_omniscience(&mut state);
         let riddler = create_quantum_riddler(&mut state);
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
         add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        let card_id = CardId(2_432_002);
 
         let mut events = Vec::new();
-        let wf = handle_cast_spell(
-            &mut state,
-            PlayerId(0),
-            riddler,
-            CardId(2_432_002),
-            &mut events,
-        )
-        .unwrap();
-        assert!(matches!(
-            wf,
-            WaitingFor::AlternativeCastChoice {
-                keyword: AlternativeCastKeyword::Warp,
-                ..
-            }
-        ));
+        let wf = handle_cast_spell(&mut state, PlayerId(0), riddler, card_id, &mut events).unwrap();
+        let WaitingFor::CastingVariantChoice { options, .. } = wf else {
+            panic!("expected N-way CastingVariantChoice under Omniscience, got {wf:?}");
+        };
+        // Reach-guard: the free option must be present so the election is real.
+        let free_index = options
+            .iter()
+            .position(|o| matches!(o.variant, CastingVariant::HandPermission { .. }))
+            .expect("free HandPermission option must be offered");
 
-        let wf = handle_warp_cost_choice(
+        let wf = handle_casting_variant_choice(
             &mut state,
             PlayerId(0),
             riddler,
-            CardId(2_432_002),
-            crate::types::actions::AlternativeCastDecision::Normal,
+            card_id,
+            &options,
+            free_index,
             &mut events,
         )
         .unwrap();
 
         assert!(
-            !matches!(wf, WaitingFor::AlternativeCastChoice { .. }),
-            "normal choice under Omniscience must not re-prompt; got {wf:?}"
+            !matches!(wf, WaitingFor::CastingVariantChoice { .. }),
+            "free election under Omniscience must not re-prompt; got {wf:?}"
         );
         assert!(
             !matches!(wf, WaitingFor::ManaPayment { .. }),
-            "Omniscience normal cast must skip mana payment; got {wf:?}"
+            "Omniscience free cast must skip mana payment; got {wf:?}"
         );
+    }
+
+    /// Test 1: when the printed cost is affordable the menu offers BOTH the free
+    /// option and the printed `Normal` option (at its printed cost, not a second
+    /// {0}). Reverting the printed-cost prepare would collapse `Normal` to {0} or
+    /// drop it — this option-set equality catches both.
+    #[test]
+    fn menu_offers_free_and_printed_when_affordable() {
+        let mut state = setup_game_at_main_phase();
+        install_omniscience(&mut state);
+        let spell = create_plain_creature(&mut state);
+        ample_blue_mana(&mut state);
+
+        let set = casting_variant_choice_set(&state, PlayerId(0), spell, None);
+        let free = set
+            .options
+            .iter()
+            .find(|o| matches!(o.variant, CastingVariant::HandPermission { .. }))
+            .expect("free HandPermission option must be offered");
+        assert_eq!(free.mana_cost, ManaCost::NoCost);
+        let normal = set
+            .options
+            .iter()
+            .find(|o| o.variant == CastingVariant::Normal)
+            .expect("printed Normal option must be offered when affordable");
+        assert_eq!(
+            normal.mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            },
+            "the Normal option must display the printed {{1}}{{U}}, not a duplicate {{0}}"
+        );
+        assert_eq!(
+            set.options.len(),
+            2,
+            "a plain creature under Omniscience offers exactly free + printed, got {:?}",
+            set.options
+        );
+    }
+
+    /// Test 7: Mulldrifter three-way — all three methods affordable produce three
+    /// options with DISTINCT costs (printed {4}{U}, evoke {2}{U}, free {0}).
+    #[test]
+    fn menu_offers_three_distinct_costs_for_mulldrifter_when_all_affordable() {
+        let mut state = setup_game_at_main_phase();
+        install_omniscience(&mut state);
+        let mulldrifter = create_mulldrifter(&mut state);
+        ample_blue_mana(&mut state);
+
+        let set = casting_variant_choice_set(&state, PlayerId(0), mulldrifter, None);
+        let cost_of = |variant: CastingVariant| {
+            set.options
+                .iter()
+                .find(|o| o.variant == variant)
+                .unwrap_or_else(|| {
+                    panic!("option {variant:?} must be present in {:?}", set.options)
+                })
+                .mana_cost
+                .clone()
+        };
+        let free = set
+            .options
+            .iter()
+            .find(|o| matches!(o.variant, CastingVariant::HandPermission { .. }))
+            .expect("free option must be present");
+        assert_eq!(free.mana_cost, ManaCost::NoCost);
+        assert_eq!(
+            cost_of(CastingVariant::Normal),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            }
+        );
+        assert_eq!(
+            cost_of(CastingVariant::Evoke),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            }
+        );
+    }
+
+    /// Test 8 (engine side): the newly menu-gated keyword variants surface as
+    /// options under Omniscience when affordable (Warp here). The FE label
+    /// coverage for these is gated by check-frontend.
+    #[test]
+    fn menu_offers_warp_keyword_option_under_omniscience() {
+        let mut state = setup_game_at_main_phase();
+        install_omniscience(&mut state);
+        let riddler = create_quantum_riddler(&mut state);
+        ample_blue_mana(&mut state);
+
+        let set = casting_variant_choice_set(&state, PlayerId(0), riddler, None);
+        assert!(
+            set.options
+                .iter()
+                .any(|o| matches!(o.variant, CastingVariant::HandPermission { .. })),
+            "free option must be present"
+        );
+        let warp = set
+            .options
+            .iter()
+            .find(|o| o.variant == CastingVariant::Warp)
+            .expect("Warp keyword option must join the menu under Omniscience");
+        assert_eq!(
+            warp.mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            }
+        );
+    }
+
+    /// Test 10: multi-authority order bug. A OncePerTurn (Zaffai-class) permission
+    /// created EARLIER in battlefield order than Omniscience must not hide the
+    /// Unlimited source — the free option must latch the Omniscience id and carry
+    /// `Unlimited` frequency (so electing it records no once-per-turn slot). The
+    /// pre-fix first-match scan would have returned the Zaffai id here.
+    #[test]
+    fn free_option_latches_unlimited_source_over_earlier_once_per_turn() {
+        let mut state = setup_game_at_main_phase();
+
+        // Earlier-in-battlefield OncePerTurn CastFromHandFree source (Zaffai-class).
+        let zaffai = create_object(
+            &mut state,
+            CardId(2_432_020),
+            PlayerId(0),
+            "Zaffai (test)".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&zaffai)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CastFromHandFree {
+                    frequency: CastFrequency::OncePerTurn,
+                    origin: CastFreeOrigin::Hand,
+                })
+                .affected(TargetFilter::Any),
+            );
+
+        // Omniscience appended AFTER Zaffai (later in battlefield order).
+        let omniscience = install_omniscience(&mut state);
+        let spell = create_plain_creature(&mut state);
+        ample_blue_mana(&mut state);
+
+        let set = casting_variant_choice_set(&state, PlayerId(0), spell, None);
+        let free = set
+            .options
+            .iter()
+            .find(|o| matches!(o.variant, CastingVariant::HandPermission { .. }))
+            .expect("free option must be present");
+        let CastingVariant::HandPermission { source, frequency } = free.variant else {
+            unreachable!()
+        };
+        assert_eq!(
+            source, omniscience,
+            "the free option must latch the Unlimited (Omniscience) source, not the \
+             earlier OncePerTurn Zaffai source"
+        );
+        assert_eq!(frequency, CastFrequency::Unlimited);
     }
 }
 

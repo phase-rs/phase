@@ -1802,6 +1802,13 @@
     "variantBestow": "Cast with Bestow",
     "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
+    "variantMutate": "Cast with Mutate",
+    "variantAwaken": "Cast with Awaken",
+    "variantCleave": "Cast with Cleave",
+    "variantImpending": "Cast with Impending",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Cast with Prototype",
+    "variantFaceDown": "Cast Face Down",
     "variantFallback": "Cast with {{type}}"
   },
   "categoryChoice": {

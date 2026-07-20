@@ -1765,6 +1765,13 @@
     "variantBestow": "Lancer avec Don",
     "variantFreerunning": "Lancer avec Freerunning",
     "variantFuse": "Lancer avec Fusion",
+    "variantMutate": "Lancer avec Mutate",
+    "variantAwaken": "Lancer avec Éveil",
+    "variantCleave": "Lancer avec Tranchage",
+    "variantImpending": "Lancer avec Imminence",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lancer avec Prototype",
+    "variantFaceDown": "Lancer face cachée",
     "variantFallback": "Lancer avec {{type}}"
   },
   "categoryChoice": {

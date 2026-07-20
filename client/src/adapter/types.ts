@@ -570,9 +570,13 @@ export type CastingVariant =
   | { type: "Foretell" }
   | { type: "Overload" }
   | { type: "Bestow" }
+  | { type: "Mutate" }
   | { type: "Awaken" }
   | { type: "Cleave" }
+  | { type: "Impending" }
   | { type: "MoreThanMeetsTheEye" }
+  | { type: "Prototype" }
+  | { type: "FaceDown" }
   | { type: "Freerunning" }
   | { type: "Fuse" };
 

@@ -1765,6 +1765,13 @@
     "variantBestow": "Rzuć z Bestow",
     "variantFreerunning": "Rzuć z Freerunning",
     "variantFuse": "Rzuć z Fuse",
+    "variantMutate": "Rzuć z Mutate",
+    "variantAwaken": "Rzuć z Awaken",
+    "variantCleave": "Rzuć z Cleave",
+    "variantImpending": "Rzuć z Impending",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Rzuć z Prototype",
+    "variantFaceDown": "Rzuć zakrytą",
     "variantFallback": "Rzuć z {{type}}"
   },
   "categoryChoice": {

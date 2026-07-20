@@ -4356,6 +4356,11 @@ fn cast_free_permission_from_source(
     })
 }
 
+/// First-match (any-frequency) `CastFromHandFree` source lookup. Production code
+/// uses the Unlimited-preferring `unlimited_hand_cast_free_source` (CR 601.2b
+/// order-bug fix); this raw first-match helper is retained only for the two
+/// permission-provenance tests (Tamiyo emblem / Omniscience source assertions).
+#[cfg(test)]
 pub(crate) fn hand_cast_free_permission_source(
     state: &GameState,
     player: PlayerId,
@@ -4367,9 +4372,39 @@ pub(crate) fn hand_cast_free_permission_source(
     })
 }
 
-/// CR 601.2b + CR 118.9a: `Unlimited` `CastFromHandFree` that zeroes mana cost on
-/// the normal `CastSpell` path (Omniscience from hand; Dracogenesis from hand or
-/// command-zone commanders).
+/// CR 601.2b + CR 118.9a: The `Unlimited` `CastFromHandFree` source (Omniscience,
+/// Dracogenesis, Tamiyo emblem) admitting `obj` for `player`. Unlike
+/// `hand_cast_free_permission_source` (first-match over any frequency), this scans
+/// specifically for an `Unlimited` grant, so a battlefield-earlier `OncePerTurn`
+/// source (Zaffai) cannot hide Omniscience — fixing the first-match order bug and
+/// giving the free-cast menu the correct granting `ObjectId` to latch.
+fn unlimited_hand_cast_free_source(
+    state: &GameState,
+    player: PlayerId,
+    obj: &crate::game::game_object::GameObject,
+) -> Option<ObjectId> {
+    iter_cast_free_permission_source_ids(state).find(|&src_id| {
+        cast_free_permission_from_source(state, player, obj, src_id)
+            == Some(CastFrequency::Unlimited)
+    })
+}
+
+/// CR 601.2b + CR 118.9a: Whether an `Unlimited` `CastFromHandFree` permission
+/// (Omniscience) admits this object for a non-`HandPermission` cast. This is the
+/// "a free cast is available" predicate consulted by the three NoCost-gated guard
+/// sites (the dispatch gate, `normal_cast_choice_cost_and_affordability`, and the
+/// candidate-feasibility gate). Whether the mana cost is actually ZEROED on a
+/// given prepare is decided separately at the prepare call site (see the
+/// `hand_cast_free` binding), which additionally consults `CastingMode` and the
+/// explicit `variant_override` so the menu's printed `Normal` option keeps its
+/// printed cost while the default/overlay cast floors to free.
+///
+/// The first conjunct is preserved verbatim (Revision-3 implementer note): it
+/// prevents re-firing on a prepare that is ALREADY a `HandPermission` election
+/// (the `.or()` cost chain zeroes those independently via
+/// `is_hand_permission_variant`). Rebuilt onto the Unlimited-preferring
+/// `unlimited_hand_cast_free_source` so a battlefield-earlier `OncePerTurn` source
+/// (Zaffai) can no longer hide Omniscience (order-bug fix, test 10).
 fn unlimited_hand_cast_free_applies(
     state: &GameState,
     player: PlayerId,
@@ -4377,8 +4412,7 @@ fn unlimited_hand_cast_free_applies(
     casting_variant: CastingVariant,
 ) -> bool {
     !matches!(casting_variant, CastingVariant::HandPermission { .. })
-        && hand_cast_free_permission_source(state, player, obj)
-            .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
+        && unlimited_hand_cast_free_source(state, player, obj).is_some()
 }
 
 /// CR 601.2f: Whether `spell_id` matches a pending next-spell modifier's optional
@@ -4891,6 +4925,133 @@ fn casting_variant_candidates(
     if has_fuse_candidate {
         candidates.push(CastingVariant::Normal);
         candidates.push(CastingVariant::Fuse);
+    }
+
+    // CR 118.9 + CR 118.9a + CR 601.2b: When an `Unlimited` `CastFromHandFree`
+    // permission (Omniscience) admits this hand object, the casting-method
+    // election IS the existing N-way `CastingVariantChoice` prompt — free, printed,
+    // and each keyword alternative cost are one mutually-exclusive announcement
+    // (CR 118.9a), not a chain of two-slot modals. Gate every push on that
+    // permission being active: without it this block adds nothing, so every
+    // no-permission board is byte-identical to prior behavior (containment).
+    if obj.zone == Zone::Hand {
+        if let Some(source) = unlimited_hand_cast_free_source(state, player, obj) {
+            // CR 118.9: the effect-applied free alternative cost (X = 0 per
+            // CR 107.3b, resolved by the NoCost prepare — no mana spent).
+            candidates.push(CastingVariant::HandPermission {
+                source,
+                frequency: CastFrequency::Unlimited,
+            });
+            // CR 601.2b: the printed-cost path (mana announced, X electable). The
+            // prepare keeps the printed cost (not force-zeroed), and
+            // `casting_variant_choice_set` drops it via `can_cast_prepared_now` when
+            // unaffordable — implementing "auto-free when the printed cost can't be
+            // paid" by leaving `HandPermission` as the sole surviving option.
+            // Guard: the Fuse block (above) already pushed `Normal` for a fusable
+            // split card, and that push is NON-adjacent to this one (Fuse +
+            // HandPermission sit between them). `casting_variant_choice_set` dedups
+            // with consecutive-only `Vec::dedup` (no preceding sort), so pushing
+            // `Normal` again here would leave two identical "Cast Normally" options
+            // in the menu. Only offer `Normal` when the Fuse block didn't.
+            if !has_fuse_candidate {
+                candidates.push(CastingVariant::Normal);
+            }
+
+            let effective_keywords = effective_spell_keywords(state, player, object_id);
+
+            // CR 702.185a: Warp (keyword presence — mirrors the Warp offer block).
+            if obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
+            {
+                candidates.push(CastingVariant::Warp);
+            }
+            // CR 702.103a + CR 303.4a: Bestow — offered only when the bestow keyword
+            // is present AND a legal creature target exists (parity with the Bestow
+            // offer block's `has_legal_creature_target` gate).
+            if effective_keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Bestow(_)))
+            {
+                let creature_filter =
+                    TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
+                if !targeting::find_legal_targets(state, &creature_filter, player, object_id)
+                    .is_empty()
+                {
+                    candidates.push(CastingVariant::Bestow);
+                }
+            }
+            // CR 702.140a: Mutate — keyword present AND a legal "non-Human creature
+            // you own" merge target exists (parity with the Mutate offer block).
+            if obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Mutate(_)))
+                && !targeting::find_legal_targets(state, &mutate_target_filter(), player, object_id)
+                    .is_empty()
+            {
+                candidates.push(CastingVariant::Mutate);
+            }
+            // CR 702.113a + CR 702.113b: Awaken — keyword present AND a land you
+            // control exists for the awaken land target (parity with the Awaken
+            // offer block's `has_legal_land` gate).
+            if obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Awaken { .. }))
+            {
+                let land_filter = TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::land()
+                        .controller(crate::types::ability::ControllerRef::You),
+                );
+                if !targeting::find_legal_targets(state, &land_filter, player, object_id).is_empty()
+                {
+                    candidates.push(CastingVariant::Awaken);
+                }
+            }
+            // CR 702.148a: Cleave — keyword present AND the bracket-removed ability
+            // set was parsed (parity with the Cleave offer block's
+            // `obj.cleave_variant.is_some()` gate).
+            if obj.cleave_variant.is_some()
+                && obj
+                    .keywords
+                    .iter()
+                    .any(|k| matches!(k, crate::types::keywords::Keyword::Cleave(_)))
+            {
+                candidates.push(CastingVariant::Cleave);
+            }
+            // CR 702.176a: Impending (keyword presence).
+            if obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Impending { .. }))
+            {
+                candidates.push(CastingVariant::Impending);
+            }
+            // CR 702.162a: More Than Meets the Eye (keyword presence).
+            if obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::MoreThanMeetsTheEye(_)))
+            {
+                candidates.push(CastingVariant::MoreThanMeetsTheEye);
+            }
+            // CR 702.160a: Prototype — offered only when the secondary
+            // characteristics are complete (parity with `prototype_form_from_object`).
+            if prototype_form_from_object(obj).is_some() {
+                candidates.push(CastingVariant::Prototype);
+            }
+            // CR 702.37c / CR 702.168b + CR 708.4: Morph / Megamorph / Disguise
+            // face-down cast — offered when an effective face-down keyword is present
+            // and the face-down cast is permitted (parity with the FaceDown offer
+            // block; the fixed {3} affordability is checked by `can_cast_prepared_now`).
+            if object_has_effective_face_down_keyword(state, object_id)
+                && face_down_cast_is_permitted(state, player, object_id)
+            {
+                candidates.push(CastingVariant::FaceDown);
+            }
+        }
     }
 
     candidates
@@ -5635,7 +5796,27 @@ fn prepare_spell_cast_with_variant_override_inner(
     // Dracogenesis); `OncePerTurn` sources (Zaffai) must be opted into
     // explicitly via a dedicated action to preserve the player's "may cast"
     // choice and make per-turn slot consumption visible at the action layer.
-    let hand_cast_free = unlimited_hand_cast_free_applies(state, player, obj, casting_variant);
+    // CR 601.2b + CR 118.9a: Decide whether THIS prepare zeroes the mana cost under
+    // an active `Unlimited` `CastFromHandFree` permission. The free cast is now an
+    // explicit `CastingVariantChoice` menu option (CR 118.9), so zeroing here is the
+    // residual auto-free path:
+    // - `Display`: the hand overlay shows the cheapest legal cast, so an active
+    //   permission always floors the displayed cost to `NoCost` (decision D1).
+    // - `Actual` with `variant_override == None`: the DEFAULT cast (probes,
+    //   `effective_spell_cost`, `can_cast_object_now`) — the cheapest legal cast is
+    //   free, so zero it (keeps affordability/AI castability correct).
+    // - `Actual` with an explicit `variant_override` (the menu's per-candidate
+    //   prepare): NOT zeroed here. The menu's `Normal` candidate keeps its printed
+    //   cost (dropped by `can_cast_prepared_now` when unaffordable — single-method
+    //   degrade, §3.5), and keyword candidates keep their alternative cost, so the
+    //   election is a real free-vs-printed-vs-keyword choice rather than a menu of
+    //   duplicate `{0}` options. An explicit `HandPermission` election is already
+    //   zeroed by `is_hand_permission_variant` below, independent of this flag.
+    let hand_cast_free = unlimited_hand_cast_free_applies(state, player, obj, casting_variant)
+        && match mode {
+            CastingMode::Display => true,
+            CastingMode::Actual => variant_override.is_none(),
+        };
 
     // CR 118.9: Energy replaces mana cost entirely when casting with ExileWithEnergyCost.
     // CR 702.34a: Non-mana flashback costs use NoCost for mana (cost is paid separately).
@@ -9153,6 +9334,78 @@ fn continue_cast_with_variant(
                 Ok(prepared) => prepared,
                 Err(err) => {
                     revert_bestow_form(state, object_id);
+                    return Err(err);
+                }
+            };
+        prepared.payment_mode = payment_mode;
+        return continue_with_prepared(state, player, prepared, events);
+    }
+
+    // CR 702.140a: Mutate marks the spell BEFORE prepare so the
+    // `continue_with_prepared` target-attachment branch requests the non-Human
+    // creature target — the generic prepare-by-variant path skips this pre-stack
+    // mutation, so an elected Mutate variant needs this dedicated arm (mirrors
+    // Bestow). Reverted on a preparation error (CR 702.140b).
+    if variant == CastingVariant::Mutate {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            apply_mutate_form(obj);
+        }
+        let mut prepared =
+            match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
+            {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    revert_mutate_form(state, object_id);
+                    return Err(err);
+                }
+            };
+        prepared.payment_mode = payment_mode;
+        return continue_with_prepared(state, player, prepared, events);
+    }
+
+    // CR 702.148a-b + CR 612: Cleave swaps in the bracket-removed ability set
+    // BEFORE prepare so `combined_spell_ability_def` reads the cleaved text — a
+    // pre-stack mutation the generic path skips. Reverted on a preparation error.
+    if variant == CastingVariant::Cleave {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            apply_cleave_text_change(obj);
+        }
+        let mut prepared =
+            match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
+            {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                        revert_cleave_text_change(obj);
+                    }
+                    return Err(err);
+                }
+            };
+        prepared.payment_mode = payment_mode;
+        return continue_with_prepared(state, player, prepared, events);
+    }
+
+    // CR 702.160a: Prototype applies the secondary mana cost and P/T BEFORE prepare
+    // so the announced stack spell already has prototype characteristics — a
+    // pre-stack mutation the generic path skips. Restored on a preparation error.
+    if variant == CastingVariant::Prototype {
+        if !state
+            .objects
+            .get_mut(&object_id)
+            .is_some_and(apply_prototype_form)
+        {
+            return Err(EngineError::InvalidAction(
+                "Prototype characteristics are unavailable for this object".to_string(),
+            ));
+        }
+        let mut prepared =
+            match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
+            {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                        clear_prototype_form(obj);
+                    }
                     return Err(err);
                 }
             };

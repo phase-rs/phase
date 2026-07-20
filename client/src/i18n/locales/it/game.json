@@ -1765,6 +1765,13 @@
     "variantBestow": "Lancia con Conferire",
     "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
+    "variantMutate": "Lancia con Mutate",
+    "variantAwaken": "Lancia con Risveglio",
+    "variantCleave": "Lancia con Fendere",
+    "variantImpending": "Lancia con Incombere",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lancia con Prototipo",
+    "variantFaceDown": "Lancia a faccia in giù",
     "variantFallback": "Lancia con {{type}}"
   },
   "categoryChoice": {

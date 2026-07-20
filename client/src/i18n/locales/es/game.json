@@ -1765,6 +1765,13 @@
     "variantBestow": "Lanzar con Otorgar",
     "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
+    "variantMutate": "Lanzar con Mutate",
+    "variantAwaken": "Lanzar con Despertar",
+    "variantCleave": "Lanzar con Recortar",
+    "variantImpending": "Lanzar con Inminencia",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lanzar con Prototipo",
+    "variantFaceDown": "Lanzar boca abajo",
     "variantFallback": "Lanzar con {{type}}"
   },
   "categoryChoice": {

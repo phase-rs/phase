@@ -682,6 +682,8 @@ mod obeka_splitter_additional_phases;
 mod obliterate_regression;
 mod officious_interrogation_bare_strive_surcharge;
 mod old_growth_troll_return_as_aura;
+mod omniscience_free_cast_chalice_x;
+mod omniscience_free_cast_vexing_bauble;
 mod omo_queen_of_vesuva;
 mod oracle_parser;
 mod overload_no_legal_target;
