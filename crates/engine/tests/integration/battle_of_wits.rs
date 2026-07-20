@@ -61,11 +61,12 @@ fn setup(controller_cards: usize, opponent_cards: usize) -> (GameRunner, ObjectI
         .first()
         .expect("Battle of Wits trigger exists");
     assert!(
-        trigger.condition.is_some(),
+        trigger.definition.condition.is_some(),
         "the parsed trigger must retain its intervening-if condition"
     );
     assert_no_unimplemented(
         trigger
+            .definition
             .execute
             .as_deref()
             .expect("the parsed trigger must retain its win effect"),

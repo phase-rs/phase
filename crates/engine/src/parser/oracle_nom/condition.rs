@@ -3317,8 +3317,8 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     // "you have N or more [you-only quantity-suffix]"
     let (rest, n) = parse_number(rest)?;
 
-    // CR 401.1 + CR 603.4: An intervening-if library threshold counts cards in
-    // the trigger controller's library at both trigger detection and resolution.
+    // CR 401.3 + CR 603.4: A library's card count is public, and this
+    // intervening-if threshold is checked at trigger detection and resolution.
     if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>(" or more cards in your library").parse(rest)
     {
