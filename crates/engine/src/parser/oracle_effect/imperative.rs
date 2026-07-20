@@ -2153,11 +2153,20 @@ pub(super) fn parse_targeted_action_ast(
             .parse(input)
         })
         .is_some();
-        let (target_text, _) = super::strip_optional_target_prefix(rest);
+        // CR 115.1d + CR 601.2c: Preserve the "up to N target" count instead of discarding
+        // it. `strip_optional_target_prefix` already parses the quantifier; the
+        // spec was previously dropped here, so "gain control of up to two target
+        // creatures" collapsed to a single optional slot and only one creature
+        // could be chosen (issue #6205).
+        let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        return Some(TargetedImperativeAst::GainControl { target, all });
+        return Some(TargetedImperativeAst::GainControl {
+            target,
+            all,
+            multi_target,
+        });
     }
     // Earthbend: "[you ]earthbend [N] [target <type>]". The optional "you "
     // subject (Fatal Fissure's delayed trigger "you earthbend 4") names the
@@ -2380,7 +2389,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             subject: TargetFilter::SelfRef,
         },
-        TargetedImperativeAst::GainControl { target, all } => {
+        TargetedImperativeAst::GainControl { target, all, .. } => {
             if all {
                 Effect::GainControlAll { target }
             } else {
@@ -11399,6 +11408,34 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             };
             let mut clause = parsed_clause(lower_targeted_action_ast(ast));
             clause.multi_target = multi_target;
+            clause
+        }
+        // CR 115.1d + CR 601.2c: "gain control of up to N target …" (The Super
+        // Hero Civil War, Jace, Ingenious Mind-Mage). Same shape as the
+        // Tap/Untap arm above: the bare-Effect lowering cannot carry a target
+        // count, so a GainControl AST that captured one is lowered here and the
+        // count is threaded onto the clause. Only the TARGETED form can carry
+        // it — the mass "gain control of all/each" (`all: true`) has no target
+        // slots. Destructured by value (rather than the `ast @ …` + re-match
+        // used above) so the count moves out without a clone and the pattern
+        // stays exhaustive; the variant is rebuilt with `multi_target: None` so
+        // lowering still flows through the single authority
+        // (`lower_targeted_action_ast`) instead of duplicating `Effect::GainControl`.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            TargetedImperativeAst::GainControl {
+                target,
+                all: false,
+                multi_target: Some(multi_target),
+            },
+        )) => {
+            let mut clause = parsed_clause(lower_targeted_action_ast(
+                TargetedImperativeAst::GainControl {
+                    target,
+                    all: false,
+                    multi_target: None,
+                },
+            ));
+            clause.multi_target = Some(multi_target);
             clause
         }
         // CR 115.1d + CR 601.2c: "return up to N cards from your graveyard to

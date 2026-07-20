@@ -162,6 +162,7 @@ mod frostcliff_siege_anchor_word_modes;
 mod fury_sliver_double_strike_grant;
 mod fuse_runtime;
 mod gaeas_anthem_team_pump;
+mod gain_control_multi_target_6205;
 mod gatta_and_luzzu_regression;
 mod gemstone_caverns_begin_game;
 mod gev_scaled_scorch_enter_counters;

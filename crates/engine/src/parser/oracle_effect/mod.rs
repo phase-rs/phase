@@ -14644,7 +14644,12 @@ fn try_parse_verb_and_target<'a>(
         let all = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
             .parse(rest_lower.as_str())
             .is_ok();
-        let (target_text, _) = strip_optional_target_prefix(rest);
+        // CR 115.1d + CR 601.2c: preserve "up to N target …" here too — this compound/rider
+        // path (saga chapters carrying a trailing duration, e.g. The Super Hero
+        // Civil War) is the second `gain control of` entry point, and dropping
+        // the count here left issue #6205 half-fixed. Mirrors the `fight ` arm
+        // directly above.
+        let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
         let rem_lower = rem.to_ascii_lowercase();
         if tag::<_, _, OracleError<'_>>(" during that player's next turn")
@@ -14676,7 +14681,14 @@ fn try_parse_verb_and_target<'a>(
                 rem,
             ));
         }
-        return Some((TargetedImperativeAst::GainControl { target, all }, rem));
+        return Some((
+            TargetedImperativeAst::GainControl {
+                target,
+                all,
+                multi_target,
+            },
+            rem,
+        ));
     }
     // Earthbend: "earthbend [N] [target <type>]"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("earthbend ").parse(lower) {
