@@ -1311,10 +1311,22 @@ impl GameObject {
         let Some(printed_index) = self.base_trigger_definitions.iter().position(matches) else {
             return false;
         };
+        let base_set = self.trigger_base_set_instance;
+        if self.trigger_definitions.iter_all().any(|entry| {
+            matches!(
+                &entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: entry_base_set,
+                    printed_index: entry_printed_index,
+                } if *entry_base_set == base_set && *entry_printed_index == printed_index
+            )
+        }) {
+            return true;
+        }
         let definition = self.base_trigger_definitions[printed_index].clone();
         self.trigger_definitions.push(TriggerEntry::new(
             TriggerDefinitionOccurrenceRef::Printed {
-                base_set: self.trigger_base_set_instance,
+                base_set,
                 printed_index,
             },
             definition,
@@ -2838,6 +2850,27 @@ mod tests {
         assert_ne!(
             object.trigger_definitions[0].occurrence, object.trigger_definitions[1].occurrence,
             "repeated final slots must not collapse because their payloads match"
+        );
+    }
+
+    #[test]
+    fn reliving_a_materialized_printed_slot_does_not_duplicate_it() {
+        let mut object = trigger_test_object();
+        let trigger = TriggerDefinition::new(TriggerMode::Phase);
+        object.push_printed_trigger(trigger.clone());
+
+        assert!(object.relive_printed_trigger(|definition| definition == &trigger));
+        assert_eq!(
+            object.trigger_definitions.len(),
+            1,
+            "re-materializing an already-live printed slot must not duplicate its trigger"
+        );
+        assert_eq!(
+            object.trigger_definitions[0].occurrence,
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            }
         );
     }
 
