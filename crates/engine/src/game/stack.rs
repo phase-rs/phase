@@ -2070,7 +2070,7 @@ fn self_counter_batch_state_is_settled(state: &GameState) -> bool {
         && state.active_per_category_zone_choice().is_none()
         && state.active_batch_delivery().is_none()
         && state.pending_proliferate_actions.is_none()
-        && state.pending_counter_additions.is_none()
+        && state.active_counter_additions().is_none()
         && state.active_counter_moves().is_none()
         && state.pending_optional_effect.is_none()
         && state.pending_optional_trigger_event.is_none()

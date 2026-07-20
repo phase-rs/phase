@@ -769,8 +769,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining proliferate additions should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(

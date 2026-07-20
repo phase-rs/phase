@@ -6416,7 +6416,7 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     }
     if state.pending_replacement.is_some()
         || state.active_batch_delivery().is_some()
-        || state.pending_counter_additions.is_some()
+        || state.active_counter_additions().is_some()
         || state.active_counter_moves().is_some()
         || state.active_counter_removals().is_some()
     {

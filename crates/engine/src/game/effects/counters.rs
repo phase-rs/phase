@@ -152,7 +152,7 @@ pub(crate) fn stash_pending_counter_additions(
     remaining: Vec<PendingCounterAddition>,
     completion: PendingEffectResolved,
 ) {
-    state.pending_counter_additions = Some(PendingCounterAdditionQueue {
+    state.push_counter_additions(PendingCounterAdditionQueue {
         remaining,
         completion: Some(completion),
     });
@@ -204,8 +204,7 @@ pub(crate) fn append_pending_counter_post_actions(
         return;
     }
     if let Some(completion) = state
-        .pending_counter_additions
-        .as_mut()
+        .active_counter_additions_mut()
         .and_then(|queue| queue.completion.as_mut())
     {
         completion.post_actions.extend(post_actions);
@@ -247,7 +246,7 @@ fn merge_pending_counter_completion_after_nested_pause(
     state: &mut GameState,
     completion: PendingEffectResolved,
 ) {
-    let Some(queue) = state.pending_counter_additions.as_mut() else {
+    let Some(queue) = state.active_counter_additions_mut() else {
         stash_pending_counter_additions(state, Vec::new(), completion);
         return;
     };
@@ -282,8 +281,12 @@ fn merge_pending_counter_completion_after_nested_pause(
 }
 
 pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.pending_counter_additions.take() {
+    while let Some(mut queue) = state.active_counter_additions().cloned() {
         let Some(next) = queue.remaining.first().cloned() else {
+            state
+                .take_active_counter_additions()
+                .expect("settled counter-additions queue must own the active frame")
+                .expect("settled counter-additions frame must exist");
             if let Some(PendingEffectResolved {
                 kind,
                 source_id,
@@ -328,7 +331,9 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
             continue;
         };
         queue.remaining.remove(0);
-        state.pending_counter_additions = Some(queue);
+        state
+            .replace_active_counter_additions(queue)
+            .expect("re-parked counter-additions queue must own the active frame");
         let completed = match next {
             PendingCounterAddition::Object {
                 actor,
@@ -3112,8 +3117,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining target should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(
@@ -3142,7 +3146,7 @@ mod tests {
     #[test]
     fn nested_post_action_pause_preserves_parent_completion() {
         let mut state = GameState::new_two_player(42);
-        state.pending_counter_additions = Some(PendingCounterAdditionQueue {
+        state.push_counter_additions(PendingCounterAdditionQueue {
             remaining: vec![PendingCounterAddition::Object {
                 actor: PlayerId(0),
                 object_id: ObjectId(10),
@@ -3170,8 +3174,7 @@ mod tests {
         );
 
         let queue = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("nested queue remains installed");
         assert_eq!(queue.remaining.len(), 1);
         let completion = queue
@@ -3239,8 +3242,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining object should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(
@@ -3354,8 +3356,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining target should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(
@@ -4278,6 +4279,96 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(state.last_effect_count, Some(2));
         assert!(state.objects[&source_id].counters.is_empty());
+    }
+
+    /// CR 122.1 + CR 616.1: the production multi-target counter-addition
+    /// resolver parks its remaining recipients and completion in CounterAdditions
+    /// while each recipient's placement chooses among noncommuting replacements.
+    /// v2 restores that real prompt before production replacement actions finish
+    /// the queue.
+    #[test]
+    fn counter_additions_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+        let mut state = GameState::new_two_player(42);
+        install_noncommuting_counter_replacements(&mut state);
+        let first = create_object(
+            &mut state,
+            CardId(913),
+            PlayerId(0),
+            "First Counter Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(914),
+            PlayerId(0),
+            "Second Counter Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first), TargetRef::Object(second)],
+            ObjectId(915),
+            PlayerId(0),
+        );
+
+        resolve_add(&mut state, &ability, &mut Vec::new())
+            .expect("production counter-addition resolver creates its first prompt");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CounterAdditions(_))
+        ));
+        assert_eq!(
+            state
+                .active_counter_additions()
+                .expect("counter-additions queue owns its prompt")
+                .remaining
+                .len(),
+            1
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("paused CounterAdditions prompt serializes as v2");
+        assert_eq!(saved["resolution_state_version"], 2);
+        assert!(saved.get("pending_counter_additions").is_none());
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("v2 CounterAdditions prompt restores");
+        let mut state = restored.into_game_state();
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("production replacement action resumes the counter-additions queue");
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                assert!(matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::CounterAdditions(_))
+                ));
+            }
+        }
+
+        assert!(state.active_counter_additions().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        for object_id in [first, second] {
+            assert!(
+                state.objects[&object_id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0)
+                    >= 3,
+                "each recipient must resolve through both counter replacements"
+            );
+        }
     }
 
     #[test]

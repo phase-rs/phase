@@ -41,7 +41,7 @@ fn maybe_drain_each_player_copy_chosen(state: &mut GameState, events: &mut Vec<G
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.pending_each_player_copy_chosen.is_some()
         && state.pending_copy_token_resolution.is_none()
-        && state.pending_counter_additions.is_none()
+        && state.active_counter_additions().is_none()
     {
         effects::each_player_copy_chosen::drain_pending(state, events);
     }
@@ -899,7 +899,7 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_counter_additions.is_some()
+                && state.active_counter_additions().is_some()
             {
                 effects::counters::drain_pending_counter_additions(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -1000,7 +1000,7 @@ pub(super) fn handle_replacement_choice(
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_each_player_copy_chosen.is_some()
                 && state.pending_copy_token_resolution.is_none()
-                && state.pending_counter_additions.is_none()
+                && state.active_counter_additions().is_none()
             {
                 effects::each_player_copy_chosen::drain_pending(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -1187,7 +1187,7 @@ pub(super) fn handle_replacement_choice(
                 drain_pending_life_total_assignment(state, events);
                 return Ok(state.waiting_for.clone());
             }
-            if state.pending_counter_additions.is_some() {
+            if state.active_counter_additions().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
@@ -1414,7 +1414,7 @@ pub(super) fn handle_copy_target_choice(
             if let Some(waiting_for) =
                 finish_copy_target_choice_entry(state, source_id, events, post_actions, false)?
             {
-                if state.pending_counter_additions.is_none() {
+                if state.active_counter_additions().is_none() {
                     crate::game::meld::finish_deferred_meld_entry(state, context, events);
                 }
                 return Ok(waiting_for);
