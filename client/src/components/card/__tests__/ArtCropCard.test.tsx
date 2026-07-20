@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
@@ -136,8 +136,35 @@ describe("ArtCropCard", () => {
     expect(screen.getByText("2")).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
     expect(screen.getByText("/")).toBeInTheDocument();
+    // The +1/+1 counter badge lives in the art area, as a sibling of the very
+    // element the fix swaps — so it is the piece most at risk from a future
+    // refactor of that slot.
+    expect(screen.getByText("1")).toBeInTheDocument();
     // Name appears in both the frame header and the fallback tile's label.
     expect(screen.getAllByText("Banana").length).toBeGreaterThan(0);
+  });
+
+  it("falls back to the tile when resolved art fails to load", () => {
+    // A URL that resolves but 404s (future-dated set, stale token image ref).
+    // Without an onError handler the default renderer would show the browser's
+    // broken-image glyph — the same defect issue #6156 reports.
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/kuruk.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    const img = document.querySelector("img");
+    expect(img).not.toBeNull();
+    fireEvent.error(img!);
+
+    expect(screen.getByRole("img", { name: "Kuruk, the Mastodon" })).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
+    // Frame survives here too.
+    expect(screen.getByText("/")).toBeInTheDocument();
   });
 
   it("still pulses while art is genuinely resolving", () => {

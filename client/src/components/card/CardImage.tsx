@@ -104,30 +104,33 @@ export function CardImage({
   //   - `imageError`: the resolved `<img>` failed to load.
   // Both render the card/token name (and Oracle text when known) so every artless
   // card or token — not just one hard-coded name — stays identifiable.
-  if (!faceDown && (imageError || !src)) {
-    return (
-      <CardArtFallback
-        name={cardName}
-        oracleText={resolvedOracleText}
-        className={baseClasses}
-        style={borderStyle ?? { border: "1px solid #4b5563" }}
-      />
-    );
-  }
+  const showArtFallback = !faceDown && (imageError || !src);
 
   const renderedSrc = faceDown ? CARD_BACK_URL : (src ?? "");
   const renderedAlt = faceDown ? t("card.faceDownName") : cardName;
 
   return (
     <div className="relative inline-block w-fit select-none">
-      <img
-        src={renderedSrc}
-        alt={renderedAlt}
-        draggable={false}
-        onError={() => setImageError(true)}
-        className={`${baseClasses} shadow-lg object-cover`}
-        style={borderStyle ?? { border: "1px solid #4b5563" }}
-      />
+      {showArtFallback ? (
+        // Swapped in place of the `<img>` rather than early-returned, so the
+        // overlay badges below stay on screen: an artless card must not also
+        // lose its unimplemented-mechanics warning.
+        <CardArtFallback
+          name={cardName}
+          oracleText={resolvedOracleText}
+          className={baseClasses}
+          style={borderStyle ?? { border: "1px solid #4b5563" }}
+        />
+      ) : (
+        <img
+          src={renderedSrc}
+          alt={renderedAlt}
+          draggable={false}
+          onError={() => setImageError(true)}
+          className={`${baseClasses} shadow-lg object-cover`}
+          style={borderStyle ?? { border: "1px solid #4b5563" }}
+        />
+      )}
       {unimplementedMechanics && unimplementedMechanics.length > 0 && (
         <span
           className="absolute top-0.5 left-0.5 bg-amber-500 text-black text-[8px] font-bold rounded-sm px-0.5 leading-tight"

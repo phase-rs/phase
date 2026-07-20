@@ -111,6 +111,23 @@ describe("CardImage art fallback (issue #6156)", () => {
     expect(screen.getByText("Reveillark")).toBeInTheDocument();
   });
 
+  it("keeps the unimplemented-mechanics badge visible on the fallback tile", () => {
+    // The fallback is swapped in place of the <img> rather than early-returned,
+    // so the overlay badges survive. An artless card losing its "!" warning
+    // would trade one information loss for another.
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="Banana" isToken unimplementedMechanics={["Food"]} />);
+
+    expect(screen.getByRole("img", { name: "Banana" })).toBeInTheDocument();
+    expect(screen.getByText("!")).toBeInTheDocument();
+  });
+
   it("keeps face-down cards on the card back instead of revealing a name tile", () => {
     // Face-down cards call `useCardImage("")`, which resolves to a null src with
     // no in-flight lookup — the same shape as an artless token. Only the

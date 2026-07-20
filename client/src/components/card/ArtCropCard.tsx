@@ -1,4 +1,4 @@
-import { memo, useMemo, type CSSProperties } from "react";
+import { memo, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PTColor } from "../../viewmodel/cardProps";
@@ -49,6 +49,14 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
     faceName: obj?.face_down ? undefined : imageLookup.faceName,
   });
+
+  // A resolved URL can still 404 (future-dated sets not yet on the CDN, stale
+  // token image refs). Without this the default battlefield renderer would show
+  // the browser's broken-image glyph — the same visual defect issue #6156
+  // reports — while `CardImage` recovered. Reset on src change so a new face
+  // re-tries; mirrors `CardImage.tsx`.
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [cardSrc]);
 
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {
     if (!obj) return { frameGradient: "", lightText: false, ptDisplay: null };
@@ -170,11 +178,12 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                   an artless permanent loses its picture but never its game
                   state. `src` is non-null for face-down cards (CARD_BACK_URL),
                   so those still render the card back here. */}
-              {src ? (
+              {src && !artError ? (
                 <img
                   src={renderedSrc}
                   alt={cardName}
                   draggable={false}
+                  onError={() => setArtError(true)}
                   className="absolute inset-0 w-full h-full object-cover"
                 />
               ) : (
