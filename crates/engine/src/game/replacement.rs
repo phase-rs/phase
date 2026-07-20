@@ -15,7 +15,8 @@ use crate::types::counter::CounterType;
 
 use super::filter::{
     matches_target_filter, matches_target_filter_on_battlefield_entry,
-    matches_target_filter_on_damage_record_source, FilterContext,
+    matches_target_filter_on_damage_record_source, matches_target_filter_on_event_snapshot,
+    FilterContext,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -2538,6 +2539,7 @@ fn connive_applier(
 ) -> ApplyResult {
     let ProposedEvent::Connive {
         object_id,
+        subject,
         count,
         applied,
     } = event
@@ -2550,6 +2552,7 @@ fn connive_applier(
         // the fallback survivor event cannot re-apply the same replacement.
         return ApplyResult::Modified(ProposedEvent::Connive {
             object_id,
+            subject,
             count,
             applied,
         });
@@ -2563,6 +2566,7 @@ fn connive_applier(
         // the fallback survivor event cannot re-apply the same replacement.
         return ApplyResult::Modified(ProposedEvent::Connive {
             object_id,
+            subject,
             count,
             applied,
         });
@@ -2610,7 +2614,9 @@ fn connive_applier(
                 // (small) `applied` set per re-entry.
                 let _ = crate::game::effects::connive::propose_connive(
                     state,
-                    object_id,
+                    crate::types::game_state::ConniveSubject {
+                        snapshot: (*subject).clone(),
+                    },
                     connive_count,
                     applied.clone(),
                     events,
@@ -2678,7 +2684,9 @@ fn connive_applier(
                             if state.pending_connive_reentry.is_none() {
                                 state.pending_connive_reentry =
                                     Some(crate::types::game_state::PendingConniveReentry {
-                                        conniver: object_id,
+                                        conniver: crate::types::game_state::ConniveSubject {
+                                            snapshot: (*subject).clone(),
+                                        },
                                         count: connive_count,
                                         applied: applied.clone(),
                                     });
@@ -4834,16 +4842,60 @@ fn replacement_condition_quantity_ctx(
     state: &GameState,
     source_id: ObjectId,
     affected_object_id: Option<ObjectId>,
+    event: &ProposedEvent,
 ) -> crate::game::quantity::QuantityContext {
-    let scoped_player = affected_object_id
-        .and_then(|id| state.objects.get(&id))
-        .map(replacement_source_player);
+    let scoped_player = match event {
+        // CR 400.7: Connive's subject may have left and returned while a
+        // replacement ordering choice was pending. Its controller-relative
+        // condition context is frozen on the original subject, never read from
+        // the current object at the reused storage id.
+        ProposedEvent::Connive { subject, .. } => Some(subject.controller),
+        _ => affected_object_id
+            .and_then(|id| state.objects.get(&id))
+            .map(replacement_source_player),
+    };
     crate::game::quantity::QuantityContext {
         entering: None,
         source: source_id,
         trigger_source: None,
         recipient: None,
         scoped_player,
+    }
+}
+
+/// CR 400.7 + CR 614.1d: determine whether a replacement's `valid_card`
+/// predicate matches the event subject. Connive carries its own exact snapshot;
+/// all other events retain their established live or entry-snapshot paths.
+fn replacement_valid_card_matches(
+    repl_def: &ReplacementDefinition,
+    event: &ProposedEvent,
+    state: &GameState,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if let ProposedEvent::Connive { subject, .. } = event {
+        return matches_target_filter_on_event_snapshot(state, subject, filter, ctx);
+    }
+    if repl_def.event == ReplacementEvent::ChangeZone
+        || (matches!(event, ProposedEvent::TokenEntry { .. })
+            && repl_def.event == ReplacementEvent::Moved)
+    {
+        return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
+    }
+    event
+        .affected_object_id()
+        .map(|oid| matches_target_filter(state, oid, filter, ctx))
+        .unwrap_or(false)
+}
+
+/// CR 400.7: an exact Connive snapshot must not be converted back into a raw
+/// object id for condition evaluation. Conditions that need unavailable facts
+/// fail closed; controller-scoped quantities use the snapshot in
+/// [`replacement_condition_quantity_ctx`].
+fn replacement_condition_affected_object_id(event: &ProposedEvent) -> Option<ObjectId> {
+    match event {
+        ProposedEvent::Connive { .. } => None,
+        _ => event.affected_object_id(),
     }
 }
 
@@ -5013,7 +5065,8 @@ fn evaluate_replacement_condition(
             }
             // CR 608.2c: resolve with the scoped-player context so `ScopedPlayer`
             // filters bind to the entering/affected object's controller.
-            let ctx = replacement_condition_quantity_ctx(state, source_id, affected_object_id);
+            let ctx =
+                replacement_condition_quantity_ctx(state, source_id, affected_object_id, event);
             let lhs_val = crate::game::quantity::resolve_quantity_with_ctx(
                 state,
                 lhs,
@@ -5063,7 +5116,8 @@ fn evaluate_replacement_condition(
             // CR 608.2c: resolve with the scoped-player context so `ScopedPlayer`
             // filters bind to the entering/affected object's controller (Land
             // Equilibrium's LHS "an opponent who controls at least as many lands").
-            let ctx = replacement_condition_quantity_ctx(state, source_id, affected_object_id);
+            let ctx =
+                replacement_condition_quantity_ctx(state, source_id, affected_object_id, event);
             let lhs_val = crate::game::quantity::resolve_quantity_with_ctx(
                 state,
                 lhs,
@@ -5400,17 +5454,7 @@ fn apply_state_level_gates(
     // CR 614.1d: valid_card filter — the event's affected object must match.
     if let Some(ref filter) = repl_def.valid_card {
         let ctx = FilterContext::from_source_with_controller(source, source_controller);
-        let matches = if repl_def.event == ReplacementEvent::ChangeZone
-            || (matches!(event, ProposedEvent::TokenEntry { .. })
-                && repl_def.event == ReplacementEvent::Moved)
-        {
-            matches_target_filter_on_battlefield_entry(state, event, filter, &ctx)
-        } else {
-            event
-                .affected_object_id()
-                .map(|oid| matches_target_filter(state, oid, filter, &ctx))
-                .unwrap_or(false)
-        };
+        let matches = replacement_valid_card_matches(repl_def, event, state, filter, &ctx);
         if !matches {
             return false;
         }
@@ -5441,7 +5485,7 @@ fn apply_state_level_gates(
             source_controller,
             source,
             state,
-            event.affected_object_id(),
+            replacement_condition_affected_object_id(event),
             event,
         ) {
             return false;
@@ -5777,17 +5821,7 @@ fn object_replacement_candidate_applies(
 
     if let Some(ref filter) = repl_def.valid_card {
         let ctx = FilterContext::from_source_with_controller(obj.id, replacement_player);
-        let matches = if repl_def.event == ReplacementEvent::ChangeZone
-            || (matches!(event, ProposedEvent::TokenEntry { .. })
-                && repl_def.event == ReplacementEvent::Moved)
-        {
-            matches_target_filter_on_battlefield_entry(state, event, filter, &ctx)
-        } else {
-            event
-                .affected_object_id()
-                .map(|oid| matches_target_filter(state, oid, filter, &ctx))
-                .unwrap_or(false)
-        };
+        let matches = replacement_valid_card_matches(repl_def, event, state, filter, &ctx);
         if !matches {
             return false;
         }
@@ -5817,7 +5851,7 @@ fn object_replacement_candidate_applies(
             replacement_player,
             obj.id,
             state,
-            event.affected_object_id(),
+            replacement_condition_affected_object_id(event),
             event,
         ) {
             return false;
@@ -8780,7 +8814,9 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{DamageRecord, LiminalEntry, ManaSpentSourceSnapshot};
+    use crate::types::game_state::{
+        DamageRecord, GameState, LiminalEntry, ManaSpentSourceSnapshot,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaType;
@@ -9544,6 +9580,23 @@ mod tests {
 
     #[test]
     fn replacement_event_key_taxonomy_matches_supported_proposed_events() {
+        let mut connive_state = GameState::new_two_player(42);
+        let conniver_id = ObjectId(1);
+        connive_state.objects.insert(
+            conniver_id,
+            GameObject::new(
+                conniver_id,
+                CardId(1),
+                PlayerId(0),
+                "Conniver".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        connive_state.battlefield.push_back(conniver_id);
+        let connive_subject = connive_state
+            .capture_connive_subject(conniver_id)
+            .expect("fixture conniver exists")
+            .snapshot;
         let token_event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
@@ -9676,6 +9729,7 @@ mod tests {
             (
                 ProposedEvent::Connive {
                     object_id: ObjectId(1),
+                    subject: Box::new(connive_subject),
                     count: 1,
                     applied: HashSet::new(),
                 },
@@ -12600,6 +12654,53 @@ mod tests {
             subtypes: vec![],
         };
         obj
+    }
+
+    /// CR 400.7 + CR 614.1d: Connive replacement passes keep the original
+    /// subject facts. A same-id return between two replacement checks must not
+    /// make the second check read the returned incarnation's controller.
+    #[test]
+    fn connive_replacement_second_pass_uses_original_subject_snapshot() {
+        let conniver_id = ObjectId(6100);
+        let mut state = GameState::new_two_player(42);
+        state.objects.insert(
+            conniver_id,
+            make_creature(conniver_id, PlayerId(0), Zone::Battlefield),
+        );
+        state.battlefield.push_back(conniver_id);
+        let original = state
+            .capture_connive_subject(conniver_id)
+            .expect("fixture conniver exists before replacement pass one");
+        let event = ProposedEvent::Connive {
+            object_id: conniver_id,
+            subject: Box::new(original.snapshot.clone()),
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let first_pass = ReplacementDefinition::new(ReplacementEvent::Connive);
+        assert!(
+            apply_state_level_gates(&first_pass, &event, ObjectId(0), PlayerId(0), &state),
+            "reach guard: the first Connive replacement pass applies"
+        );
+
+        crate::game::zones::move_to_zone(&mut state, conniver_id, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(
+            &mut state,
+            conniver_id,
+            Zone::Battlefield,
+            &mut Vec::new(),
+        );
+        state.objects.get_mut(&conniver_id).unwrap().controller = PlayerId(1);
+
+        let mut second_pass = ReplacementDefinition::new(ReplacementEvent::Connive);
+        second_pass.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(
+            apply_state_level_gates(&second_pass, &event, ObjectId(0), PlayerId(0), &state),
+            "the second pass reads the original P0 creature snapshot, not the P1 same-id return"
+        );
     }
 
     #[test]

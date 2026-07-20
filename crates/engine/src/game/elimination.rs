@@ -2283,7 +2283,9 @@ mod tests {
             crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
         ]));
         state.pending_connive_reentry = Some(PendingConniveReentry {
-            conniver: o,
+            conniver: state
+                .capture_connive_subject(o)
+                .expect("fixture conniver exists"),
             count: 1,
             applied: HashSet::new(),
         });
