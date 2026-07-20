@@ -968,6 +968,7 @@ pub fn resolve(
             per_obj_ctx.source_id,
         );
         let delivery_start = events.len();
+        let stack_depth_before_zone_move = state.resolution_stack.len();
         match process_one_zone_move_with_terminal(state, &per_obj_ctx, *obj_id, events) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
@@ -1040,7 +1041,7 @@ pub fn resolve(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
-                state.push_change_zone_iteration(
+                state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
                         paused_current: Some(
@@ -1084,6 +1085,7 @@ pub fn resolve(
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
+                    stack_depth_before_zone_move,
                 );
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                 // may already have surfaced its own `EffectZoneChoice`.
@@ -1687,6 +1689,7 @@ pub fn resolve_all(
         let anticipated_pause =
             anticipated_zone_change_delivery(state, obj_id, dest_zone, ability.source_id);
         let delivery_start = events.len();
+        let stack_depth_before_zone_move = state.resolution_stack.len();
         match crate::game::zone_pipeline::execute_zone_move_with_terminal(
             state,
             obj_id,
@@ -1742,7 +1745,7 @@ pub fn resolve_all(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
-                state.push_change_zone_iteration(
+                state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
                         paused_current: Some(
@@ -1779,6 +1782,7 @@ pub fn resolve_all(
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
+                    stack_depth_before_zone_move,
                 );
                 crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
@@ -8006,6 +8010,140 @@ mod tests {
             state.active_change_zone_frame().is_none(),
             "resume slot must be cleared once the loop completes"
         );
+    }
+
+    #[test]
+    fn multi_target_entry_counter_pause_keeps_change_zone_below_counter_child() {
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
+
+        fn install_counter_replacement(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            modification: QuantityModification,
+        ) {
+            let source_id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source_id)
+                .expect("counter replacement source exists")
+                .replacement_definitions
+                .push(
+                    ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                        .quantity_modification(modification),
+                );
+        }
+
+        let mut state = GameState::new_two_player(42);
+        install_counter_replacement(
+            &mut state,
+            910,
+            "Counter Doubler",
+            QuantityModification::DOUBLE,
+        );
+        install_counter_replacement(
+            &mut state,
+            911,
+            "Counter Incrementer",
+            QuantityModification::Plus { value: 1 },
+        );
+        let first = create_object(
+            &mut state,
+            CardId(912),
+            PlayerId(0),
+            "First entrant".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(913),
+            PlayerId(0),
+            "Second entrant".to_string(),
+            Zone::Graveyard,
+        );
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![(
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Fixed { value: 1 },
+                )],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![TargetRef::Object(first), TargetRef::Object(second)],
+            ObjectId(914),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("multi-target entry resolves");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::types::resolution::FrameKind::ChangeZone,
+                crate::types::resolution::FrameKind::CounterAdditions,
+            ],
+            "the complete ChangeZone owner must remain below its ETB-counter child"
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("nested ChangeZone/counter prompt serializes as v2");
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("v2 nested prompt restores");
+        let mut state = restored.into_game_state();
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("production replacement action resumes the counter child first");
+        }
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.active_change_zone_frame().is_none());
+        assert!(state.active_counter_additions().is_none());
+        for object_id in [first, second] {
+            assert_eq!(state.objects[&object_id].zone, Zone::Battlefield);
+            assert!(
+                state.objects[&object_id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or_default()
+                    > 0,
+                "each entrant must finish its counter-replacement queue"
+            );
+        }
     }
 
     /// CR 708.2a + CR 708.3 (issue #2923 review): a face-down `ChangeZone` entry

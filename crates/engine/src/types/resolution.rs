@@ -270,6 +270,14 @@ pub enum ResolutionStackError {
         child_stack_start: usize,
         stack_len: usize,
     },
+    #[error(
+        "child-stack boundary {child_stack_start} has {actual:?} immediately below it, expected {expected:?}"
+    )]
+    UnexpectedChildBoundaryParent {
+        child_stack_start: usize,
+        expected: FrameKind,
+        actual: FrameKind,
+    },
     #[error("top frame {frame:?} does not match waiting prompt {waiting_for}")]
     PromptMismatch {
         frame: FrameKind,
@@ -534,6 +542,81 @@ impl ResolutionStack {
                 actual: frame.kind(),
             }),
         }
+    }
+
+    /// Insert a newly paused ChangeZone owner below the child stack raised by
+    /// the current zone move. If that boundary directly follows the Devour-only
+    /// owner for this move, upgrade that exact frame in place so its eligibility
+    /// snapshot remains coupled to the complete logical iteration owner.
+    pub fn insert_change_zone_parent_at_child_boundary(
+        &mut self,
+        pending: PendingChangeZoneIteration,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        if child_stack_start >= self.frames.len() {
+            return Err(ResolutionStackError::InvalidChildBoundary {
+                child_stack_start,
+                stack_len: self.frames.len(),
+            });
+        }
+
+        if let Some(parent_index) = child_stack_start.checked_sub(1) {
+            if let Some(ResolutionFrame::ChangeZone(frame)) = self.frames.get(parent_index) {
+                if frame.pending.is_none() {
+                    let devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
+                    self.frames[parent_index] =
+                        ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+                            pending: Some(pending),
+                            devour_eligible_snapshot,
+                        }));
+                    return Ok(());
+                }
+            }
+        }
+
+        self.insert_parent_at_child_boundary(
+            ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+                pending: Some(pending),
+                devour_eligible_snapshot: None,
+            })),
+            child_stack_start,
+        )
+    }
+
+    /// Replace the exact ChangeZone owner immediately below the child stack it
+    /// raised. This is the re-pause counterpart to `replace_active_change_zone`:
+    /// the owner remains in place while an ETB-counter child owns the stack top.
+    pub fn replace_change_zone_parent_at_child_boundary(
+        &mut self,
+        pending: PendingChangeZoneIteration,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        let parent_index =
+            child_stack_start
+                .checked_sub(1)
+                .ok_or(ResolutionStackError::InvalidChildBoundary {
+                    child_stack_start,
+                    stack_len: self.frames.len(),
+                })?;
+        let Some(parent) = self.frames.get(parent_index) else {
+            return Err(ResolutionStackError::InvalidChildBoundary {
+                child_stack_start,
+                stack_len: self.frames.len(),
+            });
+        };
+        let ResolutionFrame::ChangeZone(frame) = parent else {
+            return Err(ResolutionStackError::UnexpectedChildBoundaryParent {
+                child_stack_start,
+                expected: FrameKind::ChangeZone,
+                actual: parent.kind(),
+            });
+        };
+        let devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
+        self.frames[parent_index] = ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+            pending: Some(pending),
+            devour_eligible_snapshot,
+        }));
+        Ok(())
     }
 
     /// Returns the complete BatchDelivery owner only when it owns the stack
@@ -1443,14 +1526,18 @@ impl ResolutionStateWire {
                 if let Some(frame) = legacy_counter_removals.into_frame() {
                     legacy.push_counter_removals(frame);
                 }
-                if let Some(frame) = legacy_counter_additions.into_frame() {
-                    legacy.push_counter_additions(frame);
+                // A per-player copy walk parks beneath its inner token-copy
+                // work, and CopyToken in turn parks beneath an ETB-counter
+                // child. Rebuild that exact outer-to-inner order from the v1
+                // independent slots before top-only resume dispatch sees it.
+                if let Some(frame) = legacy_each_player_copy_chosen.into_frame() {
+                    legacy.push_each_player_copy_chosen(frame);
                 }
                 if let Some(frame) = legacy_copy_token.into_frame() {
                     legacy.push_copy_token(frame);
                 }
-                if let Some(frame) = legacy_each_player_copy_chosen.into_frame() {
-                    legacy.push_each_player_copy_chosen(frame);
+                if let Some(frame) = legacy_counter_additions.into_frame() {
+                    legacy.push_counter_additions(frame);
                 }
                 if let Some(frame) = legacy_choose_one_of.into_frame() {
                     legacy.push_choose_one_of(frame);
@@ -3355,6 +3442,81 @@ mod tests {
         );
         assert!(copy_token.active_copy_token().is_none());
         assert_reserializes_v2_only(copy_token);
+    }
+
+    #[test]
+    fn v1_nested_each_player_copy_and_counter_fixture_preserves_child_order() {
+        let state = GameState::new_two_player(122);
+        let each_player = PendingEachPlayerCopyChosen {
+            stage: CopyChosenStage::AwaitingCopy,
+            player: PlayerId(0),
+            chosen: Vec::new(),
+            remaining_choices: Vec::new(),
+            choose_filter: TargetFilter::Controller,
+            min: 0,
+            max: 0,
+            copy_modifications: Vec::new(),
+            scale: None,
+            choose_scope: CopyChooseScope::Chooser,
+            source_id: ObjectId(122),
+            source_controller: PlayerId(0),
+            scoped_players: Vec::new(),
+            trigger_event: None,
+        };
+        let copy_token = PendingCopyTokenResolution {
+            created_ids: Vec::new(),
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: ObjectId(122),
+        };
+        let counter_additions = PendingCounterAdditionQueue {
+            remaining: Vec::new(),
+            completion: None,
+        };
+
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_each_player_copy_chosen"] =
+            serde_json::to_value(each_player).expect("legacy each-player owner serializes");
+        v1["pending_copy_token_resolution"] =
+            serde_json::to_value(copy_token).expect("legacy copy-token child serializes");
+        v1["pending_counter_additions"] =
+            serde_json::to_value(counter_additions).expect("legacy counter child serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        let wire: ResolutionStateWire =
+            serde_json::from_value(v1).expect("v1 nested pause converts through the wire");
+        let v2 = serde_json::to_value(&wire).expect("nested pause serializes as v2 frames");
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                v2.get(*field).is_none(),
+                "nested v2 fixture must not write legacy field {field}"
+            );
+        }
+
+        let mut state = wire.into_game_state();
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::EachPlayerCopyChosen,
+                FrameKind::CopyToken,
+                FrameKind::CounterAdditions,
+            ],
+            "v1 nested parent/child slots must restore outer-to-inner"
+        );
+
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            let frames = state.resolution_stack.clone();
+            crate::game::effects::resume_resolution_frames(&mut state, &frames, &mut events);
+        }
+        assert!(state.active_each_player_copy_chosen().is_none());
+        assert!(state.active_copy_token().is_none());
+        assert!(state.active_counter_additions().is_none());
+        assert_reserializes_v2_only(state);
     }
 
     #[test]

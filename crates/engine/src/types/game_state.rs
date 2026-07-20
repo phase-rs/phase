@@ -13538,6 +13538,26 @@ impl GameState {
         }
     }
 
+    /// Park a newly paused ChangeZone iteration beneath the complete child
+    /// stack raised by the current move. The recorded depth is structural, not
+    /// a search for a buried parent.
+    pub fn push_change_zone_iteration_after_child(
+        &mut self,
+        pending: PendingChangeZoneIteration,
+        child_stack_start: usize,
+    ) {
+        match self.resolution_stack.len().cmp(&child_stack_start) {
+            std::cmp::Ordering::Less => {
+                panic!("ChangeZone move removed a parent before it could be parked")
+            }
+            std::cmp::Ordering::Equal => self.push_change_zone_iteration(pending),
+            std::cmp::Ordering::Greater => self
+                .resolution_stack
+                .insert_change_zone_parent_at_child_boundary(pending, child_stack_start)
+                .expect("paused ChangeZone owner must be inserted below its child stack"),
+        }
+    }
+
     /// Re-parks the active ChangeZone owner after its resume reaches another
     /// replacement boundary. The complete logical group is replaced in place;
     /// it is never popped and re-pushed or split into a sidecar.
@@ -13550,6 +13570,26 @@ impl GameState {
             devour_eligible_snapshot,
         })
         .expect("re-paused ChangeZone must own the active frame");
+    }
+
+    /// Re-park the current ChangeZone owner after its resumed move raised an
+    /// ETB-counter child. The complete owner is replaced at its captured
+    /// boundary, never removed or split while that child is active.
+    pub fn replace_active_change_zone_iteration_after_child(
+        &mut self,
+        pending: PendingChangeZoneIteration,
+        child_stack_start: usize,
+    ) {
+        match self.resolution_stack.len().cmp(&child_stack_start) {
+            std::cmp::Ordering::Less => {
+                panic!("ChangeZone move removed its active owner before it could be re-parked")
+            }
+            std::cmp::Ordering::Equal => self.replace_active_change_zone_iteration(pending),
+            std::cmp::Ordering::Greater => self
+                .resolution_stack
+                .replace_change_zone_parent_at_child_boundary(pending, child_stack_start)
+                .expect("re-paused ChangeZone owner must remain below its child stack"),
+        }
     }
 
     /// Returns the complete BatchDelivery owner only when its typed frame owns
