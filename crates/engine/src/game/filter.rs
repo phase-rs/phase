@@ -18,6 +18,7 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
+use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
     AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
     SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
@@ -1659,6 +1660,75 @@ pub fn matches_target_filter_on_lki_snapshot(
         is_suspected: lki.is_suspected,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
+}
+
+/// CR 400.7 + CR 603.10a: Match an event subject from its captured facts,
+/// never by re-reading the live object at the same storage id. Connive uses
+/// this for its exact completion snapshot after a replacement-ordering pause.
+pub(crate) fn matches_target_filter_on_event_snapshot(
+    state: &GameState,
+    snapshot: &EventObjectSnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let mut object = GameObject::new(
+        snapshot.identity.object_id,
+        CardId(0),
+        snapshot.owner,
+        snapshot.name.clone(),
+        snapshot.zone,
+    );
+    object.controller = snapshot.controller;
+    object.power = snapshot.power;
+    object.toughness = snapshot.toughness;
+    object.base_power = snapshot.base_power;
+    object.base_toughness = snapshot.base_toughness;
+    object.card_types.core_types = snapshot.core_types.clone();
+    object.card_types.subtypes = snapshot.subtypes.clone();
+    object.card_types.supertypes = snapshot.supertypes.clone();
+    object.mana_cost = ManaCost::generic(snapshot.mana_value);
+    object.keywords = snapshot.keywords.clone();
+    object.color = snapshot.colors.clone();
+    object.counters = snapshot.counters.clone();
+    object.is_token = snapshot.is_token;
+    object.is_commander = snapshot.is_commander;
+    object.tapped = snapshot.tapped;
+    object.face_down = snapshot.face_down;
+    object.transformed = snapshot.transformed;
+    object.is_suspected = snapshot.is_suspected;
+    object.is_renowned = snapshot.is_renowned;
+    object.is_saddled = snapshot.is_saddled;
+    object.attachments = snapshot
+        .attachments
+        .iter()
+        .map(|attachment| attachment.identity.object_id)
+        .collect();
+    object.saddled_by = snapshot
+        .relations
+        .saddled_sources
+        .iter()
+        .map(|identity| identity.object_id)
+        .collect();
+    object.convoked_creatures = snapshot
+        .relations
+        .convoked_sources
+        .iter()
+        .map(|identity| identity.object_id)
+        .collect();
+
+    filter_inner_for_object(
+        state,
+        &object,
+        snapshot.identity.object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.trigger_source,
+        ctx.recipient_id,
+        ctx.scoped_iteration_player,
+        ControllerLookup::LiveOnly,
+    )
 }
 
 /// CR 603.4 + CR 603.6 + CR 603.10: Evaluate a trigger condition whose
@@ -4958,7 +5028,7 @@ fn stack_entry_targets_satisfy(
     }
 }
 
-fn object_has_no_abilities(obj: &GameObject) -> bool {
+pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
     obj.keywords.is_empty()
         && obj.abilities.is_empty()
         && obj.trigger_definitions.is_empty()

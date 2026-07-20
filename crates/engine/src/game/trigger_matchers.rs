@@ -3284,15 +3284,30 @@ pub(super) fn match_connives(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    let source_id = source_event_subject_id(source_context);
     let GameEvent::EffectResolved {
         kind: EffectKind::Connive,
         source_id: conniver_id,
-        ..
+        subject,
     } = event
     else {
         return false;
     };
+    if let Some(subject) = subject {
+        if let Some(filter) = &trigger.valid_card {
+            return super::filter::matches_target_filter_on_event_snapshot(
+                state,
+                subject,
+                filter,
+                &super::filter::FilterContext::from_trigger_source(source_context),
+            );
+        }
+        return subject.identity == source_context.identity.reference;
+    }
+
+    // Legacy events have no exact subject snapshot. They cannot arise from the
+    // current connive pipeline, but retain the prior LKI fallback for archived
+    // test fixtures and historic event logs.
+    let source_id = source_event_subject_id(source_context);
     if trigger.valid_card.is_some() {
         // CR 603.10a + CR 111.7: Connive triggers look back in time. The conniver is
         // routinely gone by the time this event is matched — killed in response while the
@@ -16530,6 +16545,73 @@ mod tests {
         assert!(
             !match_connives(&opp_event, &trigger, &test_trigger_source_context(&state, source), &state),
             "an opponent's conniver must NOT fire the controller's 'creature you control' trigger via LKI"
+        );
+    }
+
+    /// CR 400.7 + CR 701.50f: A Connive completion event owns the incarnation
+    /// that performed the keyword action. A same-id return neither satisfies
+    /// that returned object's self trigger nor changes the typed subject facts
+    /// observed by another permanent's "creature you control connives" trigger.
+    #[test]
+    fn connives_completion_snapshot_does_not_rebind_same_id_return() {
+        let mut state = setup();
+        let observer = create_object(
+            &mut state,
+            CardId(830),
+            PlayerId(0),
+            "Glorious Purpose".to_string(),
+            Zone::Battlefield,
+        );
+        let conniver = create_object(
+            &mut state,
+            CardId(831),
+            PlayerId(0),
+            "Original Conniver".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, conniver);
+        let original = state
+            .capture_connive_subject(conniver)
+            .expect("fixture conniver exists before it leaves");
+
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, conniver, Zone::Battlefield, &mut Vec::new());
+        state.objects.get_mut(&conniver).unwrap().controller = PlayerId(1);
+        assert_ne!(
+            original.identity(),
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&conniver]),
+            "reach guard: the returned object must be a distinct incarnation"
+        );
+
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Connive,
+            source_id: conniver,
+            subject: Some(Box::new(original.snapshot.clone())),
+        };
+
+        let self_trigger = make_trigger(TriggerMode::Connives);
+        assert!(
+            !match_connives(
+                &event,
+                &self_trigger,
+                &test_trigger_source_context(&state, conniver),
+                &state
+            ),
+            "the returned permanent is not the object that connived"
+        );
+
+        let typed_trigger = parse_trigger_line(
+            "Whenever a creature you control connives, put a +1/+1 counter on that creature.",
+            "Glorious Purpose",
+        );
+        assert!(
+            match_connives(
+                &event,
+                &typed_trigger,
+                &test_trigger_source_context(&state, observer),
+                &state
+            ),
+            "the typed Connive subject filter reads the original captured controller, not the returned object"
         );
     }
 

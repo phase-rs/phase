@@ -68,7 +68,9 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
     doubles: ["turn", "supported", "total"],
   },
   session_start: { blobs: ["route"], doubles: [] },
-  game_start: { blobs: ["game_mode"], doubles: ["player_count", "ai_count"] },
+  // `format` appended 2026-07: the engine `GameFormat` variant name (e.g.
+  // "Commander", "HistoricBrawl"); "" from clients predating the field.
+  game_start: { blobs: ["game_mode", "format"], doubles: ["player_count", "ai_count"] },
   route_view: { blobs: ["route"], doubles: [] },
 };
 
