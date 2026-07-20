@@ -2721,11 +2721,16 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     ));
     assert!(
         state
-            .pending_spell_resolution
-            .as_ref()
+            .active_spell_resolution()
             .is_some_and(|ctx| ctx.object_id == mimeoplasm),
         "the outer permanent-spell resolution must survive the inner cost prompt"
     );
+
+    let serialized = serde_json::to_string(runner.state())
+        .expect("the nested SpellResolution replacement prompt serializes as v2");
+    let restored: GameState = serde_json::from_str(&serialized)
+        .expect("the nested SpellResolution replacement prompt restores from v2");
+    let mut runner = GameRunner::from_state(restored);
 
     for prompt in 0..2 {
         assert!(
@@ -2750,8 +2755,7 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
             assert!(
                 runner
                     .state()
-                    .pending_spell_resolution
-                    .as_ref()
+                    .active_spell_resolution()
                     .is_some_and(|ctx| ctx.object_id == mimeoplasm),
                 "an inner cost redirect must not consume the outer spell-resolution context"
             );
@@ -2782,7 +2786,7 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     );
     assert_eq!(state.objects[&mimeoplasm].zone, Zone::Battlefield);
     assert!(
-        state.pending_spell_resolution.is_none(),
+        state.active_spell_resolution().is_none(),
         "the outer context is consumed only when Mimeoplasm's own entry completes"
     );
 }

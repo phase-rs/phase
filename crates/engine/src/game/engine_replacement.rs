@@ -218,7 +218,7 @@ pub(super) fn handle_replacement_choice(
                 //     `post_replacement_continuation` drain; the epilogue below
                 //     keeps draining WITH the spell-resolution ctx and with
                 //     `post_replacement_source` cleared for zone changes.
-                // (2) `pending_spell_resolution` ordering is therefore
+                // (2) SpellResolution frame ordering is therefore
                 //     untouched: `apply_pending_spell_resolution` still runs in
                 //     the epilogue before that drain.
                 // (3) PLAN OQ#3 (RESOLVED): play/cast provenance is not a ctx
@@ -756,13 +756,13 @@ pub(super) fn handle_replacement_choice(
             state.waiting_for = waiting_for.clone();
 
             let mut replacement_ctx = None;
-            if zone_change_object_id
-                .zip(state.pending_spell_resolution.as_ref())
-                .is_some_and(|(object_id, ctx)| object_id == ctx.object_id)
-            {
+            if zone_change_object_id.is_some_and(|object_id| {
+                state
+                    .active_spell_resolution()
+                    .is_some_and(|ctx| object_id == ctx.object_id)
+            }) {
                 let ctx = state
-                    .pending_spell_resolution
-                    .take()
+                    .take_active_spell_resolution()
                     .expect("matching spell-resolution context was checked above");
                 if enters_battlefield {
                     apply_pending_spell_resolution(state, &ctx, events);
@@ -1286,10 +1286,12 @@ pub(super) fn handle_replacement_choice(
             // the next resume's epilogue to drain; on a pause, surface the
             // parked prompt (its resume delivers the chosen event through the
             // ZoneChange arm above).
-            let _ = state
-                .clear_active_ability_continuation()
-                .expect("replacement cancellation cannot clear a buried continuation");
-            if let Some(ctx) = state.pending_spell_resolution.take() {
+            if state.active_ability_continuation().is_some() {
+                let _ = state
+                    .clear_active_ability_continuation()
+                    .expect("replacement cancellation cannot clear a buried continuation");
+            }
+            if let Some(ctx) = state.take_active_spell_resolution() {
                 match crate::game::zone_pipeline::move_object(
                     state,
                     crate::game::zone_pipeline::ZoneMoveRequest::spell_resolution_default(
@@ -3077,7 +3079,7 @@ mod tests {
 
     /// CR 608.3e + CR 614.6 discriminating test (fail-first): when a permanent
     /// spell's ETB is fully prevented after a replacement choice
-    /// (`ReplacementResult::Prevented` while `pending_spell_resolution` is set),
+    /// (`ReplacementResult::Prevented` while SpellResolution is active),
     /// the graveyard fallback is a FRESH, never-consulted event — it must route
     /// through the zone pipeline so a board-wide `Moved` graveyard→exile
     /// redirect (Rest in Peace / Leyline of the Void) fires on the discarded
@@ -3088,7 +3090,7 @@ mod tests {
     /// today, so the natural entry-prevention pause is not constructible
     /// end-to-end; the parked choice is staged as a regeneration-shield Destroy
     /// prevention (the canonical `Prevented` producer) with
-    /// `pending_spell_resolution` set. The assertion target —
+    /// the SpellResolution frame set. The assertion target —
     /// `handle_replacement_choice`'s Prevented-arm CR 608.3e fallback — is
     /// driven through the real `GameAction::ChooseReplacement` resume entry.
     #[test]
@@ -3137,7 +3139,7 @@ mod tests {
             .into();
 
         // The paused entry's spell-resolution bookkeeping.
-        state.pending_spell_resolution = Some(PendingSpellResolution {
+        state.push_spell_resolution(PendingSpellResolution {
             object_id: spell,
             controller: PlayerId(0),
             casting_variant: CastingVariant::Normal,
@@ -3186,6 +3188,16 @@ mod tests {
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);
+
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("spell-resolution prompt serializes as v2 frames");
+        let mut state =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("spell-resolution prompt restores from v2 frames")
+                .into_game_state();
+        state.rehydrate_rng();
 
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("resume replacement choice");

@@ -10664,12 +10664,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_token_substitution_count: Option<i32>,
 
-    /// Transient: post-resolution context for a permanent spell whose ETB replacement
-    /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
-    /// after the zone change completes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_spell_resolution: Option<PendingSpellResolution>,
-
     /// CR 614.12a + CR 707.9 + CR 603.2: `ZoneChanged`-to-battlefield events
     /// for an object whose entry is paused mid-resolution awaiting an
     /// interactive choice (e.g. `WaitingFor::CopyTargetChoice`). Per CR
@@ -14089,6 +14083,35 @@ impl GameState {
             .expect("the active life-total assignment frame must be structurally consumable")
     }
 
+    /// Returns permanent-spell completion context only when its frame owns the
+    /// active stack top.
+    pub fn active_spell_resolution(&self) -> Option<&PendingSpellResolution> {
+        self.resolution_stack.active_spell_resolution()
+    }
+
+    /// Mutably accesses only the active permanent-spell completion context.
+    pub fn active_spell_resolution_mut(&mut self) -> Option<&mut PendingSpellResolution> {
+        self.resolution_stack.active_spell_resolution_mut()
+    }
+
+    /// Parks permanent-spell completion context above the replacement choice
+    /// that suspended its entry.
+    pub fn push_spell_resolution(&mut self, pending: PendingSpellResolution) {
+        self.resolution_stack.push_spell_resolution(pending);
+    }
+
+    /// Consumes exactly the active permanent-spell completion context. Child
+    /// operations remain above this frame until they finish; no frame search is
+    /// permitted to reach through them.
+    pub fn take_active_spell_resolution(&mut self) -> Option<PendingSpellResolution> {
+        if self.active_spell_resolution().is_none() {
+            return None;
+        }
+        self.resolution_stack
+            .take_active_spell_resolution()
+            .expect("the active spell-resolution frame must be structurally consumable")
+    }
+
     /// Removes a completed independent MultiDraw frame. A frame carrying the
     /// deferred connive re-entry remains resident until that exact link is
     /// consumed by its action/resume owner.
@@ -14756,7 +14779,6 @@ impl GameState {
             replacement_may_cost_paused: false,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
-            pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: LayersDirty::full(),
             static_gate_truth: im::HashMap::new(),
@@ -15763,7 +15785,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_replacement: _,
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
-        pending_spell_resolution: _,
         deferred_entry_events: _,
         layers_dirty: _,
         static_gate_truth: _,
@@ -16058,7 +16079,6 @@ impl PartialEq for GameState {
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
-            && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty
             // `static_gate_truth` is INTENTIONALLY excluded: unlike

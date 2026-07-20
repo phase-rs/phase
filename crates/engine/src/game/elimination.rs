@@ -828,11 +828,10 @@ fn do_eliminate(
     // `pending_cast` controller key above) so a living player's paused resolution
     // survives an opponent's departure.
     if state
-        .pending_spell_resolution
-        .as_ref()
+        .active_spell_resolution()
         .is_some_and(|psr| psr.controller == player)
     {
-        state.pending_spell_resolution = None;
+        let _ = state.take_active_spell_resolution();
     }
 
     // CR 800.4a: All objects the player owns leave the game (exiled). Route each
@@ -2313,22 +2312,6 @@ mod tests {
             HashSet::new(),
             crate::types::game_state::DrawSequenceOrigin::Plain,
         );
-        // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
-        state.pending_spell_resolution = Some(PendingSpellResolution {
-            object_id: o,
-            controller: PlayerId(2),
-            casting_variant: CastingVariant::Normal,
-            cast_from_zone: None,
-            cast_controller: None,
-            cast_timing_permission: None,
-            spell_targets: vec![],
-            actual_mana_spent: 0,
-            kickers_paid: vec![],
-            additional_cost_payment_count: 0,
-            additional_cost_payments: vec![],
-            convoked_creatures: vec![],
-        });
-
         let mut events = Vec::new();
         // Real path: X (P1) and C (P2) leave in the SAME simultaneous SBA event
         // (losers sorted by id -> [P1, P2] -> do_eliminate(P1) then do_eliminate(P2)).
@@ -2366,10 +2349,6 @@ mod tests {
             state.active_draw_sequence().is_none(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \
              cleared via abandon_post_replacement_continuation, not stranded"
-        );
-        assert!(
-            state.pending_spell_resolution.is_none(),
-            "the leaving chooser's coupled spell-resolution ctx must be torn down"
         );
     }
 
@@ -2450,21 +2429,6 @@ mod tests {
         state.pending_search_found_batch =
             Some(pending_search_found_batch(PlayerId(0), parked_found));
         state.push_batch_delivery(pending_search_found_zone_delivery(parked_found));
-        // A coupled spell-resolution ctx owned by the LIVING chooser (P0).
-        state.pending_spell_resolution = Some(PendingSpellResolution {
-            object_id: create_object(&mut state, CardId(7), PlayerId(0), "S".into(), Zone::Stack),
-            controller: PlayerId(0),
-            casting_variant: CastingVariant::Normal,
-            cast_from_zone: None,
-            cast_controller: None,
-            cast_timing_permission: None,
-            spell_targets: vec![],
-            actual_mana_spent: 0,
-            kickers_paid: vec![],
-            additional_cost_payment_count: 0,
-            additional_cost_payments: vec![],
-            convoked_creatures: vec![],
-        });
         // CR 121.2: a paused draw instruction owned by the LIVING chooser (P0)
         // must survive a different player's departure — no over-clear.
         let living_frame = state.push_draw_sequence_with_origin(
@@ -2505,10 +2469,6 @@ mod tests {
             }),
             "an opponent leaving must preserve the living chooser's nested found-card completion"
         );
-        assert!(
-            state.pending_spell_resolution.is_some(),
-            "an opponent leaving must not tear down the living player's spell-resolution ctx"
-        );
         let survivor = state
             .active_draw_sequence()
             .expect("an opponent leaving must not clear the living chooser's paused instruction");
@@ -2527,6 +2487,44 @@ mod tests {
                 }
             ),
             "the living chooser's ReplacementChoice park must be preserved"
+        );
+    }
+
+    #[test]
+    fn elimination_clears_only_the_leaving_players_active_spell_resolution() {
+        let mut state = setup_three_player();
+        let spell = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Paused permanent".into(),
+            Zone::Stack,
+        );
+        state.push_spell_resolution(PendingSpellResolution {
+            object_id: spell,
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        });
+
+        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        assert!(
+            state.active_spell_resolution().is_some(),
+            "an opponent leaving must not tear down the living player's active spell frame"
+        );
+
+        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+        assert!(
+            state.active_spell_resolution().is_none(),
+            "the leaving controller's active spell frame must be torn down"
         );
     }
 

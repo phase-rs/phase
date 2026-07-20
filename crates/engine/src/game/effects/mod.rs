@@ -892,11 +892,10 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             life::drain_pending_life_total_assignment(state, events);
         }
         ResolutionFrame::SpellResolution(_) => {
-            if let Some(pending) = state.pending_spell_resolution.clone() {
-                crate::game::engine_replacement::apply_pending_spell_resolution(
-                    state, &pending, events,
-                );
-            }
+            // A permanent spell's entry is resumed only by the exact parked
+            // replacement action. This frame remains its parent while any
+            // replacement-produced child work resolves; Priority does not
+            // authorize a synthetic entry completion.
         }
         ResolutionFrame::PostReplacement(_) => {
             let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(

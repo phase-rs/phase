@@ -1256,21 +1256,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 .map(|o| o.additional_cost_payments.clone())
                                 .unwrap_or_default()
                         });
-                    state.pending_spell_resolution =
-                        Some(crate::types::game_state::PendingSpellResolution {
-                            object_id: entry.id,
-                            controller: entry.controller,
-                            casting_variant,
-                            cast_from_zone,
-                            cast_controller: Some(entry.controller),
-                            cast_timing_permission,
-                            spell_targets: spell_targets.clone(),
-                            actual_mana_spent,
-                            kickers_paid,
-                            additional_cost_payment_count,
-                            additional_cost_payments,
-                            convoked_creatures,
-                        });
+                    state.push_spell_resolution(crate::types::game_state::PendingSpellResolution {
+                        object_id: entry.id,
+                        controller: entry.controller,
+                        casting_variant,
+                        cast_from_zone,
+                        cast_controller: Some(entry.controller),
+                        cast_timing_permission,
+                        spell_targets: spell_targets.clone(),
+                        actual_mana_spent,
+                        kickers_paid,
+                        additional_cost_payment_count,
+                        additional_cost_payments,
+                        convoked_creatures,
+                    });
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);
                     // Emit StackResolved now — the spell has left the stack even though

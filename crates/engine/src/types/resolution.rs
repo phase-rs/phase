@@ -280,8 +280,8 @@ impl ResolutionFrame {
             | Self::MultiDraw(_)
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
+            | Self::SpellResolution(_)
             | Self::PostReplacement(_) => true,
-            Self::SpellResolution(_) => false,
         }
     }
 
@@ -1841,6 +1841,50 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::LifeTotalAssignment(pending));
     }
 
+    /// Returns permanent-spell completion context only when its frame owns the
+    /// active stack top.
+    pub fn active_spell_resolution(&self) -> Option<&PendingSpellResolution> {
+        match self.last() {
+            Some(ResolutionFrame::SpellResolution(pending)) => Some(pending),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active permanent-spell completion context.
+    pub fn active_spell_resolution_mut(&mut self) -> Option<&mut PendingSpellResolution> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::SpellResolution(pending)) => Some(pending),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active permanent-spell completion frame.
+    pub fn take_active_spell_resolution(
+        &mut self,
+    ) -> Result<Option<PendingSpellResolution>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::SpellResolution(_)) => {
+                let ResolutionFrame::SpellResolution(pending) =
+                    self.pop_expected(FrameKind::SpellResolution)?
+                else {
+                    unreachable!("checked spell-resolution frame kind must match")
+                };
+                Ok(Some(pending))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::SpellResolution,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks permanent-spell completion context above the replacement choice
+    /// that suspended its entry.
+    pub fn push_spell_resolution(&mut self, pending: PendingSpellResolution) {
+        self.push_inner(ResolutionFrame::SpellResolution(pending));
+    }
+
     /// Returns the active general replacement drain. During the one shipped
     /// G4 topology this is its exact, immediately preceding parent while the
     /// child starts or remains paused; there is intentionally no general frame
@@ -2290,6 +2334,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_multi_draw");
                 legacy_object.remove("pending_connive_reentry");
                 legacy_object.remove("pending_life_total_assignment");
+                legacy_object.remove("pending_spell_resolution");
                 legacy_object.remove("post_replacement_drains");
                 legacy_object.remove("post_replacement_effect");
                 legacy_object.remove("post_replacement_resolved_effect");
@@ -2892,6 +2937,8 @@ struct LegacyReplacementTailsWire {
     #[serde(default)]
     pending_life_total_assignment: Option<PendingLifeTotalAssignment>,
     #[serde(default)]
+    pending_spell_resolution: Option<PendingSpellResolution>,
+    #[serde(default)]
     post_replacement_drains: PostReplacementDrainStack,
     #[serde(default)]
     post_replacement_effect: Option<Box<AbilityDefinition>>,
@@ -2956,10 +3003,11 @@ impl LegacyReplacementTailsWire {
         let next_draw_sequence_frame_id = self.draw_sequences.next_frame_id();
         let pending_connive_reentry = self.pending_connive_reentry.take();
         let pending_life_total_assignment = self.pending_life_total_assignment.take();
+        let pending_spell_resolution = self.pending_spell_resolution.take();
         if !self.draw_sequences.is_empty() {
-            if pending_life_total_assignment.is_some() {
+            if pending_life_total_assignment.is_some() || pending_spell_resolution.is_some() {
                 return Err(
-                    "legacy multi-draw state cannot have an independent life-total assignment tail"
+                    "legacy multi-draw state cannot have an independent life-total assignment or spell-resolution tail"
                         .to_string(),
                 );
             }
@@ -2999,6 +3047,9 @@ impl LegacyReplacementTailsWire {
         if let Some(pending) = pending_life_total_assignment {
             frames.push(ResolutionFrame::LifeTotalAssignment(pending));
         }
+        if let Some(pending) = pending_spell_resolution {
+            frames.push(ResolutionFrame::SpellResolution(pending));
+        }
         Ok((frames, next_draw_sequence_frame_id))
     }
 }
@@ -3019,14 +3070,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
         }
         frames.push_inner(frame.clone());
     }
-    push_legacy_after_child_frames(state, &mut frames);
     Ok(frames)
-}
-
-fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_spell_resolution.clone() {
-        frames.push_inner(ResolutionFrame::SpellResolution(pending));
-    }
 }
 
 fn project_frames_into_legacy_state(
@@ -3108,11 +3152,9 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::LifeTotalAssignment(pending) => projected
                 .resolution_stack
                 .push_life_total_assignment(pending.clone()),
-            ResolutionFrame::SpellResolution(pending) => set_once(
-                &mut projected.pending_spell_resolution,
-                pending.clone(),
-                "SpellResolution",
-            )?,
+            ResolutionFrame::SpellResolution(pending) => projected
+                .resolution_stack
+                .push_spell_resolution(pending.clone()),
             ResolutionFrame::PostReplacement(drains) => {
                 projected
                     .resolution_stack
@@ -3125,14 +3167,6 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.pending_spell_resolution = None;
-}
-
-fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), String> {
-    if slot.replace(value).is_some() {
-        return Err(format!("duplicate {name} frame"));
-    }
-    Ok(())
 }
 
 fn legacy_resolution_wire_field(object: &Map<String, Value>) -> Option<&str> {
@@ -3340,30 +3374,6 @@ mod tests {
             draw_sequences,
             connive_reentry: None,
         })
-    }
-
-    fn restore_v1_fixture(state: GameState) -> GameState {
-        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
-        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
-
-        let wire: ResolutionStateWire =
-            serde_json::from_value(v1).expect("v1 fixture converts through the wire");
-        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
-        assert_eq!(
-            v2["resolution_state_version"],
-            Value::from(RESOLUTION_STATE_WIRE_VERSION)
-        );
-        assert!(v2.get("resolution_frames").is_some());
-        for field in legacy_resolution_wire_fields() {
-            assert!(
-                v2.get(*field).is_none(),
-                "v2 fixture must not write legacy field {field}"
-            );
-        }
-
-        serde_json::from_value::<ResolutionStateWire>(v2)
-            .expect("v2 fixture restores for the legacy runtime action path")
-            .into_game_state()
     }
 
     fn restore_v1_optional_effect_fixture(
@@ -4837,7 +4847,7 @@ mod tests {
             .regeneration_shield()
             .description("Regenerate".to_string())]
         .into();
-        spell.pending_spell_resolution = Some(PendingSpellResolution {
+        let pending_spell_resolution = PendingSpellResolution {
             object_id: spell_id,
             controller: PlayerId(0),
             casting_variant: CastingVariant::Normal,
@@ -4850,7 +4860,7 @@ mod tests {
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
-        });
+        };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
@@ -4874,10 +4884,16 @@ mod tests {
         });
         spell.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &spell);
-        let mut spell = restore_v1_fixture(spell);
+        let mut spell = serde_json::to_value(spell).expect("legacy spell fixture serializes");
+        spell["pending_spell_resolution"] =
+            serde_json::to_value(pending_spell_resolution).expect("legacy spell tail serializes");
+        spell["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let mut spell = serde_json::from_value::<ResolutionStateWire>(spell)
+            .expect("v1 spell fixture restores")
+            .into_game_state();
         apply_as_current(&mut spell, GameAction::ChooseReplacement { index: 0 })
             .expect("spell fixture resumes through the real replacement action");
-        assert!(spell.pending_spell_resolution.is_none());
+        assert!(spell.active_spell_resolution().is_none());
         assert_reserializes_v2_only(spell);
 
         let mut drains = PostReplacementDrainStack::default();
