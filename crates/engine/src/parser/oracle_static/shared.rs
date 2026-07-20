@@ -375,6 +375,55 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     parse_continuous_gets_has(predicate.original, affected, description)
 }
 
+/// CR 509.1c + CR 604.1 + CR 611.3a: the inverted `"As long as <cond>, <self-ref>
+/// <bare rule-static predicate>"` class — Frodo Baggins / Enkira
+/// ("… it must be blocked if able") and Ethrimik ("… ~ can't attack or block").
+///
+/// General across two axes: any condition `parse_static_condition` can type
+/// (minus the attached-subject-bound subset, declined by
+/// `condition_binds_attached_subject`) × any predicate
+/// `parse_rule_static_predicate_nom` accepts. Emits exactly one condition-gated
+/// definition via the shared `lower_rule_static` lowering — never a hand-built
+/// `StaticMode`.
+///
+/// Fails closed at three points, each deliberate:
+/// 1. the subject must be a SELF-reference (`"it "` / `"~ "`) — "they " and the
+///    typed/player subjects denote a set other than the source, and binding those
+///    to `SelfRef` would retarget the requirement;
+/// 2. `all_consuming` — the effect clause must be NOTHING but the requirement, so
+///    compound lines (Dragon's Rage Channeler) decline and keep today's handling;
+/// 3. the condition must TYPE — an untypeable condition returns `None` rather than
+///    emitting an unconditional requirement (CR 611.3a).
+fn try_parse_inverted_bare_self_rule_static(
+    split: &InvertedSplit,
+    effect_lower: &str,
+    description: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let effect_tp = TextPair::new(&split.effect_text, effect_lower);
+    // Self-references ONLY — see fail-closed note 1 above.
+    let predicate_tp = nom_tag_tp(&effect_tp, "it ").or_else(|| nom_tag_tp(&effect_tp, "~ "))?;
+
+    let (_, predicate) = all_consuming(parse_rule_static_predicate_nom)
+        .parse(predicate_tp.lower.trim())
+        .ok()?;
+
+    // CR 608.2c attached-subject gate. MUST run BEFORE condition typing: the
+    // attached conditions this rejects DO type (and fully consume), so a gate
+    // placed after step 5 would be dead code. See `condition_binds_attached_subject`.
+    if condition_binds_attached_subject(&split.condition_text.to_lowercase()) {
+        return None;
+    }
+
+    let condition = parse_static_condition(&split.condition_text)?;
+
+    Some(vec![lower_rule_static(
+        predicate,
+        TargetFilter::SelfRef,
+        description,
+    )
+    .condition(condition)])
+}
+
 /// CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on
 /// the host creature's COMBAT STATE — "As long as equipped/enchanted creature is
 /// attacking|blocking, it has/gets <X> [and <unmodeled conjunct>]" (Ace's
@@ -560,6 +609,79 @@ pub(crate) fn parse_attached_subject_qualifier(condition_lower: &str) -> Option<
         return None;
     }
     Some(filter)
+}
+
+/// CR 608.2c + CR 611.3a: Does this condition bind an ATTACHED subject
+/// ("enchanted creature", "equipped permanent", …) anywhere within it?
+///
+/// Used as a FAIL-CLOSED guard by the bare self-referential combat-requirement
+/// branch in `parse_static_line_multi_dispatch`. CR 608.2c directs that a card's
+/// text be read as a whole with the rules of English applied, rather than clause
+/// by clause — so the pronoun "it" in the effect clause binds to its English
+/// antecedent, the enchanted/equipped permanent, NOT to the Aura/Equipment
+/// itself. (The same inference is already relied on by `parse_static_line_multi`'s
+/// attached-scope rebind, which cites 608.2c for exactly this.) Binding that
+/// clause to `TargetFilter::SelfRef` would put the requirement on the wrong
+/// object.
+///
+/// LIVE PAPER REGRESSION THIS PREVENTS — Ray of Frost (afr):
+///   "As long as enchanted creature is red, it loses all abilities."
+/// Both legs type: the condition fully consumes (`oracle_nom::condition`'s
+/// `test_attached_object_is_color_condition`) and "loses all abilities" is a
+/// `RuleStaticPredicate::LoseAllAbilities`. The branch runs BEFORE the consumer
+/// that correctly claims this line today (`try_parse_inverted_attached_subject_grant`
+/// via the `parse_static_line_inner` fallback), so without this gate the branch
+/// would win the race and strip the AURA's own abilities (Flash, Enchant, its ETB
+/// trigger, its untap-prevention static) instead of the enchanted creature's.
+/// Dog Umbra (mh3) is the MID-STRING member ("as long as another player controls
+/// enchanted creature, it can't attack or block"), which is why this is a
+/// word-boundary SCAN and not a prefix peek.
+///
+/// DEFER: deriving the correct `affected` here (as
+/// `try_parse_inverted_attached_subject_grant` does via
+/// `parse_attached_subject_qualifier`) is NOT done, because that machinery's
+/// `Source*` collapse for attached prefixes is a suspected latent bug pending a
+/// dedicated audit + recipient-gating pass — see the DEFER note on
+/// `oracle_nom::condition::parse_source_subject`. Until that audit lands, this
+/// class is left UNCLAIMED (today's behavior) rather than claimed incorrectly.
+///
+/// Word-boundary scan (not a substring `contains`): the combinator is tried at
+/// each word start, so it matches complete attached-subject phrases only, and it
+/// finds them mid-string as well as at the prefix. Note `tag("equipped ")`
+/// carries a TRAILING SPACE, so the predicate-adjective form "~ is equipped"
+/// (Enkira) does NOT match and is correctly still claimed.
+///
+/// KNOWN, CURRENTLY-HARMLESS OVER-DECLINE: the trailing space spares a predicate
+/// adjective only at END OF STRING. It does NOT spare a SELF-referential condition
+/// where the adjective is followed by more words — "~ is enchanted or equipped"
+/// (Novice Knight) and "~ is enchanted by exactly one Aura" (Timber Paladin) both
+/// put a space after "enchanted" and therefore MATCH, even though "it" there
+/// correctly IS self. This is accepted, not a defect to route around: zero live
+/// impact, because no such card carries a BARE `RuleStaticPredicate` effect clause
+/// — Novice Knight grants "can attack as though it didn't have defender", Timber
+/// Paladin sets base P/T — so `all_consuming` declines them BEFORE this gate is
+/// ever consulted. (The bare-adjective forms "~ is enchanted" — Pillar of War,
+/// Freewind Equenaut — are at end of string and are correctly spared, exactly like
+/// Enkira.) If a future printing pairs a multi-word self-referential
+/// "is enchanted …" condition with a bare rule-static predicate, THAT is the point
+/// to narrow this gate — not before.
+pub(crate) fn condition_binds_attached_subject(condition_lower: &str) -> bool {
+    let mut remaining = condition_lower.trim_start();
+    while !remaining.is_empty() {
+        if alt((
+            tag::<_, _, OracleError<'_>>("enchanted "),
+            tag::<_, _, OracleError<'_>>("equipped "),
+        ))
+        .parse(remaining)
+        .is_ok()
+        {
+            return true;
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    false
 }
 
 /// CR 113.6b: Whether `filter` scopes to cards you own/control in `zone` — the
@@ -2087,6 +2209,46 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
                 }
                 return defs;
             }
+        }
+        // CR 509.1c + CR 604.1 + CR 611.3a: inverted static whose effect clause is a
+        // BARE self-referential combat requirement — "As long as <cond>, it must be
+        // blocked if able" (Frodo Baggins, Enkira), "As long as <cond>, it can't
+        // attack or block" (Ethrimik). The split above already isolated the
+        // condition and effect cleanly; this arm is the missing consumer for the
+        // bare-requirement shape. Without it the line falls through to
+        // `try_split_and_must_attack_block`, which cuts the requirement out
+        // mid-clause and leaves an orphaned "it", forcing the condition into
+        // `StaticCondition::Unrecognized` — evaluated as always-true in the layer
+        // system, so per CR 604.1 the requirement would function UNCONDITIONALLY.
+        //
+        // `all_consuming` is the safety gate for the effect clause: it must be
+        // nothing but a combat requirement. Dragon's Rage Channeler ("… gets +2/+2,
+        // has flying, and attacks each combat if able") leaves a non-empty
+        // remainder, declines here, and is still handled by the compound splitter
+        // as before.
+        //
+        // CR 608.2c attached-subject gate: read as a whole with the rules of English
+        // applied, the pronoun "it" binds its English antecedent — the enchanted/
+        // equipped permanent — not this source. Binding to SelfRef would retarget
+        // the requirement onto the Aura/Equipment. This is a LIVE PAPER regression,
+        // not a hypothetical: Ray of Frost (afr) "As long as enchanted creature is
+        // red, it loses all abilities" types on BOTH legs, and this branch runs
+        // BEFORE the consumer that correctly claims it today, so an ungated branch
+        // would strip the Aura's own abilities. Declined fail-closed — see
+        // `condition_binds_attached_subject`.
+        //
+        // Subject stripping accepts ONLY self-references ("it "/"~ "). "they " and
+        // the typed/player subjects in `parse_effect_subject_prefix` denote a set
+        // OTHER than the source; binding those to `SelfRef` would retarget the
+        // requirement.
+        //
+        // CR 611.3a fail-closed: an untypeable condition returns None and falls
+        // through rather than emitting an unconditional requirement (mirrors the
+        // cant-win-lose precedent above).
+        if let Some(defs) =
+            try_parse_inverted_bare_self_rule_static(&split, &effect_lower, &stripped)
+        {
+            return defs;
         }
     }
 
