@@ -1501,6 +1501,7 @@ fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool 
         || state.active_counter_removals().is_some()
         || state.active_counter_additions().is_some()
         || state.active_copy_token().is_some()
+        || state.active_multi_draw_frame().is_some()
 }
 
 pub(crate) fn append_to_pending_continuation(
@@ -1525,6 +1526,15 @@ pub(crate) fn append_to_pending_continuation(
                 .expect("sub_ability checked above")
                 .as_mut();
         }
+    } else if state
+        .resolution_stack
+        .has_active_post_replacement_draw_pair()
+    {
+        state
+            .insert_ability_continuation_outside_active_post_replacement_draw(
+                PendingContinuation::new(tail, state),
+            )
+            .expect("paired post-replacement draw must retain its continuation outside the pair");
     } else if active_frame_requires_ability_continuation_parent(state) {
         state
             .insert_ability_continuation_parent_of_active(PendingContinuation::new(tail, state))
@@ -1535,6 +1545,17 @@ pub(crate) fn append_to_pending_continuation(
 }
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
+    if state
+        .resolution_stack
+        .has_active_post_replacement_draw_pair()
+    {
+        state
+            .insert_ability_continuation_outside_active_post_replacement_draw(
+                PendingContinuation::new(Box::new(head), state),
+            )
+            .expect("paired post-replacement draw must retain its continuation outside the pair");
+        return;
+    }
     if active_frame_requires_ability_continuation_parent(state) {
         state
             .insert_ability_continuation_parent_of_active(PendingContinuation::new(

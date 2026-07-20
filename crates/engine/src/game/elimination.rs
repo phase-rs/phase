@@ -2294,15 +2294,6 @@ mod tests {
         state.post_replacement_token_choice_applied = Some(HashSet::from([
             crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
         ]));
-        state.push_connive_reentry(PendingConniveReentry {
-            conniver: state
-                .capture_connive_subject(o)
-                .expect("fixture conniver exists"),
-            count: 1,
-            applied: HashSet::new(),
-        });
-        state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(2), o));
-        state.push_batch_delivery(pending_search_found_zone_delivery(o));
         // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
         // single-player-scoped, must clear alongside its siblings via
         // `abandon_post_replacement_continuation` (replacement.rs).
@@ -2336,15 +2327,6 @@ mod tests {
             "abandoning the parked chooser's continuation must also clear the token-choice \
              applied seed, not just its established siblings (issue #4886, review #6)"
         );
-        assert!(state.active_connive_reentry().is_none());
-        assert!(
-            state.pending_search_found_batch.is_none(),
-            "the eliminated chooser's outer found-card batch must be abandoned"
-        );
-        assert!(
-            state.active_batch_delivery().is_none(),
-            "the eliminated chooser's nested found-card zone completion must be abandoned"
-        );
         assert!(
             state.active_draw_sequence().is_none(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \
@@ -2353,7 +2335,52 @@ mod tests {
     }
 
     #[test]
-    fn elimination_clears_outer_search_found_batch_without_nested_zone_completion() {
+    fn elimination_clears_active_connive_reentry_for_leaving_chooser() {
+        let mut state = setup_three_player();
+        let conniver = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Conniver".into(),
+            Zone::Battlefield,
+        );
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+        };
+        state.push_connive_reentry(PendingConniveReentry {
+            conniver: state
+                .capture_connive_subject(conniver)
+                .expect("fixture conniver exists"),
+            count: 1,
+            applied: HashSet::new(),
+        });
+
+        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+
+        assert!(state.active_connive_reentry().is_none());
+    }
+
+    #[test]
+    fn elimination_clears_search_found_batch_with_nested_zone_completion() {
         let mut state = setup_three_player();
         let found = create_object(
             &mut state,
@@ -2387,7 +2414,8 @@ mod tests {
             candidate_count: 1,
             candidates: Vec::new(),
         };
-        assert!(state.active_batch_delivery().is_none());
+        state.push_batch_delivery(pending_search_found_zone_delivery(found));
+        assert!(state.active_batch_delivery().is_some());
 
         eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
 
@@ -2397,7 +2425,7 @@ mod tests {
     }
 
     #[test]
-    fn opponent_leaving_preserves_living_choosers_replacement() {
+    fn opponent_leaving_preserves_living_choosers_search_found_replacement() {
         // CR 800.4a affects only the leaving player: a DIFFERENT player's departure
         // must NOT clear the living chooser's parked replacement (no over-clear).
         let mut state = setup_three_player();
@@ -2429,18 +2457,6 @@ mod tests {
         state.pending_search_found_batch =
             Some(pending_search_found_batch(PlayerId(0), parked_found));
         state.push_batch_delivery(pending_search_found_zone_delivery(parked_found));
-        // CR 121.2: a paused draw instruction owned by the LIVING chooser (P0)
-        // must survive a different player's departure — no over-clear.
-        let living_frame = state.push_draw_sequence_with_origin(
-            PlayerId(0),
-            2,
-            HashSet::new(),
-            crate::types::game_state::DrawSequenceOrigin::Plain,
-        );
-        state
-            .draw_sequence_frame_mut(living_frame)
-            .expect("the frame just pushed is active")
-            .accumulated = 1;
 
         let mut events = Vec::new();
         eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
@@ -2469,15 +2485,6 @@ mod tests {
             }),
             "an opponent leaving must preserve the living chooser's nested found-card completion"
         );
-        let survivor = state
-            .active_draw_sequence()
-            .expect("an opponent leaving must not clear the living chooser's paused instruction");
-        assert_eq!(
-            (survivor.player, survivor.remaining, survivor.accumulated),
-            (PlayerId(0), 2, 1),
-            "the living chooser's paused draw instruction must survive intact — owed units and \
-             already-delivered count both preserved"
-        );
         assert!(
             matches!(
                 state.waiting_for,
@@ -2488,6 +2495,63 @@ mod tests {
             ),
             "the living chooser's ReplacementChoice park must be preserved"
         );
+    }
+
+    #[test]
+    fn opponent_leaving_preserves_living_choosers_draw_replacement() {
+        let mut state = setup_three_player();
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+        };
+        let living_frame = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            2,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        state
+            .draw_sequence_frame_mut(living_frame)
+            .expect("the frame just pushed is active")
+            .accumulated = 1;
+
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut Vec::new());
+
+        assert!(state.pending_replacement.is_some());
+        let survivor = state
+            .active_draw_sequence()
+            .expect("an opponent leaving must not clear the living chooser's paused instruction");
+        assert_eq!(
+            (survivor.player, survivor.remaining, survivor.accumulated),
+            (PlayerId(0), 2, 1),
+            "the living chooser's paused draw instruction must survive intact — owed units and \
+             already-delivered count both preserved"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
     }
 
     #[test]

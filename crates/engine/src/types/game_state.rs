@@ -13200,6 +13200,23 @@ impl GameState {
         )
     }
 
+    /// Inserts the continuation outside an active general-drain/draw pair so
+    /// the paused `PostReplacement` frame remains the draw's exact immediate
+    /// parent until the child draw is complete.
+    pub fn insert_ability_continuation_outside_active_post_replacement_draw(
+        &mut self,
+        pending: PendingContinuation,
+    ) -> Result<(), ResolutionStackError> {
+        let choose_zone_trigger_context = pending.trigger_context.clone();
+        self.resolution_stack
+            .insert_ability_continuation_outside_active_post_replacement_draw(
+                AbilityContinuationFrame {
+                    pending,
+                    choose_zone_trigger_context,
+                },
+            )
+    }
+
     /// Re-park the active continuation after its production handler made
     /// progress but raised another prompt.
     pub fn replace_active_ability_continuation(
@@ -14121,6 +14138,9 @@ impl GameState {
             return Ok(None);
         }
         let next_frame_id = frame.draw_sequences.next_frame_id();
+        let paired_post_replacement = self
+            .resolution_stack
+            .has_active_post_replacement_draw_pair();
         if let Some(super::resolution::ResolutionFrame::PostReplacement(drains)) =
             self.resolution_stack.active_predecessor()
         {
@@ -14137,7 +14157,13 @@ impl GameState {
         }
         self.resolution_stack
             .observe_draw_sequence_frame_id(next_frame_id);
-        self.resolution_stack.take_active_multi_draw()
+        let completed = self.resolution_stack.take_active_multi_draw()?;
+        if paired_post_replacement {
+            let _ = self
+                .resolution_stack
+                .promote_ability_continuation_after_post_replacement_draw()?;
+        }
+        Ok(completed)
     }
 
     /// Retires only the exact top general drain whose continuation paused and
@@ -14425,7 +14451,8 @@ impl GameState {
             return true;
         }
         if let Some(paused) = self
-            .active_batch_delivery_mut()
+            .resolution_stack
+            .active_batch_delivery_or_post_replacement_child_mut()
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
@@ -14458,7 +14485,8 @@ impl GameState {
             return true;
         }
         if let Some(paused) = self
-            .active_batch_delivery_mut()
+            .resolution_stack
+            .active_batch_delivery_or_post_replacement_child_mut()
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.member.object_id == member_id)
         {

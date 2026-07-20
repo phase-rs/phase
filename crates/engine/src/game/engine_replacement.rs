@@ -1566,7 +1566,9 @@ pub(super) fn handle_copy_target_choice(
         if let Some(pending) = state.active_copy_token_mut() {
             pending.created_ids = created_ids;
         }
-        super::effects::token_copy::drain_pending_copy_token_resolution(state, events);
+        if state.active_copy_token().is_some() {
+            super::effects::token_copy::drain_pending_copy_token_resolution(state, events);
+        }
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Ok(state.waiting_for.clone());
         }
@@ -1677,6 +1679,12 @@ fn finish_copy_target_choice_entry(
         }
         state.capture_paused_zone_change_delivery_for_member(source_id, &events[delivery_start..]);
     }
+    // CR 615.5: a CopyTargetChoice raised by a general post-replacement
+    // continuation has now completed its own copy work. Retire only that
+    // active paused drain before exposing the outer batch-delivery completion;
+    // a later nested choice returned above and therefore keeps the drain
+    // resident with its event context intact.
+    state.finish_active_paused_post_replacement_dispatch();
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).

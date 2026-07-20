@@ -820,6 +820,31 @@ impl ResolutionStack {
         }
     }
 
+    /// Mutably accesses a BatchDelivery owner while its exact active
+    /// PostReplacement child finishes an as-enters copy choice. This fixed
+    /// parent/child relation lets the copy-choice path record the resumed zone
+    /// delivery before it retires the child; it is deliberately not a search
+    /// for a buried batch frame.
+    pub fn active_batch_delivery_or_post_replacement_child_mut(
+        &mut self,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        let parent_index = self.frames.len().checked_sub(2);
+        match self.frames.last() {
+            Some(ResolutionFrame::BatchDelivery(_)) => match self.frames.last_mut() {
+                Some(ResolutionFrame::BatchDelivery(frame)) => Some(frame),
+                Some(_) | None => unreachable!("checked active batch frame must match"),
+            },
+            Some(ResolutionFrame::PostReplacement(_)) => match parent_index {
+                Some(index) => match self.frames.get_mut(index) {
+                    Some(ResolutionFrame::BatchDelivery(frame)) => Some(frame),
+                    Some(_) | None => None,
+                },
+                None => None,
+            },
+            Some(_) | None => None,
+        }
+    }
+
     /// Consume exactly the active BatchDelivery owner after its logical group
     /// settles once.
     pub fn take_active_batch_delivery(
@@ -1971,6 +1996,93 @@ impl ResolutionStack {
     /// paused-drain/draw adjacency.
     pub fn active_predecessor(&self) -> Option<&ResolutionFrame> {
         self.frames.get(self.frames.len().checked_sub(2)?)
+    }
+
+    /// True only for the live general-drain/draw pair at the active stack
+    /// boundary. This inspects the top and its exact immediate predecessor; it
+    /// is not a search for a buried PostReplacement frame.
+    pub fn has_active_post_replacement_draw_pair(&self) -> bool {
+        matches!(
+            (self.active_predecessor(), self.last()),
+            (
+                Some(ResolutionFrame::PostReplacement(drains)),
+                Some(ResolutionFrame::MultiDraw(_)),
+            ) if matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(DrainStatus::Paused | DrainStatus::Dispatching)
+            )
+        )
+    }
+
+    /// Inserts a continuation outside the active general-drain/draw pair.
+    ///
+    /// The continuation is the draw's later instruction, so it must resume
+    /// after the draw while the resident drain still exposes its event context.
+    /// Keeping it below the pair preserves the required immediate
+    /// `PostReplacement` → `MultiDraw` relationship for the duration of the
+    /// paused draw.
+    pub fn insert_ability_continuation_outside_active_post_replacement_draw(
+        &mut self,
+        frame: AbilityContinuationFrame,
+    ) -> Result<(), ResolutionStackError> {
+        if !self.has_active_post_replacement_draw_pair() {
+            return match self.last() {
+                None => Err(ResolutionStackError::NoActiveChild),
+                Some(actual) => Err(ResolutionStackError::UnexpectedTop {
+                    expected: FrameKind::MultiDraw,
+                    actual: actual.kind(),
+                }),
+            };
+        }
+        let post_replacement_index = self
+            .frames
+            .len()
+            .checked_sub(2)
+            .expect("the checked adjacent pair has a parent");
+        self.frames.insert(
+            post_replacement_index,
+            ResolutionFrame::AbilityContinuation(frame),
+        );
+        Ok(())
+    }
+
+    /// After the active child draw completes, makes its outer continuation the
+    /// new active child of the resident post-replacement drain. The operation
+    /// is a fixed two-frame swap after the MultiDraw child has been popped; it
+    /// never searches the stack or removes the drain.
+    pub fn promote_ability_continuation_after_post_replacement_draw(
+        &mut self,
+    ) -> Result<bool, ResolutionStackError> {
+        let post_replacement_index = self
+            .frames
+            .len()
+            .checked_sub(1)
+            .ok_or(ResolutionStackError::Empty)?;
+        let Some(continuation_index) = post_replacement_index.checked_sub(1) else {
+            return Ok(false);
+        };
+        match (
+            self.frames.get(continuation_index),
+            self.frames.get(post_replacement_index),
+        ) {
+            (
+                Some(ResolutionFrame::AbilityContinuation(_)),
+                Some(ResolutionFrame::PostReplacement(drains)),
+            ) if matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(DrainStatus::Paused)
+            ) =>
+            {
+                self.frames.swap(continuation_index, post_replacement_index);
+                Ok(true)
+            }
+            (Some(_), Some(ResolutionFrame::PostReplacement(_))) => Ok(false),
+            (_, Some(actual)) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::PostReplacement,
+                actual: actual.kind(),
+            }),
+            (_, None) => unreachable!("checked active post-replacement index exists"),
+        }
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &ResolutionFrame> {
