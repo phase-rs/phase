@@ -1471,6 +1471,17 @@ fn park_repeat_for_after_current_iteration(
     }
 }
 
+fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool {
+    state.active_per_player_zone_choice().is_some()
+        || state.active_per_category_zone_choice().is_some()
+        || state.active_change_zone_frame().is_some()
+        || state.active_batch_delivery().is_some()
+        || state.active_counter_moves().is_some()
+        || state.active_counter_removals().is_some()
+        || state.active_counter_additions().is_some()
+        || state.active_copy_token().is_some()
+}
+
 pub(crate) fn append_to_pending_continuation(
     state: &mut GameState,
     tail: Option<Box<ResolvedAbility>>,
@@ -1493,16 +1504,17 @@ pub(crate) fn append_to_pending_continuation(
                 .expect("sub_ability checked above")
                 .as_mut();
         }
+    } else if active_frame_requires_ability_continuation_parent(state) {
+        state
+            .insert_ability_continuation_parent_of_active(PendingContinuation::new(tail, state))
+            .expect("paused child operation must retain its continuation as an immediate parent");
     } else {
         state.park_ability_continuation(PendingContinuation::new(tail, state));
     }
 }
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
-    if state.active_per_player_zone_choice().is_some()
-        || state.active_per_category_zone_choice().is_some()
-        || state.active_change_zone_frame().is_some()
-    {
+    if active_frame_requires_ability_continuation_parent(state) {
         state
             .insert_ability_continuation_parent_of_active(PendingContinuation::new(
                 Box::new(head),
