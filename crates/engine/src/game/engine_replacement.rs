@@ -40,7 +40,7 @@ use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
 fn maybe_drain_each_player_copy_chosen(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.pending_each_player_copy_chosen.is_some()
-        && state.pending_copy_token_resolution.is_none()
+        && state.active_copy_token().is_none()
         && state.active_counter_additions().is_none()
     {
         effects::each_player_copy_chosen::drain_pending(state, events);
@@ -933,7 +933,7 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_copy_token_resolution.is_some()
+                && state.active_copy_token().is_some()
             {
                 effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -999,7 +999,7 @@ pub(super) fn handle_replacement_choice(
             // re-park if either primitive re-paused under a second replacement.
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_each_player_copy_chosen.is_some()
-                && state.pending_copy_token_resolution.is_none()
+                && state.active_copy_token().is_none()
                 && state.active_counter_additions().is_none()
             {
                 effects::each_player_copy_chosen::drain_pending(state, events);
@@ -1193,7 +1193,7 @@ pub(super) fn handle_replacement_choice(
                 };
                 effects::counters::drain_pending_counter_additions(state, events);
                 if matches!(state.waiting_for, WaitingFor::Priority { .. })
-                    && state.pending_copy_token_resolution.is_some()
+                    && state.active_copy_token().is_some()
                 {
                     effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 }
@@ -1222,7 +1222,7 @@ pub(super) fn handle_replacement_choice(
                 }
                 return Ok(state.waiting_for.clone());
             }
-            if state.pending_copy_token_resolution.is_some() {
+            if state.active_copy_token().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
@@ -1561,8 +1561,9 @@ pub(super) fn handle_copy_target_choice(
                 }
             }
         }
-        if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
-            pending.created_ids = state.last_created_token_ids.clone();
+        let created_ids = state.last_created_token_ids.clone();
+        if let Some(pending) = state.active_copy_token_mut() {
+            pending.created_ids = created_ids;
         }
         super::effects::token_copy::drain_pending_copy_token_resolution(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {

@@ -785,6 +785,75 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the CopyToken owner only when its typed frame owns the stack top.
+    pub fn active_copy_token(&self) -> Option<&PendingCopyTokenResolution> {
+        match self.last() {
+            Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable top-only access to the active CopyToken owner.
+    pub fn active_copy_token_mut(&mut self) -> Option<&mut PendingCopyTokenResolution> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active CopyToken owner after its remaining batches
+    /// settle.
+    pub fn take_active_copy_token(
+        &mut self,
+    ) -> Result<Option<PendingCopyTokenResolution>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::CopyToken(_)) => {
+                let ResolutionFrame::CopyToken(frame) = self.pop_expected(FrameKind::CopyToken)?
+                else {
+                    unreachable!("checked copy-token frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::CopyToken,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a new CopyToken owner as the active inner frame.
+    pub fn push_copy_token(&mut self, pending: PendingCopyTokenResolution) {
+        self.push_inner(ResolutionFrame::CopyToken(pending));
+    }
+
+    /// Re-park the active CopyToken owner after it advances or pauses again.
+    pub fn replace_active_copy_token(
+        &mut self,
+        pending: PendingCopyTokenResolution,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::CopyToken(_)) => {
+                self.replace_active(ResolutionFrame::CopyToken(pending))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::CopyToken,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Insert a CopyToken parent below the complete child stack its batch
+    /// created after the producer recorded that stack boundary.
+    pub fn insert_copy_token_parent_at_child_boundary(
+        &mut self,
+        pending: PendingCopyTokenResolution,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        self.insert_parent_at_child_boundary(ResolutionFrame::CopyToken(pending), child_stack_start)
+    }
+
     /// Mutably accesses only the active repeat-until owner.
     pub fn active_repeat_until_mut(&mut self) -> Option<&mut PendingRepeatUntil> {
         match self.frames.last_mut() {
@@ -1242,6 +1311,7 @@ impl ResolutionStateWire {
                 let legacy_counter_moves = LegacyCounterMovesWire::from_value(&value)?;
                 let legacy_counter_removals = LegacyCounterRemovalsWire::from_value(&value)?;
                 let legacy_counter_additions = LegacyCounterAdditionsWire::from_value(&value)?;
+                let legacy_copy_token = LegacyCopyTokenWire::from_value(&value)?;
                 let legacy_choose_one_of = LegacyChooseOneOfWire::from_value(&value)?;
                 let legacy_vote_ballot = LegacyVoteBallotWire::from_value(&value)?;
                 let legacy_per_player_zone_choice =
@@ -1264,6 +1334,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_counter_moves");
                 legacy_object.remove("pending_counter_removals");
                 legacy_object.remove("pending_counter_additions");
+                legacy_object.remove("pending_copy_token_resolution");
                 legacy_object.remove("pending_choose_one_of");
                 legacy_object.remove("pending_vote_ballot_iteration");
                 legacy_object.remove("pending_per_player_zone_choice");
@@ -1293,6 +1364,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_counter_additions.into_frame() {
                     legacy.push_counter_additions(frame);
+                }
+                if let Some(frame) = legacy_copy_token.into_frame() {
+                    legacy.push_copy_token(frame);
                 }
                 if let Some(frame) = legacy_choose_one_of.into_frame() {
                     legacy.push_choose_one_of(frame);
@@ -1577,6 +1651,24 @@ impl LegacyCounterAdditionsWire {
     }
 }
 
+/// v1-only CopyToken field. Runtime state carries the owner only in its typed
+/// frame.
+#[derive(Deserialize)]
+struct LegacyCopyTokenWire {
+    #[serde(default)]
+    pending_copy_token_resolution: Option<PendingCopyTokenResolution>,
+}
+
+impl LegacyCopyTokenWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingCopyTokenResolution> {
+        self.pending_copy_token_resolution
+    }
+}
+
 /// v1-only choose-one-of field. Runtime state carries it only as a typed frame.
 #[derive(Deserialize)]
 struct LegacyChooseOneOfWire {
@@ -1689,6 +1781,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::CounterMoves(_)
                 | ResolutionFrame::CounterRemovals(_)
                 | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::CopyToken(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
@@ -1723,9 +1816,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_copy_token_resolution.clone() {
-        frames.push_inner(ResolutionFrame::CopyToken(pending));
-    }
     if let Some(pending) = state.pending_each_player_copy_chosen.clone() {
         frames.push_inner(ResolutionFrame::EachPlayerCopyChosen(pending));
     }
@@ -1867,11 +1957,9 @@ fn project_frames_into_legacy_state(
                     .resolution_stack
                     .push_counter_additions(pending.clone());
             }
-            ResolutionFrame::CopyToken(pending) => set_once(
-                &mut projected.pending_copy_token_resolution,
-                pending.clone(),
-                "CopyToken",
-            )?,
+            ResolutionFrame::CopyToken(pending) => {
+                projected.resolution_stack.push_copy_token(pending.clone());
+            }
             ResolutionFrame::EachPlayerCopyChosen(pending) => set_once(
                 &mut projected.pending_each_player_copy_chosen,
                 pending.clone(),
@@ -1948,7 +2036,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
     state.pending_repeated_optional_payment = None;
     state.optional_cost_payments_this_resolution = 0;
-    state.pending_copy_token_resolution = None;
     state.pending_each_player_copy_chosen = None;
     state.pending_optional_effect = None;
     state.pending_optional_trigger_event = None;
@@ -2267,6 +2354,21 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 counter-additions fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_copy_token_fixture(
+        state: GameState,
+        pending: PendingCopyTokenResolution,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_copy_token_resolution"] =
+            serde_json::to_value(pending).expect("legacy copy-token serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 copy-token fixture converts through the wire")
             .into_game_state()
     }
 
@@ -3124,19 +3226,20 @@ mod tests {
         assert!(alias.active_batch_delivery().is_some());
         assert_reserializes_v2_only(alias);
 
-        let mut copy_token = GameState::new_two_player(121);
-        copy_token.pending_copy_token_resolution = Some(PendingCopyTokenResolution {
-            created_ids: Vec::new(),
-            remaining: VecDeque::new(),
-            effect_kind: EffectKind::CopyTokenOf,
-            source_id: ObjectId(121),
-        });
-        let mut copy_token = restore_v1_fixture(copy_token);
+        let mut copy_token = restore_v1_copy_token_fixture(
+            GameState::new_two_player(121),
+            PendingCopyTokenResolution {
+                created_ids: Vec::new(),
+                remaining: VecDeque::new(),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id: ObjectId(121),
+            },
+        );
         crate::game::effects::token_copy::drain_pending_copy_token_resolution(
             &mut copy_token,
             &mut Vec::new(),
         );
-        assert!(copy_token.pending_copy_token_resolution.is_none());
+        assert!(copy_token.active_copy_token().is_none());
         assert_reserializes_v2_only(copy_token);
     }
 

@@ -11797,13 +11797,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_card_component_route: Option<MergedCardComponentRoute>,
 
-    /// CR 707.2 + CR 614.1a + CR 616.1: Pending `CopyTokenOf` source loop
-    /// paused by an interactive token-creation replacement. Drained by
-    /// `token_copy::drain_pending_copy_token_resolution` after the current
-    /// replacement choice creates the accepted copy token(s).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_copy_token_resolution: Option<PendingCopyTokenResolution>,
-
     /// CR 101.4 + CR 616.1: Deferred resume state for `EachPlayerCopyChosen` when
     /// the current player's inner token copy OR its +1/+1 counter placement
     /// paused on a replacement choice. Drained by
@@ -13699,6 +13692,48 @@ impl GameState {
         self.resolution_stack.take_active_counter_additions()
     }
 
+    /// Returns the CopyToken owner only when its typed frame owns the stack top.
+    pub fn active_copy_token(&self) -> Option<&PendingCopyTokenResolution> {
+        self.resolution_stack.active_copy_token()
+    }
+
+    /// Mutably accesses only the active CopyToken owner.
+    pub fn active_copy_token_mut(&mut self) -> Option<&mut PendingCopyTokenResolution> {
+        self.resolution_stack.active_copy_token_mut()
+    }
+
+    /// Park a new CopyToken owner as the active inner frame.
+    pub fn push_copy_token(&mut self, pending: PendingCopyTokenResolution) {
+        self.resolution_stack.push_copy_token(pending);
+    }
+
+    /// Re-park the active CopyToken owner after it advances or pauses again.
+    pub fn replace_active_copy_token(
+        &mut self,
+        pending: PendingCopyTokenResolution,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_copy_token(pending)
+    }
+
+    /// Consume exactly the active CopyToken owner after its remaining batches
+    /// settle.
+    pub fn take_active_copy_token(
+        &mut self,
+    ) -> Result<Option<PendingCopyTokenResolution>, ResolutionStackError> {
+        self.resolution_stack.take_active_copy_token()
+    }
+
+    /// Insert a CopyToken parent below the complete child stack its batch
+    /// created after the producer recorded that stack boundary.
+    pub fn insert_copy_token_parent_at_child_boundary(
+        &mut self,
+        pending: PendingCopyTokenResolution,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .insert_copy_token_parent_at_child_boundary(pending, child_stack_start)
+    }
+
     /// Returns the repeat-for iteration only when its typed frame owns the
     /// stack top.
     pub fn active_repeat_for(&self) -> Option<&PendingRepeatIteration> {
@@ -14545,7 +14580,6 @@ impl GameState {
             resolving_continuation_attach_host: None,
             pending_repeated_optional_payment: None,
             merged_card_component_route: None,
-            pending_copy_token_resolution: None,
             pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
             resolution_coin_flip: None,
@@ -15658,7 +15692,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_continuation_attach_host: _,
         pending_repeated_optional_payment: _,
         merged_card_component_route: _,
-        pending_copy_token_resolution: _,
         pending_each_player_copy_chosen: _,
         pending_coin_flip: _,
         resolution_coin_flip: _,
@@ -15959,7 +15992,6 @@ impl PartialEq for GameState {
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.pending_resolution_completion == other.pending_resolution_completion
             && self.pending_repeated_optional_payment == other.pending_repeated_optional_payment
-            && self.pending_copy_token_resolution == other.pending_copy_token_resolution
             && self.pending_each_player_copy_chosen == other.pending_each_player_copy_chosen
             && self.pending_coin_flip == other.pending_coin_flip
             // CR 104.4b: volatile resolution-scoped flip result. A flip already

@@ -541,7 +541,7 @@ fn apply_pending_counter_post_action(
             crate::game::restrictions::record_token_created(state, object_id);
             push_token_entry_events(state, events, object_id, name, source_id);
             state.last_created_token_ids.push(object_id);
-            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+            if let Some(pending) = state.active_copy_token_mut() {
                 pending.created_ids.push(object_id);
             }
             true
@@ -566,7 +566,7 @@ fn apply_pending_counter_post_action(
                 events,
             );
             let completion = status.completion;
-            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+            if let Some(pending) = state.active_copy_token_mut() {
                 pending.created_ids.extend(status.created_ids);
             } else {
                 state.last_created_token_ids.extend(status.created_ids);
@@ -627,8 +627,9 @@ fn apply_pending_counter_post_action(
             if !state.last_created_token_ids.contains(&object_id) {
                 state.last_created_token_ids.push(object_id);
             }
-            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
-                pending.created_ids = state.last_created_token_ids.clone();
+            let created_ids = state.last_created_token_ids.clone();
+            if let Some(pending) = state.active_copy_token_mut() {
+                pending.created_ids = created_ids;
             }
             true
         }

@@ -14,7 +14,7 @@
 //!
 //! Unlike `ChooseAndSacrificeRest`, the per-player step is a genuine deferred
 //! continuation: the inner `CopyTokenOf` can pause on a CR 616.1 replacement
-//! choice (`pending_copy_token_resolution`), and the counter placement can pause
+//! choice (`CopyToken`), and the counter placement can pause
 //! on a competing counter-replacement ordering (`CounterAdditions`).
 //! Both pauses are handled by parking a [`PendingEachPlayerCopyChosen`] record
 //! with a [`CopyChosenStage`] marker and resuming from `drain_pending`, which
@@ -229,7 +229,7 @@ pub(crate) fn drive_choices(
 
 /// CR 707.2 + CR 616.1: Copy the first chosen object for `player`, then drive the
 /// counter step. Detects a CR 616.1 pause of the inner copy (parking
-/// `pending_copy_token_resolution`) and, rather than trusting the `Ok(())` from
+/// `CopyToken`) and, rather than trusting the `Ok(())` from
 /// `resolve_ability_chain`, parks an `AwaitingCopy` continuation and preserves
 /// the copy's replacement `WaitingFor`.
 pub(crate) fn drive_from_copy(
@@ -268,7 +268,7 @@ pub(crate) fn drive_from_copy(
     // CR 616.1: The copy parked a replacement-ordering choice. Do NOT read
     // `last_created_token_ids` (stale) and do NOT advance (that would clobber the
     // replacement `WaitingFor`). Park an `AwaitingCopy` continuation.
-    if state.pending_copy_token_resolution.is_some() {
+    if state.active_copy_token().is_some() {
         state.pending_each_player_copy_chosen = Some(make_pending(
             CopyChosenStage::AwaitingCopy,
             player,
@@ -347,7 +347,7 @@ pub(crate) fn drain_pending(state: &mut GameState, events: &mut Vec<GameEvent>) 
     // Guard invariants: never resume while a primitive of the current step is
     // still mid-flight (a copy re-paused under a second doubler, or a counter
     // ordering is still open).
-    if state.pending_copy_token_resolution.is_some() || state.active_counter_additions().is_some() {
+    if state.active_copy_token().is_some() || state.active_counter_additions().is_some() {
         return;
     }
     let Some(pending) = state.pending_each_player_copy_chosen.take() else {
