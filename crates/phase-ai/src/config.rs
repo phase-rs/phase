@@ -79,11 +79,16 @@ impl AiDifficulty {
 ///
 /// **Single source of truth** — transports that must *validate* a label before
 /// accepting it (rather than silently downgrading it) reference this constant
-/// instead of restating the list, so a new arm in `from_label` cannot drift out
-/// of a caller's accepted set. Kept as an explicit list rather than derived
-/// from the enum so a hard-error message can name every accepted spelling;
-/// `accepted_difficulty_labels_round_trip_through_from_label` asserts the two
-/// stay in agreement.
+/// instead of restating the list. Kept as an explicit list rather than derived
+/// from the enum so a hard-error message can name every accepted spelling.
+///
+/// Two tests keep this list and the enum from drifting apart in either
+/// direction: `accepted_difficulty_labels_round_trip_through_from_label` asserts
+/// every entry here round-trips through `from_label` (list → enum → list), and
+/// `every_difficulty_variant_appears_in_accepted_labels` walks a wildcard-free
+/// match over all `AiDifficulty` variants — which fails to compile if a variant
+/// is added — asserting each variant's name appears here and round-trips
+/// (enum → list → enum).
 pub const ACCEPTED_DIFFICULTY_LABELS: &[&str] =
     &["VeryEasy", "Easy", "Medium", "Hard", "VeryHard", "CEDH"];
 
@@ -1338,6 +1343,54 @@ mod tests {
                 "{label} does not round-trip through from_label"
             );
         }
+    }
+
+    #[test]
+    fn every_difficulty_variant_appears_in_accepted_labels() {
+        // The reverse direction of the round-trip test above: every enum variant
+        // must be a listed accepted label (and round-trip back). Two layers keep
+        // this honest: the wildcard-free `label_of` match fails to compile when a
+        // variant is added until it is given a label, and the `all.len()` vs
+        // label-count assertion at the end catches an `all` array (or label list)
+        // that drifts out of step. `all` itself is hand-maintained — nothing
+        // forces a new variant into it except that final length check failing.
+        fn label_of(d: AiDifficulty) -> &'static str {
+            match d {
+                AiDifficulty::VeryEasy => "VeryEasy",
+                AiDifficulty::Easy => "Easy",
+                AiDifficulty::Medium => "Medium",
+                AiDifficulty::Hard => "Hard",
+                AiDifficulty::VeryHard => "VeryHard",
+                AiDifficulty::CEDH => "CEDH",
+            }
+        }
+        let all = [
+            AiDifficulty::VeryEasy,
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
+        ];
+        for d in all {
+            let label = label_of(d);
+            assert!(
+                ACCEPTED_DIFFICULTY_LABELS.contains(&label),
+                "{label} missing from ACCEPTED_DIFFICULTY_LABELS"
+            );
+            assert_eq!(
+                AiDifficulty::from_label(label),
+                d,
+                "{label} does not round-trip back to its variant"
+            );
+        }
+        // Catches an entry added to the label list without a matching variant
+        // (the direction the per-variant loop above cannot see).
+        assert_eq!(
+            all.len(),
+            ACCEPTED_DIFFICULTY_LABELS.len(),
+            "variant count and accepted-label count diverged"
+        );
     }
 
     #[test]
