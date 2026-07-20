@@ -854,6 +854,84 @@ impl ResolutionStack {
         self.insert_parent_at_child_boundary(ResolutionFrame::CopyToken(pending), child_stack_start)
     }
 
+    /// Returns the EachPlayerCopyChosen owner only when its typed frame owns
+    /// the stack top.
+    pub fn active_each_player_copy_chosen(&self) -> Option<&PendingEachPlayerCopyChosen> {
+        match self.last() {
+            Some(ResolutionFrame::EachPlayerCopyChosen(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable top-only access to the active EachPlayerCopyChosen owner.
+    pub fn active_each_player_copy_chosen_mut(
+        &mut self,
+    ) -> Option<&mut PendingEachPlayerCopyChosen> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::EachPlayerCopyChosen(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active EachPlayerCopyChosen owner after its child
+    /// copy or counter work settles.
+    pub fn take_active_each_player_copy_chosen(
+        &mut self,
+    ) -> Result<Option<PendingEachPlayerCopyChosen>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::EachPlayerCopyChosen(_)) => {
+                let ResolutionFrame::EachPlayerCopyChosen(frame) =
+                    self.pop_expected(FrameKind::EachPlayerCopyChosen)?
+                else {
+                    unreachable!("checked each-player-copy-chosen frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::EachPlayerCopyChosen,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a new EachPlayerCopyChosen owner as the active inner frame.
+    pub fn push_each_player_copy_chosen(&mut self, pending: PendingEachPlayerCopyChosen) {
+        self.push_inner(ResolutionFrame::EachPlayerCopyChosen(pending));
+    }
+
+    /// Re-park the active EachPlayerCopyChosen owner after it advances or
+    /// pauses again.
+    pub fn replace_active_each_player_copy_chosen(
+        &mut self,
+        pending: PendingEachPlayerCopyChosen,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::EachPlayerCopyChosen(_)) => {
+                self.replace_active(ResolutionFrame::EachPlayerCopyChosen(pending))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::EachPlayerCopyChosen,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Insert an EachPlayerCopyChosen parent below the complete child stack
+    /// its current copy or counter step created after the producer recorded
+    /// that stack boundary.
+    pub fn insert_each_player_copy_chosen_parent_at_child_boundary(
+        &mut self,
+        pending: PendingEachPlayerCopyChosen,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        self.insert_parent_at_child_boundary(
+            ResolutionFrame::EachPlayerCopyChosen(pending),
+            child_stack_start,
+        )
+    }
+
     /// Mutably accesses only the active repeat-until owner.
     pub fn active_repeat_until_mut(&mut self) -> Option<&mut PendingRepeatUntil> {
         match self.frames.last_mut() {
@@ -1312,6 +1390,8 @@ impl ResolutionStateWire {
                 let legacy_counter_removals = LegacyCounterRemovalsWire::from_value(&value)?;
                 let legacy_counter_additions = LegacyCounterAdditionsWire::from_value(&value)?;
                 let legacy_copy_token = LegacyCopyTokenWire::from_value(&value)?;
+                let legacy_each_player_copy_chosen =
+                    LegacyEachPlayerCopyChosenWire::from_value(&value)?;
                 let legacy_choose_one_of = LegacyChooseOneOfWire::from_value(&value)?;
                 let legacy_vote_ballot = LegacyVoteBallotWire::from_value(&value)?;
                 let legacy_per_player_zone_choice =
@@ -1335,6 +1415,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_counter_removals");
                 legacy_object.remove("pending_counter_additions");
                 legacy_object.remove("pending_copy_token_resolution");
+                legacy_object.remove("pending_each_player_copy_chosen");
                 legacy_object.remove("pending_choose_one_of");
                 legacy_object.remove("pending_vote_ballot_iteration");
                 legacy_object.remove("pending_per_player_zone_choice");
@@ -1367,6 +1448,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_copy_token.into_frame() {
                     legacy.push_copy_token(frame);
+                }
+                if let Some(frame) = legacy_each_player_copy_chosen.into_frame() {
+                    legacy.push_each_player_copy_chosen(frame);
                 }
                 if let Some(frame) = legacy_choose_one_of.into_frame() {
                     legacy.push_choose_one_of(frame);
@@ -1669,6 +1753,24 @@ impl LegacyCopyTokenWire {
     }
 }
 
+/// v1-only EachPlayerCopyChosen field. Runtime state carries the owner only
+/// in its typed frame.
+#[derive(Deserialize)]
+struct LegacyEachPlayerCopyChosenWire {
+    #[serde(default)]
+    pending_each_player_copy_chosen: Option<PendingEachPlayerCopyChosen>,
+}
+
+impl LegacyEachPlayerCopyChosenWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingEachPlayerCopyChosen> {
+        self.pending_each_player_copy_chosen
+    }
+}
+
 /// v1-only choose-one-of field. Runtime state carries it only as a typed frame.
 #[derive(Deserialize)]
 struct LegacyChooseOneOfWire {
@@ -1782,6 +1884,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::CounterRemovals(_)
                 | ResolutionFrame::CounterAdditions(_)
                 | ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
@@ -1816,9 +1919,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_each_player_copy_chosen.clone() {
-        frames.push_inner(ResolutionFrame::EachPlayerCopyChosen(pending));
-    }
     if let Some(pending) = state.pending_life_total_assignment.clone() {
         frames.push_inner(ResolutionFrame::LifeTotalAssignment(pending));
     }
@@ -1960,11 +2060,11 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::CopyToken(pending) => {
                 projected.resolution_stack.push_copy_token(pending.clone());
             }
-            ResolutionFrame::EachPlayerCopyChosen(pending) => set_once(
-                &mut projected.pending_each_player_copy_chosen,
-                pending.clone(),
-                "EachPlayerCopyChosen",
-            )?,
+            ResolutionFrame::EachPlayerCopyChosen(pending) => {
+                projected
+                    .resolution_stack
+                    .push_each_player_copy_chosen(pending.clone());
+            }
             ResolutionFrame::ChooseOneOf(pending) => projected.push_choose_one_of(pending.clone()),
             ResolutionFrame::VoteBallot(pending) => projected.push_vote_ballot(pending.clone()),
             ResolutionFrame::PerPlayerZoneChoice(pending) => {
@@ -2036,7 +2136,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
     state.pending_repeated_optional_payment = None;
     state.optional_cost_payments_this_resolution = 0;
-    state.pending_each_player_copy_chosen = None;
     state.pending_optional_effect = None;
     state.pending_optional_trigger_event = None;
     state.pending_optional_trigger_match_count = None;
@@ -2369,6 +2468,21 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 copy-token fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_each_player_copy_chosen_fixture(
+        state: GameState,
+        pending: PendingEachPlayerCopyChosen,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_each_player_copy_chosen"] =
+            serde_json::to_value(pending).expect("legacy each-player-copy-chosen serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 each-player-copy-chosen fixture converts through the wire")
             .into_game_state()
     }
 
@@ -3245,29 +3359,30 @@ mod tests {
 
     #[test]
     fn v1_choice_iteration_fixtures_resume_via_their_production_drains() {
-        let mut each_player_copy = GameState::new_two_player(130);
-        each_player_copy.pending_each_player_copy_chosen = Some(PendingEachPlayerCopyChosen {
-            stage: CopyChosenStage::AwaitingCounters,
-            player: PlayerId(0),
-            chosen: Vec::new(),
-            remaining_choices: Vec::new(),
-            choose_filter: TargetFilter::Controller,
-            min: 0,
-            max: 0,
-            copy_modifications: Vec::new(),
-            scale: None,
-            choose_scope: CopyChooseScope::Chooser,
-            source_id: ObjectId(130),
-            source_controller: PlayerId(0),
-            scoped_players: Vec::new(),
-            trigger_event: None,
-        });
-        let mut each_player_copy = restore_v1_fixture(each_player_copy);
+        let mut each_player_copy = restore_v1_each_player_copy_chosen_fixture(
+            GameState::new_two_player(130),
+            PendingEachPlayerCopyChosen {
+                stage: CopyChosenStage::AwaitingCounters,
+                player: PlayerId(0),
+                chosen: Vec::new(),
+                remaining_choices: Vec::new(),
+                choose_filter: TargetFilter::Controller,
+                min: 0,
+                max: 0,
+                copy_modifications: Vec::new(),
+                scale: None,
+                choose_scope: CopyChooseScope::Chooser,
+                source_id: ObjectId(130),
+                source_controller: PlayerId(0),
+                scoped_players: Vec::new(),
+                trigger_event: None,
+            },
+        );
         crate::game::effects::each_player_copy_chosen::drain_pending(
             &mut each_player_copy,
             &mut Vec::new(),
         );
-        assert!(each_player_copy.pending_each_player_copy_chosen.is_none());
+        assert!(each_player_copy.active_each_player_copy_chosen().is_none());
         assert_reserializes_v2_only(each_player_copy);
 
         let choose_one_of = GameState::new_two_player(131);

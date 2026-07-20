@@ -11797,14 +11797,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_card_component_route: Option<MergedCardComponentRoute>,
 
-    /// CR 101.4 + CR 616.1: Deferred resume state for `EachPlayerCopyChosen` when
-    /// the current player's inner token copy OR its +1/+1 counter placement
-    /// paused on a replacement choice. Drained by
-    /// `each_player_copy_chosen::drain_pending` after the copy/counter drains in
-    /// `engine_replacement.rs`, once state is back at Priority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_each_player_copy_chosen: Option<PendingEachPlayerCopyChosen>,
-
     /// CR 705.1 + CR 614.1a: Pending multi-flip coin resolver paused mid-loop
     /// for a Krark's Thumb keep-1 choice. Stashes the full resolution context +
     /// loop position so `resume_after_keep` can re-enter the flip loop after the
@@ -13734,6 +13726,54 @@ impl GameState {
             .insert_copy_token_parent_at_child_boundary(pending, child_stack_start)
     }
 
+    /// Returns the EachPlayerCopyChosen owner only when its typed frame owns
+    /// the stack top.
+    pub fn active_each_player_copy_chosen(&self) -> Option<&PendingEachPlayerCopyChosen> {
+        self.resolution_stack.active_each_player_copy_chosen()
+    }
+
+    /// Mutably accesses only the active EachPlayerCopyChosen owner.
+    pub fn active_each_player_copy_chosen_mut(
+        &mut self,
+    ) -> Option<&mut PendingEachPlayerCopyChosen> {
+        self.resolution_stack.active_each_player_copy_chosen_mut()
+    }
+
+    /// Park a new EachPlayerCopyChosen owner as the active inner frame.
+    pub fn push_each_player_copy_chosen(&mut self, pending: PendingEachPlayerCopyChosen) {
+        self.resolution_stack.push_each_player_copy_chosen(pending);
+    }
+
+    /// Re-park the active EachPlayerCopyChosen owner after it advances or
+    /// pauses again.
+    pub fn replace_active_each_player_copy_chosen(
+        &mut self,
+        pending: PendingEachPlayerCopyChosen,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .replace_active_each_player_copy_chosen(pending)
+    }
+
+    /// Consume exactly the active EachPlayerCopyChosen owner after its child
+    /// copy or counter work settles.
+    pub fn take_active_each_player_copy_chosen(
+        &mut self,
+    ) -> Result<Option<PendingEachPlayerCopyChosen>, ResolutionStackError> {
+        self.resolution_stack.take_active_each_player_copy_chosen()
+    }
+
+    /// Insert an EachPlayerCopyChosen parent below the complete child stack
+    /// its current copy or counter step created after the producer recorded
+    /// that stack boundary.
+    pub fn insert_each_player_copy_chosen_parent_at_child_boundary(
+        &mut self,
+        pending: PendingEachPlayerCopyChosen,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .insert_each_player_copy_chosen_parent_at_child_boundary(pending, child_stack_start)
+    }
+
     /// Returns the repeat-for iteration only when its typed frame owns the
     /// stack top.
     pub fn active_repeat_for(&self) -> Option<&PendingRepeatIteration> {
@@ -14580,7 +14620,6 @@ impl GameState {
             resolving_continuation_attach_host: None,
             pending_repeated_optional_payment: None,
             merged_card_component_route: None,
-            pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
@@ -15692,7 +15731,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_continuation_attach_host: _,
         pending_repeated_optional_payment: _,
         merged_card_component_route: _,
-        pending_each_player_copy_chosen: _,
         pending_coin_flip: _,
         resolution_coin_flip: _,
         pending_proliferate_actions: _,
@@ -15992,7 +16030,6 @@ impl PartialEq for GameState {
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.pending_resolution_completion == other.pending_resolution_completion
             && self.pending_repeated_optional_payment == other.pending_repeated_optional_payment
-            && self.pending_each_player_copy_chosen == other.pending_each_player_copy_chosen
             && self.pending_coin_flip == other.pending_coin_flip
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing

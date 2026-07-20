@@ -263,19 +263,24 @@ pub(crate) fn drive_from_copy(
     );
     // Depth 1: skip the depth-0 chain prelude so per-resolution ledgers
     // (`last_created_token_ids`) are not reset.
+    let stack_depth_before_copy = state.resolution_stack.len();
     super::resolve_ability_chain(state, &copy_ability, events, 1)?;
 
     // CR 616.1: The copy parked a replacement-ordering choice. Do NOT read
     // `last_created_token_ids` (stale) and do NOT advance (that would clobber the
     // replacement `WaitingFor`). Park an `AwaitingCopy` continuation.
     if state.active_copy_token().is_some() {
-        state.pending_each_player_copy_chosen = Some(make_pending(
-            CopyChosenStage::AwaitingCopy,
-            player,
-            chosen,
-            remaining_choices,
-            params,
-        ));
+        park_each_player_copy_chosen_after_current_step(
+            state,
+            make_pending(
+                CopyChosenStage::AwaitingCopy,
+                player,
+                chosen,
+                remaining_choices,
+                params,
+            ),
+            stack_depth_before_copy,
+        );
         return Ok(());
     }
 
@@ -321,17 +326,22 @@ pub(crate) fn perform_counter_step_then_advance(
                     params.source_id,
                     player,
                 );
+                let stack_depth_before_counter = state.resolution_stack.len();
                 super::resolve_ability_chain(state, &counter_ability, events, 1)?;
                 // CR 616.1: the counter placement paused for a replacement
                 // ordering — park an `AwaitingCounters` continuation.
                 if state.active_counter_additions().is_some() {
-                    state.pending_each_player_copy_chosen = Some(make_pending(
-                        CopyChosenStage::AwaitingCounters,
-                        player,
-                        chosen,
-                        remaining_choices,
-                        params,
-                    ));
+                    park_each_player_copy_chosen_after_current_step(
+                        state,
+                        make_pending(
+                            CopyChosenStage::AwaitingCounters,
+                            player,
+                            chosen,
+                            remaining_choices,
+                            params,
+                        ),
+                        stack_depth_before_counter,
+                    );
                     return Ok(());
                 }
             }
@@ -350,7 +360,10 @@ pub(crate) fn drain_pending(state: &mut GameState, events: &mut Vec<GameEvent>) 
     if state.active_copy_token().is_some() || state.active_counter_additions().is_some() {
         return;
     }
-    let Some(pending) = state.pending_each_player_copy_chosen.take() else {
+    let Some(pending) = state
+        .take_active_each_player_copy_chosen()
+        .expect("each-player-copy-chosen drain may consume only the active frame")
+    else {
         return;
     };
     let params = CopyChosenParams::from_pending(&pending);
@@ -377,6 +390,28 @@ pub(crate) fn drain_pending(state: &mut GameState, events: &mut Vec<GameEvent>) 
         "each_player_copy_chosen drain error: {result:?}"
     );
     let _ = result;
+}
+
+/// Park the outer APNAP copy walk below the complete child stack raised by its
+/// current copy or counter step. The captured boundary preserves the exact
+/// parent/child dependency without searching for a buried continuation.
+fn park_each_player_copy_chosen_after_current_step(
+    state: &mut GameState,
+    pending: PendingEachPlayerCopyChosen,
+    stack_depth_before_step: usize,
+) {
+    match state.resolution_stack.len().cmp(&stack_depth_before_step) {
+        std::cmp::Ordering::Less => {
+            panic!("each-player-copy-chosen step removed a parent before it could be re-parked")
+        }
+        std::cmp::Ordering::Equal => state.push_each_player_copy_chosen(pending),
+        std::cmp::Ordering::Greater => state
+            .insert_each_player_copy_chosen_parent_at_child_boundary(
+                pending,
+                stack_depth_before_step,
+            )
+            .expect("each-player-copy-chosen parent must be inserted below its child stack"),
+    }
 }
 
 /// CR 102.1 + CR 103.1: The battlefield controller a chooser draws their
@@ -464,12 +499,20 @@ fn make_pending(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ObjectProperty, TypedFilter};
+    use crate::types::ability::{
+        ControllerRef, ObjectProperty, QuantityModification, ReplacementDefinition, TypedFilter,
+    };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::counter::CounterType;
     use crate::types::identifiers::CardId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::{FrameKind, ResolutionStateWire};
     use crate::types::zones::Zone;
 
     fn creature_filter() -> TargetFilter {
@@ -829,6 +872,118 @@ mod tests {
         assert!(
             token.has_keyword(&crate::types::keywords::Keyword::Menace),
             "menace granted to the copy"
+        );
+    }
+
+    /// Frame matrix: a real selection creates a CopyToken replacement prompt
+    /// beneath the EachPlayerCopyChosen parent. The v2 round-trip must preserve
+    /// that exact parent/child order so accepting the replacement resumes and
+    /// completes the outer APNAP walk.
+    #[test]
+    fn copy_replacement_pause_keeps_each_player_parent_and_roundtrips_v2() {
+        let mut state = setup();
+        let doubler_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let doubler = state.objects.get_mut(&doubler_id).unwrap();
+            let definition = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .token_owner_scope(ControllerRef::You)
+                .quantity_modification(QuantityModification::DOUBLE);
+            doubler.base_replacement_definitions = Arc::new(vec![definition.clone()]);
+            doubler.replacement_definitions = vec![definition].into();
+        }
+        let augmenter_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Token Augmenter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let augmenter = state.objects.get_mut(&augmenter_id).unwrap();
+            let definition = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .token_owner_scope(ControllerRef::You)
+                .quantity_modification(QuantityModification::Plus { value: 1 });
+            augmenter.base_replacement_definitions = Arc::new(vec![definition.clone()]);
+            augmenter.replacement_definitions = vec![definition].into();
+        }
+        let first = add_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, false);
+        add_creature(&mut state, CardId(2), PlayerId(0), "Lion", 3, false);
+        let ability = ability(1, 1, vec![], None);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(first)],
+            },
+        )
+        .expect("selection starts the copy-token replacement pipeline");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                candidate_count: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![FrameKind::EachPlayerCopyChosen, FrameKind::CopyToken],
+            "the outer selection walk must stay below its active CopyToken child"
+        );
+        assert!(
+            state.active_each_player_copy_chosen().is_none(),
+            "top-only access must not search through the active copy child"
+        );
+
+        let serialized = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("nested EachPlayerCopyChosen copy prompt serializes as v2");
+        assert!(
+            serialized.get("pending_each_player_copy_chosen").is_none(),
+            "v2 must not emit the removed v1 each-player-copy-chosen field"
+        );
+        let mut state = serde_json::from_value::<ResolutionStateWire>(serialized)
+            .expect("nested EachPlayerCopyChosen copy prompt roundtrips")
+            .into_game_state();
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![FrameKind::EachPlayerCopyChosen, FrameKind::CopyToken],
+            "v2 must preserve the outer parent beneath its CopyToken child"
+        );
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("replacement choice resumes both the copy and outer walk");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolution_stack.is_empty());
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::EachPlayerCopyChosen,
+                    source_id: ObjectId(500),
+                    ..
+                }
+            )),
+            "accepting the child replacement must complete the retained outer walk"
+        );
+        assert!(
+            (3..=4).contains(&state.last_created_token_ids.len()),
+            "the resumed copy must apply the selected double/plus ordering"
         );
     }
 

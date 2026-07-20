@@ -39,7 +39,7 @@ use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
 /// drained and state is back at Priority. No-op if nothing is parked.
 fn maybe_drain_each_player_copy_chosen(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && state.pending_each_player_copy_chosen.is_some()
+        && state.active_each_player_copy_chosen().is_some()
         && state.active_copy_token().is_none()
         && state.active_counter_additions().is_none()
     {
@@ -998,7 +998,7 @@ pub(super) fn handle_replacement_choice(
             // the APNAP walk (counter-pause resume). The `drain_pending` guards
             // re-park if either primitive re-paused under a second replacement.
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_each_player_copy_chosen.is_some()
+                && state.active_each_player_copy_chosen().is_some()
                 && state.active_copy_token().is_none()
                 && state.active_counter_additions().is_none()
             {

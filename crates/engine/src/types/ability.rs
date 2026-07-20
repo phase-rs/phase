@@ -12165,7 +12165,7 @@ pub enum Effect {
     /// walks the scoped player set itself and seeds
     /// `WaitingFor::EachPlayerCopyChosenSelection` per player. The inner copy and
     /// counter steps may pause on a CR 616.1 replacement choice; resumption is
-    /// threaded through `GameState::pending_each_player_copy_chosen` (see
+    /// threaded through the `EachPlayerCopyChosen` resolution frame (see
     /// `game/effects/each_player_copy_chosen.rs`).
     ///
     /// Real consumers (WHO phenomena): Human—Time Lord Meta-Crisis
