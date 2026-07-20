@@ -1910,22 +1910,23 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::SpellResolution(pending));
     }
 
-    /// Returns the active general replacement drain. During the one shipped
-    /// G4 topology this is its exact, immediately preceding parent while the
-    /// child starts or remains paused; there is intentionally no general frame
-    /// search.
+    /// Returns the active general replacement drain. It may be the exact
+    /// immediate parent of an active MultiDraw or AbilityContinuation child;
+    /// there is intentionally no general frame search.
     pub fn active_post_replacement_or_paired_parent(&self) -> Option<&PostReplacementDrainStack> {
         match self.last() {
             Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
-            Some(ResolutionFrame::MultiDraw(_)) => match self.active_predecessor() {
-                Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
-                Some(_) | None => None,
-            },
+            Some(ResolutionFrame::MultiDraw(_)) | Some(ResolutionFrame::AbilityContinuation(_)) => {
+                match self.active_predecessor() {
+                    Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
+                    Some(_) | None => None,
+                }
+            }
             Some(_) | None => None,
         }
     }
 
-    /// Mutably accesses the active general drain or its exact paired parent.
+    /// Mutably accesses the active general drain or its exact immediate parent.
     pub fn active_post_replacement_or_paired_parent_mut(
         &mut self,
     ) -> Option<&mut PostReplacementDrainStack> {
@@ -1935,13 +1936,28 @@ impl ResolutionStack {
                 Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
                 Some(_) | None => unreachable!("checked post-replacement frame must match"),
             },
-            Some(ResolutionFrame::MultiDraw(_)) => {
+            Some(ResolutionFrame::MultiDraw(_)) | Some(ResolutionFrame::AbilityContinuation(_)) => {
                 let index = paired_parent_index?;
                 match self.frames.get_mut(index) {
                     Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
                     Some(_) | None => None,
                 }
             }
+            Some(_) | None => None,
+        }
+    }
+
+    /// Returns the active ChangeZone frame, or its exact immediate parent
+    /// while a post-replacement child raised by that zone change is active.
+    /// This is the one Devour snapshot relationship that survives a paused
+    /// as-enters replacement; it deliberately does not search deeper frames.
+    pub fn active_change_zone_or_post_replacement_child(&self) -> Option<&ChangeZoneFrame> {
+        match self.last() {
+            Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
+            Some(ResolutionFrame::PostReplacement(_)) => match self.active_predecessor() {
+                Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
+                Some(_) | None => None,
+            },
             Some(_) | None => None,
         }
     }

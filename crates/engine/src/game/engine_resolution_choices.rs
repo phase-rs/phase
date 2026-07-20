@@ -4159,6 +4159,14 @@ pub(super) fn handle_resolution_choice(
                         events_before_sacrifice,
                         events_after_sacrifice,
                     } => {
+                        // CR 614.12a + CR 614.13a: a direct sacrifice selection can be the
+                        // complete body of a paused post-replacement dispatch
+                        // (Devour). Retire that exact resident before its outer
+                        // ChangeZone iteration resumes; a chained ability
+                        // continuation remains its owner.
+                        if state.active_ability_continuation().is_none() {
+                            state.finish_active_paused_post_replacement_dispatch();
+                        }
                         set_priority(state, player);
                         resume_with_error_propagation(state, events)?;
                         if let Some(outcome) = batch_or_drain_observer_triggers(
@@ -4258,6 +4266,13 @@ pub(super) fn handle_resolution_choice(
                             events_before_sacrifice,
                             events_after_sacrifice,
                         } => {
+                            // CR 614.12a + CR 614.13a: see the matching player-scope
+                            // sacrifice completion above. This EffectZoneChoice
+                            // path can complete a Devour drain without an
+                            // ability continuation.
+                            if state.active_ability_continuation().is_none() {
+                                state.finish_active_paused_post_replacement_dispatch();
+                            }
                             set_priority(state, player);
                             resume_with_error_propagation(state, events)?;
                             if let Some(outcome) = batch_or_drain_observer_triggers(

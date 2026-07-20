@@ -46,7 +46,7 @@ use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
     AbilityContinuationFrame, ChangeZoneFrame, MultiDrawFrame, OptionalEffectFrame,
     PendingCoinFlip, PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame,
-    ResolutionStack, ResolutionStackError, ResolutionStateWire,
+    ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -13272,9 +13272,11 @@ impl GameState {
     }
 
     /// Returns the Devour eligibility snapshot owned by the active ChangeZone
-    /// frame. A missing frame means no Devour co-entry is in progress.
+    /// frame. A post-replacement drain raised by that same zone change may be
+    /// its exact active child; no other buried frame is consulted.
     pub fn active_devour_eligible_snapshot(&self) -> Option<&HashSet<ObjectId>> {
-        self.active_change_zone_frame()
+        self.resolution_stack
+            .active_change_zone_or_post_replacement_child()
             .and_then(|frame| frame.devour_eligible_snapshot.as_ref())
     }
 
@@ -14174,6 +14176,18 @@ impl GameState {
             .and_then(PostReplacementDrainStack::finish_paused_dispatch);
         if finished.is_some() {
             self.remove_empty_active_post_replacement_frame();
+            // CR 614.12a + CR 614.13a: a Devour-only ChangeZone snapshot stays
+            // resident while its exact post-replacement child resolves. Once that
+            // child is retired, the snapshot is again the active owner and its
+            // single-entry lifetime ends. A pending iteration keeps its snapshot
+            // for the remaining co-arrivers.
+            if self.active_change_zone_frame().is_some_and(|frame| {
+                frame.pending.is_none() && frame.devour_eligible_snapshot.is_some()
+            }) {
+                let _ = self
+                    .take_active_change_zone_frame()
+                    .expect("a completed Devour-only ChangeZone frame must be active");
+            }
         }
     }
 
@@ -14204,16 +14218,17 @@ impl GameState {
         }
     }
 
-    /// Returns the complete general post-replacement drain authority. The only
-    /// non-top case is the exact immediate paused parent of an active MultiDraw
-    /// child; this is positional pairing, not a generic frame search.
+    /// Returns the complete general post-replacement drain authority. A
+    /// non-top drain may be the exact immediate parent of an active MultiDraw
+    /// or AbilityContinuation child; this is positional pairing, not a generic
+    /// frame search.
     pub fn active_post_replacement_drains(&self) -> Option<&PostReplacementDrainStack> {
         self.resolution_stack
             .active_post_replacement_or_paired_parent()
     }
 
-    /// Mutably accesses the active general drain or the exact paused parent of
-    /// the active MultiDraw frame.
+    /// Mutably accesses the active general drain or its exact immediate child
+    /// parent.
     pub fn active_post_replacement_drains_mut(&mut self) -> Option<&mut PostReplacementDrainStack> {
         self.resolution_stack
             .active_post_replacement_or_paired_parent_mut()
@@ -14231,7 +14246,13 @@ impl GameState {
         }
         let mut drains = PostReplacementDrainStack::default();
         let installed = drains.install(drain, policy);
-        self.resolution_stack.push_post_replacement(drains);
+        if self.active_multi_draw_frame().is_some() {
+            self.resolution_stack
+                .insert_parent_of_active(ResolutionFrame::PostReplacement(drains))
+                .expect("an active multi-draw frame accepts its exact post-replacement parent");
+        } else {
+            self.resolution_stack.push_post_replacement(drains);
+        }
         installed
     }
 

@@ -305,6 +305,23 @@ fn append_effect_resolved_after_counter_pause(
     );
 }
 
+/// CR 614.12a + CR 614.13a: capture the battlefield immediately before a
+/// known single Devour entry. Both deterministic single-entry paths call this
+/// before `move_to_zone`, so the entrant cannot appear in its own sacrifice
+/// pool even when no multi-member ChangeZone frame exists yet.
+fn capture_devour_snapshot_before_single_entry(
+    state: &mut GameState,
+    object_id: ObjectId,
+    destination: Zone,
+) {
+    if destination == Zone::Battlefield
+        && state.active_devour_eligible_snapshot().is_none()
+        && crate::game::engine_replacement::object_has_devour_replacement(state, object_id)
+    {
+        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
+    }
+}
+
 /// Move target objects between zones.
 pub fn resolve(
     state: &mut GameState,
@@ -657,6 +674,7 @@ pub fn resolve(
         {
             let index = state.rng.random_range(0..eligible.len());
             let chosen = eligible[index];
+            capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             let per_obj_enter_counters = enter_with_counters_for_object(
                 state,
                 ability,
@@ -748,6 +766,7 @@ pub fn resolve(
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
+            capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             let per_obj_enter_counters = enter_with_counters_for_object(
                 state,
                 ability,
