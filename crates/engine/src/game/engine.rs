@@ -6744,7 +6744,10 @@ fn apply_action(
             let previous_trigger_event = state.current_trigger_event.clone();
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
-            state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
+            state.current_trigger_match_count = state
+                .active_ability_continuation()
+                .and_then(|continuation| continuation.trigger_context.as_ref())
+                .and_then(|context| context.match_count);
             resume_pending_continuation_if_priority(state, &mut events)?;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_match_count = previous_trigger_match_count;

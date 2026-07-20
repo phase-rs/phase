@@ -44,8 +44,8 @@ use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
-    AbilityContinuationFrame, ChangeZoneFrame, ResolutionStack, ResolutionStackError,
-    ResolutionStateWire,
+    AbilityContinuationFrame, ChangeZoneFrame, OptionalEffectFrame, ResolutionStack,
+    ResolutionStackError, ResolutionStateWire,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -10399,8 +10399,8 @@ pub struct StaticSourceIndex {
 /// when the player answers — letting an `EventContextAmount` sub_ability
 /// (Amy Pond: "choose a suspended card you own and remove that many time counters
 /// from it") read the triggering event's amount after the pause. Building-block
-/// generalization of the `pending_optional_trigger_event` /
-/// `pending_optional_trigger_match_count` pair (The Ur-Dragon) and the
+/// generalization of the optional-effect frame's trigger event/count context
+/// (The Ur-Dragon) and the
 /// `WaitingFor::ChooseObjectsSelection` save/restore.
 ///
 /// Mechanism map (as of the `PendingContinuation.trigger_context` fix):
@@ -11846,32 +11846,6 @@ pub struct GameState {
     /// `ProliferateChoice` completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_proliferate_actions: Option<PendingProliferateActions>,
-
-    /// Pending optional effect ability chain, awaiting player accept/decline.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
-
-    /// Transient: the triggering event of the ability stashed in
-    /// `pending_optional_effect`, captured while it is still live (before
-    /// `resolve_top` clears `current_trigger_event`). Restored around
-    /// `resolve_optional_effect_decision` so an optional ("may") triggered
-    /// ability's effect resolves `TriggeringPlayer` / event-context refs
-    /// exactly as a non-optional trigger would. Mirrors
-    /// `WaitingFor::UnlessPayment.trigger_event`. Set ONLY for the
-    /// `OptionalEffectChoice` stash; taken by `handle_optional_effect_choice`.
-    /// CR 608.2: an ability's resolution is a single process.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_optional_trigger_event: Option<crate::types::events::GameEvent>,
-
-    /// CR 603.2c: Saves/restores the firing batched trigger's filtered subject
-    /// count across an `OptionalEffectChoice` round-trip so a "you may"
-    /// sub-ability (e.g. The Ur-Dragon: "you may put a permanent card from
-    /// your hand onto the battlefield") resumes with the same
-    /// `EventContextAmount` the pre-pause resolution observed. Mirror of
-    /// `pending_optional_trigger_event`. Set ONLY when stashing into
-    /// `pending_optional_effect`; taken by `handle_optional_effect_choice`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_optional_trigger_match_count: Option<u32>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
@@ -13983,6 +13957,39 @@ impl GameState {
         self.resolution_stack.push_per_category_zone_choice(pending);
     }
 
+    /// Returns the parked optional-effect authority only when its direct-choice
+    /// frame owns the stack top.
+    pub fn active_optional_effect_frame(&self) -> Option<&OptionalEffectFrame> {
+        self.resolution_stack.active_optional_effect()
+    }
+
+    /// Mutably accesses only the active optional-effect frame.
+    pub fn active_optional_effect_frame_mut(&mut self) -> Option<&mut OptionalEffectFrame> {
+        self.resolution_stack.active_optional_effect_mut()
+    }
+
+    /// Parks one optional-effect prompt with its trigger context.
+    pub fn push_optional_effect_frame(&mut self, frame: OptionalEffectFrame) {
+        self.resolution_stack.push_optional_effect(frame);
+    }
+
+    /// Re-parks the active optional-effect prompt without exposing an
+    /// empty-stack interval between APNAP responders.
+    pub fn replace_active_optional_effect_frame(
+        &mut self,
+        frame: OptionalEffectFrame,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_optional_effect(frame)
+    }
+
+    /// Consumes exactly the active optional-effect frame when its answer is
+    /// accepted or declined.
+    pub fn take_active_optional_effect_frame(
+        &mut self,
+    ) -> Result<Option<OptionalEffectFrame>, ResolutionStackError> {
+        self.resolution_stack.take_active_optional_effect()
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14667,9 +14674,6 @@ impl GameState {
             pending_library_search_delivery: None,
             pending_search_found_batch: None,
             pending_proliferate_actions: None,
-            pending_optional_effect: None,
-            pending_optional_trigger_event: None,
-            pending_optional_trigger_match_count: None,
             may_trigger_auto_choices: Vec::new(),
             decision_templates: Vec::new(),
             priority_yields: Vec::new(),
@@ -15387,7 +15391,10 @@ impl GameState {
                 record_event(event);
             }
         }
-        if let Some(event) = clone.pending_optional_trigger_event.as_ref() {
+        if let Some(event) = clone
+            .active_optional_effect_frame()
+            .and_then(|frame| frame.trigger_event.as_ref())
+        {
             record_event(event);
         }
         if let Some(context) = clone
@@ -15774,9 +15781,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_coin_flip: _,
         resolution_coin_flip: _,
         pending_proliferate_actions: _,
-        pending_optional_effect: _,
-        pending_optional_trigger_event: _,
-        pending_optional_trigger_match_count: _,
         may_trigger_auto_choices: _,
         decision_templates: _,
         priority_yields: _,
@@ -16100,8 +16104,6 @@ impl PartialEq for GameState {
             && self.last_effect_count == other.last_effect_count
             && self.last_effect_counts_by_player == other.last_effect_counts_by_player
             && self.current_trigger_match_count == other.current_trigger_match_count
-            && self.pending_optional_trigger_match_count
-                == other.pending_optional_trigger_match_count
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             // CR 603.12a: K is nonzero AT the per-iteration `OptionalEffectChoice`
             // pause (a serde boundary across separate `apply()` calls). It is

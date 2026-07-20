@@ -1831,7 +1831,11 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     draw.condition = Some(AbilityCondition::effect_performed());
     ability.sub_ability = Some(Box::new(draw));
 
-    state.pending_optional_effect = Some(Box::new(ability));
+    state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
+        ability: Box::new(ability),
+        trigger_event: None,
+        trigger_match_count: None,
+    });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
         source_id,
@@ -1877,7 +1881,11 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
     let mut ability = hand_to_battlefield_choice_ability(source_id, PlayerId(1));
     ability.sub_ability = Some(Box::new(draw_that_many(source_id, PlayerId(1))));
 
-    state.pending_optional_effect = Some(Box::new(ability));
+    state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
+        ability: Box::new(ability),
+        trigger_event: None,
+        trigger_match_count: None,
+    });
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
         remaining: vec![],

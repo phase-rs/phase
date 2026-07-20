@@ -285,6 +285,8 @@ pub enum ResolutionStackError {
         frame: FrameKind,
         waiting_for: &'static str,
     },
+    #[error("resolution stack contains multiple direct-choice owners")]
+    MultipleDirectChoiceOwners,
     #[error("invalid adjacent post-replacement and multi-draw pair: {0}")]
     InvalidAdjacentPair(&'static str),
     #[error("invalid embedded {frame:?} frame: {message}")]
@@ -1105,6 +1107,65 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the optional-effect owner only when it owns the stack top.
+    pub fn active_optional_effect(&self) -> Option<&OptionalEffectFrame> {
+        match self.last() {
+            Some(ResolutionFrame::OptionalEffect(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active optional-effect owner.
+    pub fn active_optional_effect_mut(&mut self) -> Option<&mut OptionalEffectFrame> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::OptionalEffect(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active optional-effect frame.
+    pub fn take_active_optional_effect(
+        &mut self,
+    ) -> Result<Option<OptionalEffectFrame>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::OptionalEffect(_)) => {
+                let ResolutionFrame::OptionalEffect(frame) =
+                    self.pop_expected(FrameKind::OptionalEffect)?
+                else {
+                    unreachable!("checked optional-effect frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::OptionalEffect,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks a newly active optional-effect owner.
+    pub fn push_optional_effect(&mut self, frame: OptionalEffectFrame) {
+        self.push_inner(ResolutionFrame::OptionalEffect(frame));
+    }
+
+    /// Re-parks the active optional-effect owner without an empty-stack interval.
+    pub fn replace_active_optional_effect(
+        &mut self,
+        frame: OptionalEffectFrame,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::OptionalEffect(_)) => {
+                self.replace_active(ResolutionFrame::OptionalEffect(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::OptionalEffect,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns the multi-player choose-one owner only when it owns the stack
     /// top.
     pub fn active_choose_one_of(&self) -> Option<&PendingChooseOneOf> {
@@ -1379,6 +1440,16 @@ impl ResolutionStack {
 
     /// Validate stack-local structural and prompt coherence invariants.
     pub fn validate(&self, waiting_for: &WaitingFor) -> Result<(), ResolutionStackError> {
+        if self
+            .frames
+            .iter()
+            .filter(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)))
+            .nth(1)
+            .is_some()
+        {
+            return Err(ResolutionStackError::MultipleDirectChoiceOwners);
+        }
+
         let has_multi_draw = self
             .frames
             .iter()
@@ -1520,6 +1591,7 @@ impl ResolutionStateWire {
                     LegacyPerPlayerZoneChoiceWire::from_value(&value)?;
                 let legacy_per_category_zone_choice =
                     LegacyPerCategoryZoneChoiceWire::from_value(&value)?;
+                let legacy_optional_effect = LegacyOptionalEffectWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -1542,6 +1614,9 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_vote_ballot_iteration");
                 legacy_object.remove("pending_per_player_zone_choice");
                 legacy_object.remove("pending_per_category_zone_choice");
+                legacy_object.remove("pending_optional_effect");
+                legacy_object.remove("pending_optional_trigger_event");
+                legacy_object.remove("pending_optional_trigger_match_count");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
@@ -1589,6 +1664,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_per_category_zone_choice.into_frame() {
                     legacy.push_per_category_zone_choice(frame);
+                }
+                if let Some(frame) = legacy_optional_effect.into_frame()? {
+                    legacy.push_optional_effect_frame(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -1925,6 +2003,43 @@ struct LegacyPerCategoryZoneChoiceWire {
     pending_per_category_zone_choice: Option<PendingPerCategoryZoneChoice>,
 }
 
+/// v1-only optional-effect authority. Runtime state keeps the ability and its
+/// trigger event/count context together in an `OptionalEffect` frame.
+#[derive(Deserialize)]
+struct LegacyOptionalEffectWire {
+    #[serde(default)]
+    pending_optional_effect: Option<Box<ResolvedAbility>>,
+    #[serde(default)]
+    pending_optional_trigger_event: Option<GameEvent>,
+    #[serde(default)]
+    pending_optional_trigger_match_count: Option<u32>,
+}
+
+impl LegacyOptionalEffectWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Result<Option<OptionalEffectFrame>, String> {
+        let Some(ability) = self.pending_optional_effect else {
+            if self.pending_optional_trigger_event.is_some()
+                || self.pending_optional_trigger_match_count.is_some()
+            {
+                return Err(
+                    "legacy optional-effect trigger context has no optional-effect owner"
+                        .to_string(),
+                );
+            }
+            return Ok(None);
+        };
+        Ok(Some(OptionalEffectFrame {
+            ability,
+            trigger_event: self.pending_optional_trigger_event,
+            trigger_match_count: self.pending_optional_trigger_match_count,
+        }))
+    }
+}
+
 impl LegacyPerCategoryZoneChoiceWire {
     fn from_value(value: &Value) -> Result<Self, String> {
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())
@@ -1988,14 +2103,6 @@ impl LegacyRepeatForWire {
 pub(crate) fn canonicalize_legacy_resolution_state(
     state: &GameState,
 ) -> Result<ResolutionStack, String> {
-    if state.pending_optional_effect.is_none()
-        && (state.pending_optional_trigger_event.is_some()
-            || state.pending_optional_trigger_match_count.is_some())
-    {
-        return Err(
-            "pending optional-effect trigger context has no optional-effect owner".to_string(),
-        );
-    }
     let mut frames = ResolutionStack::default();
 
     for frame in state.resolution_stack.iter() {
@@ -2015,6 +2122,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
                 | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
         ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
@@ -2057,7 +2165,10 @@ fn push_legacy_direct_choice_frames(
     state: &GameState,
     frames: &mut ResolutionStack,
 ) -> Result<(), String> {
-    let mut direct_choice_count = 0;
+    let mut direct_choice_count = frames
+        .iter()
+        .filter(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)))
+        .count();
     if state.pending_repeated_optional_payment.is_some()
         || state.optional_cost_payments_this_resolution != 0
     {
@@ -2069,14 +2180,6 @@ fn push_legacy_direct_choice_frames(
                     .optional_cost_payments_this_resolution,
             },
         ));
-    }
-    if let Some(ability) = state.pending_optional_effect.clone() {
-        direct_choice_count += 1;
-        frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-            ability,
-            trigger_event: state.pending_optional_trigger_event.clone(),
-            trigger_match_count: state.pending_optional_trigger_match_count,
-        }));
     }
     if let Some(pending) = state.pending_coin_flip.clone() {
         direct_choice_count += 1;
@@ -2200,13 +2303,7 @@ fn project_frames_into_legacy_state(
                 projected.push_per_category_zone_choice(frame.pending.clone())
             }
             ResolutionFrame::OptionalEffect(frame) => {
-                set_once(
-                    &mut projected.pending_optional_effect,
-                    frame.ability.clone(),
-                    "OptionalEffect",
-                )?;
-                projected.pending_optional_trigger_event = frame.trigger_event.clone();
-                projected.pending_optional_trigger_match_count = frame.trigger_match_count;
+                projected.push_optional_effect_frame(frame.clone());
             }
             ResolutionFrame::CoinFlip(pending) => set_once(
                 &mut projected.pending_coin_flip,
@@ -2262,9 +2359,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
     state.pending_repeated_optional_payment = None;
     state.optional_cost_payments_this_resolution = 0;
-    state.pending_optional_effect = None;
-    state.pending_optional_trigger_event = None;
-    state.pending_optional_trigger_match_count = None;
     state.pending_coin_flip = None;
     state.pending_proliferate_actions = None;
     state.draw_sequences = DrawSequenceStack::default();
@@ -2519,6 +2613,41 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("v2 fixture restores for the legacy runtime action path")
+            .into_game_state()
+    }
+
+    fn restore_v1_optional_effect_fixture(
+        state: GameState,
+        frame: OptionalEffectFrame,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_optional_effect"] =
+            serde_json::to_value(frame.ability).expect("legacy optional effect serializes");
+        v1["pending_optional_trigger_event"] =
+            serde_json::to_value(frame.trigger_event).expect("legacy optional event serializes");
+        v1["pending_optional_trigger_match_count"] =
+            serde_json::to_value(frame.trigger_match_count)
+                .expect("legacy optional count serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        let wire: ResolutionStateWire = serde_json::from_value(v1)
+            .expect("v1 optional-effect fixture converts through the wire");
+        let v2 = serde_json::to_value(&wire).expect("converted fixture serializes as v2");
+        assert_eq!(
+            v2["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(v2.get("resolution_frames").is_some());
+        for field in legacy_resolution_wire_fields() {
+            assert!(
+                v2.get(*field).is_none(),
+                "v2 fixture must not write legacy field {field}"
+            );
+        }
+
+        serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("v2 optional-effect fixture restores for the runtime action path")
             .into_game_state()
     }
 
@@ -2930,6 +3059,23 @@ mod tests {
                 remaining: Vec::new(),
             })
             .expect("optional-effect frame owns an opponent-may prompt");
+        optional_effect.push_inner(ResolutionFrame::CoinFlip(PendingCoinFlip {
+            source_id: ObjectId(6),
+            controller: PlayerId(0),
+            flipper: PlayerId(0),
+            targets: Vec::new(),
+            win_effect: None,
+            lose_effect: None,
+            kind: PendingCoinFlipKind::Single,
+        }));
+        assert_eq!(
+            optional_effect.validate(&WaitingFor::CoinFlipKeepChoice {
+                player: PlayerId(0),
+                results: vec![true, false],
+                keep_count: 1,
+            }),
+            Err(ResolutionStackError::MultipleDirectChoiceOwners)
+        );
     }
 
     #[test]
@@ -3269,20 +3415,26 @@ mod tests {
         assert_reserializes_v2_only(repeated);
 
         let mut optional = GameState::new_two_player(102);
-        optional.pending_optional_effect = Some(Box::new(resolved_draw(102)));
         optional.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(102),
             description: None,
             may_trigger_key: None,
         };
-        let mut optional = restore_v1_fixture(optional);
+        let mut optional = restore_v1_optional_effect_fixture(
+            optional,
+            OptionalEffectFrame {
+                ability: Box::new(resolved_draw(102)),
+                trigger_event: None,
+                trigger_match_count: None,
+            },
+        );
         apply_as_current(
             &mut optional,
             GameAction::DecideOptionalEffect { accept: false },
         )
         .expect("optional-effect fixture resumes through the real optional-choice action");
-        assert!(optional.pending_optional_effect.is_none());
+        assert!(optional.active_optional_effect_frame().is_none());
         assert_reserializes_v2_only(optional);
 
         let mut coin = GameState::new_two_player(103);
@@ -3950,10 +4102,9 @@ mod tests {
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         assert!(serde_json::from_value::<ResolutionStateWire>(orphan_choose_context).is_err());
 
-        let mut orphan_optional_context = GameState::new_two_player(153);
-        orphan_optional_context.pending_optional_trigger_match_count = Some(1);
         let mut orphan_optional_context =
-            serde_json::to_value(orphan_optional_context).expect("v1 serializes");
+            serde_json::to_value(GameState::new_two_player(153)).expect("v1 serializes");
+        orphan_optional_context["pending_optional_trigger_match_count"] = Value::from(1);
         orphan_optional_context["resolution_state_version"] =
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         assert!(serde_json::from_value::<ResolutionStateWire>(orphan_optional_context).is_err());

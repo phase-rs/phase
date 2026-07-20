@@ -29,7 +29,9 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
-use crate::types::resolution::{AbilityContinuationFrame, ResolutionFrame, ResolutionStack};
+use crate::types::resolution::{
+    AbilityContinuationFrame, OptionalEffectFrame, ResolutionFrame, ResolutionStack,
+};
 use crate::types::zones::Zone;
 
 pub mod adapt;
@@ -7919,8 +7921,11 @@ fn resolve_chain_body(
                 .collect();
             if let Some(first) = opponent_order.first().copied() {
                 let remaining = opponent_order.split_off(1);
-                state.pending_optional_effect =
-                    Some(Box::new(ability_with_event_context_targets(state, ability)));
+                state.push_optional_effect_frame(OptionalEffectFrame {
+                    ability: Box::new(ability_with_event_context_targets(state, ability)),
+                    trigger_event: state.current_trigger_event.clone(),
+                    trigger_match_count: state.current_trigger_match_count,
+                });
                 state.waiting_for = WaitingFor::OpponentMayChoice {
                     player: first,
                     source_id: ability.source_id,
@@ -7976,19 +7981,20 @@ fn resolve_chain_body(
                 return Ok(());
             }
         }
-        state.pending_optional_effect =
-            Some(Box::new(ability_with_event_context_targets(state, ability)));
-        // CR 608.2: capture the triggering event in lockstep with the stashed
-        // ability while `current_trigger_event` is still live (we are inside
-        // `execute_effect`). Restored when the optional decision resumes so an
-        // optional ("may") trigger's effect resolves `TriggeringPlayer` and
-        // other event-context refs exactly as a non-optional trigger would.
-        state.pending_optional_trigger_event = state.current_trigger_event.clone();
-        // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
-        // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
-        // permanent-from-hand sub-effect) resumes with the same
-        // `EventContextAmount` the pre-pause resolution observed.
-        state.pending_optional_trigger_match_count = state.current_trigger_match_count;
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ability_with_event_context_targets(state, ability)),
+            // CR 608.2: capture the triggering event in lockstep with the stashed
+            // ability while `current_trigger_event` is still live (we are inside
+            // `execute_effect`). Restored when the optional decision resumes so an
+            // optional ("may") trigger's effect resolves `TriggeringPlayer` and
+            // other event-context refs exactly as a non-optional trigger would.
+            trigger_event: state.current_trigger_event.clone(),
+            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
+            // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
+            // permanent-from-hand sub-effect) resumes with the same
+            // `EventContextAmount` the pre-pause resolution observed.
+            trigger_match_count: state.current_trigger_match_count,
+        });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: prompt_player,
             source_id: ability.source_id,
@@ -10851,6 +10857,7 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::{PlayerCounterKind, PlayerId};
+    use crate::types::resolution::ResolutionStateWire;
     use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -11745,10 +11752,20 @@ mod tests {
         ));
         state.current_trigger_event = None;
 
-        crate::game::engine_payment_choices::handle_optional_effect_choice(
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("real optional-effect prompt serializes as v2");
+        assert_eq!(v2["resolution_state_version"], 2);
+        assert!(v2.get("pending_optional_effect").is_none());
+        assert!(v2.get("pending_optional_trigger_event").is_none());
+        assert!(v2.get("pending_optional_trigger_match_count").is_none());
+        state = serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("real optional-effect prompt round-trips through the v2 wire")
+            .into_game_state();
+
+        crate::game::engine::apply(
             &mut state,
-            true,
-            &mut events,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
         )
         .unwrap();
 
@@ -14241,7 +14258,7 @@ mod tests {
             state.waiting_for,
             WaitingFor::OptionalEffectChoice { .. }
         ));
-        assert!(state.pending_optional_effect.is_none());
+        assert!(state.active_optional_effect_frame().is_none());
         assert!(events.is_empty());
     }
 
@@ -24550,8 +24567,8 @@ mod tests {
 
         assert_eq!(state.last_revealed_ids, vec![looked, sibling]);
         let pending = state
-            .pending_optional_effect
-            .as_ref()
+            .active_optional_effect_frame()
+            .map(|frame| frame.ability.as_ref())
             .expect("optional cast must be pending");
         assert_eq!(
             pending.targets,

@@ -3609,7 +3609,7 @@ pub(super) fn handle_resolution_choice(
             // the `prev` values are restored after the inner drain, leaving no
             // stale leak past the action boundary. Mirrors
             // `WaitingFor::ChooseObjectsSelection` and the
-            // `pending_optional_trigger_event` round-trip.
+            // optional-effect frame trigger-context round-trip.
             let prev_trigger_event = state.current_trigger_event.clone();
             let prev_trigger_match_count = state.current_trigger_match_count;
             let prev_die_result = state.die_result_this_resolution;

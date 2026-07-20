@@ -1948,7 +1948,7 @@ mod tests {
     /// damages the triggering player P1 — never the Aura controller P0. Sibling
     /// coverage for the decline branch; the decline resolves synchronously
     /// inside `handle_optional_effect_choice`, so its trigger context is kept
-    /// live by the pre-existing `pending_optional_trigger_event` mechanism
+    /// live by the optional-effect frame's trigger-context mechanism
     /// rather than by the drain-time snapshot under test. It guards that the
     /// `PendingContinuation::new` signature change did not regress the decline
     /// path's damage recipient.
