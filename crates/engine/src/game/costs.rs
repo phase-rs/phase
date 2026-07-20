@@ -1398,7 +1398,7 @@ fn pay_ability_cost_inner(
             if *count == REMOVE_COUNTER_COST_ALL
                 && matches!(counter_type, crate::types::counter::CounterMatch::Any)
             {
-                let counters: Vec<_> = state
+                let mut counters: Vec<_> = state
                     .objects
                     .get(&source_id)
                     .map(|obj| {
@@ -1408,6 +1408,10 @@ fn pay_ability_cost_inner(
                             .collect()
                     })
                     .unwrap_or_default();
+                // Issue #4878: `obj.counters` is a default-RandomState HashMap;
+                // sort by CounterType so the removal (and any per-type triggers
+                // it emits) happen in a deterministic, process-independent order.
+                counters.sort_by(|a, b| a.0.cmp(&b.0));
                 for (counter_type, count) in counters {
                     super::effects::counters::remove_counter_with_replacement(
                         state,

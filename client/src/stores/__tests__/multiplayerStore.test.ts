@@ -29,10 +29,12 @@ import type { PlayerSlot } from "../../multiplayer/seatTypes";
 import { formatMetadata } from "../../data/formatRegistry";
 import {
   FORMAT_DEFAULTS,
+  isServerCompatible,
   migrateOfficialServerAddress,
   type HostingSettings,
   useMultiplayerStore,
 } from "../multiplayerStore";
+import { PROTOCOL_VERSION, type ServerInfo } from "../../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -156,6 +158,20 @@ describe("multiplayerStore", () => {
     expect(id1).toMatch(/^[0-9a-f]{8}-/);
     const id2 = useMultiplayerStore.getState().playerId;
     expect(id2).toBe(id1);
+  });
+
+  it("keeps LobbyOnly compatibility to the derived one-version rollout window", () => {
+    const server = (mode: ServerInfo["mode"], protocolVersion: number): ServerInfo => ({
+      version: "test",
+      buildCommit: "test",
+      mode,
+      protocolVersion,
+    });
+
+    expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION))).toBe(true);
+    expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION - 1))).toBe(true);
+    expect(isServerCompatible(server("LobbyOnly", PROTOCOL_VERSION - 2))).toBe(false);
+    expect(isServerCompatible(server("Full", PROTOCOL_VERSION - 1))).toBe(false);
   });
 
   it("persists displayName across store resets", () => {

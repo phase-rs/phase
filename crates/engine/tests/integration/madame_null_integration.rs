@@ -107,6 +107,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             is_token: false,
             combat_status: Default::default(),
             trigger_definitions: Vec::new(),
+            trigger_source_context: None,
             co_departed: Vec::new(),
             attached_to: None,
             entered_incarnation: None,

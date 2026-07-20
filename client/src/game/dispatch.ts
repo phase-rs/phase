@@ -1,4 +1,4 @@
-import type { BatchResolveResult, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, WaitingFor } from "../adapter/types";
+import type { BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, WaitingFor } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
@@ -58,6 +58,7 @@ interface PendingLocalAction {
   kind: "local";
   action: GameAction;
   actor: number;
+  session: BoundGameSession | null;
   /** WaitingFor object that prompted this local action. */
   waitingFor: WaitingFor | null;
   resolve: () => void;
@@ -74,6 +75,16 @@ interface PendingRemoteUpdate {
 }
 
 type PendingWork = PendingLocalAction | PendingRemoteUpdate;
+
+type BoundGameSession = {
+  adapter: EngineAdapter;
+  generation: number;
+};
+
+type GameSessionPreferenceAction = Extract<
+  GameAction,
+  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" }
+>;
 
 /** Module-level mutex — replaces useRef from the hook version. */
 let isAnimating = false;
@@ -100,11 +111,36 @@ let dispatchGeneration = 0;
 let inFlightLocalAction: {
   action: GameAction;
   actor: number;
+  session: BoundGameSession | null;
   waitingFor: WaitingFor | null;
 } | null = null;
 
 function isCurrentDispatchGeneration(generation: number): boolean {
   return generation === dispatchGeneration;
+}
+
+function isBoundGameSessionCurrent(session: BoundGameSession | null): boolean {
+  if (!session) return true;
+  const game = useGameStore.getState();
+  return (
+    game.adapter === session.adapter
+    && game.gameSessionGeneration === session.generation
+    && game.gameState !== null
+  );
+}
+
+function isDispatchContextCurrent(
+  generation: number,
+  session: BoundGameSession | null,
+): boolean {
+  return isCurrentDispatchGeneration(generation) && isBoundGameSessionCurrent(session);
+}
+
+function sameBoundGameSession(
+  a: BoundGameSession | null,
+  b: BoundGameSession | null,
+): boolean {
+  return a?.adapter === b?.adapter && a?.generation === b?.generation;
 }
 
 /** Discard dispatch work that belongs to the game state being replaced. */
@@ -160,6 +196,13 @@ function waitingForActorMatches(
 }
 
 function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
+  if (!isBoundGameSessionCurrent(next.session)) return false;
+  if (
+    next.action.type === "SetPhaseStops"
+    || next.action.type === "SetPriorityPassingMode"
+  ) {
+    return true;
+  }
   const { gameState, legalActions, waitingFor } = useGameStore.getState();
   if (Object.is(next.waitingFor, waitingFor)) return true;
   if (!waitingForActorMatches(waitingFor, gameState, next.actor)) return false;
@@ -226,7 +269,9 @@ async function processAction(
   action: GameAction,
   actor: number,
   generation: number,
+  session: BoundGameSession | null,
 ): Promise<void> {
+  if (!isDispatchContextCurrent(generation, session)) return;
   const { adapter, gameState } = useGameStore.getState();
   if (!adapter || !gameState) {
     debugLog("processAction called with no adapter or gameState");
@@ -263,7 +308,7 @@ async function processAction(
   try {
     result = await adapter.submitAction(action, actor);
   } catch (err) {
-    if (!isCurrentDispatchGeneration(generation)) return;
+    if (!isDispatchContextCurrent(generation, session)) return;
     // Stale click after a priority/turn shift: the engine's actor-auth guard
     // correctly rejected it. Nothing changed engine-side, so drop it as a
     // no-op instead of letting a benign race escape as an unhandled rejection.
@@ -292,7 +337,7 @@ async function processAction(
     if (!isStateLost(err)) throw err;
     debugLog(`processAction: STATE_LOST on ${action.type}; attempting rehydrate`, "warn");
     const recovered = await attemptStateRehydrate();
-    if (!isCurrentDispatchGeneration(generation)) return;
+    if (!isDispatchContextCurrent(generation, session)) return;
     if (!recovered) {
       notifyEngineLost("submitAction");
       throw err;
@@ -306,7 +351,7 @@ async function processAction(
     try {
       result = await adapter.submitAction(action, actor);
     } catch (retryErr) {
-      if (!isCurrentDispatchGeneration(generation)) return;
+      if (!isDispatchContextCurrent(generation, session)) return;
       // Prefer the captured panic message over the bare retry tag — that's
       // the "diagnostic: submitAction-retry" the user reported, which told
       // them nothing actionable.
@@ -318,7 +363,7 @@ async function processAction(
       throw retryErr;
     }
   }
-  if (!isCurrentDispatchGeneration(generation)) return;
+  if (!isDispatchContextCurrent(generation, session)) return;
   const events: GameEvent[] = result.events;
 
   // 3b. Fetch the state AND its legal actions as ONE atomic snapshot, and persist
@@ -341,7 +386,7 @@ async function processAction(
   try {
     snapshotResult = await adapter.getSnapshot();
   } catch (err) {
-    if (!isCurrentDispatchGeneration(generation)) return;
+    if (!isDispatchContextCurrent(generation, session)) return;
     if (isEnginePanic(err)) {
       await routePanic("getSnapshot-panic", err.panic);
       throw err;
@@ -353,7 +398,7 @@ async function processAction(
     if (!isStateLost(err)) throw err;
     debugLog("processAction: STATE_LOST on getSnapshot; attempting rehydrate", "warn");
     const recovered = await attemptStateRehydrate();
-    if (!isCurrentDispatchGeneration(generation)) return;
+    if (!isDispatchContextCurrent(generation, session)) return;
     if (!recovered) {
       notifyEngineLost("getSnapshot");
       throw err;
@@ -361,7 +406,7 @@ async function processAction(
     try {
       snapshotResult = await adapter.getSnapshot();
     } catch (retryErr) {
-      if (!isCurrentDispatchGeneration(generation)) return;
+      if (!isDispatchContextCurrent(generation, session)) return;
       if (isEnginePanic(retryErr)) {
         notifyEngineLost("getSnapshot-retry-panic", retryErr.panic);
       } else {
@@ -370,7 +415,7 @@ async function processAction(
       throw retryErr;
     }
   }
-  if (!isCurrentDispatchGeneration(generation)) return;
+  if (!isDispatchContextCurrent(generation, session)) return;
   const newState = snapshotResult.state;
   const { gameId } = useGameStore.getState();
   if (gameId) void saveAuthoritativeGame(gameId, adapter, newState);
@@ -463,7 +508,7 @@ async function processAction(
   // The commit is revision-gated, so if a newer commit landed mid-animation
   // (a `gameStore.dispatch` from a modal, a remote update, an AI-loop advance),
   // THIS older pair is dropped rather than clobbering it.
-  if (!isCurrentDispatchGeneration(generation)) return;
+  if (!isDispatchContextCurrent(generation, session)) return;
   const store = useGameStore.getState();
   const stateHistory = shouldSaveHistory
     ? [...store.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
@@ -498,9 +543,14 @@ async function processQueue(generation: number): Promise<void> {
           next.resolve();
           continue;
         }
-        inFlightLocalAction = { action: next.action, actor: next.actor, waitingFor: next.waitingFor };
+        inFlightLocalAction = {
+          action: next.action,
+          actor: next.actor,
+          session: next.session,
+          waitingFor: next.waitingFor,
+        };
         try {
-          await processAction(next.action, next.actor, generation);
+          await processAction(next.action, next.actor, generation, next.session);
         } finally {
           if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
         }
@@ -564,10 +614,12 @@ async function processQueue(generation: number): Promise<void> {
  * misrouted action fails cleanly rather than silently applying as the
  * wrong player.
  */
-export async function dispatchAction(
+async function dispatchActionInternal(
   action: GameAction,
-  actor: number = getPlayerId(),
+  actor: number,
+  session: BoundGameSession | null,
 ): Promise<void> {
+  if (!isBoundGameSessionCurrent(session)) return;
   const { gameMode } = useGameStore.getState();
   if (gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
     return;
@@ -584,6 +636,7 @@ export async function dispatchAction(
     if (
       inFlightLocalAction &&
       inFlightLocalAction.actor === actor &&
+      sameBoundGameSession(inFlightLocalAction.session, session) &&
       actionsEqual(inFlightLocalAction.action, submittedAction) &&
       Object.is(inFlightLocalAction.waitingFor, currentWaitingFor)
     ) {
@@ -593,6 +646,7 @@ export async function dispatchAction(
       if (
         pending.kind === "local" &&
         pending.actor === actor &&
+        sameBoundGameSession(pending.session, session) &&
         actionsEqual(pending.action, submittedAction) &&
         Object.is(pending.waitingFor, currentWaitingFor)
       ) {
@@ -605,6 +659,7 @@ export async function dispatchAction(
         kind: "local",
         action: submittedAction,
         actor,
+        session,
         waitingFor: currentWaitingFor,
         resolve,
         reject,
@@ -614,11 +669,16 @@ export async function dispatchAction(
 
   const generation = dispatchGeneration;
   isAnimating = true;
-  inFlightLocalAction = { action: submittedAction, actor, waitingFor: currentWaitingFor };
+  inFlightLocalAction = {
+    action: submittedAction,
+    actor,
+    session,
+    waitingFor: currentWaitingFor,
+  };
   try {
-    await processAction(submittedAction, actor, generation);
+    await processAction(submittedAction, actor, generation, session);
   } catch (e) {
-    if (!isCurrentDispatchGeneration(generation)) return;
+    if (!isDispatchContextCurrent(generation, session)) return;
     debugLog(`dispatch error for ${submittedAction.type}: ${e instanceof Error ? e.message : String(e)}`);
     showActionError(submittedAction, e);
     throw e;
@@ -626,6 +686,25 @@ export async function dispatchAction(
     if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
     releaseDispatchMutex(generation);
   }
+}
+
+export function dispatchAction(
+  action: GameAction,
+  actor: number = getPlayerId(),
+): Promise<void> {
+  return dispatchActionInternal(action, actor, null);
+}
+
+/** Dispatch a standing preference only while its captured game lifecycle is
+ * still current. A late response from a disposed or resumed session is dropped
+ * before snapshot fetch/commit, so it cannot overwrite the replacement game. */
+export function dispatchActionForGameSession(
+  action: GameSessionPreferenceAction,
+  adapter: EngineAdapter,
+  generation: number,
+  actor: number = getPlayerId(),
+): Promise<void> {
+  return dispatchActionInternal(action, actor, { adapter, generation });
 }
 
 /**

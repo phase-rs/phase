@@ -84,6 +84,7 @@ impl ContinuousModification {
             // CR 707.9b + CR 613.1a: Copy-effect name override applies in Layer 1
             // after CopyValues, per timestamp order within the layer.
             ContinuousModification::SetName { .. } => Layer::Copy,
+            ContinuousModification::SetTextName { .. } => Layer::Text,
             // CR 612.8 + CR 613.1c: Setting an object's name to the source's
             // chosen card name is a text-changing effect — Layer 3.
             ContinuousModification::SetChosenName => Layer::Text,
@@ -279,6 +280,13 @@ mod tests {
         );
         // CR 612.8 + CR 613.1c: SetChosenName is a text-changing effect (Layer 3).
         assert_eq!(ContinuousModification::SetChosenName.layer(), Layer::Text);
+        assert_eq!(
+            ContinuousModification::SetTextName {
+                name: "Legitimate Businessperson".to_string(),
+            }
+            .layer(),
+            Layer::Text
+        );
         assert_eq!(
             ContinuousModification::AddPower { value: 1 }.layer(),
             Layer::ModifyPT

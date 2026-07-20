@@ -156,6 +156,20 @@ pub fn resolve(
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
     delayed_ability.scoped_player = ability.scoped_player;
+    // A delayed trigger is a continuation of this resolved ability, so preserve
+    // the same exact trigger source across its later match and resolution. Spell
+    // and activated-ability sources may not already carry trigger provenance;
+    // capture their current incarnation at creation rather than later rebinding
+    // the stored ObjectId. CR 400.7.
+    let source_context = ability.trigger_source.clone().or_else(|| {
+        state
+            .objects
+            .get(&ability.source_id)
+            .map(|source| super::super::triggers::trigger_source_context_for_latch(state, source))
+    });
+    if let Some(source_context) = source_context {
+        delayed_ability.set_trigger_source_recursive(source_context);
+    }
 
     // CR 701.27f: A delayed triggered ability may transform its source only if
     // that permanent has not transformed or converted since the delayed
@@ -690,10 +704,14 @@ fn snapshot_quantity_ref(
 /// Three responsibilities:
 /// 1. Resolve TrackedSetId(0) sentinel → TrackedSetId(real_id)
 /// 2. Bind TargetFilter::Any → TrackedSet(real_id) for implicit pronouns
-/// 3. Set origin zone to Exile (tracked sets are always from exile)
+/// 3. Preserve the parsed `origin` (Battlefield for token cleanup, Exile for
+///    cross-clause exiled-card references). When unset, `change_zone::resolve_all`
+///    derives scan zones from tracked-set members at firing time.
 fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
     match effect {
-        Effect::ChangeZoneAll { origin, target, .. } => {
+        Effect::ChangeZoneAll {
+            origin: _, target, ..
+        } => {
             // Resolve target filter
             match target {
                 TargetFilter::TrackedSet {
@@ -703,10 +721,6 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                     *target = TargetFilter::TrackedSet { id: real_id };
                 }
                 _ => {}
-            }
-            // CR 400.7: Tracked objects are in exile; set origin for zone scan
-            if origin.is_none() {
-                *origin = Some(Zone::Exile);
             }
         }
         // CR 603.7c + CR 608.2c: Pin the tracked-set sentinel `TrackedSetId(0)` to
@@ -722,15 +736,32 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
         Effect::DestroyAll { target, .. } => target.rebind_tracked_set_sentinel(real_id),
         // Upgrade ChangeZone → ChangeZoneAll: ChangeZone uses ability.targets (empty for
         // delayed triggers), so it would move nothing. ChangeZoneAll scans by filter.
-        Effect::ChangeZone { destination, .. } => {
+        Effect::ChangeZone {
+            destination,
+            origin,
+            target,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            face_down_profile,
+            ..
+        } => {
+            let bound_target = match target {
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                }
+                | TargetFilter::Any => TargetFilter::TrackedSet { id: real_id },
+                TargetFilter::TrackedSet { id } => TargetFilter::TrackedSet { id: *id },
+                _ => TargetFilter::TrackedSet { id: real_id },
+            };
             *effect = Effect::ChangeZoneAll {
-                origin: Some(Zone::Exile),
+                origin: *origin,
                 destination: *destination,
-                target: TargetFilter::TrackedSet { id: real_id },
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enter_with_counters: vec![],
-                face_down_profile: None,
+                target: bound_target,
+                enters_under: enters_under.clone(),
+                enter_tapped: *enter_tapped,
+                enter_with_counters: enter_with_counters.clone(),
+                face_down_profile: face_down_profile.clone(),
                 library_position: None,
                 random_order: false,
             };
@@ -1377,7 +1408,7 @@ mod tests {
             .expect("sub-ability chain must be preserved");
         match &sub.effect {
             Effect::ChangeZoneAll { origin, target, .. } => {
-                assert_eq!(*origin, Some(Zone::Exile));
+                assert_eq!(*origin, None);
                 assert_eq!(
                     *target,
                     TargetFilter::TrackedSet {
@@ -1433,7 +1464,8 @@ mod tests {
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
 
-        // Should be upgraded to ChangeZoneAll with resolved TrackedSetId and Exile origin
+        // Should be upgraded to ChangeZoneAll with resolved TrackedSetId; origin
+        // stays unset so runtime derives member zones when firing.
         match &state.delayed_triggers[0].ability.effect {
             Effect::ChangeZoneAll {
                 origin,
@@ -1441,7 +1473,7 @@ mod tests {
                 target,
                 ..
             } => {
-                assert_eq!(*origin, Some(Zone::Exile));
+                assert_eq!(*origin, None);
                 assert_eq!(*destination, Zone::Battlefield);
                 assert_eq!(
                     *target,
@@ -2627,5 +2659,137 @@ mod tests {
             state.battlefield.contains(&second_token),
             "the later, unrelated token must survive — the snapshot did not drift to it"
         );
+    }
+
+    /// CR 603.7c + CR 608.2c (issue #5972): plural "those tokens" delayed exile
+    /// binds the tracked set with origin `Battlefield`. A token that already
+    /// left the battlefield is skipped; the remaining member is exiled.
+    #[test]
+    fn tracked_set_battlefield_cleanup_skips_departed_token() {
+        let mut state = GameState::new_two_player(42);
+        let first_token = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Twinflame Token A".to_string(),
+            Zone::Battlefield,
+        );
+        let second_token = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Twinflame Token B".to_string(),
+            Zone::Battlefield,
+        );
+        for token in [first_token, second_token] {
+            state.objects.get_mut(&token).unwrap().card_types.core_types =
+                vec![crate::types::card_type::CoreType::Creature];
+        }
+
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![first_token, second_token]);
+        state.next_tracked_set_id = 2;
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
+
+        // One token leaves the battlefield before end-step cleanup fires.
+        crate::game::zones::move_to_zone(&mut state, first_token, Zone::Graveyard, &mut Vec::new());
+
+        let delayed = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(1),
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &delayed, &mut events, 0)
+            .expect("tracked-set battlefield cleanup resolves");
+
+        assert_eq!(
+            state.objects[&first_token].zone,
+            Zone::Graveyard,
+            "a token that already left the battlefield must not be exiled by cleanup"
+        );
+        assert_eq!(
+            state.objects[&second_token].zone,
+            Zone::Exile,
+            "the remaining tracked-set token on the battlefield must be exiled"
+        );
+    }
+
+    /// CR 603.7c (issue #5972): binding preserves an explicit Battlefield
+    /// origin when upgrading `ChangeZone { TrackedSet }` → `ChangeZoneAll`.
+    #[test]
+    fn bind_tracked_set_preserves_battlefield_origin_on_change_zone_upgrade() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(10)]);
+        state.next_tracked_set_id = 2;
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        match &state.delayed_triggers[0].ability.effect {
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Battlefield));
+                assert_eq!(*destination, Zone::Exile);
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(1)
+                    }
+                );
+            }
+            other => panic!("expected ChangeZoneAll, got {other:?}"),
+        }
     }
 }

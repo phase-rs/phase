@@ -1474,9 +1474,17 @@ pub fn candidate_actions_broad_with_probe(
             player,
             options,
             choice_type,
-            source_id,
+            source,
             ..
-        } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        } => named_choice_actions(
+            state,
+            *player,
+            options,
+            choice_type,
+            source
+                .as_ref()
+                .map(|source| source.prompt.display_name.as_str()),
+        ),
         // CR 608.2d: every printed guess is a legal candidate. Enumerated
         // uniformly here for legality + server validation; the AI's actual pick
         // is made by a hidden-info determinization pre-emption in
@@ -1501,14 +1509,8 @@ pub fn candidate_actions_broad_with_probe(
             player,
             options,
             choice_type,
-            pending_cast,
-        } => named_choice_actions(
-            state,
-            *player,
-            options,
-            choice_type,
-            Some(pending_cast.object_id),
-        ),
+            pending_cast: _,
+        } => named_choice_actions(state, *player, options, choice_type, None),
         // Alchemy spellbook draft: one candidate per card in the spellbook list.
         WaitingFor::SpellbookDraft {
             player, options, ..
@@ -4226,7 +4228,7 @@ fn remove_counter_cost_distribution_candidate(
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
-        let available: Vec<_> = match counter_type {
+        let mut available: Vec<_> = match counter_type {
             CounterMatch::OfType(counter_type) => obj
                 .counters
                 .get(counter_type)
@@ -4240,6 +4242,10 @@ fn remove_counter_cost_distribution_candidate(
                 .map(|(counter_type, count)| (counter_type.clone(), *count))
                 .collect(),
         };
+        // Issue #4878: `obj.counters` is a default-RandomState HashMap; sort by
+        // CounterType so the emitted distribution's content is a function of
+        // game state, not per-process hash iteration order.
+        available.sort_by(|a, b| a.0.cmp(&b.0));
         for (counter_type, available) in available {
             if remaining == 0 {
                 break;
@@ -4319,10 +4325,10 @@ fn named_choice_actions(
     player: PlayerId,
     options: &[String],
     choice_type: &ChoiceType,
-    source_id: Option<ObjectId>,
+    source_display_name: Option<&str>,
 ) -> Vec<CandidateAction> {
     if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
-        return card_name_choice_candidates(state, player, source_id)
+        return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()
             .map(|choice| {
                 candidate(
@@ -4350,7 +4356,7 @@ fn named_choice_actions(
 fn card_name_choice_candidates(
     state: &GameState,
     player: PlayerId,
-    source_id: Option<ObjectId>,
+    source_display_name: Option<&str>,
 ) -> Vec<String> {
     const MAX_CARD_NAME_CANDIDATES: usize = 24;
 
@@ -4379,10 +4385,8 @@ fn card_name_choice_candidates(
         choices.push(name.to_string());
     }
 
-    if let Some(source_id) = source_id {
-        if let Some(source) = state.objects.get(&source_id) {
-            push_name(&source.name, &legal_names, &mut seen, &mut choices);
-        }
+    if let Some(source_display_name) = source_display_name {
+        push_name(source_display_name, &legal_names, &mut seen, &mut choices);
     }
 
     let mut push_object_name = |id: ObjectId| {
@@ -5933,7 +5937,7 @@ mod tests {
     #[test]
     fn named_card_choice_uses_bounded_in_game_names() {
         let mut state = GameState::new_two_player(42);
-        let source = create_object(
+        let _source = create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
@@ -5954,7 +5958,7 @@ mod tests {
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
-            source_id: Some(source),
+            source: None,
             persist_player: None,
         };
 
@@ -6027,10 +6031,24 @@ mod tests {
     #[test]
     fn exact_selection_count_above_pool_cap_keeps_progress_candidate() {
         let mut state = GameState::new_two_player(42);
+        let conniver_id = ObjectId(100);
+        state.objects.insert(
+            conniver_id,
+            crate::game::game_object::GameObject::new(
+                conniver_id,
+                crate::types::identifiers::CardId(100),
+                PlayerId(0),
+                "Conniver".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(conniver_id);
         let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
         state.waiting_for = WaitingFor::ConniveDiscard {
             player: PlayerId(0),
-            conniver_id: ObjectId(100),
+            conniver: state
+                .capture_connive_subject(conniver_id)
+                .expect("fixture conniver exists"),
             source_id: ObjectId(100),
             cards,
             count: SELECTION_POOL_CAP + 1,

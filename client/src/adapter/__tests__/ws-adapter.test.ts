@@ -269,6 +269,44 @@ describe("WebSocketAdapter", () => {
       await expect(initPromise).rejects.toThrow("Failed to send setup frame");
     });
 
+    // Issue #5913: the engine's stale-ReorderHand verdict must classify the same
+    // way no matter which transport delivered it. Before the shared classifier
+    // this path built a generic ACTION_REJECTED, so `dispatchAction` — which
+    // suppresses only STALE_ACTION — still showed a server-hosted player the red
+    // error the local-WASM seat no longer sees.
+    it("classifies a stale ReorderHand rejection from the server as STALE_ACTION", async () => {
+      const pending = adapter.submitAction(
+        { type: "ReorderHand", data: { order: [1, 2, 3] } },
+        0,
+      );
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "Engine error: ReorderHand: expected 6 ids, got 5" },
+        }),
+      );
+      await expect(pending).rejects.toMatchObject({
+        code: "STALE_ACTION",
+        recoverable: false,
+      });
+    });
+
+    it("still surfaces a non-stale server rejection as a recoverable ACTION_REJECTED", async () => {
+      const pending = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "Engine error: Something genuinely wrong" },
+        }),
+      );
+      await expect(pending).rejects.toMatchObject({
+        code: "ACTION_REJECTED",
+        recoverable: true,
+      });
+    });
+
     it("sends the action frame and keeps the promise pending on a healthy socket", () => {
       ws.send.mockClear();
       void adapter.submitAction({ type: "PassPriority" }, 0);

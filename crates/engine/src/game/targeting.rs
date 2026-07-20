@@ -2,7 +2,7 @@ use crate::types::ability::{
     ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TriggerSourceContext};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
@@ -714,11 +714,16 @@ pub fn resolved_targets(
         target_filter,
         TargetFilter::SelfRef | TargetFilter::GrantingObject
     ) {
-        // CR 400.7: The self-reference resolves to the source only while it is
-        // still the same object. A source that left and re-entered the
-        // battlefield (blink/flicker) since the ability was created is a new
-        // object (higher incarnation), so the self-reference finds nothing.
-        return if ability.source_is_current(state) {
+        // CR 400.7: A self-reference resolves to the exact source, except that
+        // a departure trigger may follow its own immediate recorded event
+        // successor ("it" in the graveyard). A later same-id return remains a
+        // new object and finds nothing.
+        let source_is_current = match target_filter {
+            TargetFilter::SelfRef => ability.self_ref_is_current(state),
+            TargetFilter::GrantingObject => ability.source_is_current(state),
+            _ => unreachable!("self-reference branch only handles SelfRef or GrantingObject"),
+        };
+        return if source_is_current {
             vec![TargetRef::Object(ability.source_id)]
         } else {
             Vec::new()
@@ -945,12 +950,18 @@ pub(crate) fn resolved_object_ids_for_filter(
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     match filter {
-        // CR 400.7: self-reference resolves only while the source is the same
-        // object; a blinked-and-returned source (higher incarnation) finds nothing.
+        // CR 400.7: self-reference resolves only to the exact source or its own
+        // immediate recorded event successor; a blinked-and-returned source
+        // (higher incarnation) finds nothing.
         // CR 201.5a: an un-concretized `GrantingObject` degrades to the source
         // (host) — fail-safe; it is normally rewritten to `SpecificObject` at
         // grant-clone time.
-        TargetFilter::SelfRef | TargetFilter::GrantingObject => ability
+        TargetFilter::SelfRef => ability
+            .self_ref_is_current(state)
+            .then_some(ability.source_id)
+            .into_iter()
+            .collect(),
+        TargetFilter::GrantingObject => ability
             .source_is_current(state)
             .then_some(ability.source_id)
             .into_iter()
@@ -1671,6 +1682,26 @@ pub(crate) fn stack_entry_matches_filter(
         entry,
         filter,
         source_controller,
+        source_id,
+        &target_ctx,
+    )
+}
+
+/// Matches a stack entry from a triggered source without rebinding source-relative
+/// filters to a later object at the same storage id.
+pub(crate) fn stack_entry_matches_filter_for_trigger_source(
+    state: &GameState,
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_context: &TriggerSourceContext,
+) -> bool {
+    let source_id = source_context.identity.reference.object_id;
+    let target_ctx = super::filter::FilterContext::from_trigger_source(source_context);
+    stack_entry_matches_filter_with_context(
+        state,
+        entry,
+        filter,
+        source_context.source_read(state).controller(),
         source_id,
         &target_ctx,
     )

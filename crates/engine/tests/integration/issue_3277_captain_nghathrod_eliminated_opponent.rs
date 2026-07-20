@@ -84,6 +84,7 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
             supertypes: vec![],
             keywords: vec![],
             trigger_definitions: vec![],
+            trigger_source_context: None,
             power: Some(2),
             toughness: Some(2),
             base_power: Some(2),

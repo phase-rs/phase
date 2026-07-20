@@ -1957,27 +1957,73 @@ pub(crate) fn inject_keyword_kind_filter_prop(
 }
 
 /// CR 601.2f: Classification of a cost-modifier subject against the
-/// "the first <qualifier> spell <timing> costs …" template.
+/// "the <ordinal> <qualifier> spell <timing> costs …" template.
 ///
 /// Three outcomes, kept as a typed enum rather than an `Option` so the caller
-/// can tell "not a first-spell line" apart from "a first-spell line whose
+/// can tell "not an Nth-spell line" apart from "an Nth-spell line whose
 /// qualifier we can't yet represent." The latter MUST decline the whole cost
 /// static — emitting a filterless, gateless reducer would silently drop both
-/// the printed "first … each turn" once-per-turn restriction and the qualifier
-/// (e.g. "kicked"), reducing every spell the controller casts.
-pub(crate) enum FirstQualifiedSpell {
-    /// The subject is not a "the first … spell <timing> costs …" line; the
+/// the printed "<ordinal> … each turn" once-per-turn restriction and the
+/// qualifier (e.g. "kicked"), reducing every spell the controller casts.
+pub(crate) enum NthQualifiedSpell {
+    /// The subject is not a "the <ordinal> … spell <timing> costs …" line; the
     /// caller proceeds with its ordinary cost-modifier parsing.
     NotApplicable,
-    /// A representable first-spell subject: the qualifying spell filter and the
-    /// timing window over which "first" is measured.
-    Supported(TargetFilter, NthEventTimingKind),
-    /// The "the first … spell <timing>" shape is present, but the qualifier or
+    /// A representable Nth-spell subject: the qualifying spell filter, the timing
+    /// window over which the ordinal is measured, and the 1-based ordinal `N`
+    /// ("first" → 1, "second" → 2, …). The gate is
+    /// `SpellsCastThisTurn(filter) == N - 1` (see [`nth_qualified_spell_condition`]).
+    Supported {
+        filter: TargetFilter,
+        timing: NthEventTimingKind,
+        ordinal: u32,
+    },
+    /// The "the <ordinal> … spell <timing>" shape is present, but the qualifier or
     /// timing window can't be lowered to a spell filter + once-per-turn gate
     /// (e.g. "the first kicked spell you cast each turn" — kicker-paid state is
     /// not a representable spell-cost filter, or an opponent-/their-turn window
     /// with no static condition). The caller must decline the cost static.
     UnsupportedQualifier,
+}
+
+/// CR 601.2f: Parse the leading "the <ordinal> " of an
+/// "the <ordinal> <qualifier> spell <timing> costs/has …" subject, returning the
+/// 1-based ordinal (`"first"` → 1, `"second"` → 2, …) and the remaining subject.
+///
+/// Parameterizes what was a hardcoded `"the first "` prefix so every printed
+/// ordinal — not just the first — is covered (Highspire Bell-Ringer, Uthros
+/// Psionicist, Monk Class, Raging Battle Mouse, and Alisaie Leveilleur all print
+/// "the second spell you cast each turn costs …"). The ordinal threads into
+/// [`nth_qualified_spell_condition`] as the `SpellsCastThisTurn == N - 1` gate.
+fn parse_spell_ordinal_prefix(subject: &str) -> Option<(u32, &str)> {
+    preceded(
+        tag::<_, _, OracleError<'_>>("the "),
+        terminated(parse_ordinal_word, tag(" ")),
+    )
+    .parse(subject)
+    .ok()
+    .map(|(rest, ordinal)| (ordinal, rest))
+}
+
+/// Map an English ordinal word to its 1-based value. Only "first"/"second" occur
+/// on printed once-per-turn spell-cost modifiers today; the higher ordinals are
+/// included so the whole ordinal class stays covered without a follow-up edit.
+/// The trailing `" "` guard in [`parse_spell_ordinal_prefix`] enforces a word
+/// boundary, so "firstborn" / "seconds" never partial-match.
+fn parse_ordinal_word(i: &str) -> OracleResult<'_, u32> {
+    alt((
+        value(1u32, tag("first")),
+        value(2, tag("second")),
+        value(3, tag("third")),
+        value(4, tag("fourth")),
+        value(5, tag("fifth")),
+        value(6, tag("sixth")),
+        value(7, tag("seventh")),
+        value(8, tag("eighth")),
+        value(9, tag("ninth")),
+        value(10, tag("tenth")),
+    ))
+    .parse(i)
 }
 
 /// CR 601.2f + CR 107.3: Parse a "first qualified spell <timing> costs less"
@@ -2004,13 +2050,13 @@ pub(crate) enum FirstQualifiedSpell {
 ///   - "The first non-Lemur creature spell with flying you cast during each of
 ///     your turns costs {1} less to cast."
 ///
-/// Returns [`FirstQualifiedSpell::UnsupportedQualifier`] when the
-/// "the first … spell <timing>" shape is present but the qualifier/timing can't
-/// be represented (e.g. "the first kicked spell you cast each turn"), so the
-/// caller declines the static instead of emitting a broad reducer.
-pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedSpell {
-    let Some(after_prefix) = nom_tag_lower(lower, lower, "the first ") else {
-        return FirstQualifiedSpell::NotApplicable;
+/// Returns [`NthQualifiedSpell::UnsupportedQualifier`] when the
+/// "the <ordinal> … spell <timing>" shape is present but the qualifier/timing
+/// can't be represented (e.g. "the first kicked spell you cast each turn"), so
+/// the caller declines the static instead of emitting a broad reducer.
+pub(crate) fn parse_nth_qualified_spell_filter(lower: &str) -> NthQualifiedSpell {
+    let Some((ordinal, after_prefix)) = parse_spell_ordinal_prefix(lower) else {
+        return NthQualifiedSpell::NotApplicable;
     };
 
     // Split the subject at the cast infix that separates the pre-spell
@@ -2018,7 +2064,7 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
     // ("with {X} in its mana cost each turn cost[s] ..."). CR templating always
     // places the caster phrase between the spell noun and any post-spell modifier.
     let Some((pre, post)) = split_first_spell_cast_region(after_prefix) else {
-        return FirstQualifiedSpell::NotApplicable;
+        return NthQualifiedSpell::NotApplicable;
     };
 
     // Scan the post-caster region for the timing phrase. Everything before
@@ -2029,7 +2075,7 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
     // phrase means this is some other "the first … you cast" construction, not
     // the per-turn first-spell cost template.
     let Some((timing, post_modifier_text)) = split_first_spell_timing(post.trim()) else {
-        return FirstQualifiedSpell::NotApplicable;
+        return NthQualifiedSpell::NotApplicable;
     };
 
     // From here the "the first … spell <timing> costs …" shape is confirmed, so
@@ -2045,7 +2091,7 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
         timing,
         NthEventTimingKind::Unrestricted | NthEventTimingKind::Restricted(PlayerFilter::Controller)
     ) {
-        return FirstQualifiedSpell::UnsupportedQualifier;
+        return NthQualifiedSpell::UnsupportedQualifier;
     }
 
     // Pre-spell type/keyword qualifier (strip a bare trailing "spell" noun so a
@@ -2098,7 +2144,7 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
         } else {
             // Unrecognized pre-spell qualifier — decline rather than emit a cost
             // reduction that ignores the printed restriction.
-            return FirstQualifiedSpell::UnsupportedQualifier;
+            return NthQualifiedSpell::UnsupportedQualifier;
         }
     };
 
@@ -2110,7 +2156,7 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
     } else {
         match super::oracle_trigger::parse_post_spell_modifier(post_modifier_text) {
             Some(filter) => Some(filter),
-            None => return FirstQualifiedSpell::UnsupportedQualifier,
+            None => return NthQualifiedSpell::UnsupportedQualifier,
         }
     };
 
@@ -2121,14 +2167,18 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
             filters: vec![a, b],
         },
     };
-    FirstQualifiedSpell::Supported(filter, timing)
+    NthQualifiedSpell::Supported {
+        filter,
+        timing,
+        ordinal,
+    }
 }
 
-/// CR 601.2f: Audit that a "the first … spell <timing> has [keyword]" subject is
-/// FULLY represented by `parse_first_qualified_spell_filter` — i.e. the text
+/// CR 601.2f: Audit that a "the <ordinal> … spell <timing> has [keyword]" subject
+/// is FULLY represented by `parse_nth_qualified_spell_filter` — i.e. the text
 /// AFTER the timing phrase is empty.
 ///
-/// `parse_first_qualified_spell_filter` discards everything after the timing
+/// `parse_nth_qualified_spell_filter` discards everything after the timing
 /// phrase (the cost-modification verb on the cost-reducer path, "costs {1} less
 /// …"). On the keyword-grant path the grant verb was already split off by the
 /// caller, so a clean subject must terminate at the timing phrase. Any trailing
@@ -2140,9 +2190,9 @@ pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> FirstQualifiedS
 /// Lives next to the parser whose discard it audits. Called ONLY from the
 /// keyword-grant arm — the cost-modifier consumer legitimately expects trailing
 /// cost-verb text, so this guard must NOT move into the shared
-/// `parse_first_qualified_spell_filter`.
-pub(crate) fn first_qualified_spell_subject_fully_consumed(subject: &str) -> bool {
-    let Some(after_prefix) = nom_tag_lower(subject, subject, "the first ") else {
+/// `parse_nth_qualified_spell_filter`.
+pub(crate) fn nth_qualified_spell_subject_fully_consumed(subject: &str) -> bool {
+    let Some((_ordinal, after_prefix)) = parse_spell_ordinal_prefix(subject) else {
         return false;
     };
     let Some((_, post)) = split_first_spell_cast_region(after_prefix) else {
@@ -2209,16 +2259,20 @@ fn split_first_spell_timing(text: &str) -> Option<(NthEventTimingKind, &str)> {
     Some((timing, before.trim_end()))
 }
 
-/// CR 601.2f + CR 107.3: Build the "first qualified spell <timing>" gate.
-/// The reduction applies only while no matching spell has yet been cast this
-/// turn (`SpellsCastThisTurn(filter) == 0`). The timing axis adds a turn-owner
-/// restriction only for the "during each of your turns" form; "each turn" allows
-/// the first qualifying spell on any player's turn.
-pub(crate) fn first_qualified_spell_condition(
+/// CR 601.2f + CR 107.3: Build the "the <ordinal> qualified spell <timing>" gate.
+/// The 1-based `ordinal` (`"first"` → 1, `"second"` → 2, …) lowers to
+/// `SpellsCastThisTurn(filter) == ordinal - 1`: the reduction applies precisely
+/// while exactly `ordinal - 1` matching spells have already been cast this turn,
+/// so the spell now being cast is the Nth (the currently-casting spell is not yet
+/// counted, matching the merged `first == 0` behavior). The timing axis adds a
+/// turn-owner restriction only for the "during each of your turns" form; "each
+/// turn" allows the Nth qualifying spell on any player's turn.
+pub(crate) fn nth_qualified_spell_condition(
     filter: &TargetFilter,
     timing: &NthEventTimingKind,
+    ordinal: u32,
 ) -> StaticCondition {
-    let first_this_turn = StaticCondition::QuantityComparison {
+    let nth_this_turn = StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::SpellsCastThisTurn {
                 scope: CountScope::Controller,
@@ -2226,17 +2280,19 @@ pub(crate) fn first_qualified_spell_condition(
             },
         },
         comparator: Comparator::EQ,
-        rhs: QuantityExpr::Fixed { value: 0 },
+        rhs: QuantityExpr::Fixed {
+            value: ordinal as i32 - 1,
+        },
     };
 
     match timing {
-        // "each turn" — no turn-ownership restriction (CR 601.2: the first
+        // "each turn" — no turn-ownership restriction (CR 601.2: the Nth
         // qualifying spell of the turn regardless of whose turn it is).
-        NthEventTimingKind::Unrestricted => first_this_turn,
+        NthEventTimingKind::Unrestricted => nth_this_turn,
         // "during each of your turns" — additionally gate on the controller's
         // turn (CR 102.1 active-player reading for a cost static).
         NthEventTimingKind::Restricted(PlayerFilter::Controller) => StaticCondition::And {
-            conditions: vec![StaticCondition::DuringYourTurn, first_this_turn],
+            conditions: vec![StaticCondition::DuringYourTurn, nth_this_turn],
         },
         // Other player-scoped turn windows have no representable `StaticCondition`
         // for a cost static; the caller declines these via the filter parser.

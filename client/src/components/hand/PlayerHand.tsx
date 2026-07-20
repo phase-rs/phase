@@ -27,6 +27,7 @@ import {
   computeGapPx,
   computeReorderedHand,
   flankingHandIndices,
+  isHandPermutation,
 } from "./handInsertionSlot.ts";
 import { useCastableZoneObjects } from "../../hooks/useCastableZoneObjects.ts";
 import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
@@ -62,6 +63,10 @@ export function PlayerHand() {
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
   const player = useGameStore((s) => s.gameState?.players[playerId]);
+  // Drag-end only ever needs the hand, so depend on that slice rather than the
+  // whole `player`: an unrelated player change (life, mana, counters) would
+  // otherwise rebuild the drag-end callback on every update.
+  const hand = player?.hand;
   const objects = useGameStore((s) => s.gameState?.objects);
   // Use dispatchAction (animation pipeline) instead of store dispatch
   const inspectObject = useUiStore((s) => s.inspectObject);
@@ -342,20 +347,36 @@ export function PlayerHand() {
       if (releasedInsideHand) {
         const targetSlot = hoveredSlotRef.current;
         hoveredSlotRef.current = null;
-        if (!player) return false;
+        if (!hand) return false;
         // Reorder is suppressed while a cast is in progress (`pendingObjectId`)
         // OR while the hand is sorted/filtered (`organizeActive`): in both cases
         // the displayed slot index doesn't map 1:1 onto `player.hand`, so
         // dispatching from a displayed slot would scramble the hand. The pure
         // helper returns null in those states (and for no-op moves).
         const nextOrder = computeReorderedHand(
-          player.hand,
+          hand,
           objectId as ObjectId,
           targetSlot,
           pendingObjectId != null || organizeActive,
         );
-        if (nextOrder) {
-          dispatchAction({ type: "ReorderHand", data: { order: nextOrder } });
+        // Re-read the hand at drop time and drop the gesture when it no longer
+        // matches, rather than replaying a slot index chosen against the old
+        // layout. This closes only the narrow window where the store has
+        // committed a new hand but React has not yet re-rendered this callback;
+        // it CANNOT see the client/engine desync that issue #5913 actually
+        // reports, because the store read here is the same snapshot `nextOrder`
+        // was derived from (`dispatch.ts` commits the engine snapshot only
+        // AFTER the animation window, so both are equally stale). That case is
+        // absorbed on the engine's own verdict — see `isStaleReorderMessage`.
+        //
+        // `playerId` is the PERSPECTIVE seat, which is not the local seat while
+        // controlling another player's turn (CR 117 / Mindslaver-style). The
+        // order is built from that seat's hand, so it must be submitted as that
+        // seat too — `dispatchAction` otherwise defaults the actor to the local
+        // player and the engine validates against the wrong hand.
+        const currentHand = useGameStore.getState().gameState?.players[playerId]?.hand;
+        if (nextOrder && currentHand && isHandPermutation(nextOrder, currentHand)) {
+          dispatchAction({ type: "ReorderHand", data: { order: nextOrder } }, playerId);
         }
         return false;
       }
@@ -366,7 +387,7 @@ export function PlayerHand() {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, player, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
 
   const handleCardClick = useCallback(

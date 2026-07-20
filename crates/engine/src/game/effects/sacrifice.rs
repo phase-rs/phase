@@ -174,7 +174,7 @@ pub fn resolve(
     // object. Sacrifice is non-targeted and resolves `SelfRef` through a
     // resolution-time pool filter rather than the `resolved_targets` chokepoint,
     // so the self-reference epoch guard must be applied here explicitly.
-    if matches!(filter, TargetFilter::SelfRef) && !ability.source_is_current(state) {
+    if matches!(filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,

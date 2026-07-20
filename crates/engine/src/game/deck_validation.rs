@@ -9,7 +9,7 @@ use crate::game::deck_loading::DeckEntry;
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::format::{DeckCopyLimit, GameFormat, SideboardPolicy};
+use crate::types::format::{DeckCopyLimit, FormatConfig, GameFormat, SideboardPolicy};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::match_config::MatchType;
@@ -1022,8 +1022,10 @@ pub fn is_brawl_commander_eligible(face: &CardFace) -> bool {
     (is_legendary && (is_creature || is_planeswalker)) || explicitly_allowed
 }
 
-/// Shared validation for Brawl and Historic Brawl: 60-card singleton with a commander,
-/// legendary creature or planeswalker as commander, no partner, no sideboard.
+/// Shared validation for Brawl and Historic Brawl: singleton with a commander
+/// (deck size from the format's `FormatConfig` — 60 for Standard Brawl, 100 for
+/// Historic Brawl), legendary creature or planeswalker as commander, no
+/// partner, no sideboard.
 fn evaluate_brawl(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -1068,7 +1070,9 @@ fn evaluate_brawl(
     // a sideboard. Extra entries in the submitted list are silently ignored at
     // load time — see `load_deck_into_state` in `deck_loading.rs`.
 
-    // Exactly 60 total cards (main + commander, accounting for commander listed in main)
+    // Exact total card count from the format config (main + commander,
+    // accounting for commander listed in main).
+    let deck_size = usize::from(FormatConfig::for_format(game_format).deck_size);
     let represented_in_main = request
         .commander
         .iter()
@@ -1080,9 +1084,9 @@ fn evaluate_brawl(
         })
         .count();
     let total_cards = request.main_deck.len() + (request.commander.len() - represented_in_main);
-    if total_cards != 60 {
+    if total_cards != deck_size {
         reasons.push(format!(
-            "{format_label} deck must have exactly 60 cards (found {total_cards})"
+            "{format_label} deck must have exactly {deck_size} cards (found {total_cards})"
         ));
     }
 
@@ -2249,7 +2253,7 @@ fn quick_brawl_check(
                 "Brawl commander must be a legendary creature or legendary planeswalker",
             skip_commander_legality: false,
         },
-        60,
+        usize::from(FormatConfig::for_format(game_format).deck_size),
         game_format,
     )
 }
@@ -4851,6 +4855,30 @@ mod tests {
     }
 
     #[test]
+    fn historic_brawl_rejects_sixty_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 59),
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::HistoricBrawl),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+        };
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("exactly 100 cards")));
+    }
+
+    #[test]
     fn tiny_leaders_valid_deck_passes() {
         let db = CardDatabase::from_json_str(&tiny_leaders_test_db_json()).unwrap();
         let request = DeckCompatibilityRequest {
@@ -4950,8 +4978,9 @@ mod tests {
     fn historic_brawl_uses_brawl_legality() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         // "Not Standard" has brawl: legal but standardbrawl: not_legal
-        // Use basic lands to avoid singleton violations, plus one non-basic to test legality
-        let mut main = expand("Plains", 58);
+        // Use basic lands to avoid singleton violations, plus one non-basic to
+        // test legality. Historic Brawl is a 100-card format (99 + commander).
+        let mut main = expand("Plains", 98);
         main.push("Not Standard".to_string());
         let request = DeckCompatibilityRequest {
             main_deck: main,

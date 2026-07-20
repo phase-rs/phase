@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::triggers::check_delayed_triggers;
+use engine::game::triggers::{check_delayed_triggers, trigger_source_context_for_latch};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
     DelayedTriggerLifetime, Duration, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
@@ -87,7 +87,16 @@ fn install_lose_control_draw(
             target: TargetFilter::Controller,
         },
     );
-    let ability = engine::game::ability_utils::build_resolved_from_def(&inner, source, controller);
+    let mut ability =
+        engine::game::ability_utils::build_resolved_from_def(&inner, source, controller);
+    ability.set_trigger_source_recursive(trigger_source_context_for_latch(
+        runner.state(),
+        runner
+            .state()
+            .objects
+            .get(&source)
+            .expect("delayed trigger source"),
+    ));
     let mut trig = TriggerDefinition::new(TriggerMode::ChangesController);
     trig.valid_card = Some(TargetFilter::SpecificObject { id: scoped_obj });
     trig.execute = None;

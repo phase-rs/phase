@@ -181,6 +181,7 @@ pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use static_helpers::parse_basic_land_type_plural;
 pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
 pub(crate) use type_change::parse_additive_type_clause_modifications;
+pub(crate) use type_change::parse_inverted_base_pt_type_grant;
 
 /// Parse a static/continuous ability line into a `StaticDefinition`.
 #[tracing::instrument(level = "debug")]

@@ -18,6 +18,9 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::resolution::canonicalize_legacy_resolution_state;
+#[cfg(debug_assertions)]
+use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -272,6 +275,8 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         finalize_display_state(state);
     }
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
+    #[cfg(debug_assertions)]
+    debug_assert_runtime_resolution_invariants(state);
     Ok(result)
 }
 
@@ -2072,7 +2077,8 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
 /// - `Concede` self-authenticates via its own `player_id` field — but we still
 ///   require it to match `actor` so a player cannot concede someone else on
 ///   their behalf (CR 104.3a).
-/// - **Preference actions** (SetPhaseStops, CancelAutoPass) are per-player UI
+/// - **Preference actions** (SetPhaseStops, SetPriorityPassingMode,
+///   CancelAutoPass) are per-player UI
 ///   settings. They have no CR semantics, mutate only the submitter's own
 ///   preference slot, and may legitimately fire at any time — e.g. the human
 ///   toggles a phase stop while the AI holds priority. The downstream handlers
@@ -2095,6 +2101,7 @@ fn check_actor_authorization(
     if matches!(
         action,
         GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
@@ -2293,6 +2300,11 @@ pub(super) fn resume_pending_continuation_if_priority(
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         effects::drain_pending_continuation(state, events);
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let frames =
+                canonicalize_legacy_resolution_state(state).map_err(EngineError::InvalidAction)?;
+            effects::resume_resolution_frames(state, &frames, events);
+        }
         // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
         // boundary only after ordinary continuations drain. The shared typed
         // dispatcher owns the remaining eligible payment roots.
@@ -2974,6 +2986,22 @@ fn apply_action(
         });
     }
 
+    // Priority-passing mode is a standing, actor-scoped UI preference. It may
+    // be changed in any state and does not itself pass priority, advance the
+    // game, emit events, clear yields, or disturb takeback/loop state.
+    if let GameAction::SetPriorityPassingMode { mode } = &action {
+        if *mode == crate::types::game_state::PriorityPassingMode::Standard {
+            state.priority_passing_modes.remove(&actor);
+        } else {
+            state.priority_passing_modes.insert(actor, *mode);
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
     // CR 117.3d: SetPriorityYield propagates the actor's standing priority-yield
     // preference — a pre-committed decision to pass priority while a class of
     // triggered ability resolves. Pure preference state, routed by `actor`, and
@@ -3195,7 +3223,8 @@ fn apply_action(
     // non-pass action (cast / activate / play-land) breaks a self-refilling mandatory
     // cascade, so the accumulated detection window is stale and must be dropped.
     // Placed AFTER every preference early-return (CancelAutoPass / SetPhaseStops /
-    // ReorderHand / Debug / Grant- & RevokeDebugPermission) so a no-op preference
+    // SetPriorityPassingMode / ReorderHand / Debug / Grant- & RevokeDebugPermission)
+    // so a no-op preference
     // toggle never reaches here; PassPriority and OrderTriggers are the only actions
     // that CONTINUE a cascade and so must NOT clear (see the CR 603.3b note below).
     // `run_auto_pass_loop` and `resolve_all_fast_forward`
@@ -7198,6 +7227,26 @@ fn apply_action(
         return Ok(ActionResult {
             events,
             waiting_for: wf,
+            log_entries: vec![],
+        });
+    }
+
+    // CR 603.2 + CR 603.3b + CR 608.2g: a cast made during an unresolved
+    // effect can leave the reducer at that effect's next choice (not Priority).
+    // Park its SpellCast observers now; they are drained only when the parent
+    // resolution reaches a genuine priority boundary.
+    if let Some(waiting_for) =
+        engine_resolution_choices::park_cast_during_resolution_cast_observers(
+            state,
+            &mut events,
+            0,
+            &waiting_for,
+        )?
+    {
+        state.waiting_for = waiting_for.clone();
+        return Ok(ActionResult {
+            events,
+            waiting_for,
             log_entries: vec![],
         });
     }

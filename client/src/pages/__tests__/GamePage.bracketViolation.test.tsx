@@ -150,8 +150,8 @@ vi.mock("../../audio/useAudioContext", () => ({
   useAudioContext: () => undefined,
 }));
 
-vi.mock("../../hooks/usePhaseStopsSync", () => ({
-  usePhaseStopsSync: () => undefined,
+vi.mock("../../hooks/useGameplayPreferencesSync", () => ({
+  useGameplayPreferencesSync: () => undefined,
 }));
 
 vi.mock("../../components/board/BattlefieldBackground", () => ({

@@ -6262,6 +6262,90 @@ fn static_opponent_spells_cost_more_during_your_turn() {
     ));
 }
 
+/// CR 604.1: a LEADING "during turns other than yours, " / "during your turn, "
+/// timing clause on a cost modifier lowers to the negated / affirmative
+/// `StaticCondition` instead of being dropped (Geyser Drake, Naiad of Hidden
+/// Coves reduced EVERY spell — including on the controller's own turn). Shares the
+/// negated-turn vocabulary of the CDA / dispatch / type-change static parsers and
+/// mirrors the trailing "during your turn" suffix arm.
+#[test]
+fn cost_mod_leading_turn_scope_negated_and_affirmative() {
+    // "During turns other than yours, spells you cast cost {1} less" → Not(DuringYourTurn).
+    let def =
+        parse_static_line("During turns other than yours, spells you cast cost {1} less to cast.")
+            .expect("cost reduction should parse");
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            ..
+        }
+    ));
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        }),
+        "leading negated-turn clause must gate the reducer, got {:?}",
+        def.condition,
+    );
+
+    // Affirmative leading form → DuringYourTurn.
+    let def = parse_static_line("During your turn, spells you cast cost {1} less to cast.")
+        .expect("cost reduction should parse");
+    assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+
+    // Regression: a plain cost mod with no timing clause is unconditioned.
+    let def = parse_static_line("Spells you cast cost {1} less to cast.")
+        .expect("cost reduction should parse");
+    assert_eq!(def.condition, None);
+
+    // Branch symmetry: the shared leading-clause authority gates a SELF-spell cost
+    // modifier too, not only the generic "spells you cast" branch.
+    let def =
+        parse_static_line("During turns other than yours, this spell costs {1} less to cast.")
+            .expect("self-spell cost reduction should parse");
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        }),
+        "the negated leading clause must gate the self-spell branch too, got {:?}",
+        def.condition,
+    );
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones(),
+        "the leading scope must be peeled before self-spell detection so the modifier works from hand and stack",
+    );
+
+    // The leading scope must also reach the first-qualified branch before its
+    // grammar runs, then compose with (rather than replace) the first-spell gate.
+    let def = parse_static_line(
+        "During turns other than yours, the first spell you cast each turn costs {1} less to cast.",
+    )
+    .expect("first-spell cost reduction should parse");
+    let Some(StaticCondition::And { conditions }) = def.condition else {
+        panic!(
+            "leading turn scope and first-spell gate must compose, got {:?}",
+            def.condition
+        );
+    };
+    assert_eq!(conditions.len(), 2);
+    assert_eq!(
+        &conditions[0],
+        &StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        }
+    );
+    assert!(
+        matches!(&conditions[1], StaticCondition::QuantityComparison { .. }),
+        "the first-spell condition must survive alongside the leading scope: {:?}",
+        conditions,
+    );
+}
+
 #[test]
 fn static_opponent_creature_spells_cost_more_during_your_turn() {
     let def = parse_static_line(
@@ -14826,6 +14910,74 @@ fn static_parse_for_each_attached_to_self_kellan() {
     }
 }
 
+#[test]
+fn static_for_each_opponent_below_half_starting_life_is_dynamic_anya() {
+    // Issue #5920 — Anya, Merciless Angel: "Anya gets +3/+3 for each opponent
+    // whose life total is less than half their starting life total." Pre-fix the
+    // "whose life total …" arm was missing so the for-each clause failed and the
+    // boost froze at a FIXED +3/+3. It must now emit an `AddDynamicPower` over a
+    // `PlayerCount { PlayerAttribute { LifeTotal LT half-starting } }` so the
+    // boost scales with the number of qualifying opponents (CR 119).
+    let def = parse_static_line(
+        "~ gets +3/+3 for each opponent whose life total is less than half their starting life total.",
+    )
+    .expect("Anya static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let value = def
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("expected AddDynamicPower (dynamic, not fixed +3/+3)");
+    let inner = match value {
+        QuantityExpr::Multiply { factor: 3, inner } => inner.as_ref(),
+        other => panic!("expected Multiply by 3, got {other:?}"),
+    };
+    let filter = match inner {
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount { filter },
+        } => filter,
+        other => panic!("expected PlayerCount ref, got {other:?}"),
+    };
+    match filter {
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        } => {
+            assert_eq!(*relation, crate::types::ability::PlayerRelation::Opponent);
+            assert!(
+                matches!(
+                    attr.as_ref(),
+                    QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer
+                    }
+                ),
+                "attr must be each candidate's own LifeTotal, got {attr:?}"
+            );
+            assert_eq!(*comparator, Comparator::LT);
+            assert!(
+                matches!(
+                    value.as_ref(),
+                    QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                        inner,
+                    } if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref { qty: QuantityRef::StartingLifeTotal }
+                    )
+                ),
+                "threshold must be half (rounded down) their starting life, got {value:?}"
+            );
+        }
+        other => panic!("expected PlayerAttribute filter, got {other:?}"),
+    }
+}
+
 /// Helper: the dynamic-power `QuantityExpr` from a static line's first
 /// `AddDynamicPower` modification, plus whether `keyword` was granted.
 fn dyn_power_and_keyword(
@@ -19244,6 +19396,36 @@ fn enchanted_creature_is_blue_creature_no_subtype() {
     }));
 }
 
+#[test]
+fn witness_protection_replaces_colors_types_subtypes_name_and_abilities() {
+    let def = parse_static_line(
+        "Enchanted creature loses all abilities and is a green and white Citizen creature with base power and toughness 1/1 named Legitimate Businessperson.",
+    )
+    .unwrap();
+    let mods = &def.modifications;
+    assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+    assert!(mods.contains(&ContinuousModification::SetCardTypes {
+        core_types: vec![crate::types::card_type::CoreType::Creature],
+    }));
+    assert!(mods.contains(&ContinuousModification::SetColor {
+        colors: vec![
+            crate::types::mana::ManaColor::Green,
+            crate::types::mana::ManaColor::White,
+        ],
+    }));
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: crate::types::card_type::SubtypeSet::Creature,
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Citizen".to_string(),
+    }));
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::SetTextName {
+        name: "Legitimate Businessperson".to_string(),
+    }));
+}
+
 // --- CantBeCast (blanket casting prohibition) tests ---
 
 #[test]
@@ -22852,14 +23034,20 @@ fn static_rain_of_riches_treasure_qualifier_declined_to_existing() {
 }
 
 #[test]
-fn first_qualified_spell_filter_bare_historic_supported() {
+fn nth_qualified_spell_filter_bare_historic_supported() {
     // CR 700.6: bare "historic spell" must lower to a Historic-property filter.
-    let result = super::grammar::parse_first_qualified_spell_filter(
+    let result = super::grammar::parse_nth_qualified_spell_filter(
         "the first historic spell you cast each turn",
     );
-    let super::grammar::FirstQualifiedSpell::Supported(filter, timing) = result else {
-        panic!("expected Supported, got a non-Supported FirstQualifiedSpell");
+    let super::grammar::NthQualifiedSpell::Supported {
+        filter,
+        timing,
+        ordinal,
+    } = result
+    else {
+        panic!("expected Supported, got a non-Supported NthQualifiedSpell");
     };
+    assert_eq!(ordinal, 1, "\"the first …\" is ordinal 1");
     assert_eq!(
         timing,
         super::oracle_trigger::NthEventTimingKind::Unrestricted
@@ -22871,29 +23059,75 @@ fn first_qualified_spell_filter_bare_historic_supported() {
 }
 
 #[test]
-fn first_qualified_spell_subject_residue_rejected() {
+fn nth_qualified_spell_filter_second_spell_gates_on_one_prior_cast() {
+    // CR 601.2f: "the second spell you cast each turn costs {N} less" must NOT
+    // collapse to a filterless, conditionless reducer (which would cheapen every
+    // spell). The ordinal threads to `SpellsCastThisTurn == ordinal - 1`, so the
+    // reduction applies only while exactly one qualifying spell has already been
+    // cast this turn (the spell now being cast is the second).
+    let result =
+        super::grammar::parse_nth_qualified_spell_filter("the second spell you cast each turn");
+    let super::grammar::NthQualifiedSpell::Supported {
+        filter,
+        timing,
+        ordinal,
+    } = result
+    else {
+        panic!("expected Supported, got a non-Supported NthQualifiedSpell");
+    };
+    assert_eq!(ordinal, 2, "\"the second …\" is ordinal 2");
+    assert_eq!(
+        timing,
+        super::oracle_trigger::NthEventTimingKind::Unrestricted
+    );
+
+    let condition = super::grammar::nth_qualified_spell_condition(&filter, &timing, ordinal);
+    let StaticCondition::QuantityComparison {
+        lhs,
+        comparator,
+        rhs,
+    } = condition
+    else {
+        panic!("expected a bare QuantityComparison for the unrestricted-timing form");
+    };
+    assert_eq!(comparator, Comparator::EQ);
+    assert!(matches!(
+        lhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                ..
+            },
+        }
+    ));
+    // The second spell ⇒ one qualifying spell already cast this turn.
+    assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+}
+
+#[test]
+fn nth_qualified_spell_subject_residue_rejected() {
     // CR 601.2f: a subject with non-empty post-timing residue is NOT fully
     // consumed; a clean "...each turn" subject is.
     assert!(
-        !super::grammar::first_qualified_spell_subject_fully_consumed(
+        !super::grammar::nth_qualified_spell_subject_fully_consumed(
             "the first spell you cast each turn that mana from a treasure was spent to cast"
         ),
         "Treasure residue must report not-fully-consumed"
     );
     assert!(
-        !super::grammar::first_qualified_spell_subject_fully_consumed(
+        !super::grammar::nth_qualified_spell_subject_fully_consumed(
             "the first spell you cast during each of your turns with mana value 2 or greater"
         ),
         "post-timing MV residue must report not-fully-consumed"
     );
     assert!(
-        super::grammar::first_qualified_spell_subject_fully_consumed(
+        super::grammar::nth_qualified_spell_subject_fully_consumed(
             "the first spell you cast each turn"
         ),
         "clean subject must report fully-consumed"
     );
     assert!(
-        super::grammar::first_qualified_spell_subject_fully_consumed(
+        super::grammar::nth_qualified_spell_subject_fully_consumed(
             "the first spell you cast from exile each turn"
         ),
         "clean from-exile subject must report fully-consumed"
@@ -31104,5 +31338,416 @@ fn conditional_cant_win_lose_compound_fails_closed_on_unrecognized_condition() {
                 )
         ),
         "no outcome lock may ride on an Unrecognized (always-true) condition: {defs:?}"
+    );
+}
+
+// ------------------------------------------------------------------------
+// Inverted bare self-referential rule-static branch (CR 509.1c + CR 604.1 +
+// CR 611.3a) — Frodo Baggins / Enkira / Ethrimik, with the CR 608.2c
+// attached-subject decline gate (Ray of Frost, Dog Umbra).
+// ------------------------------------------------------------------------
+
+/// Helper: the only def emitted for an in-class line.
+fn sole_def(text: &str) -> StaticDefinition {
+    let defs = parse_static_line_multi(text);
+    assert_eq!(defs.len(), 1, "expected exactly one static def: {defs:#?}");
+    defs.into_iter().next().unwrap()
+}
+
+/// Anti-vacuous reach-guard (5.3a #10): no emitted def may carry an always-true
+/// Unrecognized condition. Fails loudly if a future change routes the class back
+/// to the try_split_and_must_attack_block fallback.
+fn assert_no_unrecognized(defs: &[StaticDefinition]) {
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.condition, Some(StaticCondition::Unrecognized { .. }))),
+        "no def may ride on an Unrecognized (always-true) condition: {defs:#?}"
+    );
+}
+
+/// 5.3a #1 — Frodo Baggins (ltr). CR 701.54e.
+/// Was TWO defs, both gated on Unrecognized{"~ is your Ring-bearer, it"} — which
+/// the layer system evaluates as always-true, so the lure applied unconditionally.
+#[test]
+fn inverted_bare_self_must_be_blocked_ring_bearer() {
+    let text = "As long as ~ is your Ring-bearer, it must be blocked if able.";
+    let defs = parse_static_line_multi(text);
+    assert_no_unrecognized(&defs);
+    let def = sole_def(text);
+    assert_eq!(def.mode, StaticMode::MustBeBlocked { by: None });
+    assert_eq!(def.condition, Some(StaticCondition::IsRingBearer));
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// 5.3a #2 — Enkira, Hostile Scavenger (slx). Different condition variant,
+/// identical grammar: the class proof. ALSO the mandatory positive reach-guard
+/// proving the CR 608.2c gate does NOT over-decline the predicate-adjective form
+/// "~ is equipped" (no trailing space, so the "equipped " tag misses).
+#[test]
+fn inverted_bare_self_must_be_blocked_source_is_equipped() {
+    let text = "As long as ~ is equipped, it must be blocked if able.";
+    let defs = parse_static_line_multi(text);
+    assert_no_unrecognized(&defs);
+    let def = sole_def(text);
+    assert_eq!(def.mode, StaticMode::MustBeBlocked { by: None });
+    assert_eq!(def.condition, Some(StaticCondition::SourceIsEquipped));
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// 5.3a #2b — Ethrimik, Imagined Fiend (ydsk). Third condition variant, second
+/// predicate family, both printing-backed.
+#[test]
+fn inverted_bare_self_cant_attack_or_block_presence_condition() {
+    let text = "As long as you control another creature, ~ can't attack or block.";
+    let defs = parse_static_line_multi(text);
+    assert_no_unrecognized(&defs);
+    let def = sole_def(text);
+    assert_eq!(def.mode, StaticMode::CantAttackOrBlock);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(def.condition, Some(StaticCondition::IsPresent { .. })),
+        "condition must be typed, not Unrecognized: {:?}",
+        def.condition
+    );
+}
+
+/// 5.3a #3 — predicate-family sweep across the branch's declared range.
+///
+/// MustAttack / MustBlock / Goaded have 0 printings in this bare inverted shape
+/// (verified against BOTH the modern "attacks each combat if able" and the legacy
+/// "attacks each turn if able" templating, excluding tokens); MustBeBlocked and
+/// CantAttackOrBlock are printing-backed and covered by #1/#2/#2b.
+/// LoseAllAbilities IS printing-backed (Ray of Frost) but ONLY in the
+/// attached-subject shape, which the Ray of Frost test asserts is DECLINED.
+/// These exercise the building block's declared range, not a card.
+#[test]
+fn inverted_bare_self_rule_static_predicate_family_sweep() {
+    for (effect, expected) in [
+        ("it attacks each combat if able.", StaticMode::MustAttack),
+        ("it blocks each combat if able.", StaticMode::MustBlock),
+        ("it is goaded.", StaticMode::Goaded),
+    ] {
+        let text = format!("As long as ~ is your Ring-bearer, {effect}");
+        let defs = parse_static_line_multi(&text);
+        assert_no_unrecognized(&defs);
+        let def = sole_def(&text);
+        assert_eq!(def.mode, expected, "for {effect}");
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::IsRingBearer),
+            "for {effect}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "for {effect}");
+    }
+}
+
+/// 5.3a #4 — the second self-reference alternative ("~ " rather than "it ").
+#[test]
+fn inverted_bare_self_accepts_tilde_subject() {
+    let text = "As long as ~ is your Ring-bearer, ~ must be blocked if able.";
+    let defs = parse_static_line_multi(text);
+    assert_no_unrecognized(&defs);
+    let def = sole_def(text);
+    assert_eq!(def.mode, StaticMode::MustBeBlocked { by: None });
+    assert_eq!(def.condition, Some(StaticCondition::IsRingBearer));
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// 5.3a #5 — NEGATIVE: a fully-consuming NON-self subject ("creatures you
+/// control") must not be CLAIMED BY THIS BRANCH. Pins fail-closed note 1 on the
+/// subject strip, which accepts only "it " / "~ ".
+///
+/// SCOPE NOTE (deliberate deviation from the plan's literal wording): the plan
+/// asked for "must NOT produce a def with affected == SelfRef". That is not
+/// satisfiable here and never was — the line declines out of this branch and
+/// lands on the PRE-EXISTING generic try_split_and_must_attack_block fallback,
+/// which has always emitted SelfRef defs gated on an Unrecognized condition for
+/// non-self subjects. Repairing that fallback is out of this plan's scope: it is
+/// the same always-true fallback the Frodo class used to hit, but for a subject
+/// shape this branch deliberately does not claim. What IS assertable, and what
+/// actually pins the subject gate, is that the branch did not claim it — no def
+/// carries this branch's signature output (a TYPED condition bound to SelfRef).
+/// The Unrecognized-gated shape is asserted too, so that if that fallback is
+/// ever fixed this test fails loudly and gets re-tightened rather than silently
+/// drifting.
+#[test]
+fn inverted_bare_self_declines_non_self_subject() {
+    let defs = parse_static_line_multi(
+        "As long as ~ is your Ring-bearer, creatures you control attack each combat if able.",
+    );
+    // Anti-vacuous reach-guard: both negatives below are `!any`/`all` shapes that
+    // are trivially true on an empty `defs`. This line must still be claimed by
+    // the pre-existing try_split_and_must_attack_block fallback, so a future
+    // upstream change that routes it to zero defs fails here loudly and
+    // specifically instead of silently turning both assertions into no-ops.
+    assert!(
+        !defs.is_empty(),
+        "line must still produce defs via the pre-existing \
+         try_split_and_must_attack_block fallback; zero defs would make the \
+         negatives below vacuous"
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| d.affected == Some(TargetFilter::SelfRef)
+                && matches!(d.mode, StaticMode::MustAttack)
+                && d.condition == Some(StaticCondition::IsRingBearer)),
+        "this branch must not claim a non-self subject: {defs:#?}"
+    );
+    // Unchanged pre-existing fallback shape (see SCOPE NOTE above).
+    assert!(
+        defs.iter()
+            .all(|d| matches!(d.condition, Some(StaticCondition::Unrecognized { .. }))),
+        "non-self subjects still ride today's Unrecognized fallback: {defs:#?}"
+    );
+}
+
+/// 5.3a #5a — HEADLINE SAFETY FIXTURE. VERBATIM Ray of Frost (afr, paper
+/// expansion): "As long as enchanted creature is red, it loses all abilities."
+///
+/// CR 608.2c: "it" binds the ENCHANTED CREATURE. Without the gate this branch
+/// would bind it to SelfRef and strip the AURA's own abilities (Flash, Enchant,
+/// its ETB trigger, its untap-prevention static) while the red creature it
+/// enchants kept everything.
+///
+/// The reach-guard below is the PRIMARY non-vacuity evidence: it proves the split
+/// succeeded and that BOTH legs of the mis-claim type, so neither all_consuming
+/// nor the fail-closed ? on the condition would have saved us — the
+/// attached-subject gate is the only thing that can be suppressing it. Confirmed
+/// empirically at implementation time: this branch runs BEFORE the consumer that
+/// correctly claims this line today, so the gate is load-bearing, not
+/// belt-and-braces.
+#[test]
+fn inverted_bare_self_declines_attached_subject_ray_of_frost() {
+    let text = "As long as enchanted creature is red, it loses all abilities.";
+
+    // --- Reach-guard: prove the branch's other preconditions ALL hold. ---
+    let stripped = strip_reminder_text(text);
+    let lower = stripped.to_lowercase();
+    let tp = TextPair::new(&stripped, &lower);
+    let split = try_split_inverted_as_long_as(&tp).expect("split must succeed");
+    assert_eq!(split.condition_text, "enchanted creature is red");
+    assert_eq!(split.effect_text, "it loses all abilities");
+    // Leg 1: the condition types AND fully consumes, so the fail-closed ? on
+    // parse_static_condition would NOT have declined this line.
+    assert!(parse_static_condition("enchanted creature is red").is_some());
+    // Leg 2: the predicate types under all_consuming, so that gate would NOT
+    // have declined it either.
+    let (_, pred) = all_consuming(parse_rule_static_predicate_nom)
+        .parse("loses all abilities")
+        .expect("predicate must type");
+    assert_eq!(pred, RuleStaticPredicate::LoseAllAbilities);
+    // ...so the attached-subject gate is what fires:
+    assert!(condition_binds_attached_subject(
+        "enchanted creature is red"
+    ));
+
+    // --- Only THEN the negative. ---
+    let defs = parse_static_line_multi(text);
+    assert!(
+        !defs
+            .iter()
+            .any(|d| d.affected == Some(TargetFilter::SelfRef)),
+        "CR 608.2c: 'it' binds the enchanted creature; binding SelfRef would \
+         strip Ray of Frost's OWN abilities: {defs:#?}"
+    );
+    // The line keeps its correct attached handling from the downstream consumer.
+    assert!(
+        defs.iter().any(|d| d
+            .modifications
+            .contains(&ContinuousModification::RemoveAllAbilities)),
+        "the enchanted creature must still lose its abilities: {defs:#?}"
+    );
+}
+
+/// 5.3a #5a PAIRED DIFFERENTIAL — minimal pair with Ray of Frost: same predicate
+/// ("loses all abilities"), same "it" subject; the ONLY variable is whether the
+/// condition binds an attached subject. The attached one binds the enchanted
+/// creature; the non-attached one binds SelfRef.
+#[test]
+fn inverted_bare_self_attached_gate_minimal_pair() {
+    // Non-attached condition -> SelfRef, typed condition.
+    let def = sole_def("As long as you control another creature, it loses all abilities.");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(def.condition, Some(StaticCondition::IsPresent { .. })),
+        "condition must be typed: {:?}",
+        def.condition
+    );
+    assert!(!condition_binds_attached_subject(
+        "you control another creature"
+    ));
+
+    // Attached condition, identical predicate -> NOT SelfRef.
+    let attached =
+        parse_static_line_multi("As long as enchanted creature is red, it loses all abilities.");
+    assert!(!attached
+        .iter()
+        .any(|d| d.affected == Some(TargetFilter::SelfRef)));
+}
+
+/// The gate's own unit range: over-decline guards (Enkira / Ethrimik / Frodo /
+/// end-of-string "is enchanted"), the PREFIX hazard (Ray of Frost, paper — why
+/// the gate exists at all), and the MID-STRING hazard (Dog Umbra — why it is a
+/// word-boundary SCAN and not a prefix peek). Both positives must be kept: a
+/// regression to a prefix-only check would still pass the Ray of Frost case.
+#[test]
+fn condition_binds_attached_subject_range() {
+    // Must NOT fire (else Enkira/Ethrimik/Frodo silently stop being claimed).
+    assert!(!condition_binds_attached_subject("~ is your ring-bearer"));
+    assert!(!condition_binds_attached_subject("~ is equipped")); // no trailing space
+    assert!(!condition_binds_attached_subject(
+        "you control another creature"
+    ));
+    assert!(!condition_binds_attached_subject("~ is enchanted")); // end-of-string, spared
+
+    // Must fire.
+    assert!(condition_binds_attached_subject(
+        "enchanted creature is red"
+    )); // Ray of Frost: PREFIX
+    assert!(condition_binds_attached_subject(
+        "another player controls enchanted creature"
+    )); // Dog Umbra: MID-STRING
+
+    // KNOWN, CURRENTLY-HARMLESS OVER-DECLINE — documented, not a bug to fix.
+    // Self-referential (so "it" IS self), but the adjective is followed by more
+    // words, so the trailing space does not spare it. Harmless: neither card's
+    // effect clause is a bare RuleStaticPredicate, so all_consuming declines them
+    // before this gate is ever consulted.
+    assert!(condition_binds_attached_subject(
+        "~ is enchanted or equipped"
+    )); // Novice Knight
+    assert!(condition_binds_attached_subject(
+        "~ is enchanted by exactly one aura"
+    )); // Timber Paladin
+}
+
+/// 5.3a #6 — NEGATIVE: compound effect clauses still decline (all_consuming), so
+/// the existing compound splitter keeps them unchanged.
+#[test]
+fn inverted_bare_self_declines_compound_effect() {
+    let defs = parse_static_line_multi(
+        "As long as there are four or more card types among cards in your graveyard, ~ gets +2/+2, has flying, and attacks each combat if able.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "compound must keep today's two-def split: {defs:#?}"
+    );
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }));
+    assert_eq!(defs[1].mode, StaticMode::MustAttack);
+}
+
+/// 5.3a #7 — NEGATIVE: the combined two-mode form ("attacks or blocks each combat
+/// if able") is a documented ZERO-CARD shape; it is not a single
+/// RuleStaticPredicate, so the branch declines and today's compound-splitter path
+/// keeps it. Asserts CURRENT behavior, not the fixed shape.
+#[test]
+fn inverted_bare_self_declines_combined_two_mode_form() {
+    let defs = parse_static_line_multi(
+        "As long as ~ is your Ring-bearer, it attacks or blocks each combat if able.",
+    );
+    // Anti-vacuous reach-guard: the negative below is a `!any` shape that is
+    // trivially true on an empty `defs`. This asserts CURRENT behavior — the
+    // compound-splitter path still keeps this line — so a zero-def regression
+    // fails here rather than silently passing an empty assertion.
+    assert!(
+        !defs.is_empty(),
+        "line must still produce defs via today's compound-splitter path; zero \
+         defs would make the negative below vacuous"
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| d.condition == Some(StaticCondition::IsRingBearer)
+                && d.affected == Some(TargetFilter::SelfRef)
+                && matches!(d.mode, StaticMode::MustAttack | StaticMode::MustBlock)),
+        "the combined two-mode form must not be claimed by this branch: {defs:#?}"
+    );
+}
+
+/// 5.3a #9 — NEGATIVE, fail-closed (CR 611.3a): an untypeable condition must never
+/// yield an UNGATED requirement. Pins the ? on parse_static_condition.
+#[test]
+fn inverted_bare_self_fails_closed_on_untypeable_condition() {
+    let defs = parse_static_line_multi(
+        "As long as the moon is in the seventh house, it must be blocked if able.",
+    );
+    // Anti-vacuous reach-guard: the negative below is a `!any` shape that is
+    // trivially true on an empty `defs`. The fail-closed `?` on
+    // parse_static_condition must suppress the UNGATED requirement while the
+    // line is still claimed downstream, so a zero-def regression fails here
+    // instead of making the CR 611.3a assertion a no-op.
+    assert!(
+        !defs.is_empty(),
+        "line must still produce defs via the pre-existing fallback; zero defs \
+         would make the fail-closed negative below vacuous"
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::MustBeBlocked { .. }) && d.condition.is_none()),
+        "an untypeable condition must not produce an unconditional requirement: {defs:#?}"
+    );
+}
+
+/// 5.3d — Fix B revert-failing test. CR 604.1 + CR 611.3a.
+///
+/// This line has NO effect-subject comma, so `try_split_inverted_as_long_as`
+/// fails and the line falls all the way to the terminal "as long as ..."
+/// fallback in dispatch.rs. On unfixed code that arm hard-codes
+/// `StaticCondition::Unrecognized`, which the layer system evaluates as
+/// always-true — silently turning a conditional static into an unconditional
+/// one. After Fix B it delegates to `parse_static_condition`, the same single
+/// authority its four in-file sibling arms already use.
+#[test]
+fn bare_as_long_as_fallback_types_its_condition() {
+    // Anti-vacuous reach-guard: prove the line does NOT split, so we know it
+    // truly reached the terminal fallback rather than being claimed upstream.
+    let stripped = strip_reminder_text("As long as ~ is your Ring-bearer");
+    let lower = stripped.to_lowercase();
+    let tp = TextPair::new(&stripped, &lower);
+    assert!(
+        try_split_inverted_as_long_as(&tp).is_none(),
+        "must reach the bare terminal fallback, not the inverted splitter"
+    );
+
+    let def = parse_static_line("As long as ~ is your Ring-bearer").expect("static parses");
+    // Was Unrecognized { text: "~ is your Ring-bearer" } before Fix B.
+    assert_eq!(def.condition, Some(StaticCondition::IsRingBearer));
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+    // NEGATIVE direction: Fix B NARROWS the Unrecognized set, it does not
+    // replace it. A genuinely untypeable condition must still land there.
+    let def2 = parse_static_line("As long as the moon is in the seventh house")
+        .expect("static still parses");
+    assert!(
+        matches!(def2.condition, Some(StaticCondition::Unrecognized { .. })),
+        "untypeable conditions must still fall back to Unrecognized: {:?}",
+        def2.condition
+    );
+}
+
+/// Pins the PRE-EXISTING full-consumption guard in `parse_static_condition`
+/// against a future prefix-tolerant relaxation. If that guard were loosened, the
+/// orphaned-pronoun text the broken splitter used to produce
+/// ("~ is your Ring-bearer, it") would start typing as a bare IsRingBearer,
+/// silently resurrecting a mis-scoped condition. Not a Fix A / Fix B test — it
+/// guards the invariant both fixes depend on.
+#[test]
+fn parse_static_condition_requires_full_consumption() {
+    assert_eq!(parse_static_condition("~ is your Ring-bearer, it"), None);
+    // Positive control: the same condition WITHOUT the orphaned pronoun types.
+    assert_eq!(
+        parse_static_condition("~ is your Ring-bearer"),
+        Some(StaticCondition::IsRingBearer)
     );
 }

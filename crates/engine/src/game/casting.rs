@@ -344,7 +344,7 @@ pub(crate) fn begin_variable_speed_payment(
             max,
             distinctness: crate::types::ability::NumberDistinctness::Repeatable,
         },
-        source_id: None,
+        source: None,
         persist_player: None,
     }
 }
@@ -776,6 +776,9 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         source_id: *source,
                         source_controller,
                         ability: None,
+                        // Restriction source is the current operation subject,
+                        // not a deferred triggered-source read.
+                        trigger_source: None,
                         recipient_id: None,
                         scoped_iteration_player: None,
                     },
@@ -14791,6 +14794,9 @@ fn apply_mana_spell_grants(
                 source_id: unit.source_id,
                 source_controller: Some(caster),
                 ability: None,
+                // This reflexive cast check evaluates its current mana-source
+                // operation, not a delayed triggered source.
+                trigger_source: None,
                 recipient_id: None,
                 scoped_iteration_player: None,
             };

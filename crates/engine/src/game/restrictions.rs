@@ -1515,7 +1515,18 @@ pub(crate) fn evaluate_condition(
         }
         // CR 602.5b: "Activate only if [player condition]" — count matching non-eliminated players.
         ParsedCondition::PlayerCountAtLeast { filter, minimum } => {
-            crate::game::quantity::resolve_player_count(state, filter, player, source_id) as usize
+            crate::game::quantity::resolve_player_count(
+                state,
+                filter,
+                player,
+                crate::game::quantity::QuantityContext {
+                    entering: None,
+                    source: source_id,
+                    trigger_source: None,
+                    recipient: None,
+                    scoped_player: None,
+                },
+            ) as usize
                 >= *minimum
         }
         // CR 702.131c: The city's blessing is a player designation that effects
@@ -1631,24 +1642,21 @@ fn target_filter_accepts_player(filter: &crate::types::ability::TargetFilter) ->
 
 fn target_ref_matches_spell_targets_filter(
     state: &crate::types::game_state::GameState,
-    context_source_id: crate::types::identifiers::ObjectId,
     target: &crate::types::ability::TargetRef,
     filter: &crate::types::ability::TargetFilter,
+    context: &super::filter::FilterContext,
 ) -> bool {
     use crate::types::ability::{TargetFilter, TargetRef};
     match target {
         TargetRef::Player(_) => target_filter_accepts_player(filter),
-        TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_source(state, context_source_id);
-            match filter {
+        TargetRef::Object(object_id) => match filter {
+            TargetFilter::Player => false,
+            TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
                 TargetFilter::Player => false,
-                TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
-                    TargetFilter::Player => false,
-                    branch => super::filter::matches_target_filter(state, *object_id, branch, &ctx),
-                }),
-                _ => super::filter::matches_target_filter(state, *object_id, filter, &ctx),
-            }
-        }
+                branch => super::filter::matches_target_filter(state, *object_id, branch, context),
+            }),
+            _ => super::filter::matches_target_filter(state, *object_id, filter, context),
+        },
     }
 }
 
@@ -1706,21 +1714,21 @@ pub(crate) fn triggering_spell_targets(
 /// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
 /// triggering spell's committed targets at resolution time.
 ///
-/// `context_source_id` scopes filter-relative terms like `FilterProp::Another`:
-/// use the triggering spell id for `AbilityCondition`, and the trigger source id
-/// for `TriggerCondition` (Orvar — "other permanents you control").
+/// `context` scopes filter-relative terms like `FilterProp::Another`: an
+/// `AbilityCondition` uses its triggering spell, while a `TriggerCondition`
+/// carries the exact trigger source (Orvar — "other permanents you control").
 pub(crate) fn triggering_spell_targets_filter(
     state: &crate::types::game_state::GameState,
     spell_id: crate::types::identifiers::ObjectId,
     filter: &crate::types::ability::TargetFilter,
-    context_source_id: crate::types::identifiers::ObjectId,
+    context: &super::filter::FilterContext,
 ) -> bool {
     let Some(targets) = spell_cast_targets(state, spell_id) else {
         return false;
     };
-    targets.iter().any(|target| {
-        target_ref_matches_spell_targets_filter(state, context_source_id, target, filter)
-    })
+    targets
+        .iter()
+        .any(|target| target_ref_matches_spell_targets_filter(state, target, filter, context))
 }
 
 /// CR 601.3d + CR 702.8a: Validate, post-target, that every target-dependent

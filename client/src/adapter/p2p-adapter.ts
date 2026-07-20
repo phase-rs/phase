@@ -19,7 +19,7 @@ import type {
 } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
@@ -1994,7 +1994,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "action_rejected": {
         if (this.pendingReject) {
           this.pendingReject(
-            new AdapterError("ACTION_REJECTED", msg.reason, true),
+            actionRejectionError(msg.reason),
           );
           this.pendingResolve = null;
           this.pendingReject = null;
@@ -2013,7 +2013,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(msg.requestId);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(msg.requestId);
-          pending.reject(new AdapterError("ACTION_REJECTED", msg.reason, true));
+          pending.reject(actionRejectionError(msg.reason));
         }
         break;
       }

@@ -11,6 +11,15 @@ pub struct CardId(pub u64);
 #[serde(transparent)]
 pub struct ObjectId(pub u64);
 
+/// Monotonic identity for one logical simultaneous zone-change action.
+///
+/// This remains distinct from an [`ObjectId`]: a logical group can contain
+/// several object incarnations, and a nested batch must never inherit its
+/// parent's trigger-observation authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LogicalZoneChangeGroupId(pub u64);
+
 /// Unique identifier for a set of objects tracked across delayed trigger boundaries.
 /// CR 603.7: Delayed triggers reference the specific objects from the originating effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

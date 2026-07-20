@@ -2711,6 +2711,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         }
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
@@ -3638,8 +3639,9 @@ fn walk_ability(
         mode_abilities,
         targets: _,
         source_id: _,
-        source_incarnation: _,
-        source_card_id: _, // latched card identity token (AllCopies yield), no read/write effect
+        source_incarnation: _, // self-transform epoch latch, no read/write effect
+        trigger_source: _,     // exact triggered-source authority, no read/write effect
+        trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
