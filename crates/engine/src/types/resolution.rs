@@ -545,9 +545,10 @@ impl ResolutionStack {
     }
 
     /// Insert a newly paused ChangeZone owner below the child stack raised by
-    /// the current zone move. If that boundary directly follows the Devour-only
-    /// owner for this move, upgrade that exact frame in place so its eligibility
-    /// snapshot remains coupled to the complete logical iteration owner.
+    /// the current zone move. If the exact boundary or its immediate predecessor
+    /// is the Devour-only owner for this move, upgrade that exact frame in place
+    /// so its eligibility snapshot remains coupled to the complete logical
+    /// iteration owner.
     pub fn insert_change_zone_parent_at_child_boundary(
         &mut self,
         pending: PendingChangeZoneIteration,
@@ -560,9 +561,21 @@ impl ResolutionStack {
             });
         }
 
+        if let Some(ResolutionFrame::ChangeZone(frame)) = self.frames.get(child_stack_start) {
+            if frame.pending.is_none() && frame.devour_eligible_snapshot.is_some() {
+                let devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
+                self.frames[child_stack_start] =
+                    ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+                        pending: Some(pending),
+                        devour_eligible_snapshot,
+                    }));
+                return Ok(());
+            }
+        }
+
         if let Some(parent_index) = child_stack_start.checked_sub(1) {
             if let Some(ResolutionFrame::ChangeZone(frame)) = self.frames.get(parent_index) {
-                if frame.pending.is_none() {
+                if frame.pending.is_none() && frame.devour_eligible_snapshot.is_some() {
                     let devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
                     self.frames[parent_index] =
                         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
@@ -583,14 +596,25 @@ impl ResolutionStack {
         )
     }
 
-    /// Replace the exact ChangeZone owner immediately below the child stack it
-    /// raised. This is the re-pause counterpart to `replace_active_change_zone`:
-    /// the owner remains in place while an ETB-counter child owns the stack top.
+    /// Replace the exact ChangeZone owner at the captured child boundary or
+    /// immediately below it. This is the re-pause counterpart to
+    /// `replace_active_change_zone`: the owner remains in place while an
+    /// ETB-counter child owns the stack top.
     pub fn replace_change_zone_parent_at_child_boundary(
         &mut self,
         pending: PendingChangeZoneIteration,
         child_stack_start: usize,
     ) -> Result<(), ResolutionStackError> {
+        if let Some(ResolutionFrame::ChangeZone(frame)) = self.frames.get(child_stack_start) {
+            let devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
+            self.frames[child_stack_start] =
+                ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+                    pending: Some(pending),
+                    devour_eligible_snapshot,
+                }));
+            return Ok(());
+        }
+
         let parent_index =
             child_stack_start
                 .checked_sub(1)
