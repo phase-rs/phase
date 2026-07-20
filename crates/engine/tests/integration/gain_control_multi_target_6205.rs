@@ -312,11 +312,14 @@ fn jace_ultimate_steals_three_creatures_through_target_selection() {
 // subtype exists, so Domineering Will has a second, independent filter gap on top
 // of the recipient one. Also out of scope here.)
 //
-// It is deliberately not fixed here. Adding a blanket `GiveControl` arm would
-// surface target slots for NON-targeted give-control effects too ("an opponent
-// gains control of that creature"), which is the exact hazard the `Sacrifice`,
-// `Bounce { AtResolution }` and `UnattachAll` carve-outs directly above
-// `extract_target_filter_from_effect` exist to prevent. Doing it correctly needs a
-// selection discriminator on `GiveControl` mirroring `BounceSelection` — a
-// separate design change, tracked as follow-up work rather than smuggled into a
-// parser count fix.
+// It is deliberately not fixed here. `GiveControl`'s `recipient` is not always a
+// chosen target — "an opponent gains control of that creature" and the
+// `ScopedPlayer` / `SpecificPlayer` recipients resolve at resolution time via
+// `unique_recipient_from_filter`. So teaching the companion-slot check to fire on
+// any `GiveControl` would manufacture a spurious player slot for that whole
+// non-targeted class, which is the same hazard the `Sacrifice`,
+// `Bounce { AtResolution }` and `UnattachAll` carve-outs in
+// `extract_target_filter_from_effect` exist to prevent. Doing it correctly means
+// discriminating a TARGETED recipient from a resolution-time one — a separate
+// design change, tracked as follow-up work rather than smuggled into a parser
+// count fix.
