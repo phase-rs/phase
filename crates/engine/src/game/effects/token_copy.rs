@@ -1250,8 +1250,7 @@ fn apply_token_modifications(
             // as their source.
             ContinuousModification::GrantTrigger { trigger } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.trigger_definitions.push((**trigger).clone());
-                    Arc::make_mut(&mut token.base_trigger_definitions).push((**trigger).clone());
+                    token.push_printed_trigger((**trigger).clone());
                 }
             }
             // CR 707.9a: "except it has \"<activated/static ability>\"" — the
@@ -1429,8 +1428,7 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
                 token.loyalty = Some(*value);
             }
             ContinuousModification::GrantTrigger { trigger } => {
-                token.trigger_definitions.push((**trigger).clone());
-                Arc::make_mut(&mut token.base_trigger_definitions).push((**trigger).clone());
+                token.push_printed_trigger((**trigger).clone());
             }
             ContinuousModification::GrantAbility { definition } => {
                 Arc::make_mut(&mut token.abilities).push((**definition).clone());

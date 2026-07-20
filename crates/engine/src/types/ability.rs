@@ -18941,8 +18941,18 @@ impl TriggerEntry {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl From<TriggerDefinition> for TriggerEntry {
     fn from(definition: TriggerDefinition) -> Self {
+        Self::new(TriggerDefinitionOccurrenceRef::Unmaterialized, definition)
+    }
+}
+
+impl TriggerEntry {
+    /// Legacy wire bridge: a payload-only entry with no occurrence provenance.
+    /// Only the deserializer may mint one; a later normalization pass migrates
+    /// it to a provable printed slot or rejects the state.
+    pub(crate) fn unmaterialized_legacy(definition: TriggerDefinition) -> Self {
         Self::new(TriggerDefinitionOccurrenceRef::Unmaterialized, definition)
     }
 }
@@ -18971,7 +18981,9 @@ impl<'de> Deserialize<'de> for TriggerEntry {
             // provable printed/base slot. Keeping the marker here preserves the
             // distinction instead of guessing copied/granted provenance from
             // definition bytes at the serde boundary.
-            TriggerEntryWire::LegacyPayload(definition) => Ok(definition.into()),
+            TriggerEntryWire::LegacyPayload(definition) => {
+                Ok(Self::unmaterialized_legacy(definition))
+            }
         }
     }
 }

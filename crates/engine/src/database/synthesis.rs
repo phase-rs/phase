@@ -3127,13 +3127,11 @@ pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::G
             .iter_all()
             .any(|entry| is_evoke_sac(entry.definition()))
         {
-            obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
+            obj.relive_printed_trigger(is_evoke_sac);
         }
         return;
     }
-    let trigger = build_evoke_etb_sac_trigger();
-    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-    obj.trigger_definitions.push(trigger);
+    obj.push_printed_trigger(build_evoke_etb_sac_trigger());
 }
 
 fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinition {
@@ -3224,15 +3222,14 @@ pub(crate) fn ensure_paid_offspring_etb_copy_triggers(
             if !obj.trigger_definitions.iter_all().any(|entry| {
                 is_offspring_etb_copy_trigger_for_ordinal(entry.definition(), origin_ordinal)
             }) {
-                obj.trigger_definitions
-                    .push(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
+                obj.relive_printed_trigger(|trigger| {
+                    is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal)
+                });
             }
             continue;
         }
 
-        let trigger = offspring_etb_copy_trigger_for_ordinal(origin_ordinal);
-        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-        obj.trigger_definitions.push(trigger);
+        obj.push_printed_trigger(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
     }
 }
 
