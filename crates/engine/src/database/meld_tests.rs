@@ -90,7 +90,7 @@ fn goddric_conditional_flying_is_not_a_printed_keyword() {
 
 #[test]
 fn subtype_loss_rider_stays_with_its_own_conditional_static() {
-    let text = "Celebration — As long as two or more nonland permanents entered the battlefield under your control this turn, Goddric is a Dragon with base power and toughness 4/4. (It loses all other creature types.)\nAs long as you control an artifact, Goddric is a Wizard with base power and toughness 2/2.";
+    let text = "Celebration — As long as two or more nonland permanents entered the battlefield under your control this turn, Goddric is a Dragon with base power and toughness 4/4, flying, and \"{R}: Dragons you control get +1/+0 until end of turn.\" (It loses all other creature types.)\nAs long as you control an artifact, Goddric is a Wizard with base power and toughness 2/2.";
     let mut card = atomic(
         "Goddric, Cloaked Reveler",
         "Legendary Creature — Human Noble",
@@ -100,6 +100,17 @@ fn subtype_loss_rider_stays_with_its_own_conditional_static() {
     card.subtypes = vec!["Human".to_string(), "Noble".to_string()];
 
     let face = parse_face(&card);
+    let celebration_static = face
+        .static_abilities
+        .iter()
+        .find(|definition| {
+            definition.modifications.contains(
+                &crate::types::ability::ContinuousModification::AddSubtype {
+                    subtype: "Dragon".to_string(),
+                },
+            )
+        })
+        .expect("the conditional Celebration static must parse");
     let wizard_static = face
         .static_abilities
         .iter()
@@ -112,6 +123,11 @@ fn subtype_loss_rider_stays_with_its_own_conditional_static() {
         })
         .expect("the independent conditional Wizard static must parse");
 
+    assert!(celebration_static.modifications.contains(
+        &crate::types::ability::ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        },
+    ));
     assert!(
         !wizard_static.modifications.contains(
             &crate::types::ability::ContinuousModification::RemoveAllSubtypes {
