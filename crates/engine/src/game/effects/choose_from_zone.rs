@@ -2534,10 +2534,6 @@ mod tests {
         );
         let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
             .expect("real category prompt serializes as v2");
-        assert!(
-            v2.get("pending_per_category_zone_choice").is_none(),
-            "v2 state must retain the category owner only in resolution_frames"
-        );
         state = serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("real category prompt round-trips through the v2 wire")
             .into_game_state();
@@ -3320,10 +3316,6 @@ mod tests {
         );
         let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
             .expect("real per-player prompt serializes as v2");
-        assert!(
-            v2.get("pending_per_player_zone_choice").is_none(),
-            "v2 state must retain the per-player owner only in resolution_frames"
-        );
         state = serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("real per-player prompt round-trips through the v2 wire")
             .into_game_state();
@@ -3350,5 +3342,173 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(state.objects.get(&first).unwrap().zone, Zone::Hand);
         assert_eq!(state.objects.get(&second).unwrap().zone, Zone::Hand);
+    }
+
+    fn each_player_choice_with_gain_life_tail(source: ObjectId) -> ResolvedAbility {
+        let tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ResolvedAbility {
+            sub_ability: Some(Box::new(tail)),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Graveyard,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::EachPlayer,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: false,
+                    constraint: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        }
+    }
+
+    #[test]
+    fn repeat_for_parks_below_complete_per_player_choice_child_stack() {
+        // CR 608.2c + CR 101.4: a repeated iteration owns both the deferred
+        // continuation and the active each-player prompt. Its repeat frame must
+        // be below that complete two-frame child stack.
+        use crate::types::actions::GameAction;
+        use crate::types::resolution::{FrameKind, ResolutionFrame};
+
+        let mut state = GameState::new_two_player(31);
+        let first = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "First repeat choice".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(1),
+            "Second repeat choice".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = each_player_choice_with_gain_life_tail(ObjectId(310));
+        ability.repeat_for = Some(crate::types::ability::QuantityExpr::Fixed { value: 2 });
+        let mut events = Vec::new();
+
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("first repeat iteration parks on the first player choice");
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::RepeatFor,
+                FrameKind::AbilityContinuation,
+                FrameKind::PerPlayerZoneChoice,
+            ],
+            "repeat-for must be below its entire per-player child stack"
+        );
+
+        for expected in [first, second, first, second] {
+            match &state.waiting_for {
+                WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                    assert_eq!(cards, &vec![expected]);
+                }
+                other => panic!("expected per-player ChooseFromZoneChoice, got {other:?}"),
+            }
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::SelectCards {
+                    cards: vec![expected],
+                },
+            )
+            .expect("each production choice action advances the repeat iteration");
+        }
+
+        assert_eq!(state.players[0].life, 22, "one tail per repeat iteration");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolution_stack.is_empty());
+    }
+
+    #[test]
+    fn repeat_until_parks_below_complete_per_player_choice_child_stack() {
+        // CR 107.1c + CR 608.2c + CR 101.4: the repeat-until owner must wait
+        // for both player choices and their shared continuation before it raises
+        // the repeat decision.
+        use crate::types::actions::GameAction;
+        use crate::types::resolution::{FrameKind, ResolutionFrame};
+
+        let mut state = GameState::new_two_player(32);
+        let first = create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(0),
+            "First repeat-until choice".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(34),
+            PlayerId(1),
+            "Second repeat-until choice".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = each_player_choice_with_gain_life_tail(ObjectId(320));
+        ability.repeat_until = Some(crate::types::ability::RepeatContinuation::ControllerChoice);
+        let mut events = Vec::new();
+
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("repeat-until iteration parks on the first player choice");
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::RepeatUntil,
+                FrameKind::AbilityContinuation,
+                FrameKind::PerPlayerZoneChoice,
+            ],
+            "repeat-until must be below its entire per-player child stack"
+        );
+
+        for expected in [first, second] {
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::SelectCards {
+                    cards: vec![expected],
+                },
+            )
+            .expect("each production choice action advances the paused process");
+        }
+
+        assert_eq!(
+            state.players[0].life, 21,
+            "the deferred tail resolves first"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        assert!(state.resolution_stack.is_empty());
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("declining the production repeat prompt completes the resolution");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }

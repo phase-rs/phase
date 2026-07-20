@@ -861,8 +861,8 @@ pub(crate) fn drain_active_vote_ballot(state: &mut GameState, events: &mut Vec<G
     });
 }
 
-/// Park the remaining ballot work either above its existing parent or directly
-/// below a typed child raised by the current ballot. This preserves nested
+/// Park the remaining ballot work either above its existing parent or below the
+/// complete child stack raised by the current ballot. This preserves nested
 /// ownership without allowing a vote consumer to search the resolution stack.
 fn park_vote_ballot_after_current_ballot(
     state: &mut GameState,
@@ -875,16 +875,21 @@ fn park_vote_ballot_after_current_ballot(
         }
         std::cmp::Ordering::Equal => state.push_vote_ballot(pending),
         std::cmp::Ordering::Greater => state
-            .insert_vote_ballot_parent_of_active(pending)
-            .expect("vote-ballot parent must be inserted directly below its typed child"),
+            .insert_vote_ballot_parent_at_child_boundary(pending, stack_depth_before_ballot)
+            .expect("vote-ballot parent must be inserted below its complete child stack"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, VoteVisibility};
-    use crate::types::identifiers::ObjectId;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityKind, CardSelectionMode, Chooser, TargetFilter, VoteVisibility, ZoneOwner,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::resolution::{FrameKind, ResolutionFrame};
     use crate::types::zones::Zone;
 
     /// CR 701.38a + CR 101.4: Initiating a Vote sets `WaitingFor::VoteChoice`
@@ -1235,6 +1240,100 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn per_ballot_resume_parks_below_complete_per_player_choice_child_stack() {
+        // CR 701.38d + CR 608.2c + CR 101.4: a per-ballot body that pauses on
+        // an each-player choice owns its continuation and active prompt as one
+        // child stack. The remaining-ballot owner must sit below both frames.
+        let mut state = GameState::new_two_player(71);
+        let controller = state.players[0].id;
+        let opponent = state.players[1].id;
+        let first = create_object(
+            &mut state,
+            CardId(71),
+            controller,
+            "First ballot choice".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(72),
+            opponent,
+            "Second ballot choice".to_string(),
+            Zone::Graveyard,
+        );
+        let source = ObjectId(710);
+        let per_choice_effect = vec![Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Graveyard,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::EachPlayer,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: false,
+                    constraint: None,
+                    selection: CardSelectionMode::Chosen,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )),
+        )];
+        let options = vec!["choice".to_string()];
+        let ballots = crate::im::Vector::from(vec![(controller, 0), (opponent, 0)]);
+        let mut events = Vec::new();
+
+        resolve_tally(
+            &mut state,
+            source,
+            controller,
+            &options,
+            &per_choice_effect,
+            &[2],
+            &ballots,
+            VoteTally::PerVote,
+            &[],
+            None,
+            &mut events,
+        )
+        .expect("first ballot pauses on the first player choice");
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::VoteBallot,
+                FrameKind::AbilityContinuation,
+                FrameKind::PerPlayerZoneChoice,
+            ],
+            "the remaining ballot owner must be below its complete child stack"
+        );
+
+        for expected in [first, second, first, second] {
+            crate::game::engine::apply(
+                &mut state,
+                controller,
+                GameAction::SelectCards {
+                    cards: vec![expected],
+                },
+            )
+            .expect("each production choice action advances the per-ballot body");
+        }
+
+        assert_eq!(state.players[0].life, 22, "one tail per resolved ballot");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolution_stack.is_empty());
     }
 
     // --- ControllerLabels (Battlebond friend-or-foe) ---

@@ -969,10 +969,10 @@ fn drain_active_repeat_until(state: &mut GameState) {
     }
 }
 
-/// Park a repeat-until parent as the owner of a direct choice, or immediately
-/// below the typed child its iteration raised. The frame count captured before
-/// the body runs distinguishes a new child from an outer parent that was
-/// already active; consumers then remain strictly top-only.
+/// Park a repeat-until parent as the owner of a direct choice, or below the
+/// complete child stack its iteration raised. The frame count captured before
+/// the body runs is the exact child-stack boundary, so consumers remain
+/// strictly top-only without searching for a buried parent.
 fn park_repeat_until_after_inner_pause(
     state: &mut GameState,
     pending: crate::types::game_state::PendingRepeatUntil,
@@ -988,8 +988,8 @@ fn park_repeat_until_after_inner_pause(
         }
         std::cmp::Ordering::Equal => state.push_repeat_until(pending),
         std::cmp::Ordering::Greater => state
-            .insert_repeat_until_parent_of_active(pending)
-            .expect("repeat-until parent must be inserted directly below its typed child"),
+            .insert_repeat_until_parent_at_child_boundary(pending, stack_depth_before_iteration)
+            .expect("repeat-until parent must be inserted below its complete child stack"),
     }
 }
 
@@ -1385,6 +1385,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             } else {
                 &ability
             };
+            let stack_depth_before_iteration = state.resolution_stack.len();
             // CR 608.2c + CR 109.5: Drive the FULL chain (parent effect +
             // sub_ability + line-1660 continuation wiring) for each resumed
             // iteration, mirroring iteration 0's path. Calling `resolve_effect`
@@ -1423,6 +1424,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             next_iteration: next,
                             total_iterations,
                         },
+                        stack_depth_before_iteration,
                     );
                 }
                 paused = true;
@@ -1439,22 +1441,26 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
 }
 
 /// Park the remaining repeat-for iterations either as the active owner of a
-/// direct choice or immediately below the continuation the just-finished
-/// iteration raised. The latter preserves the actual parent/child dependency
-/// instead of relying on a later stack search.
+/// direct choice or below the complete child stack the just-finished iteration
+/// raised. The captured boundary preserves the actual parent/child dependency
+/// without a later stack search.
 fn park_repeat_for_after_current_iteration(
     state: &mut GameState,
     pending: crate::types::game_state::PendingRepeatIteration,
+    stack_depth_before_iteration: usize,
 ) {
-    match state.resolution_stack.last() {
-        None => state.push_repeat_for(pending),
-        Some(ResolutionFrame::AbilityContinuation(_)) => state
-            .insert_repeat_for_parent_of_active(pending)
-            .expect("repeat-for parent must be inserted directly below its continuation child"),
-        Some(frame) => panic!(
-            "repeat-for iteration raised an unexpected nested {:?} frame",
-            frame.kind()
-        ),
+    match state
+        .resolution_stack
+        .len()
+        .cmp(&stack_depth_before_iteration)
+    {
+        std::cmp::Ordering::Less => {
+            panic!("repeat-for iteration removed a parent frame before it could be re-parked")
+        }
+        std::cmp::Ordering::Equal => state.push_repeat_for(pending),
+        std::cmp::Ordering::Greater => state
+            .insert_repeat_for_parent_at_child_boundary(pending, stack_depth_before_iteration)
+            .expect("repeat-for parent must be inserted below its complete child stack"),
     }
 }
 
@@ -1498,10 +1504,11 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
         return;
     }
 
-    if let Some(frame) = state
-        .take_active_ability_continuation()
-        .expect("continuation prepend may consume only the active continuation frame")
-    {
+    if state.active_ability_continuation().is_some() {
+        let frame = state
+            .take_active_ability_continuation()
+            .expect("active continuation must remain the stack top while it is prepended")
+            .expect("active continuation lookup must produce a frame");
         let existing = frame.pending;
         let PendingContinuation {
             chain,
@@ -1522,9 +1529,10 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
-    } else {
-        state.park_ability_continuation(PendingContinuation::new(Box::new(head), state));
+        return;
     }
+
+    state.park_ability_continuation(PendingContinuation::new(Box::new(head), state));
 }
 
 /// CR 118.12 + CR 608.2c: Complete the original rider of a paused
@@ -5387,6 +5395,7 @@ fn drive_repeat_for_outermost(
     while iteration < base_iterations {
         let mut iter_ability = effective.clone();
         iter_ability.repeat_for = None;
+        let stack_depth_before_iteration = state.resolution_stack.len();
         resolve_chain_body(state, &iter_ability, events, depth)?;
         if state.waiting_for != initial_waiting_for
             || (!initial_continuation_present && state.active_ability_continuation().is_some())
@@ -5404,6 +5413,7 @@ fn drive_repeat_for_outermost(
                         next_iteration,
                         total_iterations: base_iterations,
                     },
+                    stack_depth_before_iteration,
                 );
             }
             break;
@@ -8377,6 +8387,7 @@ fn resolve_chain_body(
                     } else {
                         effective
                     };
+                let stack_depth_before_iteration = state.resolution_stack.len();
                 // CR 608.2d: A kind-driven or member-driven iteration whose action
                 // is optional fires its per-iteration "you may" gate through the
                 // full chain. All other iterations resolve the effect directly —
@@ -8448,6 +8459,7 @@ fn resolve_chain_body(
                                 next_iteration,
                                 total_iterations: iterations,
                             },
+                            stack_depth_before_iteration,
                         );
                     }
                     break;

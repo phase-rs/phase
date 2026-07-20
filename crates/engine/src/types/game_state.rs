@@ -13578,13 +13578,17 @@ impl GameState {
         self.resolution_stack.replace_active_repeat_for(pending)
     }
 
-    /// Insert a repeat-for parent directly below the continuation it resumed.
-    pub fn insert_repeat_for_parent_of_active(
+    /// Insert a repeat-for parent below the complete child stack its iteration
+    /// created after the producer recorded that stack's boundary.
+    pub fn insert_repeat_for_parent_at_child_boundary(
         &mut self,
         pending: PendingRepeatIteration,
+        child_stack_start: usize,
     ) -> Result<(), ResolutionStackError> {
-        self.resolution_stack
-            .insert_parent_of_active(super::resolution::ResolutionFrame::RepeatFor(pending))
+        self.resolution_stack.insert_parent_at_child_boundary(
+            super::resolution::ResolutionFrame::RepeatFor(pending),
+            child_stack_start,
+        )
     }
 
     /// Returns the repeat-until owner only when it owns the stack top.
@@ -13617,13 +13621,17 @@ impl GameState {
         self.resolution_stack.replace_active_repeat_until(pending)
     }
 
-    /// Insert a repeat-until parent directly below the child it suspended for.
-    pub fn insert_repeat_until_parent_of_active(
+    /// Insert a repeat-until parent below the complete child stack its
+    /// iteration created after the producer recorded that stack's boundary.
+    pub fn insert_repeat_until_parent_at_child_boundary(
         &mut self,
         pending: PendingRepeatUntil,
+        child_stack_start: usize,
     ) -> Result<(), ResolutionStackError> {
-        self.resolution_stack
-            .insert_parent_of_active(super::resolution::ResolutionFrame::RepeatUntil(pending))
+        self.resolution_stack.insert_parent_at_child_boundary(
+            super::resolution::ResolutionFrame::RepeatUntil(pending),
+            child_stack_start,
+        )
     }
 
     /// Returns the choose-one-of owner only when it owns the stack top.
@@ -13660,13 +13668,17 @@ impl GameState {
         self.resolution_stack.push_vote_ballot(pending);
     }
 
-    /// Insert a vote-ballot parent directly below the child it suspended for.
-    pub fn insert_vote_ballot_parent_of_active(
+    /// Insert a vote-ballot parent below the complete child stack its ballot
+    /// created after the producer recorded that stack's boundary.
+    pub fn insert_vote_ballot_parent_at_child_boundary(
         &mut self,
         pending: PendingVoteBallotIteration,
+        child_stack_start: usize,
     ) -> Result<(), ResolutionStackError> {
-        self.resolution_stack
-            .insert_parent_of_active(super::resolution::ResolutionFrame::VoteBallot(pending))
+        self.resolution_stack.insert_parent_at_child_boundary(
+            super::resolution::ResolutionFrame::VoteBallot(pending),
+            child_stack_start,
+        )
     }
 
     /// Returns the per-player zone-choice owner only when it owns the stack top.

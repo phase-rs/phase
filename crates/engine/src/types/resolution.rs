@@ -263,6 +263,13 @@ pub enum ResolutionStackError {
     },
     #[error("a parent frame requires an active child")]
     NoActiveChild,
+    #[error(
+        "child-stack boundary {child_stack_start} is not below the active child stack of length {stack_len}"
+    )]
+    InvalidChildBoundary {
+        child_stack_start: usize,
+        stack_len: usize,
+    },
     #[error("top frame {frame:?} does not match waiting prompt {waiting_for}")]
     PromptMismatch {
         frame: FrameKind,
@@ -649,6 +656,32 @@ impl ResolutionStack {
             .checked_sub(1)
             .ok_or(ResolutionStackError::NoActiveChild)?;
         self.frames.insert(active_index, frame);
+        Ok(())
+    }
+
+    /// Install an outer frame immediately below the child stack a producer
+    /// created after recording its pre-resolution boundary.
+    ///
+    /// This is structural insertion, not a frame search: the caller supplies
+    /// the exact stack depth observed before it invoked the child producer.
+    /// The boundary must therefore precede at least one currently active child
+    /// frame; a producer with no child parks its frame normally.
+    pub fn insert_parent_at_child_boundary(
+        &mut self,
+        frame: ResolutionFrame,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        let stack_len = self.frames.len();
+        if stack_len == 0 {
+            return Err(ResolutionStackError::NoActiveChild);
+        }
+        if child_stack_start >= stack_len {
+            return Err(ResolutionStackError::InvalidChildBoundary {
+                child_stack_start,
+                stack_len,
+            });
+        }
+        self.frames.insert(child_stack_start, frame);
         Ok(())
     }
 
@@ -1929,6 +1962,10 @@ mod tests {
             stack.insert_parent_of_active(continuation_frame(1)),
             Err(ResolutionStackError::NoActiveChild)
         );
+        assert_eq!(
+            stack.insert_parent_at_child_boundary(continuation_frame(1), 0),
+            Err(ResolutionStackError::NoActiveChild)
+        );
 
         stack.push_inner(ResolutionFrame::PostReplacement(
             PostReplacementDrainStack::default(),
@@ -1946,6 +1983,13 @@ mod tests {
                 FrameKind::PostReplacement,
                 FrameKind::AbilityContinuation,
             ]
+        );
+        assert_eq!(
+            stack.insert_parent_at_child_boundary(continuation_frame(3), stack.len()),
+            Err(ResolutionStackError::InvalidChildBoundary {
+                child_stack_start: stack.len(),
+                stack_len: stack.len(),
+            })
         );
 
         assert_eq!(
