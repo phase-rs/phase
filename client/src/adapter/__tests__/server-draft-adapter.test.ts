@@ -487,5 +487,49 @@ describe("ServerDraftAdapter", () => {
         recoverable: true,
       });
     });
+
+    // The preview path answers against the same engine state an action would,
+    // so it can carry the same stale verdict and must classify identically.
+    it("classifies a stale mana-payment preview rejection as STALE_ACTION", async () => {
+      const pending = adapter.previewManaPayment(
+        { type: "ReorderHand", data: { order: [1, 2, 3] } },
+        0,
+      );
+      const calls = ws.send.mock.calls;
+      const sent = JSON.parse(calls[calls.length - 1][0] as string);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ManaPaymentPreviewRejected",
+          data: {
+            request_id: sent.data.request_id,
+            reason: "Engine error: ReorderHand: expected 6 ids, got 5",
+          },
+        }),
+      );
+
+      await expect(pending).rejects.toMatchObject({
+        code: "STALE_ACTION",
+        recoverable: false,
+      });
+    });
+
+    it("still surfaces a non-stale preview rejection as a recoverable ACTION_REJECTED", async () => {
+      const pending = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+      const calls = ws.send.mock.calls;
+      const sent = JSON.parse(calls[calls.length - 1][0] as string);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ManaPaymentPreviewRejected",
+          data: { request_id: sent.data.request_id, reason: "Engine error: no mana sources" },
+        }),
+      );
+
+      await expect(pending).rejects.toMatchObject({
+        code: "ACTION_REJECTED",
+        recoverable: true,
+      });
+    });
   });
 });

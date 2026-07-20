@@ -674,11 +674,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           // still surfaces as the red recoverable error this PR removes
           // everywhere else.
           //
-          // Deliberately NOT applied to the other two `ACTION_REJECTED` sites in
-          // this file: `DraftActionRejected` carries a pick/pass rejection (no
-          // `GameAction`, so no stale-action verdict is possible) and
-          // `ManaPaymentPreviewRejected` answers a preview query rather than an
-          // action submission. Both stay plain recoverable rejections.
+          // The mana-payment preview handler below routes through the same
+          // classifier. Deliberately NOT applied to `DraftActionRejected`: that
+          // carries a pick/pass rejection, which is not a `GameAction` at all,
+          // so no stale-action verdict is possible — it is a separate draft
+          // protocol concern and stays a plain recoverable rejection.
           this.pendingReject(actionRejectionError(data.reason));
           this.pendingResolve = null;
           this.pendingReject = null;
@@ -701,7 +701,13 @@ export class ServerDraftAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("ACTION_REJECTED", data.reason, true));
+          // Same shared classifier as the action path above. A preview is
+          // answered against the same engine state an action would be, so it
+          // can carry the same stale verdict when the state moves underneath
+          // the request — and a stale preview is likewise void rather than
+          // retryable. Non-stale reasons still classify as recoverable
+          // ACTION_REJECTED, so existing surface/retry behavior is unchanged.
+          pending.reject(actionRejectionError(data.reason));
         }
         break;
       }
