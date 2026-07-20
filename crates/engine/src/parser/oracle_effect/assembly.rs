@@ -2383,6 +2383,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             chain.kind = continuation_kind;
             // R2 — a SHAPE REPAIR, not materialization.
             normalize_linked_exile_cast_pair(&mut prev, &mut chain);
+            // CR 608.2c: an independent sentence after an if/otherwise choice
+            // resolves after either branch (for example, Wedding Announcement's
+            // three-counter transform also follows its Human-token branch).
+            if chain.sub_link == SubAbilityLink::SequentialSibling {
+                if let Some(else_chain) = prev.else_ability.as_mut() {
+                    append_to_deepest_sub_ability(else_chain, Some(Box::new(chain.clone())));
+                }
+            }
             if prev.sub_ability.is_some() {
                 // Walk to the deepest sub_ability and append there
                 let mut cursor = &mut prev;

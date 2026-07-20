@@ -138,8 +138,10 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Effect, QuantityExpr};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::ability::{
+        Effect, QuantityExpr, QuantityRef, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
+    };
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
     fn make_incubate_ability(count: QuantityExpr) -> ResolvedAbility {
@@ -149,6 +151,97 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn sunfall_incubates_once_for_each_creature_exiled_this_way() {
+        let mut state = GameState::new_two_player(42);
+        for index in 0..3 {
+            let id = zones::create_object(
+                &mut state,
+                CardId(200 + index),
+                PlayerId((index % 2) as u8),
+                format!("Creature {index}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let mut setup_events = Vec::new();
+        resolve(
+            &mut state,
+            &make_incubate_ability(QuantityExpr::Fixed { value: 1 }),
+            &mut setup_events,
+        )
+        .expect("setup Incubator resolves");
+        let transformed_incubator = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| state.objects[id].name == "Incubator")
+            .expect("setup creates an Incubator");
+        crate::game::transform::transform_permanent(
+            &mut state,
+            transformed_incubator,
+            &mut setup_events,
+        )
+        .expect("setup Incubator transforms");
+        assert_eq!(
+            state.objects[&transformed_incubator].name, "Phyrexian Token",
+            "the setup token must be a transformed creature before Sunfall resolves"
+        );
+
+        let incubate = ResolvedAbility::new(
+            Effect::Incubate {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(TypedFilter::new(
+                            TypeFilter::Creature,
+                        ))),
+                        caused_by: Some(ThisWayCause::Exiled),
+                    },
+                },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let sunfall = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(incubate);
+
+        crate::game::effects::resolve_ability_chain(&mut state, &sunfall, &mut Vec::new(), 0)
+            .expect("Sunfall resolves");
+        assert_eq!(
+            state.exile.len(),
+            4,
+            "all three creatures and the transformed Incubator are exiled"
+        );
+        let incubator = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|object| object.name == "Incubator")
+            .expect("Sunfall creates an Incubator");
+        assert_eq!(
+            incubator.counters.get(&CounterType::Plus1Plus1).copied(),
+            Some(4),
+            "the Incubator must get one counter for each creature exiled"
+        );
     }
 
     #[test]

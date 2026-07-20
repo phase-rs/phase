@@ -32,7 +32,7 @@ import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
-import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
+import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
@@ -51,6 +51,7 @@ import {
   loadActiveGame,
   loadGame,
   loadP2PHostSession,
+  nextGameSessionGeneration,
   saveActiveGame,
   useGameStore,
 } from "../stores/gameStore";
@@ -520,9 +521,9 @@ export function GameProvider({
 }: GameProviderProps) {
   const { t } = useTranslation("game");
 
-  // Sync the persistent phaseStops preference into engine-owned state so the
-  // engine remains the single authority for auto-pass / empty-blocker decisions.
-  usePhaseStopsSync();
+  // Sync persistent gameplay preferences into engine-owned state so the
+  // engine remains the single authority for priority recommendations.
+  useGameplayPreferencesSync();
 
   // Refs for callback props — these are notifications that should never
   // cause the game setup effect to re-run.
@@ -1400,6 +1401,7 @@ export function GameProvider({
             logHistory: [],
             nextLogSeq: 0,
             adapter: null,
+            gameSessionGeneration: nextGameSessionGeneration(),
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,

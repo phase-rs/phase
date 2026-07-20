@@ -391,6 +391,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SetPhaseStops { stops } => {
             bound_list("SetPhaseStops.stops", stops.len())?;
         }
+        GameAction::SetPriorityPassingMode { .. } => {}
         GameAction::DistributeAmong { distribution, .. } => {
             bound_list("DistributeAmong.distribution", distribution.len())?;
         }

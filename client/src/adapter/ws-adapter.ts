@@ -12,7 +12,7 @@ import type {
   PersistedGameState,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -39,6 +39,9 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 20 — Actor-scoped priority-passing settings and filtered per-player state.
+ * 19 — Connive exact subject snapshots and resident paused post-replacement
+ *      drains changed the serialized full-game state.
  * 17 — Dedicated companion deck slot and typed companion-reveal choices.
  * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
  * 15 — Mana-payment preview request/response variants.
@@ -47,7 +50,7 @@ export interface DeckData {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 18;
+export const PROTOCOL_VERSION = 20;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -775,7 +778,7 @@ export class WebSocketAdapter implements EngineAdapter {
         this.emit({ type: "actionPendingChanged", pending: false });
         if (this.pendingReject) {
           this.pendingReject(
-            new AdapterError("ACTION_REJECTED", data.reason, true),
+            actionRejectionError(data.reason),
           );
           this.pendingResolve = null;
           this.pendingReject = null;
@@ -798,7 +801,7 @@ export class WebSocketAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("ACTION_REJECTED", data.reason, true));
+          pending.reject(actionRejectionError(data.reason));
         }
         break;
       }

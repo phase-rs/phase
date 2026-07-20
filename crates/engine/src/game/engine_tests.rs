@@ -2092,6 +2092,52 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
 }
 
 #[test]
+fn set_priority_passing_mode_is_actor_scoped_sparse_and_any_state() {
+    use crate::types::game_state::PriorityPassingMode;
+
+    let mut state = setup_game_at_main_phase();
+    state.priority_player = PlayerId(1);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    let waiting = state.waiting_for.clone();
+    let passes = state.priority_passes.clone();
+    let auto_pass = state.auto_pass.clone();
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityPassingMode {
+            mode: PriorityPassingMode::SkipLowUseWindows,
+        },
+    )
+    .expect("non-priority actor may set their own mode");
+
+    assert_eq!(result.events, Vec::new());
+    assert_eq!(state.waiting_for, waiting);
+    assert_eq!(state.priority_passes, passes);
+    assert_eq!(state.auto_pass, auto_pass);
+    assert_eq!(
+        state.priority_passing_mode(PlayerId(0)),
+        PriorityPassingMode::SkipLowUseWindows
+    );
+    assert_eq!(
+        state.priority_passing_mode(PlayerId(1)),
+        PriorityPassingMode::Standard
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityPassingMode {
+            mode: PriorityPassingMode::Standard,
+        },
+    )
+    .expect("Standard removes the sparse preference entry");
+    assert!(state.priority_passing_modes.is_empty());
+}
+
+#[test]
 fn cancel_auto_pass_routes_by_actor() {
     // Regression: P0 had an auto-pass session; P1 holds priority and submits
     // CancelAutoPass on P0's behalf would previously cancel *P1's* session

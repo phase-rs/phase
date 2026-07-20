@@ -5,7 +5,7 @@ use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
     CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
-    MayTriggerAutoChoiceKey, ShardChoice, YieldScope, YieldTarget,
+    MayTriggerAutoChoiceKey, PriorityPassingMode, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -674,6 +674,11 @@ pub enum GameAction {
     /// Legal in any WaitingFor state — pure preference propagation.
     SetPhaseStops {
         stops: Vec<super::phase::PhaseStop>,
+    },
+    /// Set the acting player's standing priority-passing preference. Legal in
+    /// every `WaitingFor` state and actor-scoped, like `SetPhaseStops`.
+    SetPriorityPassingMode {
+        mode: PriorityPassingMode,
     },
     /// CR 117.3d: Update the acting player's standing priority-yield preferences —
     /// a pre-committed decision to pass priority while a class of triggered
@@ -1564,6 +1569,7 @@ impl GameAction {
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
@@ -1713,6 +1719,23 @@ mod tests {
     }
 
     #[test]
+    fn set_priority_passing_mode_roundtrips_with_bounded_scalar_payload() {
+        let action = GameAction::SetPriorityPassingMode {
+            mode: crate::types::game_state::PriorityPassingMode::SkipLowUseWindows,
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "SetPriorityPassingMode",
+                "data": { "mode": "SkipLowUseWindows" }
+            })
+        );
+        assert_eq!(serde_json::from_value::<GameAction>(json).unwrap(), action);
+        assert_eq!(action.source_object(), None);
+    }
+
+    #[test]
     fn source_object_for_every_permanent_action_variant() {
         let oid = ObjectId(7);
         let cid = CardId(1);
@@ -1829,6 +1852,12 @@ mod tests {
             (GameAction::CancelCast, None),
             (GameAction::CompanionToHand, None),
             (GameAction::CancelAutoPass, None),
+            (
+                GameAction::SetPriorityPassingMode {
+                    mode: crate::types::game_state::PriorityPassingMode::SkipLowUseWindows,
+                },
+                None,
+            ),
         ];
         for (action, expected) in cases {
             assert_eq!(

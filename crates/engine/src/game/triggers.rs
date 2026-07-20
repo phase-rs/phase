@@ -192,6 +192,13 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
         WardCost::PayLife(amount) => AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: *amount },
         },
+        WardCost::PayLifeEqualToPower => AbilityCost::PayLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        },
         WardCost::DiscardCard => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
@@ -18141,6 +18148,19 @@ pub mod tests {
             result,
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
+
+        let power_life = WardCost::PayLifeEqualToPower;
+        let result = ward_cost_to_ability_cost(&power_life);
+        assert!(matches!(
+            result,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    }
+                }
             }
         ));
 

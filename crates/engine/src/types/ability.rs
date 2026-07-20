@@ -20384,6 +20384,12 @@ pub enum ContinuousModification {
     SetName {
         name: String,
     },
+    /// CR 612.8 + CR 613.1c: A continuous effect that gives an object a
+    /// literal name is a text-changing effect, not a copiable-value override
+    /// (Witness Protection). Applied in Layer 3.
+    SetTextName {
+        name: String,
+    },
     AddPower {
         value: i32,
     },

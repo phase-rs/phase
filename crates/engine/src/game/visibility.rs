@@ -1248,6 +1248,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered.auto_pass.retain(|pid, _| *pid == viewer);
     filtered.phase_stops.retain(|pid, _| *pid == viewer);
     filtered
+        .priority_passing_modes
+        .retain(|pid, _| *pid == viewer);
+    filtered
         .may_trigger_auto_choices
         .retain(|record| record.key.player == viewer);
     filtered.decision_templates.retain(|t| t.owner == viewer);
@@ -1747,6 +1750,30 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+
+    #[test]
+    fn priority_passing_preferences_are_visible_only_to_their_owner() {
+        use crate::types::game_state::PriorityPassingMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(1), PriorityPassingMode::SkipLowUseWindows);
+
+        let p0 = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(p0.priority_passing_modes.len(), 1);
+        assert_eq!(
+            p0.priority_passing_mode(PlayerId(0)),
+            PriorityPassingMode::SkipLowUseWindows
+        );
+        assert_eq!(
+            p0.priority_passing_mode(PlayerId(1)),
+            PriorityPassingMode::Standard
+        );
+    }
 
     fn dummy_pending_cast(
         object_id: ObjectId,

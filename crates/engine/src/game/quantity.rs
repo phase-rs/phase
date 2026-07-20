@@ -727,6 +727,7 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         // QuantityExpr-carrying variant forces a decision here.
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
@@ -2798,13 +2799,31 @@ fn resolve_ref(
                             .and_then(|causes| causes.get(&oid))
                             .is_some_and(|member_cause| member_cause == cause),
                     };
-                    cause_ok
-                        && crate::game::filter::matches_target_filter(
-                            state,
-                            oid,
-                            filter,
-                            &filter_ctx,
+                    let matches_filter = if !state.battlefield.contains(&oid) {
+                        // CR 608.2h: Use last-known information to filter a tracked object that has left the battlefield.
+                        state.lki_cache.get(&oid).map_or_else(
+                            || {
+                                crate::game::filter::matches_target_filter(
+                                    state,
+                                    oid,
+                                    filter,
+                                    &filter_ctx,
+                                )
+                            },
+                            |lki| {
+                                crate::game::filter::matches_target_filter_on_lki_snapshot(
+                                    state,
+                                    oid,
+                                    lki,
+                                    filter,
+                                    &filter_ctx,
+                                )
+                            },
                         )
+                    } else {
+                        crate::game::filter::matches_target_filter(state, oid, filter, &filter_ctx)
+                    };
+                    cause_ok && matches_filter
                 })
                 .count();
             usize_to_i32_saturating(count)

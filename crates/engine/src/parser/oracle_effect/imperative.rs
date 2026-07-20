@@ -18058,6 +18058,55 @@ mod tests {
         );
     }
 
+    /// Issue #5898 — Settle the Wreckage: "That player may search their library
+    /// for that many basic land cards …". The "for that many" anaphoric count
+    /// (CR 608.2c, = the number of creatures exiled by the prior instruction)
+    /// without an "up to" prefix previously fell through to the `for N` number
+    /// parser, which rejected "that many" and defaulted the search to
+    /// `count: Fixed 1` with a dropped type filter (`Any`) — so it searched for a
+    /// single card of any type ("functioning as Chaos Warp"). The count must
+    /// surface as `EventContextAmount` and the "basic land cards" type phrase must
+    /// still reach the filter.
+    #[test]
+    fn settle_the_wreckage_for_that_many_basic_lands_binds_event_count() {
+        fn find_search(def: &AbilityDefinition) -> Option<(QuantityExpr, TargetFilter)> {
+            if let Effect::SearchLibrary { filter, count, .. } = &*def.effect {
+                return Some((count.clone(), filter.clone()));
+            }
+            def.sub_ability.as_deref().and_then(find_search)
+        }
+
+        let def = super::super::parse_effect_chain(
+            "That player may search their library for that many basic land cards, put those cards onto the battlefield tapped, then shuffle.",
+            AbilityKind::Spell,
+        );
+        let (count, filter) = find_search(&def)
+            .unwrap_or_else(|| panic!("expected a SearchLibrary link in the chain, got {def:?}"));
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            "'for that many' must bind the anaphoric event count, not default to Fixed 1"
+        );
+        let TargetFilter::Typed(basic_land) = filter else {
+            panic!("expected typed basic-land filter, got {filter:?}");
+        };
+        assert!(
+            basic_land.type_filters.contains(&TypeFilter::Land),
+            "the search filter must preserve the Land type, got {basic_land:?}"
+        );
+        assert!(
+            basic_land.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: crate::types::card_type::Supertype::Basic
+                }
+            )),
+            "the search filter must preserve the Basic supertype, got {basic_land:?}"
+        );
+    }
+
     /// CR 400.7 + CR 701.23 + CR 107.1c: Multi-zone same-name exile combinator.
     /// The `All` ("all cards") quantifier accepts every possessive (mandatory
     /// mass-exile class: Eradicate, Quash, Counterbore, Lost Legacy). The

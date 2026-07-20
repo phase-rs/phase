@@ -110,9 +110,18 @@ jobs:
           git fetch --force origin main
           git fetch --force --tags origin
 
+          # main is a live merge-queue branch, so a commit can land between this
+          # job's checkout and now. That is a benign fast-forward, not an error:
+          # re-cut the release from the current tip instead of failing the nightly.
+          # A divergence (tip is not a descendant of our checkout) is not
+          # recoverable here and still fails.
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-            echo "::error::Checked-out HEAD is not origin/main"
-            exit 1
+            if [ "$(git merge-base HEAD origin/main)" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::origin/main diverged from the checked-out commit"
+              exit 1
+            fi
+            echo "main advanced $(git rev-parse --short HEAD)..$(git rev-parse --short origin/main) since checkout; re-cutting from the current tip."
+            git reset --hard origin/main
           fi
 
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
@@ -299,18 +308,37 @@ jobs:
         if: ${{ steps.release-run.outputs.skip_creation != 'true' }}
         env:
           RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          git fetch --force origin main
-          if [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
-            base=$(git merge-base HEAD origin/main)
-            if [ "$base" != "$(git rev-parse origin/main)" ]; then
-              echo "::error::origin/main advanced while preparing the release"
-              exit 1
+          # main is a live branch; it can advance between cutting the release
+          # commit and pushing it. The release commit only touches version files,
+          # which no ordinary PR modifies, so on divergence we rebase it onto the
+          # current tip and retry instead of failing the nightly. Recreate the tag
+          # to track the rebased commit. Bounded so a persistently-racing main
+          # fails loudly rather than looping forever.
+          pushed=false
+          for attempt in 1 2 3 4 5; do
+            git fetch --force origin main
+            if [ "$(git rev-parse origin/main)" = "$(git rev-parse HEAD)" ]; then
+              echo "Release commit is already on origin/main."
+              pushed=true
+              break
             fi
-            git push "https://x-access-token:${RELEASE_BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
-          else
-            echo "Release commit is already on origin/main."
+            if [ "$(git merge-base HEAD origin/main)" != "$(git rev-parse origin/main)" ]; then
+              echo "origin/main advanced under the release commit; rebasing onto the current tip (attempt $attempt)."
+              git rebase origin/main
+              git tag -f -a "$TAG" -m "$TAG"
+            fi
+            if git push "https://x-access-token:${RELEASE_BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
+              pushed=true
+              break
+            fi
+            echo "Push rejected (main moved again); retrying."
+          done
+          if [ "$pushed" != true ]; then
+            echo "::error::Could not fast-forward the release commit onto main after 5 attempts"
+            exit 1
           fi
 
       - name: Wait for CI on release commit
@@ -346,15 +374,26 @@ jobs:
               url=$(jq -r '.html_url' <<< "$decoded")
 
               if [ "$status" = "completed" ]; then
-                if [ "$conclusion" = "success" ]; then
-                  echo "CI succeeded for $RELEASE_SHA: $url"
-                  exit 0
-                fi
-                echo "::error::CI completed with $conclusion for $RELEASE_SHA: $url"
-                exit 1
+                case "$conclusion" in
+                  success)
+                    echo "CI succeeded for $RELEASE_SHA: $url"
+                    exit 0
+                    ;;
+                  cancelled|skipped|stale|neutral)
+                    # A cancelled/superseded run is not a real failure signal:
+                    # main may have been re-pushed, cancelling this commit's run.
+                    # Keep polling for a conclusive result instead of failing the
+                    # nightly, and fall back to the deadline if none ever arrives.
+                    echo "CI for $RELEASE_SHA is completed/$conclusion (non-conclusive); continuing to wait: $url"
+                    ;;
+                  *)
+                    echo "::error::CI completed with $conclusion for $RELEASE_SHA: $url"
+                    exit 1
+                    ;;
+                esac
+              else
+                echo "CI for $RELEASE_SHA is $status: $url"
               fi
-
-              echo "CI for $RELEASE_SHA is $status: $url"
             else
               echo "Waiting for CI run for $RELEASE_SHA..."
             fi

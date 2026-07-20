@@ -9941,6 +9941,23 @@ fn build_oracle_face_inner(
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
     merge_extracted_keywords(&mut keywords, extracted_keywords);
 
+    // CR 611.3a + CR 702: MTGJSON can list a keyword that is granted only by a
+    // conditional static (Goddric's flying). Keep it on the static and drop the
+    // unconditional copy unless a standalone keyword line corroborates it.
+    keywords.retain(|keyword| {
+        oracle_corroborated.iter().any(|entry| entry == keyword)
+            || !parsed.statics.iter().any(|definition| {
+                definition.condition.is_some()
+                    && definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddKeyword { keyword: granted }
+                                if granted == keyword
+                        )
+                    })
+            })
+    });
+
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
     // Partner(Generic) via FromStr. Scan Oracle text for the actual partner name.
