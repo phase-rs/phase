@@ -698,7 +698,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         drain_pending_change_zone_iteration(state, events);
     }
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && state.pending_change_zone_iteration.is_none()
+        && state.active_change_zone_frame().is_none()
         && !state
             .active_ability_continuation()
             .is_some_and(|continuation| {
@@ -1028,7 +1028,10 @@ fn should_stop_repeat_until(
 /// a further pause; emits the trailing `EffectResolved` event when the loop
 /// completes.
 fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(pending) = state.pending_change_zone_iteration.take() {
+    while let Some(frame) = state.active_change_zone_frame().cloned() {
+        let Some(pending) = frame.pending else {
+            return;
+        };
         let crate::types::game_state::PendingChangeZoneIteration {
             mut logical_zone_change_group,
             paused_current,
@@ -1193,8 +1196,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                         &trigger_events,
                     )
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
-                    state.pending_change_zone_iteration =
-                        Some(crate::types::game_state::PendingChangeZoneIteration {
+                    state.replace_active_change_zone_iteration(
+                        crate::types::game_state::PendingChangeZoneIteration {
                             logical_zone_change_group,
                             paused_current: anticipated_pause.map(|mut boundary| {
                                 boundary.append_delivery_events(&events[delivery_start..]);
@@ -1225,7 +1228,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enters_modified_if: ctx.enters_modified_if.clone(),
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
-                        });
+                        },
+                    );
                     return;
                 }
                 crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
@@ -1249,8 +1253,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                         &trigger_events,
                     )
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
-                    state.pending_change_zone_iteration =
-                        Some(crate::types::game_state::PendingChangeZoneIteration {
+                    state.replace_active_change_zone_iteration(
+                        crate::types::game_state::PendingChangeZoneIteration {
                             logical_zone_change_group,
                             paused_current: Some(paused_current),
                             remaining: remaining[i + 1..].to_vec(),
@@ -1277,7 +1281,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enters_modified_if: ctx.enters_modified_if.clone(),
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
-                        });
+                        },
+                    );
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                     // may already have surfaced its own `EffectZoneChoice` during the
                     // resumed member's entry.
@@ -1311,7 +1316,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // the whole ChangeZone entry event is complete, so clear the pre-entry
         // Devour snapshot. NOT cleared on the `paused` break above (a further
         // devourer's sacrifice and the remaining members still need it).
-        let _ = state.devour_eligible_snapshot.take();
+        let _ = state
+            .take_active_change_zone_frame()
+            .expect("settled ChangeZone must consume the active owner once");
         if let Some(count) = moved_count {
             state.last_effect_count = Some(count);
         }
@@ -1494,13 +1501,14 @@ pub(crate) fn append_to_pending_continuation(
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
     if state.active_per_player_zone_choice().is_some()
         || state.active_per_category_zone_choice().is_some()
+        || state.active_change_zone_frame().is_some()
     {
         state
             .insert_ability_continuation_parent_of_active(PendingContinuation::new(
                 Box::new(head),
                 state,
             ))
-            .expect("zone-choice iteration must retain its continuation as an immediate parent");
+            .expect("paused child operation must retain its continuation as an immediate parent");
         return;
     }
 
@@ -8474,7 +8482,7 @@ fn resolve_chain_body(
 
     if matches!(ability.effect, Effect::ChangeZone { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && state.pending_change_zone_iteration.is_none()
+        && state.active_change_zone_frame().is_none()
     {
         crate::game::engine_resolution_choices::settle_pending_library_search_delivery(
             state, events,

@@ -4121,10 +4121,14 @@ pub(super) fn handle_resolution_choice(
             // never over-clears a live mass snapshot. No-op when no Devour is in
             // flight (`snapshot == None`).
             if matches!(effect_kind, EffectKind::Sacrifice)
-                && state.devour_eligible_snapshot.is_some()
-                && state.pending_change_zone_iteration.is_none()
+                && state.active_devour_eligible_snapshot().is_some()
+                && state
+                    .active_change_zone_frame()
+                    .is_some_and(|frame| frame.pending.is_none())
             {
-                let _ = state.devour_eligible_snapshot.take();
+                let _ = state
+                    .take_active_change_zone_frame()
+                    .expect("completed single Devour entry owns the active ChangeZone frame");
             }
 
             if matches!(effect_kind, EffectKind::Sacrifice)
@@ -4353,8 +4357,8 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.pending_change_zone_iteration =
-                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                state.push_change_zone_iteration(
+                                    crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
@@ -4390,7 +4394,8 @@ pub(super) fn handle_resolution_choice(
                                         enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
-                                    });
+                                    },
+                                );
                                 return Ok(action_result_outcome(
                                     events,
                                     state.waiting_for.clone(),
@@ -4408,8 +4413,8 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.pending_change_zone_iteration =
-                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                state.push_change_zone_iteration(
+                                    crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
                                         paused_current: Some(
                                             state
@@ -4452,7 +4457,8 @@ pub(super) fn handle_resolution_choice(
                                         enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
-                                    });
+                                    },
+                                );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
                                         choice_player,
@@ -4773,8 +4779,8 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
-                                state.pending_change_zone_iteration =
-                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                state.push_change_zone_iteration(
+                                    crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
@@ -4804,7 +4810,8 @@ pub(super) fn handle_resolution_choice(
                                         enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
-                                    });
+                                    },
+                                );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
                                         player, state,
@@ -4821,8 +4828,8 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
-                                state.pending_change_zone_iteration =
-                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                state.push_change_zone_iteration(
+                                    crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
                                         paused_current: Some(
                                             state
@@ -4859,7 +4866,8 @@ pub(super) fn handle_resolution_choice(
                                         enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
-                                    });
+                                    },
+                                );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
                                         choice_player,

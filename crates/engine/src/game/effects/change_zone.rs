@@ -730,7 +730,14 @@ pub fn resolve(
             // CR 614.13a: single-pick entry completed (Done branch) — clear the
             // pre-entry Devour snapshot (its lifetime = this entry event). The
             // pause arm above returned before reaching here.
-            let _ = state.devour_eligible_snapshot.take();
+            if state
+                .active_change_zone_frame()
+                .is_some_and(|frame| frame.pending.is_none())
+            {
+                let _ = state
+                    .take_active_change_zone_frame()
+                    .expect("completed ChangeZone owns the active frame");
+            }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -814,7 +821,14 @@ pub fn resolve(
             // CR 614.13a: single-pick entry completed (Done branch) — clear the
             // pre-entry Devour snapshot (its lifetime = this entry event). The
             // pause arm above returned before reaching here.
-            let _ = state.devour_eligible_snapshot.take();
+            if state
+                .active_change_zone_frame()
+                .is_some_and(|frame| frame.pending.is_none())
+            {
+                let _ = state
+                    .take_active_change_zone_frame()
+                    .expect("completed ChangeZone owns the active frame");
+            }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -884,12 +898,12 @@ pub fn resolve(
     // Captured before any member enters so every co-arriver (and the devourers
     // themselves) is excluded regardless of iteration order.
     if dest_zone == Zone::Battlefield
-        && state.devour_eligible_snapshot.is_none()
+        && state.active_devour_eligible_snapshot().is_none()
         && targeted_objects
             .iter()
             .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
     {
-        state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
+        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
     }
 
     // CR 608.2c: "that many" in a later instruction refers back to the number
@@ -973,8 +987,8 @@ pub fn resolve(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
-                state.pending_change_zone_iteration =
-                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                state.push_change_zone_iteration(
+                    crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
                             boundary.append_delivery_events(&events[delivery_start..]);
@@ -1010,7 +1024,8 @@ pub fn resolve(
                         enters_modified_if: ctx.enters_modified_if.clone(),
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
-                    });
+                    },
+                );
                 return Ok(());
             }
             crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
@@ -1025,8 +1040,8 @@ pub fn resolve(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
-                state.pending_change_zone_iteration =
-                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                state.push_change_zone_iteration(
+                    crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
                         paused_current: Some(
                             state
@@ -1068,7 +1083,8 @@ pub fn resolve(
                         enters_modified_if: ctx.enters_modified_if.clone(),
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
-                    });
+                    },
+                );
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                 // may already have surfaced its own `EffectZoneChoice`.
                 crate::game::replacement::park_waiting_for(state, player);
@@ -1081,7 +1097,14 @@ pub fn resolve(
 
     // CR 614.13a: targeted multi-ChangeZone co-entry completed without pausing —
     // clear the pre-entry Devour snapshot (its lifetime = this entry event).
-    let _ = state.devour_eligible_snapshot.take();
+    if state
+        .active_change_zone_frame()
+        .is_some_and(|frame| frame.pending.is_none())
+    {
+        let _ = state
+            .take_active_change_zone_frame()
+            .expect("completed ChangeZone owns the active frame");
+    }
 
     // CR 608.2c: record how many objects this targeted move relocated so a
     // downstream sub-ability's `QuantityRef::EventContextAmount` ("that many")
@@ -1622,12 +1645,12 @@ pub fn resolve_all(
     // `is_none`-gated so a nested/resumed pass doesn't re-capture; cleared on the
     // event-completion paths below.
     if dest_zone == Zone::Battlefield
-        && state.devour_eligible_snapshot.is_none()
+        && state.active_devour_eligible_snapshot().is_none()
         && matching
             .iter()
             .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
     {
-        state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
+        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
     }
 
     // CR 401.4: When placing objects on the bottom of a library "in a random
@@ -1719,8 +1742,8 @@ pub fn resolve_all(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
-                state.pending_change_zone_iteration =
-                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                state.push_change_zone_iteration(
+                    crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
                         paused_current: Some(
                             state
@@ -1755,7 +1778,8 @@ pub fn resolve_all(
                         enters_modified_if: None,
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
-                    });
+                    },
+                );
                 crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
             }
@@ -1779,8 +1803,8 @@ pub fn resolve_all(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
-                state.pending_change_zone_iteration =
-                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                state.push_change_zone_iteration(
+                    crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
                             boundary.append_delivery_events(&events[delivery_start..]);
@@ -1812,7 +1836,8 @@ pub fn resolve_all(
                         enters_modified_if: None,
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
-                    });
+                    },
+                );
                 return Ok(());
             }
         }
@@ -1821,7 +1846,14 @@ pub fn resolve_all(
     // pre-entry Devour snapshot (its lifetime = this one ChangeZone-to-battlefield
     // event). NOT cleared on the NeedsChoice pause above (the paused devourer's
     // sacrifice + remaining co-entering members still need it).
-    let _ = state.devour_eligible_snapshot.take();
+    if state
+        .active_change_zone_frame()
+        .is_some_and(|frame| frame.pending.is_none())
+    {
+        let _ = state
+            .take_active_change_zone_frame()
+            .expect("completed ChangeZone owns the active frame");
+    }
 
     // CR 608.2c: "that many" in a later instruction refers back to the prior
     // action's count. Record the number of objects moved so downstream
@@ -2627,7 +2659,9 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReturnAsAuraTarget { .. }
         ));
-        assert!(state.pending_change_zone_iteration.is_some());
+        assert!(state
+            .active_change_zone_frame()
+            .is_some_and(|frame| frame.pending.is_some()));
         assert_eq!(state.objects[&other_card].zone, Zone::Graveyard);
 
         let result = apply_as_current(
@@ -2646,7 +2680,7 @@ mod tests {
         );
         assert!(state.objects[&second_host].attachments.contains(&aura_id));
         assert_eq!(state.objects[&other_card].zone, Zone::Battlefield);
-        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.active_change_zone_frame().is_none());
         assert!(matches!(
             state.waiting_for,
             WaitingFor::Priority {
@@ -2760,7 +2794,9 @@ mod tests {
             WaitingFor::ReturnAsAuraTarget { .. }
         ));
         assert!(
-            state.pending_change_zone_iteration.is_some(),
+            state
+                .active_change_zone_frame()
+                .is_some_and(|frame| frame.pending.is_some()),
             "remaining members must be stashed so the mass move can resume"
         );
 
@@ -2787,7 +2823,7 @@ mod tests {
                 "every returned creature must reach the battlefield"
             );
         }
-        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.active_change_zone_frame().is_none());
         assert_eq!(
             state.last_effect_count,
             Some(4),
@@ -5842,34 +5878,31 @@ mod tests {
             PlayerId(0),
         );
 
-        state.pending_change_zone_iteration =
-            Some(crate::types::game_state::PendingChangeZoneIteration {
-                logical_zone_change_group:
-                    crate::game::triggers::allocate_logical_zone_change_group(
-                        &mut state,
-                        &[hero, soldier],
-                    ),
-                paused_current: None,
-                remaining: vec![hero, soldier],
-                source_id: ObjectId(100),
-                controller: PlayerId(0),
-                origin: Some(Zone::Graveyard),
-                destination: Zone::Battlefield,
-                enter_transformed: false,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_under_player: None,
-                enters_attacking: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: conditional,
-                duration: None,
-                track_exiled_by_source: false,
-                moved_count: None,
-                face_down_profile: None,
-                library_placement: None,
-                enters_modified_if: None,
-                enter_attached_to: None,
-                effect_kind: EffectKind::ChangeZone,
-            });
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
+        state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: vec![hero, soldier],
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            enter_transformed: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_under_player: None,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: conditional,
+            duration: None,
+            track_exiled_by_source: false,
+            moved_count: None,
+            face_down_profile: None,
+            library_placement: None,
+            enters_modified_if: None,
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZone,
+        });
         state.resolving_stack_entry = Some(StackEntry {
             id: ObjectId(101),
             controller: PlayerId(0),
@@ -7970,7 +8003,7 @@ mod tests {
             "both declined → no life paid"
         );
         assert!(
-            state.pending_change_zone_iteration.is_none(),
+            state.active_change_zone_frame().is_none(),
             "resume slot must be cleared once the loop completes"
         );
     }
@@ -8100,8 +8133,8 @@ mod tests {
             state.waiting_for
         );
         let pending = state
-            .pending_change_zone_iteration
-            .as_ref()
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
             .expect("a paused targeted ChangeZone must stash the iteration");
         assert_eq!(
             pending.face_down_profile.as_ref(),
@@ -8158,7 +8191,7 @@ mod tests {
         }
 
         assert!(
-            state.pending_change_zone_iteration.is_none(),
+            state.active_change_zone_frame().is_none(),
             "resume slot must be cleared once the loop completes"
         );
     }
@@ -8211,7 +8244,9 @@ mod tests {
             state.waiting_for
         );
         assert!(
-            state.pending_change_zone_iteration.is_some(),
+            state
+                .active_change_zone_frame()
+                .is_some_and(|frame| frame.pending.is_some()),
             "resolve_all must stash remaining library matches on NeedsChoice"
         );
 
@@ -8232,7 +8267,7 @@ mod tests {
         assert!(state.objects[&shock_a].tapped);
         assert!(state.objects[&shock_b].tapped);
         assert_eq!(state.players[0].life, life_before);
-        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.active_change_zone_frame().is_none());
     }
 
     /// Helper: replicates the shock-land-in-library scaffolding used across
@@ -8391,8 +8426,8 @@ mod tests {
                 "expected ReplacementChoice at each iteration"
             );
             let group = &state
-                .pending_change_zone_iteration
-                .as_ref()
+                .active_change_zone_frame()
+                .and_then(|frame| frame.pending.as_ref())
                 .expect("each pending replacement choice retains the logical owner")
                 .logical_zone_change_group;
             assert_eq!(
@@ -8413,7 +8448,7 @@ mod tests {
             );
             assert!(state.objects[&shock].tapped);
         }
-        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.active_change_zone_frame().is_none());
     }
 
     /// CR 608.2c (issue #1093 review): every member of a targeted multi-object
@@ -8476,7 +8511,7 @@ mod tests {
                 .expect("decline shock");
         }
 
-        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.active_change_zone_frame().is_none());
         for shock in [s1, s2, s3] {
             assert_eq!(state.objects[&shock].zone, Zone::Battlefield);
         }
@@ -8536,7 +8571,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -8560,24 +8595,67 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
+        ability.sub_ability = Some(Box::new(create_tokens));
 
-        // Pause the ChangeZone on the first returned card's replacement — the
-        // targeted `resolve` installs the `ReplacementChoice` + the paused
-        // iteration carrier — then stash the "create that many" continuation
-        // exactly as `resolve_ability_chain` does when a parent effect pauses
-        // mid-resolution. The resume path (`drain_pending_continuation`) then
-        // exercises the fix: the ChangeZone iteration drains and stamps the count
-        // BEFORE this continuation runs.
+        // Pause the ChangeZone on the first returned card's replacement through
+        // the production chain resolver. It places the chained token instruction
+        // beneath the active ChangeZone frame, so the ChangeZone owns every
+        // replacement resume before its "that many" consumer can run.
         let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "first returned card must pause on its replacement"
         );
-        state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
-            Box::new(create_tokens),
-            &state,
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::types::resolution::FrameKind::AbilityContinuation,
+                crate::types::resolution::FrameKind::ChangeZone,
+            ],
+            "the continuation must remain the ChangeZone frame's immediate parent"
+        );
+
+        // Persist the real prompt boundary through the v2 frames-only wire.
+        // Both the complete ChangeZone owner and its immediate parent
+        // continuation must survive without reintroducing either legacy runtime
+        // field onto `GameState`.
+        let wire = crate::types::resolution::ResolutionStateWire::from_game_state(state);
+        let v2 = serde_json::to_value(&wire).expect("ChangeZone prompt serializes as v2");
+        assert!(v2.get("resolution_stack").is_none());
+        assert!(v2.get("pending_change_zone_iteration").is_none());
+        assert!(v2.get("devour_eligible_snapshot").is_none());
+        assert_eq!(
+            v2["resolution_frames"]["frames"]
+                .as_array()
+                .expect("v2 resolution stack exposes its frames array")
+                .len(),
+            2,
+            "the real prompt retains exactly its parent continuation and ChangeZone owner"
+        );
+        let wire: crate::types::resolution::ResolutionStateWire =
+            serde_json::from_value(v2).expect("v2 ChangeZone prompt deserializes");
+        state = wire.into_game_state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
         ));
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::types::resolution::FrameKind::AbilityContinuation,
+                crate::types::resolution::FrameKind::ChangeZone,
+            ],
+            "v2 restore preserves the exact continuation/ChangeZone frame nesting"
+        );
 
         // Decline each replacement; each returned card still enters (tapped).
         for _ in 0..3 {
@@ -8761,7 +8839,7 @@ mod tests {
         assert_eq!(state.objects[&shock_a].zone, Zone::Battlefield);
         assert_eq!(state.objects[&shock_b].zone, Zone::Battlefield);
         assert_eq!(state.objects[&graveyard_land].zone, Zone::Battlefield);
-        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.active_change_zone_frame().is_none());
     }
 
     /// CR 110.2a: Only `ControllerRef::You` is supported at runtime today.

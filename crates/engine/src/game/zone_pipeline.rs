@@ -2139,10 +2139,10 @@ pub(crate) fn deliver_replaced_zone_change(
         // before the FIRST co-entering devourer enters; persisted (is_none gate) so all
         // co-entering devourers share it. Excludes self + every co-arriver.
         if to == Zone::Battlefield
-            && state.devour_eligible_snapshot.is_none()
+            && state.active_devour_eligible_snapshot().is_none()
             && crate::game::engine_replacement::object_has_devour_replacement(state, object_id)
         {
-            state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
+            state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
         }
 
         // CR 400.7d + CR 608.3: a permanent spell's resolution turns the spell

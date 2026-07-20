@@ -501,7 +501,10 @@ fn abandon_pending_zone_change_member_for_player_left(
     leaving_player: PlayerId,
 ) {
     let mut canceled_pauses = Vec::new();
-    if let Some(pending) = state.pending_change_zone_iteration.as_mut() {
+    if let Some(pending) = state
+        .active_change_zone_frame_mut()
+        .and_then(|frame| frame.pending.as_mut())
+    {
         pending
             .logical_zone_change_group
             .record_abandoned_by_player_left(identity)
@@ -951,7 +954,10 @@ fn do_eliminate(
 /// left before any remaining member resumes; otherwise a pre-pause latch could
 /// fire from an object that no longer exists in the game.
 fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: PlayerId) {
-    if let Some(pending) = state.pending_change_zone_iteration.as_mut() {
+    if let Some(pending) = state
+        .active_change_zone_frame_mut()
+        .and_then(|frame| frame.pending.as_mut())
+    {
         pending
             .logical_zone_change_group
             .retire_contexts_owned_by(player);
@@ -1015,15 +1021,19 @@ fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerI
 /// together. `PendingBatchDeliveries` is intentionally not included: it is a
 /// shared per-object batch and retains the existing prune/resume rules.
 fn abandon_change_zone_family_for_controller(state: &mut GameState, player: PlayerId) {
-    if state
-        .pending_change_zone_iteration
-        .as_ref()
-        .is_none_or(|pending| pending.controller != player)
-    {
+    let Some(pending) = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+    else {
+        return;
+    };
+    if pending.controller != player {
         return;
     }
 
-    state.pending_change_zone_iteration = None;
+    let _ = state
+        .take_active_change_zone_frame()
+        .expect("elimination cannot consume a buried ChangeZone frame");
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
@@ -1543,7 +1553,7 @@ mod tests {
             candidate_count: 1,
             candidates: Vec::new(),
         };
-        state.pending_change_zone_iteration = Some(pending_change_zone_iteration(
+        state.push_change_zone_iteration(pending_change_zone_iteration(
             group,
             Some(paused),
             vec![surviving],
@@ -1555,8 +1565,8 @@ mod tests {
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
         let iteration = state
-            .pending_change_zone_iteration
-            .as_ref()
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
             .expect("living controller keeps the change-zone family");
         assert!(iteration.paused_current.is_none());
         assert_eq!(iteration.remaining, vec![surviving]);
@@ -1564,7 +1574,7 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
         crate::game::effects::drain_pending_continuation(&mut state, &mut events);
-        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.active_change_zone_frame().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }

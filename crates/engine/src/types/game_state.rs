@@ -44,7 +44,8 @@ use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
-    AbilityContinuationFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
+    AbilityContinuationFrame, ChangeZoneFrame, ResolutionStack, ResolutionStackError,
+    ResolutionStateWire,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -11780,35 +11781,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_repeated_optional_payment: Option<Box<PendingRepeatedOptionalPayment>>,
 
-    /// CR 614.12b + CR 614.1c + CR 614.13: Pending multi-target `ChangeZone`
-    /// iteration loop paused mid-flight because one of the moving objects
-    /// triggered a per-permanent replacement choice. Drained by
-    /// `drain_pending_continuation` before the repeat-for frame so the
-    /// inner ChangeZone iteration completes (and its `EffectResolved` event
-    /// fires) before the outer repeat loop advances. See
-    /// [`PendingChangeZoneIteration`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
-
-    /// CR 614.12a + CR 614.13a/b: Battlefield objects eligible to be chosen by an
-    /// as-enters Devour sacrifice (CR 702.82a/c), captured the instant BEFORE the
-    /// FIRST co-entering devourer enters and PERSISTED for the whole simultaneous
-    /// entry. Because CR 614.12a makes every co-entering permanent's as-enters
-    /// choice happen before ANY of them enter, the engine (which serializes entry)
-    /// reuses this one pre-entry snapshot for every co-entering devourer — so a
-    /// second devourer cannot devour the first (it entered "at the same time",
-    /// CR 614.13a), and the eligible pool (live battlefield ∩ snapshot) also
-    /// excludes anything an earlier devourer already sacrificed (it left the
-    /// battlefield) and the devourers themselves (absent from the pre-entry set).
-    /// `None` outside a Devour co-entry; cleared when the whole ChangeZone entry
-    /// event completes (all co-entering members resolved), NOT per-sacrifice.
-    ///
-    /// WARNING — save/resume: the serde attr MUST stay `skip_serializing_if =
-    /// "Option::is_none"` (skips only `None`; a live `Some` is serialized so a
-    /// mid-prompt save keeps the constraint). Never broaden to skip `Some`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub devour_eligible_snapshot: Option<HashSet<ObjectId>>,
-
     /// CR 730.3e (second clause): routing override for the card components of a
     /// TOKEN merged permanent leaving the battlefield under a card-scoped
     /// (`NonToken`) `Moved` redirect. "If the merged permanent is a token but
@@ -13546,6 +13518,90 @@ impl GameState {
         Ok(self.take_active_ability_continuation()?.is_some())
     }
 
+    /// Returns the complete ChangeZone owner only when it owns the stack top.
+    pub fn active_change_zone_frame(&self) -> Option<&ChangeZoneFrame> {
+        self.resolution_stack.active_change_zone()
+    }
+
+    /// Mutably accesses only the active complete ChangeZone owner.
+    pub fn active_change_zone_frame_mut(&mut self) -> Option<&mut ChangeZoneFrame> {
+        self.resolution_stack.active_change_zone_mut()
+    }
+
+    /// Park a complete ChangeZone owner as the active inner frame.
+    pub fn push_change_zone_frame(&mut self, frame: ChangeZoneFrame) {
+        self.resolution_stack.push_change_zone(frame);
+    }
+
+    /// Re-park the active ChangeZone owner after another replacement pause.
+    pub fn replace_active_change_zone_frame(
+        &mut self,
+        frame: ChangeZoneFrame,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_change_zone(frame)
+    }
+
+    /// Consume exactly the active ChangeZone owner after its one settlement.
+    pub fn take_active_change_zone_frame(
+        &mut self,
+    ) -> Result<Option<ChangeZoneFrame>, ResolutionStackError> {
+        self.resolution_stack.take_active_change_zone()
+    }
+
+    /// Returns the Devour eligibility snapshot owned by the active ChangeZone
+    /// frame. A missing frame means no Devour co-entry is in progress.
+    pub fn active_devour_eligible_snapshot(&self) -> Option<&HashSet<ObjectId>> {
+        self.active_change_zone_frame()
+            .and_then(|frame| frame.devour_eligible_snapshot.as_ref())
+    }
+
+    /// Begins a Devour co-entry in a frame that remains authoritative even
+    /// when the ordinary iteration owner is absent.
+    pub fn push_devour_change_zone_snapshot(&mut self, snapshot: HashSet<ObjectId>) {
+        self.push_change_zone_frame(ChangeZoneFrame {
+            pending: None,
+            devour_eligible_snapshot: Some(snapshot),
+        });
+    }
+
+    /// Parks a newly paused ChangeZone iteration. A Devour-only frame belongs
+    /// to the same operation and is replaced; every other active frame remains
+    /// the structural parent below this new child.
+    pub fn push_change_zone_iteration(&mut self, pending: PendingChangeZoneIteration) {
+        if self
+            .active_change_zone_frame()
+            .is_some_and(|frame| frame.pending.is_none())
+        {
+            let devour_eligible_snapshot = self
+                .active_change_zone_frame()
+                .and_then(|frame| frame.devour_eligible_snapshot.clone());
+            self.replace_active_change_zone_frame(ChangeZoneFrame {
+                pending: Some(pending),
+                devour_eligible_snapshot,
+            })
+            .expect("Devour-only ChangeZone frame must re-park atomically");
+        } else {
+            self.push_change_zone_frame(ChangeZoneFrame {
+                pending: Some(pending),
+                devour_eligible_snapshot: None,
+            });
+        }
+    }
+
+    /// Re-parks the active ChangeZone owner after its resume reaches another
+    /// replacement boundary. The complete logical group is replaced in place;
+    /// it is never popped and re-pushed or split into a sidecar.
+    pub fn replace_active_change_zone_iteration(&mut self, pending: PendingChangeZoneIteration) {
+        let devour_eligible_snapshot = self
+            .active_change_zone_frame()
+            .and_then(|frame| frame.devour_eligible_snapshot.clone());
+        self.replace_active_change_zone_frame(ChangeZoneFrame {
+            pending: Some(pending),
+            devour_eligible_snapshot,
+        })
+        .expect("re-paused ChangeZone must own the active frame");
+    }
+
     /// Returns the repeat-for iteration only when its typed frame owns the
     /// stack top.
     pub fn active_repeat_for(&self) -> Option<&PendingRepeatIteration> {
@@ -13881,10 +13937,9 @@ impl GameState {
         delivery_events: &[GameEvent],
         terminal_completion: ZoneMoveCompletion,
     ) -> bool {
-        let mut owner_count = 0;
         if let Some(paused) = self
-            .pending_change_zone_iteration
-            .as_mut()
+            .active_change_zone_frame_mut()
+            .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
@@ -13892,7 +13947,7 @@ impl GameState {
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
-            owner_count += 1;
+            return true;
         }
         if let Some(paused) = self
             .pending_batch_deliveries
@@ -13904,13 +13959,9 @@ impl GameState {
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
-            owner_count += 1;
+            return true;
         }
-        assert!(
-            owner_count <= 1,
-            "one paused delivery cannot have two owners"
-        );
-        owner_count == 1
+        false
     }
 
     /// Copy-target and Aura resumption already own the prompt rather than a
@@ -13923,15 +13974,14 @@ impl GameState {
         member_id: ObjectId,
         delivery_events: &[GameEvent],
     ) -> bool {
-        let mut owner_count = 0;
         if let Some(paused) = self
-            .pending_change_zone_iteration
-            .as_mut()
+            .active_change_zone_frame_mut()
+            .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.member.object_id == member_id)
         {
             paused.append_delivery_events(delivery_events);
-            owner_count += 1;
+            return true;
         }
         if let Some(paused) = self
             .pending_batch_deliveries
@@ -13940,13 +13990,9 @@ impl GameState {
             .filter(|paused| paused.member.object_id == member_id)
         {
             paused.append_delivery_events(delivery_events);
-            owner_count += 1;
+            return true;
         }
-        assert!(
-            owner_count <= 1,
-            "one paused delivery cannot have two owners"
-        );
-        owner_count == 1
+        false
     }
 
     /// Allocate the complete owner for one logical zone-change action before
@@ -14403,8 +14449,6 @@ impl GameState {
             resolution_stack: ResolutionStack::default(),
             resolving_continuation_attach_host: None,
             pending_repeated_optional_payment: None,
-            pending_change_zone_iteration: None,
-            devour_eligible_snapshot: None,
             merged_card_component_route: None,
             pending_copy_token_resolution: None,
             pending_each_player_copy_chosen: None,
@@ -15522,8 +15566,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolution_stack: _,
         resolving_continuation_attach_host: _,
         pending_repeated_optional_payment: _,
-        pending_change_zone_iteration: _,
-        devour_eligible_snapshot: _,
         merged_card_component_route: _,
         pending_copy_token_resolution: _,
         pending_each_player_copy_chosen: _,
@@ -15827,25 +15869,9 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.revealed_cards == other.revealed_cards
             && self.public_revealed_cards == other.public_revealed_cards
-            && self.resolution_stack == other.resolution_stack
+            && self.resolution_stack.game_state_eq(&other.resolution_stack)
             && self.pending_resolution_completion == other.pending_resolution_completion
             && self.pending_repeated_optional_payment == other.pending_repeated_optional_payment
-            && self.pending_change_zone_iteration == other.pending_change_zone_iteration
-            // `devour_eligible_snapshot` is INTENTIONALLY excluded from PartialEq.
-            // It is a TRANSIENT mid-resolution carrier (CR 614.12a/13a): `Some`
-            // only while a Devour co-entry is in flight, `None` everywhere else.
-            // It is NOT necessarily recoverable from the other compared fields
-            // during its Some-window — at the as-enters sacrifice prompt the
-            // Devour PutCounter sub-ability has not run, so for a vanilla devourer
-            // `pending_etb_counters` does not contain the entering ObjectId; the
-            // snapshot can be live across this boundary. Exclusion is safe anyway:
-            // PartialEq is used for AI-search position dedup, and the only effect
-            // of ignoring this field is that two otherwise-identical transient
-            // mid-resolution states may dedup together — an AI-search collapse,
-            // never a game-rule error (the rule-bearing constraint is the live
-            // snapshot itself, which IS preserved on serde round-trip: the field
-            // is serialized whenever `Some` — see `skip_serializing_if` above —
-            // so a mid-prompt save/resume keeps the constraint intact).
             && self.pending_copy_token_resolution == other.pending_copy_token_resolution
             && self.pending_each_player_copy_chosen == other.pending_each_player_copy_chosen
             && self.pending_coin_flip == other.pending_coin_flip
@@ -17000,6 +17026,20 @@ mod tests {
             !loop_states_equal(&normalized_a, &changed_reference.normalize_for_loop()),
             "different LKI for a still-referenced incarnation remains meaningful"
         );
+    }
+
+    /// The Devour snapshot is rules-bearing while a prompt is live, but remains
+    /// intentionally outside the state-equality key just as it was before the
+    /// ChangeZone frame migration. Replacing `game_state_eq` with derived stack
+    /// equality makes this assertion fail.
+    #[test]
+    fn game_state_equality_excludes_devour_only_change_zone_frame() {
+        let state = GameState::new_two_player(7);
+        let mut with_snapshot = state.clone();
+        with_snapshot.push_devour_change_zone_snapshot(HashSet::from([ObjectId(99)]));
+
+        assert_ne!(state.resolution_stack, with_snapshot.resolution_stack);
+        assert_eq!(state, with_snapshot);
     }
 
     /// PR-6 test 8 (B2 loop-equality guard): `unbounded_resources` is
@@ -18601,7 +18641,7 @@ mod tests {
     // ---------------------------------------------------------------------
 
     #[test]
-    fn pending_change_zone_iteration_modern_shape_roundtrips() {
+    fn change_zone_iteration_modern_shape_roundtrips() {
         let mut logical_zone_change_group =
             LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(1), Vec::new());
         logical_zone_change_group
@@ -18678,6 +18718,33 @@ mod tests {
             error.to_string().contains("immediately_before_latched"),
             "missing latch rejection must name the missing authority: {error}"
         );
+
+        // A same-kind child is a distinct operation. It must not absorb the
+        // parent logical owner or copy the parent's Devour-only sidecar.
+        let mut state = GameState::new_two_player(20);
+        let snapshot = HashSet::from([ObjectId(70)]);
+        state.push_devour_change_zone_snapshot(snapshot.clone());
+        state.push_change_zone_iteration(original.clone());
+        let mut child = original;
+        child.source_id = ObjectId(8);
+        state.push_change_zone_iteration(child);
+        assert_eq!(state.resolution_stack.len(), 2);
+        assert_eq!(state.active_devour_eligible_snapshot(), None);
+
+        let child = state
+            .take_active_change_zone_frame()
+            .expect("same-kind child must be the active frame")
+            .expect("same-kind child exists");
+        assert_eq!(
+            child.pending.map(|pending| pending.source_id),
+            Some(ObjectId(8))
+        );
+
+        let parent = state
+            .take_active_change_zone_frame()
+            .expect("same-kind parent must resume after the child")
+            .expect("same-kind parent exists");
+        assert_eq!(parent.devour_eligible_snapshot, Some(snapshot));
     }
 
     #[test]

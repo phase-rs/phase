@@ -5744,8 +5744,9 @@ fn apply_action(
                             old_target,
                         });
                     }
-                    let resumes_change_zone_iteration =
-                        state.pending_change_zone_iteration.is_some();
+                    let resumes_change_zone_iteration = state
+                        .active_change_zone_frame()
+                        .is_some_and(|frame| frame.pending.is_some());
                     if !resumes_change_zone_iteration {
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,

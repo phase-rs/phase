@@ -6411,7 +6411,7 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     if state.has_post_replacement_drain() {
         return false;
     }
-    if state.pending_change_zone_iteration.is_some() {
+    if state.active_change_zone_frame().is_some() {
         return false;
     }
     if state.pending_replacement.is_some()
@@ -31764,7 +31764,7 @@ pub mod tests {
                 &mut events,
             );
             assert!(
-                state.pending_change_zone_iteration.is_none()
+                state.active_change_zone_frame().is_none()
                     && state.pending_batch_deliveries.is_none(),
                 "{carrier:?} exact production evidence: no nonbattlefield-only pause was fabricated"
             );
@@ -31882,7 +31882,9 @@ pub mod tests {
                 );
                 match carrier {
                     LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state.pending_change_zone_iteration.is_some(),
+                        state
+                            .active_change_zone_frame()
+                            .is_some_and(|frame| frame.pending.is_some()),
                         "ChangeZone slot {paused_index} must retain its production carrier"
                     ),
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
@@ -32338,7 +32340,9 @@ pub mod tests {
                 );
                 match carrier {
                     LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state.pending_change_zone_iteration.is_some(),
+                        state
+                            .active_change_zone_frame()
+                            .is_some_and(|frame| frame.pending.is_some()),
                         "ChangeZone must retain the mixed-origin owner while parked"
                     ),
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
@@ -33268,8 +33272,8 @@ pub mod tests {
                 let logical_group = match carrier {
                     LogicalZoneProductionCarrier::ChangeZone => {
                         &state
-                            .pending_change_zone_iteration
-                            .as_ref()
+                            .active_change_zone_frame()
+                            .and_then(|frame| frame.pending.as_ref())
                             .expect("ChangeZone suppressor owner is parked")
                             .logical_zone_change_group
                     }
@@ -33478,8 +33482,8 @@ pub mod tests {
             let logical_group = match carrier {
                 LogicalZoneProductionCarrier::ChangeZone => {
                     &state
-                        .pending_change_zone_iteration
-                        .as_ref()
+                        .active_change_zone_frame()
+                        .and_then(|frame| frame.pending.as_ref())
                         .expect("ChangeZone entering-suppressor owner is parked")
                         .logical_zone_change_group
                 }

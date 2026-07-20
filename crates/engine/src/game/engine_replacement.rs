@@ -965,7 +965,7 @@ pub(super) fn handle_replacement_choice(
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.active_ability_continuation().is_some()
-                    || state.pending_change_zone_iteration.is_some())
+                    || state.active_change_zone_frame().is_some())
                 // CR 118.12 + CR 605.3b + CR 616.1: A mana-source cost pause
                 // owns the unpaid cost suffix.  Do not drain the ordinary
                 // effect rider before that typed root has settled it.
@@ -1057,7 +1057,7 @@ pub(super) fn handle_replacement_choice(
             // or failed its suffix.  This mirrors the prevention path below.
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.active_ability_continuation().is_some()
-                    || state.pending_change_zone_iteration.is_some())
+                    || state.active_change_zone_frame().is_some())
             {
                 effects::drain_pending_continuation(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -1265,7 +1265,7 @@ pub(super) fn handle_replacement_choice(
                 if resumed_mana_ability_cost
                     && matches!(waiting_for, WaitingFor::Priority { .. })
                     && (state.active_ability_continuation().is_some()
-                        || state.pending_change_zone_iteration.is_some())
+                        || state.active_change_zone_frame().is_some())
                 {
                     effects::drain_pending_continuation(state, events);
                 }

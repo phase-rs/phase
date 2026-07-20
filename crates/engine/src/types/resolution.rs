@@ -304,6 +304,45 @@ impl ResolutionStack {
         self.frames.last()
     }
 
+    /// Compares runtime frames with the `GameState` equality contract.
+    ///
+    /// A Devour-only ChangeZone frame preserves a live CR 614.12a/614.13a
+    /// eligibility constraint, but that transient snapshot was deliberately
+    /// excluded from `GameState` equality before its migration. Keep that
+    /// contract: omit a frame with no iteration owner, and compare an owner
+    /// without its Devour sidecar. The derived stack equality remains strict for
+    /// wire round-trip validation.
+    pub(crate) fn game_state_eq(&self, other: &Self) -> bool {
+        let mut left = self.frames.iter().filter(|frame| {
+            !matches!(
+                frame,
+                ResolutionFrame::ChangeZone(change_zone) if change_zone.pending.is_none()
+            )
+        });
+        let mut right = other.frames.iter().filter(|frame| {
+            !matches!(
+                frame,
+                ResolutionFrame::ChangeZone(change_zone) if change_zone.pending.is_none()
+            )
+        });
+
+        loop {
+            match (left.next(), right.next()) {
+                (None, None) => return true,
+                (
+                    Some(ResolutionFrame::ChangeZone(left)),
+                    Some(ResolutionFrame::ChangeZone(right)),
+                ) => {
+                    if left.pending != right.pending {
+                        return false;
+                    }
+                }
+                (Some(left), Some(right)) if left == right => {}
+                (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => return false,
+            }
+        }
+    }
+
     /// Returns the active ability-continuation owner, if that family owns the
     /// stack top. This is deliberately a top-only view; callers must not use
     /// it to recover a buried parent continuation.
@@ -432,6 +471,68 @@ impl ResolutionStack {
         match self.last() {
             Some(ResolutionFrame::RepeatUntil(frame)) => Some(frame),
             Some(_) | None => None,
+        }
+    }
+
+    /// Returns the complete ChangeZone owner only when it owns the stack top.
+    ///
+    /// The frame retains the complete logical zone-change group and any
+    /// Devour snapshot together, so no caller can resume a partial carrier.
+    pub fn active_change_zone(&self) -> Option<&ChangeZoneFrame> {
+        match self.last() {
+            Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable top-only access to the complete ChangeZone owner.
+    pub fn active_change_zone_mut(&mut self) -> Option<&mut ChangeZoneFrame> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active ChangeZone owner.
+    pub fn take_active_change_zone(
+        &mut self,
+    ) -> Result<Option<ChangeZoneFrame>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::ChangeZone(_)) => {
+                let ResolutionFrame::ChangeZone(frame) =
+                    self.pop_expected(FrameKind::ChangeZone)?
+                else {
+                    unreachable!("checked ChangeZone frame kind must match")
+                };
+                Ok(Some(*frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::ChangeZone,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a complete ChangeZone owner as the active inner frame.
+    pub fn push_change_zone(&mut self, frame: ChangeZoneFrame) {
+        self.push_inner(ResolutionFrame::ChangeZone(Box::new(frame)));
+    }
+
+    /// Re-park the active ChangeZone owner after another replacement pause.
+    pub fn replace_active_change_zone(
+        &mut self,
+        frame: ChangeZoneFrame,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::ChangeZone(_)) => {
+                self.replace_active(ResolutionFrame::ChangeZone(Box::new(frame)))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::ChangeZone,
+                actual: frame.kind(),
+            }),
         }
     }
 
@@ -887,6 +988,7 @@ impl ResolutionStateWire {
                 let legacy_ability = LegacyAbilityContinuationWire::from_value(&value)?;
                 let legacy_repeat_for = LegacyRepeatForWire::from_value(&value)?;
                 let legacy_repeat_until = LegacyRepeatUntilWire::from_value(&value)?;
+                let legacy_change_zone = LegacyChangeZoneWire::from_value(&value)?;
                 let legacy_choose_one_of = LegacyChooseOneOfWire::from_value(&value)?;
                 let legacy_vote_ballot = LegacyVoteBallotWire::from_value(&value)?;
                 let legacy_per_player_zone_choice =
@@ -902,6 +1004,8 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_choose_zone_trigger_context");
                 legacy_object.remove("pending_repeat_iteration");
                 legacy_object.remove("pending_repeat_until");
+                legacy_object.remove("pending_change_zone_iteration");
+                legacy_object.remove("devour_eligible_snapshot");
                 legacy_object.remove("pending_choose_one_of");
                 legacy_object.remove("pending_vote_ballot_iteration");
                 legacy_object.remove("pending_per_player_zone_choice");
@@ -916,6 +1020,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_repeat_until.into_frame() {
                     legacy.push_repeat_until(frame);
+                }
+                if let Some(frame) = legacy_change_zone.into_frame() {
+                    legacy.push_change_zone_frame(frame);
                 }
                 if let Some(frame) = legacy_choose_one_of.into_frame() {
                     legacy.push_choose_one_of(frame);
@@ -1104,6 +1211,30 @@ struct LegacyRepeatUntilWire {
     pending_repeat_until: Option<PendingRepeatUntil>,
 }
 
+/// v1-only ChangeZone fields. The complete logical-zone owner and its Devour
+/// snapshot migrated together; runtime state never carries either field.
+#[derive(Deserialize)]
+struct LegacyChangeZoneWire {
+    #[serde(default)]
+    pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
+    #[serde(default)]
+    devour_eligible_snapshot: Option<HashSet<ObjectId>>,
+}
+
+impl LegacyChangeZoneWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<ChangeZoneFrame> {
+        (self.pending_change_zone_iteration.is_some() || self.devour_eligible_snapshot.is_some())
+            .then_some(ChangeZoneFrame {
+                pending: self.pending_change_zone_iteration,
+                devour_eligible_snapshot: self.devour_eligible_snapshot,
+            })
+    }
+}
+
 /// v1-only choose-one-of field. Runtime state carries it only as a typed frame.
 #[derive(Deserialize)]
 struct LegacyChooseOneOfWire {
@@ -1211,6 +1342,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
             ResolutionFrame::AbilityContinuation(_)
                 | ResolutionFrame::RepeatFor(_)
                 | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::ChangeZone(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
@@ -1245,12 +1377,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if state.pending_change_zone_iteration.is_some() || state.devour_eligible_snapshot.is_some() {
-        frames.push_inner(ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
-            pending: state.pending_change_zone_iteration.clone(),
-            devour_eligible_snapshot: state.devour_eligible_snapshot.clone(),
-        })));
-    }
     if let Some(pending) = state.pending_batch_deliveries.clone() {
         frames.push_inner(ResolutionFrame::BatchDelivery(Box::new(pending)));
     }
@@ -1383,17 +1509,9 @@ fn project_frames_into_legacy_state(
                     frame.optional_cost_payments_this_resolution;
             }
             ResolutionFrame::ChangeZone(frame) => {
-                if let Some(pending) = frame.pending.clone() {
-                    set_once(
-                        &mut projected.pending_change_zone_iteration,
-                        pending,
-                        "ChangeZone",
-                    )?;
-                }
-                if projected.devour_eligible_snapshot.is_some() {
-                    return Err("duplicate ChangeZone devour snapshot".to_string());
-                }
-                projected.devour_eligible_snapshot = frame.devour_eligible_snapshot.clone();
+                projected
+                    .resolution_stack
+                    .push_change_zone((**frame).clone());
             }
             ResolutionFrame::BatchDelivery(pending) => set_once(
                 &mut projected.pending_batch_deliveries,
@@ -1496,8 +1614,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
     state.pending_repeated_optional_payment = None;
     state.optional_cost_payments_this_resolution = 0;
-    state.pending_change_zone_iteration = None;
-    state.devour_eligible_snapshot = None;
     state.pending_batch_deliveries = None;
     state.pending_counter_moves = None;
     state.pending_counter_removals = None;
@@ -1803,6 +1919,27 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 repeat-until fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_change_zone_fixture(
+        state: GameState,
+        pending: Option<PendingChangeZoneIteration>,
+        devour_eligible_snapshot: Option<HashSet<ObjectId>>,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        if let Some(pending) = pending {
+            v1["pending_change_zone_iteration"] =
+                serde_json::to_value(pending).expect("legacy ChangeZone owner serializes");
+        }
+        if let Some(snapshot) = devour_eligible_snapshot {
+            v1["devour_eligible_snapshot"] =
+                serde_json::to_value(snapshot).expect("legacy Devour snapshot serializes");
+        }
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 ChangeZone fixture converts through the wire")
             .into_game_state()
     }
 
@@ -2223,22 +2360,18 @@ mod tests {
 
     #[test]
     fn resolution_state_wire_keeps_devour_snapshot_without_a_change_zone_iteration() {
-        let mut state = GameState::new_two_player(44);
+        let state = GameState::new_two_player(44);
         let snapshot = HashSet::from([ObjectId(7), ObjectId(8)]);
-        state.devour_eligible_snapshot = Some(snapshot.clone());
-
-        let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
-        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
-        let wire: ResolutionStateWire =
-            serde_json::from_value(v1).expect("v1 devour sidecar converts through frames");
+        let restored = restore_v1_change_zone_fixture(state, None, Some(snapshot.clone()));
+        let wire = ResolutionStateWire::from_game_state(restored);
         let v2 = serde_json::to_value(&wire).expect("v2 wire serializes");
         assert!(v2.get("devour_eligible_snapshot").is_none());
 
         let restored: ResolutionStateWire =
             serde_json::from_value(v2).expect("v2 devour sidecar projects for runtime");
         assert_eq!(
-            restored.into_game_state().devour_eligible_snapshot,
-            Some(snapshot)
+            restored.into_game_state().active_devour_eligible_snapshot(),
+            Some(&snapshot)
         );
     }
 
@@ -2514,11 +2647,13 @@ mod tests {
         let ResolutionFrame::ChangeZone(change_zone_frame) = change_zone_frame(113) else {
             unreachable!("helper constructs a change-zone frame")
         };
-        let mut change_zone = GameState::new_two_player(113);
-        change_zone.pending_change_zone_iteration = change_zone_frame.pending;
-        change_zone.devour_eligible_snapshot = Some(HashSet::from([ObjectId(113)]));
-        let change_zone = resume_priority_fixture(restore_v1_fixture(change_zone));
-        assert!(change_zone.pending_change_zone_iteration.is_none());
+        let change_zone = GameState::new_two_player(113);
+        let change_zone = resume_priority_fixture(restore_v1_change_zone_fixture(
+            change_zone,
+            change_zone_frame.pending,
+            Some(HashSet::from([ObjectId(113)])),
+        ));
+        assert!(change_zone.active_change_zone_frame().is_none());
         assert_reserializes_v2_only(change_zone);
 
         let mut counter_moves = GameState::new_two_player(114);
