@@ -32,10 +32,11 @@
 //! Both tests drive the real casting + ETB-trigger pipeline against the
 //! verified Oracle text (Scryfall, 2026-07-14): {G} Elephant, 3/4.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const GREENBELT_RAMPAGER_ORACLE: &str = "When this creature enters, pay {E}{E} (two energy \
@@ -77,11 +78,15 @@ fn scenario_with_rampager(starting_energy: u32) -> (engine::game::scenario::Game
 }
 
 fn energy_of(state: &engine::types::game_state::GameState) -> u32 {
+    player_energy(state, P0)
+}
+
+fn player_energy(state: &engine::types::game_state::GameState, player: PlayerId) -> u32 {
     state
         .players
         .iter()
-        .find(|p| p.id == P0)
-        .expect("P0 exists")
+        .find(|p| p.id == player)
+        .unwrap_or_else(|| panic!("player {player:?} exists"))
         .energy
 }
 
@@ -120,5 +125,158 @@ fn greenbelt_rampager_cant_pay_energy_bounces_to_hand() {
         energy, 1,
         "an unpayable {{E}}{{E}} must bounce the creature to hand and grant {{E}} \
          exactly once; energy={energy}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Controller/owner divergence — maintainer review on PR #5869
+// ---------------------------------------------------------------------------
+//
+// The two tests above never distinguish owner from controller (P0 is always
+// both). This section drives a REAL stolen/reanimated-permanent scenario
+// through the production cast + ETB pipeline: Greenbelt Rampager starts in
+// P0's graveyard (P0 is its owner throughout), and P1 reanimates it with a
+// real Oracle-text-parsed spell — "Put target creature card from a graveyard
+// onto the battlefield under your control." (the first sentence of
+// Necromantic Summons, verified real Oracle text) — which lowers to
+// `Effect::ChangeZone { enters_under: Some(ControllerRef::You), .. }` (CR
+// 110.2a). That makes P1 the CONTROLLER of an object P0 still OWNS the moment
+// it enters, exactly the fixture the review asked for, driven through the
+// real production resolver (`change_zone::resolve` -> real ETB trigger scan
+// -> real `pay::resolve`), not a hand-built synthetic AST.
+//
+// CR 109.5: "you"/"your" in an ability always means that ability's
+// controller. Greenbelt Rampager's ETB ability is controlled by whoever
+// controls Greenbelt Rampager when it enters (CR 603.3d) — P1 here — so both
+// the "{E}{E}" cost and the "you get {E}" reward must bind to P1, never P0.
+// The bounce destination ("return this creature to its OWNER's hand") is the
+// one explicitly owner-relative phrase in the Oracle text and must go to P0
+// regardless of who controls it.
+
+const NECROMANTIC_SUMMONS_FIRST_SENTENCE: &str =
+    "Put target creature card from a graveyard onto the battlefield under your control.";
+
+/// Build a scenario where Greenbelt Rampager sits in P0's graveyard (P0 is its
+/// owner) and P1 holds a real reanimation spell that will put it onto the
+/// battlefield under P1's control. Returns the runner with the reanimation
+/// spell still in P1's hand (uncast) plus both object ids; the caller casts +
+/// resolves the reanimation spell to drive Rampager's real ETB trigger with
+/// P1 as controller and P0 as owner.
+fn scenario_with_stolen_rampager(
+    controller_energy: u32,
+    owner_energy: u32,
+) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let rampager = scenario
+        .add_creature_to_graveyard(P0, "Greenbelt Rampager", 3, 4)
+        .from_oracle_text(GREENBELT_RAMPAGER_ORACLE)
+        .id();
+
+    let reanimate = scenario
+        .add_spell_to_hand(P1, "Test Reanimation Spell", false)
+        .from_oracle_text(NECROMANTIC_SUMMONS_FIRST_SENTENCE)
+        // Free cast — the divergence under test is orthogonal to the mana cost.
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    for p in runner.state_mut().players.iter_mut() {
+        if p.id == P0 {
+            p.energy = owner_energy;
+        } else if p.id == P1 {
+            p.energy = controller_energy;
+        }
+    }
+    // `GameScenario::at_phase` hands the active player/priority to P0 (the
+    // scenario default). The reanimation spell is cast by P1, so hand P1 both
+    // active-player status and priority — otherwise the sorcery-speed cast is
+    // rejected as "not a castable zone" (CR 601.3g: sorcery-speed casting
+    // requires the caster to be the active player with an empty stack).
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = engine::types::game_state::WaitingFor::Priority { player: P1 };
+
+    (runner, reanimate, rampager)
+}
+
+/// Controller (P1) has enough energy and pays; the OWNER (P0) has none. If the
+/// cost payment ever read the owner's pool instead of the controller's, this
+/// would wrongly fail (P0 has 0) even though the actual controller can pay.
+#[test]
+fn greenbelt_rampager_controller_pays_when_owner_has_no_energy() {
+    let (mut runner, reanimate, rampager) = scenario_with_stolen_rampager(2, 0);
+
+    let outcome = runner.cast(reanimate).target_object(rampager).resolve();
+
+    outcome.assert_zone(&[rampager], Zone::Battlefield);
+    let state = outcome.state();
+    assert_eq!(
+        state.objects.get(&rampager).map(|o| o.controller),
+        Some(P1),
+        "sanity: the reanimation must actually make P1 the controller"
+    );
+    assert_eq!(
+        state.objects.get(&rampager).map(|o| o.owner),
+        Some(P0),
+        "sanity: reanimation changes control, never ownership (CR 110.2)"
+    );
+
+    assert_eq!(
+        player_energy(state, P1),
+        0,
+        "the CONTROLLER's (P1) {{E}}{{E}} must be spent to pay the ETB cost"
+    );
+    assert_eq!(
+        player_energy(state, P0),
+        0,
+        "the OWNER's (P0) energy must be untouched by a payment that belongs \
+         to the controller, not the owner"
+    );
+}
+
+/// Controller (P1) cannot pay (0 energy); the OWNER (P0) has plenty. If the
+/// cost payment ever read the owner's pool instead of the controller's, this
+/// would wrongly succeed (P0 has energy to spare) even though the actual
+/// controller cannot pay. The creature must bounce to its OWNER's hand (P0,
+/// per the Oracle text's explicit "owner's hand" wording) while the "you get
+/// {E}" reward must still go to the CONTROLLER (P1), not the owner.
+#[test]
+fn greenbelt_rampager_cant_pay_bounces_to_owner_hand_reward_to_controller() {
+    let (mut runner, reanimate, rampager) = scenario_with_stolen_rampager(0, 5);
+
+    let outcome = runner.cast(reanimate).target_object(rampager).resolve();
+
+    outcome.assert_zone(&[rampager], Zone::Hand);
+    let state = outcome.state();
+    let owner_hand = state
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .expect("P0 exists")
+        .hand
+        .contains(&rampager);
+    assert!(
+        owner_hand,
+        "CR 110.2 + Oracle text ('return this creature to its owner's hand'): \
+         the unpayable bounce must land in the OWNER's (P0) hand, not the \
+         controller's (P1)"
+    );
+
+    assert_eq!(
+        player_energy(state, P1),
+        1,
+        "the CONTROLLER (P1) must receive the bounce rider's {{E}}, not the owner"
+    );
+    assert_eq!(
+        player_energy(state, P0),
+        5,
+        "the OWNER's (P0) energy must be untouched: an unpayable cost the \
+         controller couldn't afford must not siphon from the owner's pool, \
+         and the reward must not land on the owner either"
     );
 }
