@@ -106,10 +106,15 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
 }
 
 pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>) {
-    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || state.active_choose_one_of().is_none()
+    {
         return;
     }
-    let Some(pending) = state.pending_choose_one_of.take() else {
+    let Some(pending) = state
+        .take_active_choose_one_of()
+        .expect("choose-one-of resume may consume only its active frame")
+    else {
         return;
     };
     prompt_next(
@@ -160,15 +165,17 @@ pub(crate) fn resolve_branch(
         )));
     };
 
-    state.pending_choose_one_of = (!remaining_players.is_empty()).then(|| PendingChooseOneOf {
-        controller,
-        source_id,
-        branches: branches.clone(),
-        parent_targets: parent_targets.clone(),
-        context: context.clone(),
-        replacement_applied: replacement_applied.clone(),
-        remaining_players,
-    });
+    if !remaining_players.is_empty() {
+        state.push_choose_one_of(PendingChooseOneOf {
+            controller,
+            source_id,
+            branches: branches.clone(),
+            parent_targets: parent_targets.clone(),
+            context: context.clone(),
+            replacement_applied: replacement_applied.clone(),
+            remaining_players,
+        });
+    }
 
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;

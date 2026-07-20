@@ -11859,11 +11859,8 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_coin_flip: Option<ResolutionCoinFlip>,
 
-    /// CR 608.2c + CR 107.1c: Pending "repeat this process" loop paused because
     /// CR 701.55d: Pending continuation of a multi-player ChooseOneOf after a
     /// selected branch has finished resolving, including any nested choices.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_choose_one_of: Option<PendingChooseOneOf>,
     /// CR 701.38d + CR 608.2c: Per-ballot vote iteration paused by an
     /// interactive choice. Drained after `pending_change_zone_iteration` and
     /// before the repeat-for frame.
@@ -13632,6 +13629,23 @@ impl GameState {
             .insert_parent_of_active(super::resolution::ResolutionFrame::RepeatUntil(pending))
     }
 
+    /// Returns the choose-one-of owner only when it owns the stack top.
+    pub fn active_choose_one_of(&self) -> Option<&PendingChooseOneOf> {
+        self.resolution_stack.active_choose_one_of()
+    }
+
+    /// Consume exactly the active choose-one-of frame.
+    pub fn take_active_choose_one_of(
+        &mut self,
+    ) -> Result<Option<PendingChooseOneOf>, ResolutionStackError> {
+        self.resolution_stack.take_active_choose_one_of()
+    }
+
+    /// Park the remaining choose-one-of players for the selected branch.
+    pub fn push_choose_one_of(&mut self, pending: PendingChooseOneOf) {
+        self.resolution_stack.push_choose_one_of(pending);
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14327,7 +14341,6 @@ impl GameState {
             pending_each_player_copy_chosen: None,
             pending_coin_flip: None,
             resolution_coin_flip: None,
-            pending_choose_one_of: None,
             pending_vote_ballot_iteration: None,
             pending_per_player_zone_choice: None,
             pending_player_scope_sacrifice_choice: None,
@@ -15450,7 +15463,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_each_player_copy_chosen: _,
         pending_coin_flip: _,
         resolution_coin_flip: _,
-        pending_choose_one_of: _,
         pending_vote_ballot_iteration: _,
         pending_per_player_zone_choice: _,
         pending_per_category_zone_choice: _,
@@ -15778,7 +15790,6 @@ impl PartialEq for GameState {
             // advances `state.rng`, so iterations differ regardless; comparing
             // this field never masks a real repeat (safe to include).
             && self.resolution_coin_flip == other.resolution_coin_flip
-            && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_vote_ballot_iteration == other.pending_vote_ballot_iteration
             && self.pending_per_player_zone_choice == other.pending_per_player_zone_choice
             && self.pending_player_scope_sacrifice_choice
