@@ -2862,6 +2862,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
         | FilterProp::Attacking { .. }
+        | FilterProp::RequiredToAttack
         | FilterProp::Blocking
         | FilterProp::BlockingSource
         | FilterProp::CombatRelation { .. }
