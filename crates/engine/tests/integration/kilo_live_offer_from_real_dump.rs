@@ -23,8 +23,8 @@ use engine::game::engine::apply;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    GameState, LoopAction, LoopActionContext, ManaChoice, PayCostKind, PayableResource,
-    PersistedGameState, WaitingFor,
+    GameState, LoopAction, LoopActionContext, LoopCollapseAxis, ManaChoice, PayCostKind,
+    PayableResource, PersistedGameState, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType;
@@ -330,7 +330,7 @@ fn drive_to_collapse_boundary(state: &mut GameState) {
     for _ in 0..200 {
         match &state.waiting_for {
             WaitingFor::PayAmountChoice {
-                resource: PayableResource::LoopCollapse,
+                resource: PayableResource::LoopCollapse { .. },
                 ..
             } => return,
             WaitingFor::Priority { player } => {
@@ -508,10 +508,14 @@ fn kilo_accept_collapses_at_boundary_to_exactly_n_counters() {
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::PayAmountChoice { resource: PayableResource::LoopCollapse, player, .. }
-                if player == P0
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::LoopCollapse { axis: LoopCollapseAxis::Counters },
+                player,
+                ..
+            } if player == P0
         ),
-        "at the CR 500.5 boundary P0 is prompted to name the finite collapse count, got {:?}",
+        "at the CR 500.5 boundary P0 is prompted to name the finite COUNTER-axis collapse count \
+         (CR 732.2a); the axis label must be Counters, got {:?}",
         state.waiting_for
     );
 

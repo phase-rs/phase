@@ -40,13 +40,19 @@ export function PayAmountChoiceUI() {
       case "Speed":
         return t("mana.resourceSpeed");
       case "LoopCollapse":
-        return t("mana.resourceLoopCollapse");
+        // Dead arm: LoopCollapse never reaches resourceLabel (the loopCollapseAxis
+        // branch owns its title/button). Kept for switch exhaustiveness only.
+        return "";
     }
   }, [data, t]);
 
-  // Display-only: the LoopCollapse prompt frames token *creation*, not a cost to
-  // "pay" (CR 732.2a loop collapse — the engine mints N copies, nothing is spent).
-  const isLoopCollapse = data?.resource.type === "LoopCollapse";
+  // Display-only: the LoopCollapse prompt frames axis growth (tokens / counters /
+  // life / mixed), not a cost to "pay" (CR 732.2a loop collapse — the engine
+  // applies N cycles of the collapsed axis, nothing is spent). Counter/life labels
+  // are ITERATION-framed (×N), never a raw resource count: N is the cycle count and
+  // each cycle applies per_cycle_delta, so N tokens but N×δ counters/life.
+  const loopCollapseAxis =
+    data?.resource.type === "LoopCollapse" ? data.resource.data.axis : null;
 
   const handleCommit = useCallback(() => {
     dispatch({ type: "SubmitPayAmount", data: { amount: value } });
@@ -65,7 +71,11 @@ export function PayAmountChoiceUI() {
       >
         <div className="pointer-events-auto min-w-[320px] max-w-[420px] rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
-            {t(isLoopCollapse ? "mana.loopCollapseTitle" : "mana.chooseAmountTitle")}
+            {t(
+              loopCollapseAxis
+                ? `mana.loopCollapseTitle${loopCollapseAxis}`
+                : "mana.chooseAmountTitle",
+            )}
             {sourceName && (
               <span className="ml-1 text-gray-400">&mdash; {sourceName}</span>
             )}
@@ -96,8 +106,8 @@ export function PayAmountChoiceUI() {
               onClick={handleCommit}
               className={gameButtonClass({ tone: "emerald", size: "md" })}
             >
-              {isLoopCollapse
-                ? t("mana.loopCollapseAmount", { value })
+              {loopCollapseAxis
+                ? t(`mana.loopCollapseAmount${loopCollapseAxis}`, { value })
                 : t("mana.payAmount", { value, resource: resourceLabel })}
             </button>
           </div>

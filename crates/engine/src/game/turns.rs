@@ -10,7 +10,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, ExtraPhase, GameState, PayableResource, PendingCounterAddition,
+    AutoPassMode, ExtraPhase, GameState, LoopCollapseAxis, PayableResource, PendingCounterAddition,
     PendingEffectResolved, TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
@@ -346,9 +346,18 @@ pub(super) fn drain_pending_phase_transition_progress(
             // populated stash is present iff a materializable loop was accepted (§5);
             // prompt its controller for the finite count N.
             if let Some(controller) = next_apnap_player_with_pending_materialization(state) {
+                // CR 732.2a: label the prompt by the axis this loop collapses (display
+                // only — the submit handler resolves from the stash, not this field).
+                // The controller was selected on a NON-EMPTY stash, so `Mixed` here is
+                // purely defensive.
+                let axis = state
+                    .pending_unbounded_materialization
+                    .get(&controller)
+                    .map(|items| LoopCollapseAxis::from_materializations(items))
+                    .unwrap_or(LoopCollapseAxis::Mixed);
                 state.waiting_for = WaitingFor::PayAmountChoice {
                     player: controller,
-                    resource: PayableResource::LoopCollapse,
+                    resource: PayableResource::LoopCollapse { axis },
                     // CR 732.2a: any finite count (incl. 0 — a legal collapse-to-
                     // nothing; the ∞ still ends). `max` reuses the engine's loop
                     // safety bound; the AI branch offers only N=1 so the wide range

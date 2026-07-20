@@ -9210,11 +9210,91 @@ pub enum PayableResource {
     /// object-growth loop shortcut collapses into, named by the loop controller
     /// at the next phase/step boundary (the shortcut's ending point is a priority
     /// window). The submit handler reads the deferred materialization stash by
-    /// player and mints N tokens — it deducts nothing. Unit variant: only a
-    /// `TokensCreated` token loop reaches this prompt today, so no axis field is
-    /// needed (a deferred mana/counter collapse would add the discriminator when a
-    /// real second value exists).
-    LoopCollapse,
+    /// player and applies it — it deducts nothing. `axis` is a DISPLAY-ONLY label
+    /// (derived from the stash at construction, `turns.rs`) so the prompt names the
+    /// correct growth axis (tokens / counters / life / mixed); resolution ignores it
+    /// and reads the typed `PersistentAxisMaterialization` stash directly.
+    LoopCollapse { axis: LoopCollapseAxis },
+}
+
+/// CR 732.2a: which persistent-growth axis an accepted object-growth loop collapses
+/// into, used ONLY to label the finite-count prompt (`PayableResource::LoopCollapse`).
+/// Pure display descriptor — the submit handler resolves from the typed
+/// `PersistentAxisMaterialization` stash and never reads this field. `Copy` mirrors
+/// `PayableResource`. `Ord` backs the `BTreeSet` fold in `from_materializations`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum LoopCollapseAxis {
+    Tokens,
+    Counters,
+    Life,
+    Mixed,
+}
+
+impl LoopCollapseAxis {
+    /// CR 732.2a: derive the prompt label from the controller's deferred
+    /// materialization stash. Folds every item's axis into a set: exactly one
+    /// distinct axis → that axis; two or more → `Mixed`; empty → `Mixed` (defensive —
+    /// a populated stash is the only way this prompt fires). The flagship observed-
+    /// growth combo (Kilo) pushes a single `DriveSequence`, so mapping its
+    /// `collapsed_axes` is load-bearing, not incidental.
+    pub fn from_materializations(items: &[PersistentAxisMaterialization]) -> Self {
+        let mut axes: BTreeSet<LoopCollapseAxis> = BTreeSet::new();
+        for item in items {
+            match item {
+                PersistentAxisMaterialization::Tokens(_) => {
+                    axes.insert(LoopCollapseAxis::Tokens);
+                }
+                PersistentAxisMaterialization::Counters(_) => {
+                    axes.insert(LoopCollapseAxis::Counters);
+                }
+                PersistentAxisMaterialization::Life { .. } => {
+                    axes.insert(LoopCollapseAxis::Life);
+                }
+                PersistentAxisMaterialization::DriveSequence { collapsed_axes, .. } => {
+                    for ax in collapsed_axes {
+                        if let Some(mapped) = Self::from_resource_axis(*ax) {
+                            axes.insert(mapped);
+                        }
+                    }
+                }
+            }
+        }
+        // Exactly-one distinct axis → that axis; anything else (≥2, or the defensive
+        // empty stash) → Mixed.
+        match axes.iter().next() {
+            Some(axis) if axes.len() == 1 => *axis,
+            _ => LoopCollapseAxis::Mixed,
+        }
+    }
+
+    /// CR 732.2a: map one ∞-marked `ResourceAxis` onto a collapse-prompt label.
+    /// EXHAUSTIVE (no wildcard, per CLAUDE.md "let the compiler catch missing arms"):
+    /// only the three materializable axes carry a label; every non-materializable axis
+    /// maps to `None` explicitly, so a future materializable axis build-breaks here and
+    /// forces a conscious classification.
+    fn from_resource_axis(axis: ResourceAxis) -> Option<LoopCollapseAxis> {
+        match axis {
+            ResourceAxis::TokensCreated => Some(LoopCollapseAxis::Tokens),
+            // Real value on the observed-growth path is `Counter(Other, Other)`; both
+            // fields are display-irrelevant here — any counter class maps to Counters.
+            ResourceAxis::Counter(_, _) => Some(LoopCollapseAxis::Counters),
+            ResourceAxis::Life(_) => Some(LoopCollapseAxis::Life),
+            ResourceAxis::Mana(_)
+            | ResourceAxis::DamageDealt(_)
+            | ResourceAxis::LibraryDelta(_)
+            | ResourceAxis::Trigger(_)
+            | ResourceAxis::CardsDrawn
+            | ResourceAxis::Casts
+            | ResourceAxis::LandfallTriggers
+            | ResourceAxis::CombatPhases
+            | ResourceAxis::ExtraTurns
+            | ResourceAxis::DeathTriggers
+            | ResourceAxis::EtbTriggers
+            | ResourceAxis::LtbTriggers
+            | ResourceAxis::SacTriggers
+            | ResourceAxis::Poison(_) => None,
+        }
+    }
 }
 
 fn default_one() -> u32 {

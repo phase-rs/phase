@@ -2152,7 +2152,7 @@ pub(super) fn handle_resolution_choice(
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             match resource {
-                PayableResource::LoopCollapse => {
+                PayableResource::LoopCollapse { .. } => {
                     // CR 732.2a: an accepted unbounded loop shortcut deferred its finite
                     // count to this phase/step boundary; the controller has now named N.
                     // Apply each stashed persistent-axis materialization, cash out the

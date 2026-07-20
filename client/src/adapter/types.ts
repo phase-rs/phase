@@ -2187,6 +2187,10 @@ export type ShardChoice =
   | { type: "PayMana" }
   | { type: "PayLife" };
 
+// CR 732.2a: which persistent-growth axis an accepted object-growth loop collapses
+// into — a display-only label so the prompt names the correct axis.
+export type LoopCollapseAxis = "Tokens" | "Counters" | "Life" | "Mixed";
+
 export type PayableResource =
   | { type: "Energy" }
   | { type: "ManaGeneric"; data: { per_x: number } }
@@ -2194,7 +2198,7 @@ export type PayableResource =
   | { type: "Speed" }
   // CR 732.2a: not a resource payment — the finite count an accepted
   // object-growth loop shortcut collapses into (display-only; the engine mints).
-  | { type: "LoopCollapse" };
+  | { type: "LoopCollapse"; data: { axis: LoopCollapseAxis } };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }

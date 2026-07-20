@@ -2935,7 +2935,7 @@ pub fn candidate_actions_broad_with_probe(
         // search regardless of the display cap. Must precede the general arm below.
         WaitingFor::PayAmountChoice {
             player,
-            resource: PayableResource::LoopCollapse,
+            resource: PayableResource::LoopCollapse { .. },
             ..
         } => vec![candidate(
             GameAction::SubmitPayAmount { amount: 1 },
@@ -5005,6 +5005,7 @@ mod tests {
         StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::LoopCollapseAxis;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -5715,7 +5716,9 @@ mod tests {
         let state = GameState {
             waiting_for: WaitingFor::PayAmountChoice {
                 player: PlayerId(0),
-                resource: PayableResource::LoopCollapse,
+                resource: PayableResource::LoopCollapse {
+                    axis: LoopCollapseAxis::Tokens,
+                },
                 min: 0,
                 max: 1000,
                 accumulated: 0,

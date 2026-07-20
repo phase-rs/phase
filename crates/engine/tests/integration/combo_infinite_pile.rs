@@ -41,7 +41,8 @@ use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    GameState, LoopDetectionMode, PayableResource, PersistentAxisMaterialization, WaitingFor,
+    GameState, LoopCollapseAxis, LoopDetectionMode, PayableResource, PersistentAxisMaterialization,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaColor;
@@ -732,7 +733,7 @@ fn real_4p_observed_drive_sequence_replays_captured_period_n_times() {
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
                 if player == P0
         ),
         "the boundary prompts P0 for the DriveSequence LoopCollapse count, got {:?}",
@@ -853,7 +854,7 @@ fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
                 if player == P0
         ),
         "the phase boundary must prompt P0 for the LoopCollapse count, got {:?}",
@@ -905,7 +906,7 @@ fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
         !matches!(
             state.waiting_for,
             WaitingFor::PayAmountChoice {
-                resource: PayableResource::LoopCollapse,
+                resource: PayableResource::LoopCollapse { .. },
                 ..
             }
         ),
@@ -943,7 +944,7 @@ fn loop_collapse_large_mint_does_not_overflow_small_stack() {
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
                 if player == P0
         ),
         "reach-guard: at the LoopCollapse prompt for P0, got {:?}",
@@ -1019,7 +1020,7 @@ fn real_4p_basalt_mana_loop_boundary_does_not_prompt_collapse() {
         !matches!(
             state.waiting_for,
             WaitingFor::PayAmountChoice {
-                resource: PayableResource::LoopCollapse,
+                resource: PayableResource::LoopCollapse { .. },
                 ..
             }
         ),
@@ -1181,7 +1182,7 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
                 if player == P0
         ),
         "the coexisting token loop must still prompt LoopCollapse at the boundary, got {:?}",
@@ -1397,7 +1398,7 @@ fn real_4p_one_shot_bootstrap_seeds_tapped_infinite_pile_and_w_plus_1_untapped()
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
                 if player == P0
         ),
         "the phase boundary must prompt P0 for the LoopCollapse count, got {:?}",
@@ -1441,7 +1442,7 @@ fn real_4p_one_shot_bootstrap_seeds_tapped_infinite_pile_and_w_plus_1_untapped()
         !matches!(
             runner.state().waiting_for,
             WaitingFor::PayAmountChoice {
-                resource: PayableResource::LoopCollapse,
+                resource: PayableResource::LoopCollapse { .. },
                 ..
             }
         ),
@@ -1637,7 +1638,7 @@ fn real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_li
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
                 if player == P0
         ),
         "the boundary must prompt P0 for the multi-axis LoopCollapse count, got {:?}",
@@ -1773,7 +1774,7 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse, .. }
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
                 if player == P0
         ),
         "the token axis still prompts LoopCollapse at the boundary, got {:?}",
@@ -1814,5 +1815,238 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
         p0_saproling_ids(&state).len(),
         saps_before.len() + 5,
         "the token axis still mints 5 (only the observer-drifted counter axis is declined)"
+    );
+}
+
+// ─────────── CR 732.2a: LoopCollapse prompt axis-label derivation ───────────
+
+/// Drive the REAL production boundary and return the axis label the `LoopCollapse`
+/// prompt carries (`turns.rs` derives it from the controller's stash at construction).
+fn collapse_axis_at_boundary(state: &mut GameState) -> LoopCollapseAxis {
+    drive_priority_to_next_boundary(state);
+    match &state.waiting_for {
+        WaitingFor::PayAmountChoice {
+            resource: PayableResource::LoopCollapse { axis },
+            player,
+            ..
+        } if *player == P0 => *axis,
+        other => panic!("expected P0's LoopCollapse boundary prompt, got {other:?}"),
+    }
+}
+
+/// T2 (TOKENS): the natural accept path stashes a `Tokens` materialization, so a pure
+/// token loop labels its collapse prompt `Tokens` — the whole-production path, no graft.
+///
+/// REVERT-PROBE: change `LoopCollapseAxis::from_materializations` to `return
+/// LoopCollapseAxis::Mixed;` ⇒ this assertion FLIPS. (Reverting to the OLD always-Tokens
+/// behavior leaves T2 green — T1/T3/T4 are the discriminators that catch that revert.)
+#[test]
+fn loop_collapse_prompt_labels_token_axis_tokens() {
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    drive_all_accept(&mut state);
+    // Reach-guard: the accept stashed the token materialization (non-vacuity anchor).
+    assert!(
+        state.pending_unbounded_materialization.contains_key(&P0),
+        "accepting the object-growth loop stashes P0's token materialization"
+    );
+    assert_eq!(
+        collapse_axis_at_boundary(&mut state),
+        LoopCollapseAxis::Tokens,
+        "a pure token loop labels the collapse prompt Tokens"
+    );
+}
+
+/// T1 (COUNTERS — PRIMARY discriminator): a pure counter loop labels its collapse prompt
+/// `Counters`, NOT the old hardcoded `Tokens`. This is the exact defect the fix targets
+/// (the prompt used to always say "tokens" even for a counter loop).
+///
+/// REVERT-PROBE: change `from_materializations` to `return LoopCollapseAxis::Tokens;`
+/// (the pre-fix behavior) ⇒ this assertion FLIPS from Counters to Tokens.
+#[test]
+fn loop_collapse_prompt_labels_counter_axis_counters() {
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::CounterGrowth;
+
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    drive_all_accept(&mut state);
+    let creature = *p0_saproling_ids(&state)
+        .iter()
+        .next()
+        .expect("P0 controls at least one Saproling to bear a counter axis");
+    // Replace the natural token stash with a PURE counter materialization (the single-
+    // authority writer the accept path uses).
+    state.pending_unbounded_materialization.clear();
+    state.register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+            object: creature,
+            counter: CounterType::Plus1Plus1,
+            per_cycle_delta: 2,
+        }]),
+    );
+    assert_eq!(
+        collapse_axis_at_boundary(&mut state),
+        LoopCollapseAxis::Counters,
+        "a pure counter loop labels the collapse prompt Counters (revert to Tokens ⇒ flips)"
+    );
+}
+
+/// T3 (LIFE): a pure life-gain loop labels its collapse prompt `Life`.
+///
+/// REVERT-PROBE: `from_materializations` → `return LoopCollapseAxis::Tokens;` ⇒ FLIPS.
+#[test]
+fn loop_collapse_prompt_labels_life_axis_life() {
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    drive_all_accept(&mut state);
+    state.pending_unbounded_materialization.clear();
+    state.register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::Life {
+            player: P0,
+            per_cycle_delta: 3,
+        },
+    );
+    assert_eq!(
+        collapse_axis_at_boundary(&mut state),
+        LoopCollapseAxis::Life,
+        "a pure life loop labels the collapse prompt Life"
+    );
+}
+
+/// T4 (MIXED): a loop that collapses two distinct axes at once (counter + life, the same
+/// two-axis shape the batched-collapse test grafts) labels its prompt `Mixed`.
+///
+/// REVERT-PROBE: change the `≥2 → Mixed` fold to return the first axis ⇒ this assertion
+/// FLIPS from Mixed to Counters.
+#[test]
+fn loop_collapse_prompt_labels_multi_axis_mixed() {
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::CounterGrowth;
+
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    drive_all_accept(&mut state);
+    let creature = *p0_saproling_ids(&state)
+        .iter()
+        .next()
+        .expect("P0 controls at least one Saproling to bear a counter axis");
+    state.pending_unbounded_materialization.clear();
+    state.register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+            object: creature,
+            counter: CounterType::Plus1Plus1,
+            per_cycle_delta: 1,
+        }]),
+    );
+    state.register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::Life {
+            player: P0,
+            per_cycle_delta: 1,
+        },
+    );
+    assert_eq!(
+        collapse_axis_at_boundary(&mut state),
+        LoopCollapseAxis::Mixed,
+        "a two-axis (counter + life) loop labels the collapse prompt Mixed (first-axis-wins ⇒ flips)"
+    );
+}
+
+/// UNIT (CR 732.2a): `LoopCollapseAxis::from_materializations` maps each stash shape to its
+/// label — including the LOAD-BEARING observed-growth `DriveSequence → axis` path (the Kilo
+/// combo pushes a single `DriveSequence` with `Counter(Other, Other)`, NOT a batched
+/// `Counters` item; a derivation that ignored `DriveSequence` would mislabel Kilo `Mixed`).
+///
+/// REVERT-PROBE: `from_materializations` → `return LoopCollapseAxis::Tokens;` ⇒ every
+/// non-Tokens assertion FLIPS. Removing the `DriveSequence` arm ⇒ the two drive-sequence
+/// assertions FLIP to Mixed.
+#[test]
+fn loop_collapse_axis_from_materializations_maps_each_shape() {
+    use engine::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::CounterGrowth;
+    use engine::types::mana::ManaType;
+
+    let counters = [PersistentAxisMaterialization::Counters(vec![
+        CounterGrowth {
+            object: ObjectId(1),
+            counter: CounterType::Plus1Plus1,
+            per_cycle_delta: 1,
+        },
+    ])];
+    assert_eq!(
+        LoopCollapseAxis::from_materializations(&counters),
+        LoopCollapseAxis::Counters
+    );
+
+    let life = [PersistentAxisMaterialization::Life {
+        player: P0,
+        per_cycle_delta: 1,
+    }];
+    assert_eq!(
+        LoopCollapseAxis::from_materializations(&life),
+        LoopCollapseAxis::Life
+    );
+
+    // LOAD-BEARING: the observed-growth DriveSequence carrying the Kilo counter axis maps
+    // to Counters (not Mixed) — the single-DriveSequence shape the flagship combo pushes.
+    let drive_counter = [PersistentAxisMaterialization::DriveSequence {
+        sequence: vec![],
+        collapsed_axes: vec![ResourceAxis::Counter(
+            CounterClass::Other,
+            ObjectClass::Other,
+        )],
+    }];
+    assert_eq!(
+        LoopCollapseAxis::from_materializations(&drive_counter),
+        LoopCollapseAxis::Counters,
+        "the flagship Kilo DriveSequence(Counter) labels Counters, not Mixed"
+    );
+
+    // The Tokens mapping via the DriveSequence path (a TokensCreated observed loop).
+    let drive_tokens = [PersistentAxisMaterialization::DriveSequence {
+        sequence: vec![],
+        collapsed_axes: vec![ResourceAxis::TokensCreated],
+    }];
+    assert_eq!(
+        LoopCollapseAxis::from_materializations(&drive_tokens),
+        LoopCollapseAxis::Tokens
+    );
+
+    // Two distinct axes → Mixed.
+    let mixed = [
+        PersistentAxisMaterialization::Life {
+            player: P0,
+            per_cycle_delta: 1,
+        },
+        PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+            object: ObjectId(1),
+            counter: CounterType::Plus1Plus1,
+            per_cycle_delta: 1,
+        }]),
+    ];
+    assert_eq!(
+        LoopCollapseAxis::from_materializations(&mixed),
+        LoopCollapseAxis::Mixed
+    );
+
+    // Empty stash → Mixed (defensive).
+    assert_eq!(
+        LoopCollapseAxis::from_materializations(&[]),
+        LoopCollapseAxis::Mixed
+    );
+
+    // A non-materializable DriveSequence axis contributes no label → Mixed (defensive).
+    let drive_mana = [PersistentAxisMaterialization::DriveSequence {
+        sequence: vec![],
+        collapsed_axes: vec![ResourceAxis::Mana(ManaType::Colorless)],
+    }];
+    assert_eq!(
+        LoopCollapseAxis::from_materializations(&drive_mana),
+        LoopCollapseAxis::Mixed
     );
 }
