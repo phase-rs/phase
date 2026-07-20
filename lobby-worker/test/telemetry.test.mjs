@@ -45,7 +45,7 @@ test("sanitizeTelemetryBatch accepts the Tier 2 report/usage events with their c
     batch([
       { event: "card_report", oracle_id: "abc", face_name: "Front", name: "Colossal Dreadmaw", zone: "Battlefield", game_mode: "ai", turn: 5, supported: 2, total: 3 },
       { event: "session_start", route: "/game" },
-      { event: "game_start", game_mode: "ai", player_count: 2, ai_count: 1 },
+      { event: "game_start", game_mode: "ai", format: "HistoricBrawl", player_count: 2, ai_count: 1 },
       { event: "route_view", route: "/deck-builder" },
     ]),
   );
@@ -60,7 +60,7 @@ test("sanitizeTelemetryBatch accepts the Tier 2 report/usage events with their c
   assert.deepEqual(report.doubles, [5, 2, 3]);
   assert.deepEqual(session.blobs, ["/game"]);
   assert.deepEqual(session.doubles, []);
-  assert.deepEqual(gameStart.blobs, ["ai"]);
+  assert.deepEqual(gameStart.blobs, ["ai", "HistoricBrawl"]);
   assert.deepEqual(gameStart.doubles, [2, 1]);
   assert.deepEqual(route.blobs, ["/deck-builder"]);
   assert.deepEqual(route.doubles, []);
