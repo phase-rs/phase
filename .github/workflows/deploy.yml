@@ -50,8 +50,11 @@ jobs:
       - name: Set cache keys
         id: cache-keys
         run: |
-          echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
           echo "day=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Derive MTGJSON cache key
+        id: mtgjson-key
+        uses: ./.github/actions/mtgjson-cache-key
 
       - name: Cache MTGJSON data
         # Full data/mtgjson dir under the `mtgjson-full-` namespace: this job
@@ -60,15 +63,17 @@ jobs:
         # `mtgjson-atomic-`/`mtgjson-sets-` caches; all stay under the
         # `mtgjson-` prefix that clear-caches.yml deletes.
         #
-        # Exact weekly key, NO restore-keys: a new week misses so gen-card-data.sh
-        # re-fetches fresh MTGJSON data (its `[ ! -f ]` guards download whatever
-        # the empty dir is missing); a restore-keys fallback would pin the
-        # file-existence-gated fetches to last week's data forever.
+        # Exact published-version key (week-based fallback when the probe
+        # fails — see the mtgjson-cache-key action), NO restore-keys: the key
+        # misses exactly when MTGJSON publishes, so gen-card-data.sh re-fetches
+        # fresh data (its `[ ! -f ]` guards download whatever the empty dir is
+        # missing); a restore-keys fallback would pin the file-existence-gated
+        # fetches to stale data forever.
         id: mtgjson-cache
         uses: actions/cache@v4
         with:
           path: data/mtgjson
-          key: mtgjson-full-${{ steps.cache-keys.outputs.week }}
+          key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
 
       # Daily key with NO restore-keys: the gen-scryfall-*.sh scripts skip the
       # download when the file already exists, so a stale restore-key hit would
