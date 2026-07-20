@@ -1761,6 +1761,21 @@ impl ResolutionStack {
             return Err(ResolutionStackError::MultipleDirectChoiceOwners);
         }
 
+        // A frame whose direct gate matches the current prompt is its sole
+        // action owner, so it must be the active stack top. A direct-choice
+        // parent may remain below an unrelated inner prompt, but it may not be
+        // buried below a continuation while its own action is pending.
+        if let Some((index, frame)) = self.frames.iter().enumerate().find(|(_, frame)| {
+            matches!(frame.gate(), FrameGate::DirectChoice(gate) if gate.matches(waiting_for))
+        }) {
+            if index + 1 != self.frames.len() {
+                return Err(ResolutionStackError::InvalidPayload {
+                    frame: frame.kind(),
+                    message: "the direct-choice owner for the current prompt is not the active stack top".to_string(),
+                });
+            }
+        }
+
         let has_multi_draw = self
             .frames
             .iter()
@@ -4578,6 +4593,28 @@ mod tests {
         multiple_direct["resolution_state_version"] =
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
         assert!(serde_json::from_value::<ResolutionStateWire>(multiple_direct).is_err());
+
+        let mut buried_optional = GameState::new_two_player(151);
+        buried_optional.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: ObjectId(151),
+            description: None,
+            may_trigger_key: None,
+        };
+        let mut buried_optional_frames = ResolutionStack::default();
+        buried_optional_frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            ability: Box::new(resolved_draw(151)),
+            trigger_event: None,
+            trigger_match_count: None,
+        }));
+        buried_optional_frames.push_inner(continuation_frame(151));
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(
+                buried_optional,
+                buried_optional_frames,
+            ))
+            .is_err()
+        );
 
         let orphan_context = ResolvingTriggerContext {
             event: None,
