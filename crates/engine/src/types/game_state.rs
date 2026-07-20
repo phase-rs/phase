@@ -3160,7 +3160,7 @@ impl PendingZoneChangeDelivery {
 /// The struct stashes the per-iteration context (`ChangeZoneIterationCtx`)
 /// plus the unprocessed object ids; `drain_pending_change_zone_iteration`
 /// (in `effects/mod.rs`) re-enters the loop after each `ReplacementChoice`
-/// resolves. Drained BEFORE `pending_repeat_iteration` because the outer
+/// resolves. Drained before the repeat-for frame because the outer
 /// `repeat_for` loop may have stashed a chain that contains this inner
 /// ChangeZone iteration.
 ///
@@ -10752,7 +10752,7 @@ pub struct GameState {
     /// token-choice continuation — Jinnie Fay-class), read by every token
     /// proposal (`effects/token.rs`), and cleared ONLY at true full-drain
     /// (`effects/mod.rs::drain_pending_continuation`: back at priority with no
-    /// `pending_continuation`, no `pending_repeat_iteration`, AND no
+    /// ability-continuation frame, no repeat-for frame, AND no
     /// `pending_repeat_until`). The replacement pipeline and ChooseOneOf
     /// completion NEVER clear it — a branch may stash a token-bearing
     /// sub-ability or pause inside a repeat-until loop that drains only later
@@ -11771,15 +11771,6 @@ pub struct GameState {
     #[serde(skip)]
     pub resolving_continuation_attach_host: Option<AttachTarget>,
 
-    /// CR 608.2c + CR 109.5: Pending `repeat_for` iteration loop paused mid-flight
-    /// because the inner effect entered an interactive `WaitingFor` state.
-    /// Drained by `drain_pending_continuation` AFTER `pending_continuation`,
-    /// so the per-iteration chain (e.g., the SearchLibrary's
-    /// "put-onto-battlefield" continuation) completes before the next
-    /// iteration begins. See [`PendingRepeatIteration`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_repeat_iteration: Option<PendingRepeatIteration>,
-
     /// CR 603.12a + CR 608.2c: A repeated-optional-payment process (Hawkeye,
     /// Master Marksman — "you may pay {1} up to three times. When you do, choose
     /// up to that many.") paused for one of its per-iteration payment decisions.
@@ -11792,7 +11783,7 @@ pub struct GameState {
     /// CR 614.12b + CR 614.1c + CR 614.13: Pending multi-target `ChangeZone`
     /// iteration loop paused mid-flight because one of the moving objects
     /// triggered a per-permanent replacement choice. Drained by
-    /// `drain_pending_continuation` BEFORE `pending_repeat_iteration` so the
+    /// `drain_pending_continuation` before the repeat-for frame so the
     /// inner ChangeZone iteration completes (and its `EffectResolved` event
     /// fires) before the outer repeat loop advances. See
     /// [`PendingChangeZoneIteration`].
@@ -11882,7 +11873,7 @@ pub struct GameState {
     pub pending_choose_one_of: Option<PendingChooseOneOf>,
     /// CR 701.38d + CR 608.2c: Per-ballot vote iteration paused by an
     /// interactive choice. Drained after `pending_change_zone_iteration` and
-    /// before `pending_repeat_iteration`.
+    /// before the repeat-for frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_vote_ballot_iteration: Option<PendingVoteBallotIteration>,
     /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { EachPlayer }`
@@ -13568,6 +13559,47 @@ impl GameState {
         Ok(self.take_active_ability_continuation()?.is_some())
     }
 
+    /// Returns the repeat-for iteration only when its typed frame owns the
+    /// stack top.
+    pub fn active_repeat_for(&self) -> Option<&PendingRepeatIteration> {
+        self.resolution_stack.active_repeat_for()
+    }
+
+    /// Mutably accesses only the active repeat-for iteration frame.
+    pub fn active_repeat_for_mut(&mut self) -> Option<&mut PendingRepeatIteration> {
+        self.resolution_stack.active_repeat_for_mut()
+    }
+
+    /// Consume exactly the active repeat-for frame.
+    pub fn take_active_repeat_for(
+        &mut self,
+    ) -> Result<Option<PendingRepeatIteration>, ResolutionStackError> {
+        self.resolution_stack.take_active_repeat_for()
+    }
+
+    /// Park an independent repeat-for frame.
+    pub fn push_repeat_for(&mut self, pending: PendingRepeatIteration) {
+        self.resolution_stack.push_repeat_for(pending);
+    }
+
+    /// Re-park the active repeat-for frame after it advances without exposing
+    /// an empty-stack interval.
+    pub fn replace_active_repeat_for(
+        &mut self,
+        pending: PendingRepeatIteration,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_repeat_for(pending)
+    }
+
+    /// Insert a repeat-for parent directly below the continuation it resumed.
+    pub fn insert_repeat_for_parent_of_active(
+        &mut self,
+        pending: PendingRepeatIteration,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .insert_parent_of_active(super::resolution::ResolutionFrame::RepeatFor(pending))
+    }
+
     /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
     /// replacement-driven draw can pause its tail. The resulting subject is the
     /// authority for the later discard/counter step; it is never rebound through
@@ -14255,7 +14287,6 @@ impl GameState {
             public_revealed_cards: HashSet::new(),
             resolution_stack: ResolutionStack::default(),
             resolving_continuation_attach_host: None,
-            pending_repeat_iteration: None,
             pending_repeated_optional_payment: None,
             pending_change_zone_iteration: None,
             devour_eligible_snapshot: None,
@@ -15380,7 +15411,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         public_revealed_cards: _,
         resolution_stack: _,
         resolving_continuation_attach_host: _,
-        pending_repeat_iteration: _,
         pending_repeated_optional_payment: _,
         pending_change_zone_iteration: _,
         devour_eligible_snapshot: _,
@@ -15694,7 +15724,6 @@ impl PartialEq for GameState {
             && self.public_revealed_cards == other.public_revealed_cards
             && self.resolution_stack == other.resolution_stack
             && self.pending_resolution_completion == other.pending_resolution_completion
-            && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_repeated_optional_payment == other.pending_repeated_optional_payment
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
             // `devour_eligible_snapshot` is INTENTIONALLY excluded from PartialEq.

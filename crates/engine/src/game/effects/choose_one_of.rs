@@ -193,7 +193,7 @@ pub(crate) fn resolve_branch(
     // wipe the seed before that stashed token sub-ability proposes, re-prompting
     // the originating token-choice replacement (issue #4886, review #3). The
     // seed is cleared at true full-drain in `drain_pending_continuation`
-    // (Priority + no pending_continuation + no pending_repeat_iteration).
+    // (Priority + no ability-continuation or repeat-for frame).
     Ok(())
 }
 

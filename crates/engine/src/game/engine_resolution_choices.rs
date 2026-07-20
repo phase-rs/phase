@@ -917,10 +917,11 @@ fn finalize_standard_search_selection(
             .saturating_add(hand_exiles);
     }
     let mut has_delivery = false;
-    if let Some(mut frame) = state
-        .take_active_ability_continuation()
-        .expect("search selection cannot consume a buried continuation")
-    {
+    if state.active_ability_continuation().is_some() {
+        let mut frame = state
+            .take_active_ability_continuation()
+            .expect("checked active continuation must be consumable")
+            .expect("checked active continuation must exist");
         has_delivery = matches!(frame.pending.chain.effect, Effect::ChangeZone { .. });
         frame.pending.search_attach_host =
             effects::change_zone::resolve_search_continuation_attach_host(
@@ -3686,7 +3687,7 @@ pub(super) fn handle_resolution_choice(
             // CR 608.2c + CR 122.1: advance any paused resolution chain after the
             // branch resolves. This is the standard post-resolution step every
             // sibling choice handler runs. It no-ops when no `pending_continuation`
-            // / `pending_repeat_iteration` exists (each drain block is guarded by
+            // / a repeat-for frame exists (each drain block is guarded by
             // `if let Some(..) = ..take()`), so it is safe for existing `ChooseOneOf`
             // consumers and for the deferred-entry replay above (mutually exclusive
             // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop

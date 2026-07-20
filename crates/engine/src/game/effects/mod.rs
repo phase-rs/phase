@@ -691,7 +691,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // stamped when the iteration completes — not the stale pre-pause count. This
     // mirrors the non-pause path, where `change_zone::resolve` stamps
     // `last_effect_count` and emits the ChangeZone `EffectResolved` BEFORE the
-    // chained sub-ability runs. (Also kept before `pending_repeat_iteration`
+    // chained sub-ability runs. (Also kept before the repeat-for frame
     // below: the outer `repeat_for` loop must not advance until the inner
     // ChangeZone completes and emits its `EffectResolved`.)
     if !waits_for_resolution_choice(&state.waiting_for) {
@@ -712,43 +712,44 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // The continuation — the completed ChangeZone's chained downstream, or any
     // other parked chain — runs only once the inner iteration finished without
     // re-pausing on a further per-target replacement choice.
-    if !waits_for_resolution_choice(&state.waiting_for) {
-        if let Some(frame) = state
+    if !waits_for_resolution_choice(&state.waiting_for)
+        && state.active_ability_continuation().is_some()
+    {
+        let frame = state
             .take_active_ability_continuation()
-            .expect("continuation drain may consume only the active continuation frame")
-        {
-            let cont = frame.pending;
-            let PendingContinuation {
-                chain,
-                parent_kind,
-                search_attach_host,
-                trigger_context,
-            } = cont;
-            state.resolving_continuation_attach_host = search_attach_host;
-            let source_id = chain.source_id;
-            // CR 608.2: replay the resolving ability's snapshotted trigger
-            // context so TargetFilter::TriggeringPlayer (and its siblings)
-            // resolve against the original trigger, not whatever is live now.
-            let trigger_snapshot = trigger_context
-                .as_ref()
-                .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
-            let _ = resolve_ability_chain(state, &chain, events, 1);
-            if let Some(snapshot) = trigger_snapshot {
-                super::triggers::restore_trigger_event_context(state, snapshot);
-            }
-            state.resolving_continuation_attach_host = None;
-            if let Some(kind) = parent_kind {
-                events.push(GameEvent::EffectResolved {
-                    kind,
-                    source_id,
-                    subject: None,
-                });
-            }
-            if !waits_for_resolution_choice(&state.waiting_for) {
-                // CR 615.5: a resumed continuation completes its own paused
-                // resident drain only after it has not raised another choice.
-                state.post_replacement_drains.finish_paused_dispatch();
-            }
+            .expect("checked active continuation must be consumable")
+            .expect("checked active continuation must exist");
+        let cont = frame.pending;
+        let PendingContinuation {
+            chain,
+            parent_kind,
+            search_attach_host,
+            trigger_context,
+        } = cont;
+        state.resolving_continuation_attach_host = search_attach_host;
+        let source_id = chain.source_id;
+        // CR 608.2: replay the resolving ability's snapshotted trigger
+        // context so TargetFilter::TriggeringPlayer (and its siblings)
+        // resolve against the original trigger, not whatever is live now.
+        let trigger_snapshot = trigger_context
+            .as_ref()
+            .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
+        let _ = resolve_ability_chain(state, &chain, events, 1);
+        if let Some(snapshot) = trigger_snapshot {
+            super::triggers::restore_trigger_event_context(state, snapshot);
+        }
+        state.resolving_continuation_attach_host = None;
+        if let Some(kind) = parent_kind {
+            events.push(GameEvent::EffectResolved {
+                kind,
+                source_id,
+                subject: None,
+            });
+        }
+        if !waits_for_resolution_choice(&state.waiting_for) {
+            // CR 615.5: a resumed continuation completes its own paused
+            // resident drain only after it has not raised another choice.
+            state.post_replacement_drains.finish_paused_dispatch();
         }
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
@@ -762,7 +763,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // pause and re-stash via the loop in `resolve_ability_chain`, producing a
     // chain of resumed iterations until the loop completes.
     if !waits_for_resolution_choice(&state.waiting_for) {
-        drain_pending_repeat_iteration(state, events);
+        drain_active_repeat_for(state, events);
     }
     if !waits_for_resolution_choice(&state.waiting_for) {
         choose_one_of::resume_pending(state, events);
@@ -773,7 +774,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // prompt.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.active_ability_continuation().is_none()
-        && state.pending_repeat_iteration.is_none()
+        && state.active_repeat_for().is_none()
     {
         drain_pending_repeat_until(state);
     }
@@ -788,7 +789,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // ability is still resolving, so no token proposal can still need the seed.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.active_ability_continuation().is_none()
-        && state.pending_repeat_iteration.is_none()
+        && state.active_repeat_for().is_none()
         && state.pending_repeat_until.is_none()
     {
         state.post_replacement_token_choice_applied = None;
@@ -823,10 +824,11 @@ pub(crate) fn resume_resolution_frames(
     };
 
     match frame {
-        ResolutionFrame::AbilityContinuation(_)
-        | ResolutionFrame::RepeatFor(_)
-        | ResolutionFrame::RepeatUntil(_)
-        | ResolutionFrame::ChangeZone(_) => drain_pending_continuation(state, events),
+        ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::ChangeZone(_) => {
+            drain_pending_continuation(state, events)
+        }
+        ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
+        ResolutionFrame::RepeatUntil(_) => drain_pending_continuation(state, events),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
             // The optional-effect action owns both the next payment prompt and
             // its reflexive tail; a priority boundary has nothing to resume.
@@ -1314,14 +1316,17 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
 }
 
 /// CR 608.2c + CR 109.5: Resume a paused `repeat_for` loop. Each iteration
-/// may itself pause (re-stashing into `pending_repeat_iteration`); the outer
+/// may itself pause (re-parking its typed frame); the outer
 /// driver in `drain_pending_continuation` re-enters this on the next choice
 /// resolution. If an iteration completes synchronously and a further
 /// iteration also completes synchronously, this function drives them all
 /// in-line so the loop only pauses again when an inner effect actually
 /// transitions to a player-choice state.
-fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(pending) = state.pending_repeat_iteration.take() {
+fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    while let Some(pending) = state
+        .take_active_repeat_for()
+        .expect("repeat-for drain may consume only the active repeat-for frame")
+    {
         let crate::types::game_state::PendingRepeatIteration {
             ability,
             tracked_members,
@@ -1381,14 +1386,16 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
             if entered_choice || installed_continuation {
                 let next = iteration + 1;
                 if next < total_iterations {
-                    state.pending_repeat_iteration =
-                        Some(crate::types::game_state::PendingRepeatIteration {
+                    park_repeat_for_after_current_iteration(
+                        state,
+                        crate::types::game_state::PendingRepeatIteration {
                             ability: ability.clone(),
                             tracked_members: tracked_members.clone(),
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
                             next_iteration: next,
                             total_iterations,
-                        });
+                        },
+                    );
                 }
                 paused = true;
                 break;
@@ -1400,6 +1407,26 @@ fn drain_pending_repeat_iteration(state: &mut GameState, events: &mut Vec<GameEv
             // `drain_pending_continuation` will resume.
             break;
         }
+    }
+}
+
+/// Park the remaining repeat-for iterations either as the active owner of a
+/// direct choice or immediately below the continuation the just-finished
+/// iteration raised. The latter preserves the actual parent/child dependency
+/// instead of relying on a later stack search.
+fn park_repeat_for_after_current_iteration(
+    state: &mut GameState,
+    pending: crate::types::game_state::PendingRepeatIteration,
+) {
+    match state.resolution_stack.last() {
+        None => state.push_repeat_for(pending),
+        Some(ResolutionFrame::AbilityContinuation(_)) => state
+            .insert_repeat_for_parent_of_active(pending)
+            .expect("repeat-for parent must be inserted directly below its continuation child"),
+        Some(frame) => panic!(
+            "repeat-for iteration raised an unexpected nested {:?} frame",
+            frame.kind()
+        ),
     }
 }
 
@@ -5321,24 +5348,29 @@ fn drive_repeat_for_outermost(
     };
 
     let initial_waiting_for = state.waiting_for.clone();
+    let initial_continuation_present = state.active_ability_continuation().is_some();
     let mut iteration = 0usize;
     while iteration < base_iterations {
         let mut iter_ability = effective.clone();
         iter_ability.repeat_for = None;
         resolve_chain_body(state, &iter_ability, events, depth)?;
-        if state.waiting_for != initial_waiting_for {
+        if state.waiting_for != initial_waiting_for
+            || (!initial_continuation_present && state.active_ability_continuation().is_some())
+        {
             let next_iteration = iteration + 1;
             if next_iteration < base_iterations {
                 let mut resume = effective.clone();
                 resume.repeat_for = None;
-                state.pending_repeat_iteration =
-                    Some(crate::types::game_state::PendingRepeatIteration {
+                park_repeat_for_after_current_iteration(
+                    state,
+                    crate::types::game_state::PendingRepeatIteration {
                         ability: Box::new(resume),
                         tracked_members: Vec::new(),
                         iterated_counter_kinds: Vec::new(),
                         next_iteration,
                         total_iterations: base_iterations,
-                    });
+                    },
+                );
             }
             break;
         }
@@ -8247,6 +8279,7 @@ fn resolve_chain_body(
             };
 
             let initial_waiting_for = state.waiting_for.clone();
+            let initial_continuation_present = state.active_ability_continuation().is_some();
             let mut iteration = 0usize;
             let repeated_full_chain =
                 ability.repeat_for.is_some() && effective.sub_ability.is_some();
@@ -8324,7 +8357,10 @@ fn resolve_chain_body(
                 // sub-ability) complete. Without this, only the first
                 // iteration would ever fire — the loop would break and the
                 // remaining iterations would be silently dropped.
-                if state.waiting_for != initial_waiting_for {
+                if state.waiting_for != initial_waiting_for
+                    || (!initial_continuation_present
+                        && state.active_ability_continuation().is_some())
+                {
                     let next_iteration = iteration + 1;
                     if next_iteration < iterations {
                         // CR 608.2c + CR 109.5: Each resumed iteration must run
@@ -8352,8 +8388,9 @@ fn resolve_chain_body(
                         // an event, so it must not re-fire on each resumed copy).
                         resume_ability.copy_count_status =
                             crate::types::ability::CopyCountStatus::Finalized;
-                        state.pending_repeat_iteration =
-                            Some(crate::types::game_state::PendingRepeatIteration {
+                        park_repeat_for_after_current_iteration(
+                            state,
+                            crate::types::game_state::PendingRepeatIteration {
                                 ability: Box::new(resume_ability),
                                 tracked_members: iter_tracked_members.clone(),
                                 // CR 122.1 + CR 608.2c: carry the per-iteration
@@ -8362,7 +8399,8 @@ fn resolve_chain_body(
                                 iterated_counter_kinds: iterated_counter_kinds.clone(),
                                 next_iteration,
                                 total_iterations: iterations,
-                            });
+                            },
+                        );
                     }
                     break;
                 }
@@ -16477,11 +16515,19 @@ mod tests {
             other => panic!("expected SearchChoice, got {:?}", other),
         }
 
-        // The remaining iteration must be stashed in `pending_repeat_iteration`
+        // The remaining iteration must be parked in the typed repeat-for frame
         // so subsequent SearchChoice resolutions resume the loop.
         let pending = state
-            .pending_repeat_iteration
-            .as_ref()
+            .active_repeat_for()
+            .or_else(|| {
+                state
+                    .resolution_stack
+                    .active_predecessor()
+                    .and_then(|frame| match frame {
+                        ResolutionFrame::RepeatFor(pending) => Some(pending),
+                        _ => None,
+                    })
+            })
             .expect("second iteration must be stashed for resumption");
         assert_eq!(pending.next_iteration, 1);
         assert_eq!(pending.total_iterations, 2);
@@ -16581,7 +16627,7 @@ mod tests {
     /// of Abandon shape across two distinct opponent controllers. After the
     /// FIRST iteration's SearchChoice is resolved (P1 picks a basic land), the
     /// loop must resume and prompt the SECOND opponent (P2) for their own
-    /// search. Without the `pending_repeat_iteration` infrastructure, only
+    /// search. Without the typed repeat-for frame, only
     /// the first iteration would ever fire.
     #[test]
     fn repeat_for_resumes_iteration_after_search_choice_resolves() {
@@ -16717,8 +16763,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            state.pending_repeat_iteration.is_none(),
-            "loop must clear pending_repeat_iteration after final iteration completes"
+            state.active_repeat_for().is_none(),
+            "loop must clear the repeat-for frame after final iteration completes"
         );
     }
 
@@ -16844,7 +16890,7 @@ mod tests {
     /// CR 608.2c + CR 109.5 + CR 701.23i: End-to-end Winds of Abandon shape —
     /// the resumed iteration MUST run its full sub_ability chain
     /// (put-onto-battlefield + shuffle), not just the SearchLibrary effect.
-    /// Without preserving `sub_ability` on the resumed `pending_repeat_iteration`,
+    /// Without preserving `sub_ability` on the resumed repeat-for frame,
     /// the FIRST opponent's chosen card lands on the battlefield (iteration 0
     /// goes through the line-1660 SearchChoice continuation wiring), but the
     /// SECOND opponent's chosen card is silently lost — the resume path
@@ -17058,8 +17104,8 @@ mod tests {
         );
 
         assert!(
-            state.pending_repeat_iteration.is_none(),
-            "loop must clear pending_repeat_iteration after final iteration completes"
+            state.active_repeat_for().is_none(),
+            "loop must clear the repeat-for frame after final iteration completes"
         );
     }
 
@@ -17240,7 +17286,7 @@ mod tests {
     }
 
     /// CR 608.2c + CR 109.5: Direct unit test of the synchronous-continuation
-    /// re-stash predicate inside `drain_pending_repeat_iteration`. Constructs
+    /// re-park predicate inside `drain_active_repeat_for`. Constructs
     /// a multi-iteration resume whose iterations install a `pending_continuation`
     /// without changing `waiting_for`, then verifies the drain detects the
     /// continuation transition and re-stashes the remaining iterations rather
@@ -17253,7 +17299,7 @@ mod tests {
     /// state so the stash fires synchronously without any waiting_for change,
     /// directly exercising the new `installed_continuation` predicate.
     #[test]
-    fn drain_pending_repeat_iteration_restashes_on_synchronous_continuation() {
+    fn drain_active_repeat_for_reparks_on_synchronous_continuation() {
         use crate::types::ability::AbilityCondition;
         use crate::types::game_state::PendingRepeatIteration;
 
@@ -17331,7 +17377,7 @@ mod tests {
         iter_ability.repeat_for = None;
 
         // Stage a resume of 3 iterations starting at iteration 1.
-        state.pending_repeat_iteration = Some(PendingRepeatIteration {
+        state.push_repeat_for(PendingRepeatIteration {
             ability: Box::new(iter_ability),
             tracked_members: vec![],
             iterated_counter_kinds: vec![],
@@ -17340,7 +17386,7 @@ mod tests {
         });
 
         let mut events = Vec::new();
-        super::drain_pending_repeat_iteration(&mut state, &mut events);
+        super::drain_active_repeat_for(&mut state, &mut events);
 
         // Iteration 1 ran: parent Draw fired (1 card), then the
         // ConditionInstead sub stashed its else_ability into
@@ -17352,10 +17398,17 @@ mod tests {
             "iteration 1 must have installed a synchronous pending_continuation \
              (else_ability of ConditionInstead)"
         );
-        let pending = state.pending_repeat_iteration.as_ref().expect(
-            "iteration 2 must be re-stashed — without the synchronous-continuation \
+        let pending = state
+            .resolution_stack
+            .active_predecessor()
+            .and_then(|frame| match frame {
+                ResolutionFrame::RepeatFor(pending) => Some(pending),
+                _ => None,
+            })
+            .expect(
+                "iteration 2 must be re-stashed — without the synchronous-continuation \
              predicate, this would be None and iteration 2 would be silently dropped",
-        );
+            );
         assert_eq!(
             pending.next_iteration, 2,
             "re-stash must advance to iteration 2"
@@ -23380,8 +23433,7 @@ mod tests {
             WaitingFor::OptionalEffectChoice { .. }
         ));
         let pending = state
-            .pending_repeat_iteration
-            .as_ref()
+            .active_repeat_for()
             .expect("first optional prompt must stash the remaining iteration");
         assert_eq!(
             pending.total_iterations, 2,

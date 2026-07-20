@@ -361,6 +361,65 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the active repeat-for iteration owner when it owns the stack
+    /// top. Repeat consumers must never search below a nested continuation.
+    pub fn active_repeat_for(&self) -> Option<&PendingRepeatIteration> {
+        match self.last() {
+            Some(ResolutionFrame::RepeatFor(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active repeat-for iteration owner.
+    pub fn active_repeat_for_mut(&mut self) -> Option<&mut PendingRepeatIteration> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::RepeatFor(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active repeat-for iteration frame.
+    pub fn take_active_repeat_for(
+        &mut self,
+    ) -> Result<Option<PendingRepeatIteration>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::RepeatFor(_)) => {
+                let ResolutionFrame::RepeatFor(frame) = self.pop_expected(FrameKind::RepeatFor)?
+                else {
+                    unreachable!("checked repeat-for frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::RepeatFor,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a newly active repeat-for iteration.
+    pub fn push_repeat_for(&mut self, frame: PendingRepeatIteration) {
+        self.push_inner(ResolutionFrame::RepeatFor(frame));
+    }
+
+    /// Re-park the active repeat-for iteration without an empty-stack interval.
+    pub fn replace_active_repeat_for(
+        &mut self,
+        frame: PendingRepeatIteration,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::RepeatFor(_)) => {
+                self.replace_active(ResolutionFrame::RepeatFor(frame))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::RepeatFor,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Returns only the immediate predecessor of the active frame.
     ///
     /// This is intentionally narrower than a frame search: the only Phase-2
@@ -594,8 +653,8 @@ impl ResolutionStateWire {
                 if object.contains_key("resolution_stack") {
                     return Err("v1 resolution state must not contain resolution_stack".to_string());
                 }
-                let legacy_ability =
-                    LegacyAbilityContinuationWire::from_value(&value)?;
+                let legacy_ability = LegacyAbilityContinuationWire::from_value(&value)?;
+                let legacy_repeat_for = LegacyRepeatForWire::from_value(&value)?;
                 let mut legacy_value = value;
                 let legacy_object = legacy_value
                     .as_object_mut()
@@ -603,10 +662,14 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_continuation");
                 legacy_object.remove("search_continuation_attach_host");
                 legacy_object.remove("pending_choose_zone_trigger_context");
+                legacy_object.remove("pending_repeat_iteration");
                 let mut legacy: GameState =
                     serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
                 if let Some(frame) = legacy_ability.into_frame()? {
                     legacy.push_ability_continuation(frame);
+                }
+                if let Some(frame) = legacy_repeat_for.into_frame() {
+                    legacy.push_repeat_for(frame);
                 }
                 legacy.migrate_post_replacement_continuation();
                 legacy.migrate_pending_multi_draw();
@@ -769,6 +832,23 @@ impl LegacyAbilityContinuationWire {
     }
 }
 
+/// v1-only repeat-for field. Runtime state carries it only as a typed frame.
+#[derive(Deserialize)]
+struct LegacyRepeatForWire {
+    #[serde(default)]
+    pending_repeat_iteration: Option<PendingRepeatIteration>,
+}
+
+impl LegacyRepeatForWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingRepeatIteration> {
+        self.pending_repeat_iteration
+    }
+}
+
 pub(crate) fn canonicalize_legacy_resolution_state(
     state: &GameState,
 ) -> Result<ResolutionStack, String> {
@@ -783,7 +863,10 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     let mut frames = ResolutionStack::default();
 
     for frame in state.resolution_stack.iter() {
-        if !matches!(frame, ResolutionFrame::AbilityContinuation(_)) {
+        if !matches!(
+            frame,
+            ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::RepeatFor(_)
+        ) {
             return Err(format!(
                 "runtime resolution stack contains unmigrated {:?} frame",
                 frame.kind()
@@ -813,9 +896,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_repeat_iteration.clone() {
-        frames.push_inner(ResolutionFrame::RepeatFor(pending));
-    }
     if let Some(pending) = state.pending_repeat_until.clone() {
         frames.push_inner(ResolutionFrame::RepeatUntil(pending));
     }
@@ -957,11 +1037,7 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::AbilityContinuation(frame) => {
                 projected.push_ability_continuation(frame.clone());
             }
-            ResolutionFrame::RepeatFor(pending) => set_once(
-                &mut projected.pending_repeat_iteration,
-                pending.clone(),
-                "RepeatFor",
-            )?,
+            ResolutionFrame::RepeatFor(pending) => projected.push_repeat_for(pending.clone()),
             ResolutionFrame::RepeatUntil(pending) => set_once(
                 &mut projected.pending_repeat_until,
                 pending.clone(),
@@ -1104,7 +1180,6 @@ fn project_frames_into_legacy_state(
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
-    state.pending_repeat_iteration = None;
     state.pending_repeat_until = None;
     state.pending_repeated_optional_payment = None;
     state.optional_cost_payments_this_resolution = 0;
@@ -1392,6 +1467,21 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v1)
             .expect("v1 ability fixture converts through the wire")
+            .into_game_state()
+    }
+
+    fn restore_v1_repeat_for_fixture(
+        state: GameState,
+        pending: PendingRepeatIteration,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_repeat_iteration"] =
+            serde_json::to_value(pending).expect("legacy repeat-for serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 repeat-for fixture converts through the wire")
             .into_game_state()
     }
 
@@ -1994,16 +2084,18 @@ mod tests {
         assert!(continuation.active_ability_continuation().is_none());
         assert_reserializes_v2_only(continuation);
 
-        let mut repeat_for = GameState::new_two_player(111);
-        repeat_for.pending_repeat_iteration = Some(PendingRepeatIteration {
-            ability: Box::new(resolved_draw(111)),
-            tracked_members: Vec::new(),
-            iterated_counter_kinds: Vec::new(),
-            next_iteration: 0,
-            total_iterations: 0,
-        });
-        let repeat_for = resume_priority_fixture(restore_v1_fixture(repeat_for));
-        assert!(repeat_for.pending_repeat_iteration.is_none());
+        let repeat_for = GameState::new_two_player(111);
+        let repeat_for = resume_priority_fixture(restore_v1_repeat_for_fixture(
+            repeat_for,
+            PendingRepeatIteration {
+                ability: Box::new(resolved_draw(111)),
+                tracked_members: Vec::new(),
+                iterated_counter_kinds: Vec::new(),
+                next_iteration: 0,
+                total_iterations: 0,
+            },
+        ));
+        assert!(repeat_for.active_repeat_for().is_none());
         assert_reserializes_v2_only(repeat_for);
 
         let mut repeat_until = GameState::new_two_player(112);

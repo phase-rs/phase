@@ -4634,7 +4634,9 @@ mod tests {
         let _ = state
             .clear_active_ability_continuation()
             .expect("fixture has no buried continuation");
-        state.pending_repeat_iteration = None;
+        let _ = state
+            .take_active_repeat_for()
+            .expect("fixture cannot clear a buried repeat-for frame");
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };

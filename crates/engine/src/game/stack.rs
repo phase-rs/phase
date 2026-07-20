@@ -2060,7 +2060,7 @@ fn self_counter_batch_state_is_settled(state: &GameState) -> bool {
         && state.current_trigger_match_count.is_none()
         && state.die_result_this_resolution.is_none()
         && state.active_ability_continuation().is_none()
-        && state.pending_repeat_iteration.is_none()
+        && state.active_repeat_for().is_none()
         && state.pending_repeated_optional_payment.is_none()
         && state.pending_repeat_until.is_none()
         && state.pending_change_zone_iteration.is_none()

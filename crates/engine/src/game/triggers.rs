@@ -6405,7 +6405,7 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     if state.active_ability_continuation().is_some() {
         return false;
     }
-    if state.pending_repeat_iteration.is_some() {
+    if state.active_repeat_for().is_some() {
         return false;
     }
     if state.has_post_replacement_drain() {
