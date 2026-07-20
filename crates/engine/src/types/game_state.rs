@@ -21,7 +21,10 @@ use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
-use super::events::{GameEvent, PlayerActionKind};
+use super::events::{
+    EventAttachmentSnapshot, EventCombatSnapshot, EventObjectHistorySnapshot,
+    EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind,
+};
 use super::format::FormatConfig;
 use super::identifiers::{
     CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
@@ -38,6 +41,9 @@ use super::proposed_event::{
     AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec,
 };
 use super::replacements::ReplacementEvent;
+#[cfg(debug_assertions)]
+use super::resolution::debug_assert_runtime_resolution_invariants;
+use super::resolution::ResolutionStateWire;
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
@@ -1803,6 +1809,7 @@ pub struct CommanderDamageEntry {
 /// cannot go out of sync; two parallel `Option`s would let one be set
 /// without the other and break the "pause emits the same event as
 /// non-pause" invariant.
+///
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -6823,11 +6830,74 @@ pub(crate) struct PrecastShortcutBreakpoint {
 
 /// Trusted-persistence-only envelope for runtime data that must never cross a
 /// raw or public `GameState` serialization boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TrustedGameStateEnvelope {
     state: GameState,
-    #[serde(default)]
     precast_shortcut_runtime: PrecastShortcutRuntime,
+}
+
+fn decode_persisted_resolution_state(mut value: serde_json::Value) -> Result<GameState, String> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+    // Historical persistence payloads predate the explicit resolution-state
+    // discriminator. This outer persistence boundary, which already knows it
+    // is reading an old raw GameState shape, gives them the legacy-only v1
+    // marker before the first GameState decode. ResolutionStateWire itself
+    // continues to reject missing/unknown discriminators.
+    object
+        .entry("resolution_state_version".to_string())
+        .or_insert_with(|| serde_json::Value::from(1));
+    let state = serde_json::from_value::<ResolutionStateWire>(value)
+        .map(ResolutionStateWire::into_game_state)
+        .map_err(|error| error.to_string())?;
+    #[cfg(debug_assertions)]
+    debug_assert_runtime_resolution_invariants(&state);
+    Ok(state)
+}
+
+impl Serialize for TrustedGameStateEnvelope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut value = serde_json::Map::new();
+        value.insert(
+            "state".to_string(),
+            serde_json::to_value(ResolutionStateWire::from_game_state(self.state.clone()))
+                .map_err(serde::ser::Error::custom)?,
+        );
+        value.insert(
+            "precast_shortcut_runtime".to_string(),
+            serde_json::to_value(&self.precast_shortcut_runtime)
+                .map_err(serde::ser::Error::custom)?,
+        );
+        serde_json::Value::Object(value).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| serde::de::Error::custom("trusted state must be a JSON object"))?;
+        let state = object
+            .remove("state")
+            .ok_or_else(|| serde::de::Error::custom("trusted state is missing state"))?;
+        let precast_shortcut_runtime = match object.remove("precast_shortcut_runtime") {
+            Some(runtime) => serde_json::from_value(runtime).map_err(serde::de::Error::custom)?,
+            None => PrecastShortcutRuntime::default(),
+        };
+        let state = decode_persisted_resolution_state(state).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            state,
+            precast_shortcut_runtime,
+        })
+    }
 }
 
 impl TrustedGameStateEnvelope {
@@ -6853,11 +6923,24 @@ impl TrustedGameStateEnvelope {
 /// Decodes both current trusted snapshots and historical raw `GameState`
 /// snapshots. The raw form has no pre-cast route authority, so restoring it
 /// always drops any protocol wait before it reaches a live game session.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum PersistedGameState {
     Raw(Box<GameState>),
     Trusted(Box<TrustedGameStateEnvelope>),
+}
+
+impl Serialize for PersistedGameState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Raw(state) => {
+                ResolutionStateWire::from_game_state((**state).clone()).serialize(serializer)
+            }
+            Self::Trusted(envelope) => envelope.serialize(serializer),
+        }
+    }
 }
 
 /// Rejects the old prompt shape before deserializing a persisted game.
@@ -6902,7 +6985,7 @@ impl<'de> Deserialize<'de> for PersistedGameState {
                 .map(|envelope| Self::Trusted(Box::new(envelope)))
                 .map_err(serde::de::Error::custom)
         } else {
-            serde_json::from_value(value)
+            decode_persisted_resolution_state(value)
                 .map(|state| Self::Raw(Box::new(state)))
                 .map_err(serde::de::Error::custom)
         }
@@ -7470,7 +7553,7 @@ pub enum WaitingFor {
     /// After discarding, nonland discards add +1/+1 counters to the conniving creature.
     ConniveDiscard {
         player: PlayerId,
-        conniver_id: ObjectId,
+        conniver: ConniveSubject,
         source_id: ObjectId,
         cards: Vec<ObjectId>,
         count: usize,
@@ -12573,9 +12656,33 @@ pub struct TransientContinuousEffect {
 /// (CR 614.5) so the CR 616.1f repeat covers the remaining connive replacements
 /// without self-invoking. (CR 614.11a — completing a replacement's actions before
 /// resuming a draw — is the analogous supporting principle.)
+/// CR 400.7 + CR 701.50b/f: The exact permanent that began a connive action.
+///
+/// This deliberately carries the full event snapshot rather than a bare
+/// [`ObjectId`]. Connive's draw/discard tail can pause and the original permanent
+/// can leave and return before that tail adds counters. The embedded
+/// [`ObjectIncarnationRef`] keeps that returned object from becoming the old
+/// conniver. There is intentionally no serde default or raw-ID compatibility:
+/// an old save cannot reconstruct the original incarnation or LKI, so accepting
+/// it would silently authorize a different object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConniveSubject {
+    pub snapshot: EventObjectSnapshot,
+}
+
+impl ConniveSubject {
+    pub fn identity(&self) -> ObjectIncarnationRef {
+        self.snapshot.identity
+    }
+
+    pub fn object_id(&self) -> ObjectId {
+        self.identity().object_id
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingConniveReentry {
-    pub conniver: ObjectId,
+    pub conniver: ConniveSubject,
     pub count: u32,
     pub applied: HashSet<AppliedReplacementKey>,
 }
@@ -12603,7 +12710,7 @@ pub struct PendingConniveReentry {
 /// The old single slot expressed this by taking the continuation early and
 /// clearing the event fields late — an interleaving that no type enforced and
 /// every caller had to respect. Here it is a state transition:
-/// `Ready(work)` → `Dispatching` → popped.
+/// `Ready(work)` → `Dispatching` → `Paused` → popped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DrainStatus {
     /// Not yet run. `Template` is an AST resolved against `source`; `Resolved`
@@ -12612,6 +12719,21 @@ pub enum DrainStatus {
     /// Taken and running. The drain stays resident so the running effect can still
     /// read its event context (CR 615.5).
     Dispatching,
+    /// The taken continuation paused. This status lives on the exact stack entry
+    /// that dispatched it, so nested post-replacement draws retain independent
+    /// event contexts without a drain-id graph or a reverse frame reference.
+    Paused,
+}
+
+/// A transient, typed claim on one resident post-replacement drain dispatch.
+///
+/// The drain stack owns the persisted lifecycle status; this handle only lets
+/// the synchronous dispatcher finish or pause the entry it took after a nested
+/// replacement has pushed another drain above it. It is never serialized and
+/// introduces no cross-carrier reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostReplacementDrainDispatch {
+    depth: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12769,7 +12891,7 @@ impl PostReplacementDrain {
     ) -> Option<&crate::types::ability::PostReplacementContinuation> {
         match &self.status {
             DrainStatus::Ready(continuation) => Some(continuation),
-            DrainStatus::Dispatching => None,
+            DrainStatus::Dispatching | DrainStatus::Paused => None,
         }
     }
 }
@@ -12856,19 +12978,67 @@ impl PostReplacementDrainStack {
     ///
     /// Returns `None` if there is no resident drain, or its continuation was
     /// already taken.
-    pub fn begin_dispatch(&mut self) -> Option<crate::types::ability::PostReplacementContinuation> {
-        let drain = self.drains.last_mut()?;
+    pub fn begin_dispatch(
+        &mut self,
+    ) -> Option<(
+        crate::types::ability::PostReplacementContinuation,
+        PostReplacementDrainDispatch,
+    )> {
+        let depth = self.drains.len().checked_sub(1)?;
+        let drain = self.drains.get_mut(depth)?;
         match std::mem::replace(&mut drain.status, DrainStatus::Dispatching) {
-            DrainStatus::Ready(continuation) => Some(continuation),
-            // Already dispatching: report no work. The `mem::replace` above has
-            // already written `Dispatching` back, so there is nothing to restore.
+            DrainStatus::Ready(continuation) => {
+                Some((continuation, PostReplacementDrainDispatch { depth }))
+            }
+            // Already dispatching or paused: report no work. The `mem::replace`
+            // above has written `Dispatching` back, so restore a paused owner.
             DrainStatus::Dispatching => None,
+            DrainStatus::Paused => {
+                drain.status = DrainStatus::Paused;
+                None
+            }
         }
     }
 
-    /// Pop the drain whose continuation has finished dispatching.
-    pub fn finish_dispatch(&mut self) -> Option<PostReplacementDrain> {
-        if matches!(self.drains.last()?.status, DrainStatus::Dispatching) {
+    /// Whether this dispatch still owns the resident stack top. A nested
+    /// replacement drain makes this false without invalidating the handle.
+    pub fn dispatch_is_resident_top(&self, dispatch: PostReplacementDrainDispatch) -> bool {
+        dispatch.depth.checked_add(1) == Some(self.drains.len())
+    }
+
+    /// Mark the exact drain whose continuation paused. The typed handle keeps a
+    /// nested dispatch from changing the outer entry by accident.
+    pub fn pause_dispatch(&mut self, dispatch: PostReplacementDrainDispatch) -> bool {
+        let Some(drain) = self.drains.get_mut(dispatch.depth) else {
+            return false;
+        };
+        if !matches!(drain.status, DrainStatus::Dispatching) {
+            return false;
+        }
+        drain.status = DrainStatus::Paused;
+        true
+    }
+
+    /// Pop the exact drain whose continuation has finished dispatching. It may
+    /// sit below a nested paused drain; this retires only that finished owner's
+    /// event context and leaves the nested continuation intact.
+    pub fn finish_dispatch(
+        &mut self,
+        dispatch: PostReplacementDrainDispatch,
+    ) -> Option<PostReplacementDrain> {
+        if matches!(
+            self.drains.get(dispatch.depth)?.status,
+            DrainStatus::Dispatching
+        ) {
+            return Some(self.drains.remove(dispatch.depth));
+        }
+        None
+    }
+
+    /// Pop only the innermost dispatch that itself paused. This preserves the
+    /// outer event context while a contained replacement continuation runs.
+    pub fn finish_paused_dispatch(&mut self) -> Option<PostReplacementDrain> {
+        if matches!(self.drains.last()?.status, DrainStatus::Paused) {
             return self.drains.pop();
         }
         None
@@ -12905,7 +13075,10 @@ pub enum DrawSequenceOrigin {
     Plain,
     /// CR 701.50a/701.50d: after the connive draws settle, discard `count` cards and
     /// put +1/+1 counters equal to nonland cards discarded on `conniver`.
-    ConniveTail { conniver: ObjectId, count: u32 },
+    ConniveTail {
+        conniver: Box<ConniveSubject>,
+        count: u32,
+    },
     /// CR 701.22d-adjacent bookkeeping: a scry replaced into a draw completes by
     /// emitting EffectResolved{Scry} for `source_id` once the draws settle.
     ScryCompletion { source_id: ObjectId },
@@ -12993,6 +13166,17 @@ impl DrawSequenceStack {
         self.frames
             .last_mut()
             .filter(|frame| frame.frame_id == frame_id)
+    }
+
+    /// Locate a still-live frame by its stable identity without making it active.
+    ///
+    /// CR 121.6b: only [`Self::active_if`] may *resume* a frame. Completion
+    /// accounting, however, must still credit an outer unit that delivered just
+    /// before a nested replacement draw pushed its own frame above it.
+    pub fn frame_mut(&mut self, frame_id: DrawSequenceFrameId) -> Option<&mut DrawSequenceFrame> {
+        self.frames
+            .iter_mut()
+            .find(|frame| frame.frame_id == frame_id)
     }
 
     /// Push a new instruction and return its ID. Monotonic: the allocator never
@@ -13336,6 +13520,146 @@ const _: fn() = || {
 };
 
 impl GameState {
+    /// CR 400.7 + CR 701.50b/f: Capture the original conniver before any
+    /// replacement-driven draw can pause its tail. The resulting subject is the
+    /// authority for the later discard/counter step; it is never rebound through
+    /// the stable storage id.
+    pub fn capture_connive_subject(&self, object_id: ObjectId) -> Option<ConniveSubject> {
+        let object = self.objects.get(&object_id)?;
+        let identity = ObjectIncarnationRef::from_object(object);
+        let combat = self.combat.as_ref();
+        let attacker = combat.and_then(|combat| {
+            combat
+                .attackers
+                .iter()
+                .find(|attacker| attacker.object_id == object_id)
+        });
+        let blocking =
+            combat.is_some_and(|combat| combat.blocker_to_attacker.contains_key(&object_id));
+        let related_objects = attacker
+            .into_iter()
+            .flat_map(|attacker| {
+                combat
+                    .and_then(|combat| combat.blocker_assignments.get(&attacker.object_id))
+                    .into_iter()
+                    .flatten()
+            })
+            .chain(
+                combat
+                    .and_then(|combat| combat.blocker_to_attacker.get(&object_id))
+                    .into_iter()
+                    .flatten(),
+            )
+            .filter_map(|related_id| {
+                self.objects
+                    .get(related_id)
+                    .map(ObjectIncarnationRef::from_object)
+            })
+            .collect();
+        let attachments = crate::game::zones::capture_attachment_snapshot(self, object)
+            .into_iter()
+            .filter_map(|attachment| {
+                Some(EventAttachmentSnapshot {
+                    identity: attachment.identity?,
+                    controller: attachment.controller,
+                    kind: attachment.kind,
+                })
+            })
+            .collect();
+        let zone_changes_this_turn = self
+            .zone_changes_this_turn
+            .iter()
+            .filter(|record| {
+                record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity)
+            })
+            .map(|record| (record.from_zone, record.to_zone))
+            .collect();
+
+        Some(ConniveSubject {
+            snapshot: EventObjectSnapshot {
+                identity,
+                controller: object.controller,
+                owner: object.owner,
+                zone: object.zone,
+                name: object.name.clone(),
+                core_types: object.card_types.core_types.clone(),
+                subtypes: object.card_types.subtypes.clone(),
+                supertypes: object.card_types.supertypes.clone(),
+                colors: object.effective_colors(),
+                keywords: object.keywords.clone(),
+                power: object.power,
+                toughness: object.toughness,
+                base_power: object.base_power,
+                base_toughness: object.base_toughness,
+                mana_value: object.effective_mana_value(),
+                counters: object.counters.clone(),
+                is_token: object.is_token,
+                is_commander: object.is_commander,
+                tapped: object.tapped,
+                face_down: object.face_down,
+                transformed: object.transformed,
+                is_suspected: object.is_suspected,
+                is_renowned: object.is_renowned,
+                is_saddled: object.is_saddled,
+                has_no_abilities: crate::game::filter::object_has_no_abilities(object),
+                attachments,
+                protector: object.protector(),
+                combat: EventCombatSnapshot {
+                    attacking: attacker.is_some(),
+                    blocking,
+                    blocked: attacker.is_some_and(|attacker| attacker.blocked),
+                    attacking_alone: attacker
+                        .is_some_and(|_| combat.is_some_and(|combat| combat.attackers.len() == 1)),
+                    blocking_alone: blocking
+                        && combat.is_some_and(|combat| combat.blocker_to_attacker.len() == 1),
+                    defending_player: attacker.map(|attacker| attacker.defending_player),
+                    related_objects,
+                },
+                history: EventObjectHistorySnapshot {
+                    was_dealt_damage_this_turn: self.damage_dealt_this_turn.iter().any(|damage| {
+                        matches!(damage.target, TargetRef::Object(target) if target == object_id)
+                            && damage.target_incarnation == Some(identity.incarnation)
+                    }),
+                    entered_this_turn: object.entered_battlefield_turn == Some(self.turn_number),
+                    attacked_defenders_this_turn: self
+                        .creature_attacked_defenders_this_turn
+                        .get(&object_id)
+                        .map(|players| players.iter().copied().collect())
+                        .unwrap_or_default(),
+                    blocked_this_turn: self.creatures_blocked_this_turn.contains(&object_id),
+                    zone_changes_this_turn,
+                    // Counter records predating exact-incarnation support carry
+                    // only an ObjectId. Do not turn that ambiguous history into
+                    // evidence about this subject.
+                    counters_put_on_this_turn: Vec::new(),
+                },
+                relations: EventObjectRelationSnapshot {
+                    saddled_sources: object
+                        .saddled_by
+                        .iter()
+                        .filter_map(|id| {
+                            self.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        })
+                        .collect(),
+                    convoked_sources: object
+                        .convoked_creatures
+                        .iter()
+                        .filter_map(|id| {
+                            self.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        })
+                        .collect(),
+                    // Tracked-set membership is currently raw-ID-only. As with
+                    // counter history above, fail closed until it carries exact
+                    // membership identity.
+                    tracked_sets: Vec::new(),
+                },
+            },
+        })
+    }
+
     /// Builds the exact paused-delivery key from the replacement record before
     /// that record is consumed. Only a `ZoneChange` can belong to either
     /// logical zone-change owner.
@@ -15582,6 +15906,79 @@ mod drain_stack_reentrancy_tests {
         );
     }
 
+    /// CR 615.5 + CR 616.1g: nested pausing replacement continuations own
+    /// distinct stack entries. Completing the inner draw must not pop or strand
+    /// the outer prevented-event context.
+    #[test]
+    fn nested_paused_dispatches_finish_lifo() {
+        let mut stack = PostReplacementDrainStack::default();
+        assert!(stack.install(ready_drain("outer"), ResidentDrainPolicy::KeepResident));
+        let (_, outer_dispatch) = stack.begin_dispatch().expect("outer dispatch starts");
+        assert!(stack.pause_dispatch(outer_dispatch));
+
+        assert!(stack.install(ready_drain("inner"), ResidentDrainPolicy::KeepResident));
+        let (_, inner_dispatch) = stack.begin_dispatch().expect("inner dispatch starts");
+        assert!(stack.pause_dispatch(inner_dispatch));
+        assert_eq!(
+            stack.drains.len(),
+            2,
+            "both paused contexts remain resident"
+        );
+
+        assert!(stack.finish_paused_dispatch().is_some());
+        assert!(
+            matches!(
+                stack.resident(),
+                Some(PostReplacementDrain {
+                    status: DrainStatus::Paused,
+                    ..
+                })
+            ),
+            "finishing the inner pause must preserve the outer paused context"
+        );
+        assert!(stack.finish_paused_dispatch().is_some());
+        assert!(
+            stack.is_empty(),
+            "the outer pause retires only after its own resume"
+        );
+    }
+
+    /// CR 615.5 + CR 616.1g: if an outer continuation completes by starting an
+    /// inner continuation that pauses, its typed dispatch handle removes the
+    /// outer `Dispatching` entry rather than mistaking the paused inner top for
+    /// its own state. The inner context remains available until its resume.
+    #[test]
+    fn completed_outer_dispatch_does_not_strand_below_nested_pause() {
+        let mut stack = PostReplacementDrainStack::default();
+        assert!(stack.install(ready_drain("outer"), ResidentDrainPolicy::KeepResident));
+        let (_, outer_dispatch) = stack.begin_dispatch().expect("outer dispatch starts");
+
+        assert!(stack.install(ready_drain("inner"), ResidentDrainPolicy::KeepResident));
+        let (_, inner_dispatch) = stack.begin_dispatch().expect("inner dispatch starts");
+        assert!(stack.pause_dispatch(inner_dispatch));
+        assert!(
+            !stack.dispatch_is_resident_top(outer_dispatch),
+            "reach guard: the nested pause now owns the resident top"
+        );
+
+        assert!(stack.finish_dispatch(outer_dispatch).is_some());
+        assert!(
+            matches!(
+                stack.resident(),
+                Some(PostReplacementDrain {
+                    status: DrainStatus::Paused,
+                    ..
+                })
+            ),
+            "retiring the completed outer dispatch preserves the nested pause"
+        );
+        assert!(stack.finish_paused_dispatch().is_some());
+        assert!(
+            stack.is_empty(),
+            "both completed contexts retire exactly once"
+        );
+    }
+
     /// `KeepResident` drops a stash that arrives while a READY drain is pending.
     ///
     /// This pins the drop as a **leak-guard**, which is what it actually is — not,
@@ -15617,7 +16014,7 @@ mod drain_stack_reentrancy_tests {
         stack
             .drains
             .iter()
-            .find(|drain| matches!(drain.status, DrainStatus::Dispatching))
+            .find(|drain| matches!(drain.status, DrainStatus::Dispatching | DrainStatus::Paused))
             .and_then(|drain| drain.event_source)
     }
 
@@ -17105,9 +17502,23 @@ mod tests {
         // Leader-style "draw, then connive" carries its tail separately. The
         // connive tail is outer work and the draw remains the active inner work.
         let mut draw_then_connive = GameState::new_two_player(42);
+        let conniver_id = ObjectId(99);
+        draw_then_connive.objects.insert(
+            conniver_id,
+            GameObject::new(
+                conniver_id,
+                CardId(99),
+                PlayerId(0),
+                "Conniver".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        draw_then_connive.battlefield.push_back(conniver_id);
         draw(&mut draw_then_connive);
         draw_then_connive.pending_connive_reentry = Some(PendingConniveReentry {
-            conniver: ObjectId(99),
+            conniver: draw_then_connive
+                .capture_connive_subject(conniver_id)
+                .expect("fixture conniver exists"),
             count: 1,
             applied: HashSet::new(),
         });
@@ -17316,6 +17727,25 @@ mod tests {
                 alt_cost_grant_source: None,
             })
         }
+
+        let conniver = {
+            let mut state = GameState::new_two_player(42);
+            let id = ObjectId(1);
+            state.objects.insert(
+                id,
+                GameObject::new(
+                    id,
+                    CardId(1),
+                    PlayerId(0),
+                    "Conniver".to_string(),
+                    Zone::Battlefield,
+                ),
+            );
+            state.battlefield.push_back(id);
+            state
+                .capture_connive_subject(id)
+                .expect("fixture conniver exists")
+        };
 
         // Use push to avoid large stack frame from vec! macro expansion.
         let mut variants: Vec<Box<WaitingFor>> = Vec::new();
@@ -17592,7 +18022,7 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::ConniveDiscard {
             player: PlayerId(0),
-            conniver_id: ObjectId(1),
+            conniver,
             source_id: ObjectId(1),
             cards: vec![ObjectId(2)],
             count: 1,
@@ -18744,6 +19174,47 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn persisted_state_decodes_v1_at_the_boundary_and_rewrites_v2_only() {
+        let mut legacy = GameState::new_two_player(43);
+        legacy.legacy_pending_multi_draw = Some(PendingMultiDraw {
+            player: PlayerId(0),
+            remaining: 2,
+            accumulated: 1,
+        });
+
+        let v1 = serde_json::to_value(legacy).expect("legacy state serializes without a marker");
+        assert!(v1.get("resolution_state_version").is_none());
+        assert!(v1.get("pending_multi_draw").is_some());
+
+        let restored = serde_json::from_value::<PersistedGameState>(v1)
+            .expect("persistence boundary supplies the v1 discriminator");
+        let resumed = restored.clone().into_game_state();
+        assert!(resumed.legacy_pending_multi_draw.is_none());
+        assert_eq!(
+            resumed.draw_sequences.active().map(|frame| frame.remaining),
+            Some(2)
+        );
+
+        let raw_v2 = serde_json::to_value(restored).expect("restored raw state serializes");
+        assert_eq!(
+            raw_v2["resolution_state_version"],
+            serde_json::Value::from(2)
+        );
+        assert!(raw_v2.get("resolution_frames").is_some());
+        assert!(raw_v2.get("pending_multi_draw").is_none());
+
+        let trusted_v2 = serde_json::to_value(PersistedGameState::capture(resumed))
+            .expect("trusted state serializes");
+        let trusted_state = &trusted_v2["state"];
+        assert_eq!(
+            trusted_state["resolution_state_version"],
+            serde_json::Value::from(2)
+        );
+        assert!(trusted_state.get("resolution_frames").is_some());
+        assert!(trusted_state.get("pending_multi_draw").is_none());
     }
 
     #[test]

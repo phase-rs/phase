@@ -3721,7 +3721,7 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::ConniveDiscard {
                 player,
-                conniver_id,
+                conniver,
                 source_id: _,
                 cards,
                 count,
@@ -3762,14 +3762,14 @@ pub(super) fn handle_resolution_choice(
                 return Ok(action_result_outcome(events, state.waiting_for.clone()));
             };
 
-            effects::connive::add_connive_counters(state, conniver_id, nonland_count, events);
+            effects::connive::add_connive_counters(state, &conniver, nonland_count, events);
             // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's
             // id (LKI if it left the battlefield) so "whenever a creature you
             // control connives" matches the conniving permanent, not the source.
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Connive,
-                source_id: conniver_id,
-                subject: None,
+                source_id: conniver.object_id(),
+                subject: Some(Box::new(conniver.snapshot)),
             });
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }

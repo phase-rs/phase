@@ -29,6 +29,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
+use crate::types::resolution::{ResolutionFrame, ResolutionStack};
 use crate::types::zones::Zone;
 
 pub mod adapt;
@@ -740,6 +741,11 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     subject: None,
                 });
             }
+            if !waits_for_resolution_choice(&state.waiting_for) {
+                // CR 615.5: a resumed continuation completes its own paused
+                // resident drain only after it has not raised another choice.
+                state.post_replacement_drains.finish_paused_dispatch();
+            }
         }
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
@@ -787,6 +793,110 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // full-drain lifetime — clear it alongside the applied seed so it never
         // leaks into a later, unrelated `EventContextAmount` read.
         state.post_replacement_token_substitution_count = None;
+    }
+}
+
+/// Resume the active typed resolution-frame view through its established legacy
+/// authority while Phase 2 still keeps the mutable runtime slots in `GameState`.
+///
+/// The dispatcher reads only `frames.last()`. The one shipped coupled shape is
+/// represented structurally: a `MultiDraw` whose immediate predecessor is a
+/// paused `PostReplacement` drain is a paired child; all other `MultiDraw`
+/// frames are independent roots. Both delegate to `draw::resume_draw_sequence`,
+/// whose existing resident-drain cleanup preserves the paused parent. No frame
+/// is popped here, and the central legacy drains remain authoritative until
+/// Phase 3 owns the stack at runtime.
+pub(crate) fn resume_resolution_frames(
+    state: &mut GameState,
+    frames: &ResolutionStack,
+    events: &mut Vec<GameEvent>,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+
+    let Some(frame) = frames.last() else {
+        return;
+    };
+
+    match frame {
+        ResolutionFrame::AbilityContinuation(_)
+        | ResolutionFrame::RepeatFor(_)
+        | ResolutionFrame::RepeatUntil(_)
+        | ResolutionFrame::ChangeZone(_) => drain_pending_continuation(state, events),
+        ResolutionFrame::RepeatedOptionalPayment(_) => {
+            // The optional-effect action owns both the next payment prompt and
+            // its reflexive tail; a priority boundary has nothing to resume.
+        }
+        ResolutionFrame::BatchDelivery(_) => {
+            crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+        }
+        ResolutionFrame::CounterMoves(_) => counters::drain_pending_counter_moves(state, events),
+        ResolutionFrame::CounterRemovals(_) => {
+            counters::drain_pending_counter_removals(state, events);
+        }
+        ResolutionFrame::CounterAdditions(_) => {
+            counters::drain_pending_counter_additions(state, events);
+        }
+        ResolutionFrame::CopyToken(_) => {
+            token_copy::drain_pending_copy_token_resolution(state, events);
+        }
+        ResolutionFrame::EachPlayerCopyChosen(_) => {
+            each_player_copy_chosen::drain_pending(state, events);
+        }
+        ResolutionFrame::ChooseOneOf(_) => choose_one_of::resume_pending(state, events),
+        ResolutionFrame::VoteBallot(_) => {
+            vote::drain_pending_vote_ballot_iteration(state, events);
+        }
+        ResolutionFrame::PerPlayerZoneChoice(_) => {
+            choose_from_zone::drain_pending_per_player_zone_choice(state, &[], events);
+        }
+        ResolutionFrame::PerCategoryZoneChoice(_) => {
+            let _ = choose_from_zone::drain_pending_per_category_zone_choice(state, &[], events);
+        }
+        ResolutionFrame::OptionalEffect(_)
+        | ResolutionFrame::CoinFlip(_)
+        | ResolutionFrame::Proliferate(_)
+        | ResolutionFrame::MutateMerge(_) => {
+            // Direct-choice frames resume only through their corresponding
+            // action handlers, never by a priority-time drain.
+        }
+        ResolutionFrame::MultiDraw(_) => {
+            let paired_parent = matches!(
+                frames.active_predecessor(),
+                Some(ResolutionFrame::PostReplacement(drains))
+                    if matches!(
+                        drains.resident().map(|drain| &drain.status),
+                        Some(crate::types::game_state::DrainStatus::Paused)
+                    )
+            );
+            if paired_parent {
+                // The resident drain is retained and retired only by the
+                // existing typed dispatch lifecycle inside the draw authority.
+                debug_assert!(state.post_replacement_drains.resident().is_some());
+            }
+            if let Some(frame_id) = state.draw_sequences.active().map(|draw| draw.frame_id) {
+                let _ = draw::resume_draw_sequence(state, frame_id, events);
+            }
+        }
+        ResolutionFrame::ConniveReentry(_) => {
+            let _ = crate::game::engine_replacement::drain_pending_connive_reentry(state, events);
+        }
+        ResolutionFrame::LifeTotalAssignment(_) => {
+            life::drain_pending_life_total_assignment(state, events);
+        }
+        ResolutionFrame::SpellResolution(_) => {
+            if let Some(pending) = state.pending_spell_resolution.clone() {
+                crate::game::engine_replacement::apply_pending_spell_resolution(
+                    state, &pending, events,
+                );
+            }
+        }
+        ResolutionFrame::PostReplacement(_) => {
+            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                state, None, None, None, events,
+            );
+        }
     }
 }
 

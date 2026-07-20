@@ -39,6 +39,8 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 19 — Connive exact subject snapshots and resident paused post-replacement
+ *      drains changed the serialized full-game state.
  * 17 — Dedicated companion deck slot and typed companion-reveal choices.
  * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
  * 15 — Mana-payment preview request/response variants.
@@ -47,7 +49,7 @@ export interface DeckData {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 18;
+export const PROTOCOL_VERSION = 19;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
