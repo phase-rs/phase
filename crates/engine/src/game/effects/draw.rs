@@ -463,7 +463,7 @@ pub fn apply_draw_after_replacement(
         // SelfRef`-bound to a battlefield host; the only `valid_card: None` class
         // — Rest in Peace / Leyline "put into a graveyard → exile" — is
         // destination-gated to Graveyard), so a draw cannot surface a CR 616.1
-        // ordering choice and no `pending_batch_deliveries` resume is wired.
+        // ordering choice and no BatchDelivery resume is wired.
         //
         // The assert catches the MECHANICAL non-delivery bug: if the card is
         // still in the library, the move stranded — `move_object` returned a

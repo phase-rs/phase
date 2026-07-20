@@ -536,6 +536,68 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the complete BatchDelivery owner only when it owns the stack
+    /// top. Its logical zone-change group, paused delivery, and undelivered
+    /// tail remain one payload across every replacement boundary.
+    pub fn active_batch_delivery(&self) -> Option<&PendingBatchDeliveries> {
+        match self.last() {
+            Some(ResolutionFrame::BatchDelivery(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable top-only access to the complete BatchDelivery owner.
+    pub fn active_batch_delivery_mut(&mut self) -> Option<&mut PendingBatchDeliveries> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::BatchDelivery(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume exactly the active BatchDelivery owner after its logical group
+    /// settles once.
+    pub fn take_active_batch_delivery(
+        &mut self,
+    ) -> Result<Option<PendingBatchDeliveries>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::BatchDelivery(_)) => {
+                let ResolutionFrame::BatchDelivery(frame) =
+                    self.pop_expected(FrameKind::BatchDelivery)?
+                else {
+                    unreachable!("checked batch-delivery frame kind must match")
+                };
+                Ok(Some(*frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::BatchDelivery,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a complete BatchDelivery owner as the active inner frame.
+    pub fn push_batch_delivery(&mut self, pending: PendingBatchDeliveries) {
+        self.push_inner(ResolutionFrame::BatchDelivery(Box::new(pending)));
+    }
+
+    /// Re-park the active BatchDelivery owner after another replacement pause.
+    pub fn replace_active_batch_delivery(
+        &mut self,
+        pending: PendingBatchDeliveries,
+    ) -> Result<(), ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::BatchDelivery(_)) => {
+                self.replace_active(ResolutionFrame::BatchDelivery(Box::new(pending)))
+            }
+            None => Err(ResolutionStackError::Empty),
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::BatchDelivery,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Mutably accesses only the active repeat-until owner.
     pub fn active_repeat_until_mut(&mut self) -> Option<&mut PendingRepeatUntil> {
         match self.frames.last_mut() {
@@ -989,6 +1051,7 @@ impl ResolutionStateWire {
                 let legacy_repeat_for = LegacyRepeatForWire::from_value(&value)?;
                 let legacy_repeat_until = LegacyRepeatUntilWire::from_value(&value)?;
                 let legacy_change_zone = LegacyChangeZoneWire::from_value(&value)?;
+                let legacy_batch_delivery = LegacyBatchDeliveryWire::from_value(&value)?;
                 let legacy_choose_one_of = LegacyChooseOneOfWire::from_value(&value)?;
                 let legacy_vote_ballot = LegacyVoteBallotWire::from_value(&value)?;
                 let legacy_per_player_zone_choice =
@@ -1006,6 +1069,8 @@ impl ResolutionStateWire {
                 legacy_object.remove("pending_repeat_until");
                 legacy_object.remove("pending_change_zone_iteration");
                 legacy_object.remove("devour_eligible_snapshot");
+                legacy_object.remove("pending_batch_deliveries");
+                legacy_object.remove("pending_mill_deliveries");
                 legacy_object.remove("pending_choose_one_of");
                 legacy_object.remove("pending_vote_ballot_iteration");
                 legacy_object.remove("pending_per_player_zone_choice");
@@ -1023,6 +1088,9 @@ impl ResolutionStateWire {
                 }
                 if let Some(frame) = legacy_change_zone.into_frame() {
                     legacy.push_change_zone_frame(frame);
+                }
+                if let Some(frame) = legacy_batch_delivery.into_frame() {
+                    legacy.push_batch_delivery(frame);
                 }
                 if let Some(frame) = legacy_choose_one_of.into_frame() {
                     legacy.push_choose_one_of(frame);
@@ -1235,6 +1303,24 @@ impl LegacyChangeZoneWire {
     }
 }
 
+/// v1-only BatchDelivery field. Runtime state carries the complete logical
+/// owner only in its typed frame.
+#[derive(Deserialize)]
+struct LegacyBatchDeliveryWire {
+    #[serde(default, alias = "pending_mill_deliveries")]
+    pending_batch_deliveries: Option<PendingBatchDeliveries>,
+}
+
+impl LegacyBatchDeliveryWire {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+
+    fn into_frame(self) -> Option<PendingBatchDeliveries> {
+        self.pending_batch_deliveries
+    }
+}
+
 /// v1-only choose-one-of field. Runtime state carries it only as a typed frame.
 #[derive(Deserialize)]
 struct LegacyChooseOneOfWire {
@@ -1343,6 +1429,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
                 | ResolutionFrame::RepeatFor(_)
                 | ResolutionFrame::RepeatUntil(_)
                 | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::BatchDelivery(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
@@ -1377,9 +1464,6 @@ pub(crate) fn canonicalize_legacy_resolution_state(
 }
 
 fn push_legacy_after_child_frames(state: &GameState, frames: &mut ResolutionStack) {
-    if let Some(pending) = state.pending_batch_deliveries.clone() {
-        frames.push_inner(ResolutionFrame::BatchDelivery(Box::new(pending)));
-    }
     if let Some(pending) = state.pending_counter_moves.clone() {
         frames.push_inner(ResolutionFrame::CounterMoves(pending));
     }
@@ -1513,11 +1597,11 @@ fn project_frames_into_legacy_state(
                     .resolution_stack
                     .push_change_zone((**frame).clone());
             }
-            ResolutionFrame::BatchDelivery(pending) => set_once(
-                &mut projected.pending_batch_deliveries,
-                pending.as_ref().clone(),
-                "BatchDelivery",
-            )?,
+            ResolutionFrame::BatchDelivery(pending) => {
+                projected
+                    .resolution_stack
+                    .push_batch_delivery((**pending).clone());
+            }
             ResolutionFrame::CounterMoves(pending) => set_once(
                 &mut projected.pending_counter_moves,
                 pending.clone(),
@@ -1614,7 +1698,6 @@ fn clear_legacy_resolution_slots(state: &mut GameState) {
     state.resolution_stack = ResolutionStack::default();
     state.pending_repeated_optional_payment = None;
     state.optional_cost_payments_this_resolution = 0;
-    state.pending_batch_deliveries = None;
     state.pending_counter_moves = None;
     state.pending_counter_removals = None;
     state.pending_counter_additions = None;
@@ -1671,6 +1754,7 @@ fn legacy_resolution_wire_fields() -> &'static [&'static str] {
         "pending_change_zone_iteration",
         "devour_eligible_snapshot",
         "pending_batch_deliveries",
+        "pending_mill_deliveries",
         "pending_counter_moves",
         "pending_counter_removals",
         "pending_counter_additions",
@@ -1876,6 +1960,21 @@ mod tests {
 
         serde_json::from_value::<ResolutionStateWire>(v2)
             .expect("v2 fixture restores for the legacy runtime action path")
+            .into_game_state()
+    }
+
+    fn restore_v1_batch_delivery_fixture(
+        state: GameState,
+        pending: PendingBatchDeliveries,
+    ) -> GameState {
+        assert!(state.resolution_stack.is_empty());
+        let mut v1 = serde_json::to_value(state).expect("legacy fixture serializes");
+        v1["pending_batch_deliveries"] =
+            serde_json::to_value(pending).expect("legacy batch delivery serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 batch delivery fixture converts through the wire")
             .into_game_state()
     }
 
@@ -2695,7 +2794,7 @@ mod tests {
         logical_zone_change_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
-        batch.pending_batch_deliveries = Some(PendingBatchDeliveries {
+        let pending = PendingBatchDeliveries {
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -2710,11 +2809,22 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: batch.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
-        });
-        let mut batch = restore_v1_fixture(batch);
+        };
+        let mut batch = restore_v1_batch_delivery_fixture(batch, pending.clone());
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut batch, &mut Vec::new());
-        assert!(batch.pending_batch_deliveries.is_none());
+        assert!(batch.active_batch_delivery().is_none());
         assert_reserializes_v2_only(batch);
+
+        let alias_state = GameState::new_two_player(120);
+        let mut v1 = serde_json::to_value(alias_state).expect("legacy alias fixture serializes");
+        v1["pending_mill_deliveries"] =
+            serde_json::to_value(pending).expect("legacy mill alias serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let alias = serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("v1 pending_mill_deliveries alias restores")
+            .into_game_state();
+        assert!(alias.active_batch_delivery().is_some());
+        assert_reserializes_v2_only(alias);
 
         let mut copy_token = GameState::new_two_player(121);
         copy_token.pending_copy_token_resolution = Some(PendingCopyTokenResolution {

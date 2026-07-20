@@ -891,7 +891,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                     ..
                 }),
             ..
-        }) = filtered.pending_batch_deliveries.as_mut()
+        }) = filtered.active_batch_delivery_mut()
         {
             *object_id = ObjectId(0);
         }
@@ -900,7 +900,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // undelivered hidden-zone suffix across a replacement pause. Scrub both
     // the generic batch tail and the typed search-specific continuation unless
     // this viewer may inspect every searcher's private choice.
-    if let Some(pending) = filtered.pending_batch_deliveries.as_mut() {
+    if let Some(pending) = filtered.active_batch_delivery_mut() {
         match pending.completion.as_mut() {
             Some(crate::types::game_state::BatchCompletion::SearchPartitionPrimaryDelivered {
                 rest_ids,

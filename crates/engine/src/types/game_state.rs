@@ -11871,19 +11871,6 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_counter_removals: Option<PendingCounterRemovalQueue>,
 
-    /// CR 603.10a + CR 616.1: Pending simultaneous zone-move batch tail paused
-    /// by a per-object replacement choice (see [`PendingBatchDeliveries`]).
-    /// Drained by the replacement-choice resume path after the chosen event
-    /// delivers so the remaining objects complete their moves instead of
-    /// stranding. Serde alias keeps the old `pending_mill_deliveries` field name
-    /// readable from existing saves.
-    #[serde(
-        default,
-        alias = "pending_mill_deliveries",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub pending_batch_deliveries: Option<PendingBatchDeliveries>,
-
     /// CR 122.1 + CR 616.1e: Pending counter-addition batch paused by a
     /// replacement choice. Drained before normal pending continuations so
     /// multi-recipient effects such as proliferate and double counters resume
@@ -13602,6 +13589,38 @@ impl GameState {
         .expect("re-paused ChangeZone must own the active frame");
     }
 
+    /// Returns the complete BatchDelivery owner only when its typed frame owns
+    /// the stack top.
+    pub fn active_batch_delivery(&self) -> Option<&PendingBatchDeliveries> {
+        self.resolution_stack.active_batch_delivery()
+    }
+
+    /// Mutably accesses only the active complete BatchDelivery owner.
+    pub fn active_batch_delivery_mut(&mut self) -> Option<&mut PendingBatchDeliveries> {
+        self.resolution_stack.active_batch_delivery_mut()
+    }
+
+    /// Park a complete BatchDelivery owner as the active inner frame.
+    pub fn push_batch_delivery(&mut self, pending: PendingBatchDeliveries) {
+        self.resolution_stack.push_batch_delivery(pending);
+    }
+
+    /// Re-park the active BatchDelivery owner after another replacement pause.
+    pub fn replace_active_batch_delivery(
+        &mut self,
+        pending: PendingBatchDeliveries,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack.replace_active_batch_delivery(pending)
+    }
+
+    /// Consume exactly the active BatchDelivery owner after its one logical
+    /// settlement.
+    pub fn take_active_batch_delivery(
+        &mut self,
+    ) -> Result<Option<PendingBatchDeliveries>, ResolutionStackError> {
+        self.resolution_stack.take_active_batch_delivery()
+    }
+
     /// Returns the repeat-for iteration only when its typed frame owns the
     /// stack top.
     pub fn active_repeat_for(&self) -> Option<&PendingRepeatIteration> {
@@ -13950,8 +13969,7 @@ impl GameState {
             return true;
         }
         if let Some(paused) = self
-            .pending_batch_deliveries
-            .as_mut()
+            .active_batch_delivery_mut()
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
@@ -13984,8 +14002,7 @@ impl GameState {
             return true;
         }
         if let Some(paused) = self
-            .pending_batch_deliveries
-            .as_mut()
+            .active_batch_delivery_mut()
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.member.object_id == member_id)
         {
@@ -14460,7 +14477,6 @@ impl GameState {
             pending_search_found_batch: None,
             pending_counter_moves: None,
             pending_counter_removals: None,
-            pending_batch_deliveries: None,
             pending_counter_additions: None,
             pending_proliferate_actions: None,
             pending_optional_effect: None,
@@ -15573,7 +15589,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolution_coin_flip: _,
         pending_counter_moves: _,
         pending_counter_removals: _,
-        pending_batch_deliveries: _,
         pending_counter_additions: _,
         pending_proliferate_actions: _,
         pending_optional_effect: _,
@@ -15886,7 +15901,6 @@ impl PartialEq for GameState {
             && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_counter_moves == other.pending_counter_moves
             && self.pending_counter_removals == other.pending_counter_removals
-            && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
             && self.pending_proliferate_actions == other.pending_proliferate_actions
             && self.pending_cost_move_resume == other.pending_cost_move_resume

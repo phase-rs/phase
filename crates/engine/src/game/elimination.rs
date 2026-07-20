@@ -174,8 +174,7 @@ pub fn eliminate_players_simultaneously(
                     state.replacement_may_cost_paused = false;
                 }
                 if state
-                    .pending_batch_deliveries
-                    .as_ref()
+                    .active_batch_delivery()
                     .and_then(|pending| pending.completion.as_ref())
                     .is_some_and(|completion| {
                         matches!(
@@ -186,7 +185,9 @@ pub fn eliminate_players_simultaneously(
                         )
                     })
                 {
-                    state.pending_batch_deliveries = None;
+                    state
+                        .take_active_batch_delivery()
+                        .expect("eliminated search batch must own the active frame");
                 }
             }
             if let Err(error) =
@@ -524,7 +525,7 @@ fn abandon_pending_zone_change_member_for_player_left(
             );
         }
     }
-    if let Some(pending) = state.pending_batch_deliveries.as_mut() {
+    if let Some(pending) = state.active_batch_delivery_mut() {
         pending
             .logical_zone_change_group
             .record_abandoned_by_player_left(identity)
@@ -713,7 +714,7 @@ fn do_eliminate(
                     },
             }),
         ..
-    }) = state.pending_batch_deliveries.as_mut()
+    }) = state.active_batch_delivery_mut()
     {
         search_keys.retain(|searcher| *searcher != player);
         grants.retain(|(_, grant)| grant.grantee != player && grant.controller != player);
@@ -800,8 +801,7 @@ fn do_eliminate(
     if state.pending_search_found_batch.is_some() && leaving_is_latched_chooser {
         state.pending_search_found_batch = None;
         if state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .and_then(|pending| pending.completion.as_ref())
             .is_some_and(|completion| {
                 matches!(
@@ -810,7 +810,9 @@ fn do_eliminate(
                 )
             })
         {
-            state.pending_batch_deliveries = None;
+            state
+                .take_active_batch_delivery()
+                .expect("eliminated search batch must own the active frame");
         }
     }
     if state.pending_replacement.is_some() && leaving_is_latched_chooser {
@@ -962,7 +964,7 @@ fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: P
             .logical_zone_change_group
             .retire_contexts_owned_by(player);
     }
-    if let Some(pending) = state.pending_batch_deliveries.as_mut() {
+    if let Some(pending) = state.active_batch_delivery_mut() {
         pending
             .logical_zone_change_group
             .retire_contexts_owned_by(player);
@@ -1342,7 +1344,7 @@ mod tests {
                 events: vec![crate::types::statics::SuppressedTriggerEvent::Dies],
             },
         );
-        state.pending_batch_deliveries = Some(crate::types::game_state::PendingBatchDeliveries {
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             logical_zone_change_group: group,
             paused_current: None,
             remaining: vec![leaving, surviving],
@@ -1394,8 +1396,7 @@ mod tests {
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
         let batch = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("the surviving member keeps the shared batch parked");
         assert_eq!(batch.remaining, vec![surviving]);
         assert_eq!(
@@ -1423,7 +1424,7 @@ mod tests {
         );
 
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
-        assert!(state.pending_batch_deliveries.is_none());
+        assert!(state.active_batch_delivery().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
         assert_eq!(
@@ -1487,7 +1488,7 @@ mod tests {
             candidate_count: 1,
             candidates: Vec::new(),
         };
-        state.pending_batch_deliveries = Some(crate::types::game_state::PendingBatchDeliveries {
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             logical_zone_change_group: group,
             paused_current: Some(paused),
             remaining: vec![surviving],
@@ -1508,8 +1509,7 @@ mod tests {
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
         let batch = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("surviving tail retains its shared batch owner");
         assert!(batch.paused_current.is_none());
         assert_eq!(batch.remaining, vec![surviving]);
@@ -1517,7 +1517,7 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
-        assert!(state.pending_batch_deliveries.is_none());
+        assert!(state.active_batch_delivery().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }
@@ -1887,7 +1887,7 @@ mod tests {
                 },
             },
         );
-        state.pending_batch_deliveries = Some(batch);
+        state.push_batch_delivery(batch);
 
         eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
 
@@ -1899,8 +1899,7 @@ mod tests {
         };
         assert_eq!(phase_keys, &vec![PlayerId(0), PlayerId(2)]);
         let resume_keys = match state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .and_then(|batch| batch.completion.as_ref())
             .unwrap()
         {
@@ -2304,7 +2303,7 @@ mod tests {
             applied: HashSet::new(),
         });
         state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(2), o));
-        state.pending_batch_deliveries = Some(pending_search_found_zone_delivery(o));
+        state.push_batch_delivery(pending_search_found_zone_delivery(o));
         // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
         // single-player-scoped, must clear alongside its siblings via
         // `abandon_post_replacement_continuation` (replacement.rs).
@@ -2355,7 +2354,7 @@ mod tests {
             "the eliminated chooser's outer found-card batch must be abandoned"
         );
         assert!(
-            state.pending_batch_deliveries.is_none(),
+            state.active_batch_delivery().is_none(),
             "the eliminated chooser's nested found-card zone completion must be abandoned"
         );
         assert!(
@@ -2404,13 +2403,13 @@ mod tests {
             candidate_count: 1,
             candidates: Vec::new(),
         };
-        assert!(state.pending_batch_deliveries.is_none());
+        assert!(state.active_batch_delivery().is_none());
 
         eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
 
         assert!(state.pending_replacement.is_none());
         assert!(state.pending_search_found_batch.is_none());
-        assert!(state.pending_batch_deliveries.is_none());
+        assert!(state.active_batch_delivery().is_none());
     }
 
     #[test]
@@ -2445,7 +2444,7 @@ mod tests {
         let parked_found = ObjectId(77);
         state.pending_search_found_batch =
             Some(pending_search_found_batch(PlayerId(0), parked_found));
-        state.pending_batch_deliveries = Some(pending_search_found_zone_delivery(parked_found));
+        state.push_batch_delivery(pending_search_found_zone_delivery(parked_found));
         // A coupled spell-resolution ctx owned by the LIVING chooser (P0).
         state.pending_spell_resolution = Some(PendingSpellResolution {
             object_id: create_object(&mut state, CardId(7), PlayerId(0), "S".into(), Zone::Stack),
@@ -2484,20 +2483,17 @@ mod tests {
             "an opponent leaving must not clear the living chooser's outer found-card batch"
         );
         assert!(
-            state
-                .pending_batch_deliveries
-                .as_ref()
-                .is_some_and(|pending| {
-                    matches!(
-                        pending.completion,
-                        Some(
-                            crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
-                                object_id,
-                                grant: None,
-                            }
-                        ) if object_id == parked_found
-                    )
-                }),
+            state.active_batch_delivery().is_some_and(|pending| {
+                matches!(
+                    pending.completion,
+                    Some(
+                        crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                            object_id,
+                            grant: None,
+                        }
+                    ) if object_id == parked_found
+                )
+            }),
             "an opponent leaving must preserve the living chooser's nested found-card completion"
         );
         assert!(

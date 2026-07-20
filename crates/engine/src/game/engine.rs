@@ -5763,7 +5763,7 @@ fn apply_action(
                     // here — the replacement-choice resume path drains it for the
                     // CR 616.1 case, but the aura-host resume is the ONLY drain
                     // site for an `NeedsAuraAttachmentChoice` pause.
-                    if state.pending_batch_deliveries.is_some() {
+                    if state.active_batch_delivery().is_some() {
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
                     resume_pending_continuation_if_priority(state, &mut events)?;
@@ -5801,7 +5801,7 @@ fn apply_action(
             state.priority_player = active_player;
             // CR 603.10a + CR 616.1: drain a deferred batch completion parked
             // behind this aura-attachment pause (see the sibling path above).
-            if state.pending_batch_deliveries.is_some() {
+            if state.active_batch_delivery().is_some() {
                 super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
             }
             resume_pending_continuation_if_priority(state, &mut events)?;

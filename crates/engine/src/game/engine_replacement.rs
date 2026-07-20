@@ -548,7 +548,7 @@ pub(super) fn handle_replacement_choice(
                 // CR 616.1: a milled card's own `Moved` replacements (Rest in
                 // Peace + Leyline of the Void class) can surface a per-card
                 // ordering choice mid-delivery. The helper parks that prompt
-                // (`state.waiting_for` set, tail in `pending_batch_deliveries`)
+                // (`state.waiting_for` set, tail in the active BatchDelivery frame)
                 // and returns `false`. Early-return so the unconditional
                 // `waiting_for = Priority` reset below does NOT clobber the
                 // parked prompt — mirroring the `apply_etb_counters`
@@ -924,7 +924,7 @@ pub(super) fn handle_replacement_choice(
             // next object surfaces its own prompt — in that case it sets
             // `state.waiting_for` for us to propagate.
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_batch_deliveries.is_some()
+                && state.active_batch_delivery().is_some()
             {
                 crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -1234,7 +1234,7 @@ pub(super) fn handle_replacement_choice(
             }
             // CR 603.10a + CR 616.1: the paused batch object's event was
             // prevented outright — the remaining parked tail still delivers.
-            if state.pending_batch_deliveries.is_some() {
+            if state.active_batch_delivery().is_some() {
                 state.waiting_for = WaitingFor::Priority {
                     player: state.active_player,
                 };
@@ -1389,18 +1389,16 @@ pub(super) fn handle_copy_target_choice(
             // choice. The typed liminal resume now owns completion, including a
             // possible counter-replacement pause, so remove that superseded
             // record before the generic copy finisher tries to drain it.
-            if state
-                .pending_batch_deliveries
-                .as_ref()
-                .is_some_and(|pending| {
-                    pending.remaining.is_empty()
-                        && matches!(
-                            &pending.completion,
-                            Some(crate::types::game_state::BatchCompletion::MeldEntry { .. })
-                        )
-                })
-            {
-                state.pending_batch_deliveries = None;
+            if state.active_batch_delivery().is_some_and(|pending| {
+                pending.remaining.is_empty()
+                    && matches!(
+                        &pending.completion,
+                        Some(crate::types::game_state::BatchCompletion::MeldEntry { .. })
+                    )
+            }) {
+                state
+                    .take_active_batch_delivery()
+                    .expect("MeldEntry batch delivery must own the active frame");
             }
             if !crate::game::meld::commit_meld_battlefield(state, &context) {
                 crate::game::meld::finish_deferred_meld_resolution(state, source_id, events);
@@ -1680,7 +1678,7 @@ fn finish_copy_target_choice_entry(
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
-    if replay_entry_events && state.pending_batch_deliveries.is_some() {
+    if replay_entry_events && state.active_batch_delivery().is_some() {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Ok(Some(state.waiting_for.clone()));

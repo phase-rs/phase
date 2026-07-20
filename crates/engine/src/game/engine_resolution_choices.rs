@@ -6941,8 +6941,9 @@ pub(crate) fn run_batch_completion(
         // CR 701.51 + CR 616.1: the paused Attraction's entry resolved — finish
         // its open bookkeeping, then run the remaining opens of the same
         // instruction (which may themselves pause and re-defer through this
-        // same completion; `drain_pending_batch_deliveries` took the old record
-        // before calling here, so a fresh park is preserved).
+        // same completion; `drain_pending_batch_deliveries` settles and pops
+        // the old BatchDelivery frame before calling here, so a fresh park is
+        // preserved).
         BatchCompletion::AttractionOpenRemainder {
             player,
             object_id,

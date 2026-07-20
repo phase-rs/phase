@@ -341,8 +341,7 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
         matches!(
             runner
                 .state()
-                .pending_batch_deliveries
-                .as_ref()
+                .active_batch_delivery()
                 .and_then(|batch| batch.completion.as_ref()),
             Some(engine::types::game_state::BatchCompletion::RippleTerminalComplete {
                 player: P0,
@@ -419,7 +418,7 @@ fn thrumming_stone_terminal_ripple_waits_through_bottom_replacement_choice() {
     }
     assert!(runner.state().deferred_triggers.is_empty());
     assert!(runner.state().pending_resolution_completion.is_none());
-    assert!(runner.state().pending_batch_deliveries.is_none());
+    assert!(runner.state().active_batch_delivery().is_none());
 }
 
 /// CR 603.2 + CR 603.3b + CR 608.2g + CR 616.1: terminal Ripple settlement

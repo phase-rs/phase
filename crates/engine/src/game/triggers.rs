@@ -6415,7 +6415,7 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
         return false;
     }
     if state.pending_replacement.is_some()
-        || state.pending_batch_deliveries.is_some()
+        || state.active_batch_delivery().is_some()
         || state.pending_counter_additions.is_some()
         || state.pending_counter_moves.is_some()
         || state.pending_counter_removals.is_some()
@@ -31765,7 +31765,7 @@ pub mod tests {
             );
             assert!(
                 state.active_change_zone_frame().is_none()
-                    && state.pending_batch_deliveries.is_none(),
+                    && state.active_batch_delivery().is_none(),
                 "{carrier:?} exact production evidence: no nonbattlefield-only pause was fabricated"
             );
             assert!(
@@ -31888,7 +31888,7 @@ pub mod tests {
                         "ChangeZone slot {paused_index} must retain its production carrier"
                     ),
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
-                        state.pending_batch_deliveries.is_some(),
+                        state.active_batch_delivery().is_some(),
                         "BatchDelivery slot {paused_index} must retain its production carrier"
                     ),
                 }
@@ -32346,7 +32346,7 @@ pub mod tests {
                         "ChangeZone must retain the mixed-origin owner while parked"
                     ),
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
-                        state.pending_batch_deliveries.is_some(),
+                        state.active_batch_delivery().is_some(),
                         "BatchDelivery must retain the mixed-origin owner while parked"
                     ),
                 }
@@ -32838,8 +32838,7 @@ pub mod tests {
             "positive reach guard: the provider's battlefield departure is delivered before the ordering pause"
         );
         let pending = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("positive reach guard: BatchDelivery retains the mixed-direction owner");
         assert_eq!(
             pending
@@ -33279,8 +33278,7 @@ pub mod tests {
                     }
                     LogicalZoneProductionCarrier::BatchDelivery => {
                         &state
-                            .pending_batch_deliveries
-                            .as_ref()
+                            .active_batch_delivery()
                             .expect("BatchDelivery suppressor owner is parked")
                             .logical_zone_change_group
                     }
@@ -33489,8 +33487,7 @@ pub mod tests {
                 }
                 LogicalZoneProductionCarrier::BatchDelivery => {
                     &state
-                        .pending_batch_deliveries
-                        .as_ref()
+                        .active_batch_delivery()
                         .expect("BatchDelivery entering-suppressor owner is parked")
                         .logical_zone_change_group
                 }

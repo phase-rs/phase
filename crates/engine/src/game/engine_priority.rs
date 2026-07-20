@@ -85,7 +85,7 @@ pub(crate) fn run_post_action_pipeline_from(
                 retained_logical_zone_events.extend(&paused_current.delivery_events);
             }
         }
-        if let Some(pending) = state.pending_batch_deliveries.as_ref() {
+        if let Some(pending) = state.active_batch_delivery() {
             retained_logical_zone_events.extend(
                 pending
                     .logical_zone_change_group

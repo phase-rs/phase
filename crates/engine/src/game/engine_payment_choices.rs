@@ -968,7 +968,7 @@ pub(super) fn handle_unless_payment(
             // redirects fire correctly. Partial mill (library has fewer than
             // N cards) is an unpayable cost per CR 118.3 — effect fires.
             // A CR 616.1 replacement ordering choice parks the batch in
-            // state.waiting_for + state.pending_batch_deliveries; callers
+            // state.waiting_for + the active BatchDelivery frame; callers
             // must early-return so they do not clobber the parked prompt
             // (mirrors apply_etb_counters early-return in handle_replacement_choice).
             AbilityCost::Mill { count } => {
@@ -995,7 +995,7 @@ pub(super) fn handle_unless_payment(
                         true => {}
                         // CR 616.1: replacement ordering choice parked — the
                         // mill batch is in progress. Early-return to preserve
-                        // state.waiting_for + state.pending_batch_deliveries.
+                        // state.waiting_for + the active BatchDelivery frame.
                         false => {
                             return Ok(action_result(events, state.waiting_for.clone()));
                         }
