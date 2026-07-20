@@ -18089,10 +18089,21 @@ mod tests {
             },
             "'for that many' must bind the anaphoric event count, not default to Fixed 1"
         );
-        assert_ne!(
-            filter,
-            TargetFilter::Any,
-            "the 'basic land cards' type phrase must reach the search filter, not drop to Any"
+        let TargetFilter::Typed(basic_land) = filter else {
+            panic!("expected typed basic-land filter, got {filter:?}");
+        };
+        assert!(
+            basic_land.type_filters.contains(&TypeFilter::Land),
+            "the search filter must preserve the Land type, got {basic_land:?}"
+        );
+        assert!(
+            basic_land.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: crate::types::card_type::Supertype::Basic
+                }
+            )),
+            "the search filter must preserve the Basic supertype, got {basic_land:?}"
         );
     }
 
