@@ -20838,6 +20838,50 @@ fn rebind_anaphoric_ref(qty: &mut QuantityRef, target: ObjectScope) {
     }
 }
 
+/// CR 208.1 + issue #6208: Retarget a residual `Source`-scoped "its power" /
+/// "its toughness" leaf to `target`. Only the target-subject damage path uses
+/// this: "target creature deals damage equal to TWICE its power" lowers "its
+/// power" via the multiplier CDA path to `Power{Source}` (unlike the singular
+/// form's rebindable `Anaphoric`), which reads the spell — power 0 — so the
+/// clause deals nothing. In that path the subject is the target creature, never
+/// the spell, so the source-scoped characteristic must follow the subject.
+///
+/// Restricted to `Power`/`Toughness` (the "its power/toughness" anaphor) so a
+/// legitimate `ObjectManaValue{Source}` / color-count "this spell's ..." ref is
+/// left intact. Self-subject damage (Duggan) is a bare `DealDamage` never routed
+/// through the target-subject wrapper, so its `Power{Source}` is never reached.
+fn retarget_source_power_toughness(expr: &mut QuantityExpr, target: ObjectScope) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if let QuantityRef::Power { scope } | QuantityRef::Toughness { scope } = qty {
+                if *scope == ObjectScope::Source {
+                    *scope = target;
+                }
+            }
+        }
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => {
+            retarget_source_power_toughness(inner, target);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                retarget_source_power_toughness(inner, target);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            retarget_source_power_toughness(left, target);
+            retarget_source_power_toughness(right, target);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
 /// CR 120.1: True when a damage clause already carries the multi-source
 /// `EachTarget` marker (set by the parser for "their power" forms). Used to keep
 /// `wrap_target_subject_damage` from collapsing it to the single-source `Target`.
@@ -21010,7 +21054,7 @@ fn wrap_target_subject_damage(
     // flows onto the outer `TargetOnly` picker below.
     if damage_clause_is_each_target(&clause.effect) {
         rebind_each_target_damage_amount(&mut clause.effect, ObjectScope::Target);
-    } else if !bind_damage_clause_source(
+    } else if bind_damage_clause_source(
         // CR 608.2c + CR 120.1: "target creature deals damage equal to its
         // power..." (single source) makes the chosen object, not the spell card,
         // deal the damage. "Its power" is therefore the first target's current
@@ -21025,6 +21069,17 @@ fn wrap_target_subject_damage(
         DamageSource::Target,
         ObjectScope::Target,
     ) {
+        // CR 208.1 + issue #6208: `bind_damage_clause_source` only rebinds an
+        // `Anaphoric` amount leaf. The "twice its power" multiplier form lowers
+        // "its power" to `Power{Source}` (reads the spell — power 0), so retarget
+        // that residual source-scoped power/toughness to the target subject too.
+        // Fixes Punishing Punch, Animist's Might, Polliwallop, Thing Swing.
+        if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } =
+            &mut clause.effect
+        {
+            retarget_source_power_toughness(amount, ObjectScope::Target);
+        }
+    } else {
         return None;
     }
     if let Effect::DealDamage { amount, .. } | Effect::DamageAll { amount, .. } = &mut clause.effect
