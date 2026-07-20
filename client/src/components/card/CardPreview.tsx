@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { AbilityBlockKind, ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
-import { abilityLabel, loyaltyBadge, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
+import { abilityLabel, loyaltyBadge, spellCostDisplay, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -306,7 +306,18 @@ function CardPreviewInner({
       schedulePositionUpdate();
     };
 
-    window.addEventListener("mousemove", handlePointerMove);
+    // Alt toggles a FROZEN preview. Once the parsed-abilities panel is showing,
+    // the user needs to move the cursor ONTO it to click "Report a Problem" or
+    // scroll rulings — but a cursor-following panel always sits `gap` px from the
+    // pointer and dodges it forever. While Alt is active, skip the mousemove
+    // listener so the panel holds its position (it stays top-anchored via
+    // `altHeld` in applyPreviewPosition, and the ResizeObserver still re-clamps it
+    // as async rulings grow it). Toggling Alt off re-runs this effect (altHeld is
+    // a dep) and restores cursor-follow — matching the user's "side"/"follow"
+    // preference, since the `dockSide` early-return above already owns "side".
+    if (!altHeld) {
+      window.addEventListener("mousemove", handlePointerMove);
+    }
     schedulePositionUpdate();
 
     // The preview grows when async content settles (image load, hint bars, face
@@ -699,11 +710,12 @@ function CardImagePreview({
   const castManaZones: Zone[] = ["Hand", "Command", "Exile", "Graveyard", "Library"];
   const showCastManaCost =
     !showOtherFace && obj != null && castManaZones.includes(obj.zone);
-  const displayCost = showOtherFace
-    ? otherFaceCost
-    : showCastManaCost
-      ? (effectiveCost ?? obj?.mana_cost)
-      : null;
+  // The engine's effective cost reflects reductions and free-cast permissions
+  // (Omniscience); spellCostDisplay decides the shown value + reduced styling.
+  const castCostDisplay =
+    showCastManaCost && obj ? spellCostDisplay(effectiveCost, obj.mana_cost) : null;
+  const displayCost = showOtherFace ? otherFaceCost : (castCostDisplay?.displayCost ?? null);
+  const displayCostReduced = castCostDisplay?.isReduced ?? false;
 
   // Only a genuinely in-flight lookup pulses. A finished lookup with no art
   // (issue #6156) falls through to the named placeholder below — previously it
@@ -743,7 +755,7 @@ function CardImagePreview({
           />
         )}
         {displayCost && (
-          <ManaCostPips cost={displayCost} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
+          <ManaCostPips cost={displayCost} isReduced={displayCostReduced} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
         )}
         {classLevel != null && (
           <div className="absolute bottom-3 left-3 z-10">
