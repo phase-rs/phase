@@ -124,12 +124,13 @@ pub(super) fn parse_search_library_details(
     let for_that_many_match =
         if up_to_match.is_none() && any_number_tail.is_none() && for_match.is_none() {
             scan_preceded(lower, "for ", |input| {
-                map(
-                    alt((tag::<_, _, OracleError<'_>>("that many"), tag("that much"))),
-                    |_| QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount,
-                    },
-                )
+                // Delegate to the single demonstrative-amount authority
+                // (`parse_that_much_or_many`, CR 608.2h) rather than re-composing
+                // the "that many"/"that much" tags here, so the count-prefix
+                // grammar stays defined in exactly one place.
+                map(nom_quantity::parse_that_much_or_many, |qty| {
+                    QuantityExpr::Ref { qty }
+                })
                 .parse(input)
             })
         } else {
