@@ -6051,6 +6051,11 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::SetName { name } => {
                 obj.name = name.clone();
             }
+            // CR 612.8 + CR 613.1c: Literal name changes from continuous
+            // effects apply in Layer 3 and are not copiable values.
+            ContinuousModification::SetTextName { name } => {
+                obj.name = name.clone();
+            }
             // CR 612.8 + CR 613.1c: Layer 3 — set the object's name to the
             // granting source's chosen card name. Per CR 612.8 the object loses
             // any other names. No-op until a name has been chosen (`chosen_card_name`
@@ -13204,6 +13209,78 @@ mod tests {
             "Birds of Paradise",
             "the latest chosen card name supersedes the prior one"
         );
+    }
+
+    #[test]
+    fn witness_protection_applies_all_characteristics_and_reverts_when_removed() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Citizen".to_string(), "Rogue".to_string()];
+        let player = PlayerId(0);
+        let grifter = make_creature(&mut state, "Hypnotic Grifter", 1, 2, player);
+        {
+            let object = state.objects.get_mut(&grifter).unwrap();
+            object.card_types.core_types.insert(0, CoreType::Artifact);
+            object.card_types.subtypes = vec!["Equipment".to_string(), "Rogue".to_string()];
+            object.base_card_types = object.card_types.clone();
+            object.color = vec![ManaColor::Blue];
+            object.base_color = object.color.clone();
+            object.keywords.push(Keyword::Flying);
+            object.base_keywords = object.keywords.clone();
+            object.counters.insert(CounterType::Plus1Plus1, 2);
+        }
+
+        let aura = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Witness Protection".to_string(),
+            Zone::Battlefield,
+        );
+        let definition = crate::parser::oracle_static::parse_static_line(
+            "Enchanted creature loses all abilities and is a green and white Citizen creature with base power and toughness 1/1 named Legitimate Businessperson.",
+        )
+        .unwrap();
+        {
+            let object = state.objects.get_mut(&aura).unwrap();
+            object.card_types.core_types.push(CoreType::Enchantment);
+            object.card_types.subtypes.push("Aura".to_string());
+            object.base_card_types = object.card_types.clone();
+            object.attached_to = Some(grifter.into());
+            object.static_definitions.push(definition.clone());
+            Arc::make_mut(&mut object.base_static_definitions).push(definition);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let enchanted = state.objects.get(&grifter).unwrap();
+        assert_eq!(enchanted.name, "Legitimate Businessperson");
+        assert_eq!(enchanted.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(enchanted.card_types.subtypes, vec!["Citizen".to_string()]);
+        assert_eq!(enchanted.color, vec![ManaColor::Green, ManaColor::White]);
+        assert!(!enchanted.keywords.contains(&Keyword::Flying));
+        assert_eq!(enchanted.power, Some(3));
+        assert_eq!(enchanted.toughness, Some(3));
+
+        state.battlefield.retain(|id| *id != aura);
+        state.objects.get_mut(&aura).unwrap().zone = Zone::Graveyard;
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let restored = state.objects.get(&grifter).unwrap();
+        assert_eq!(restored.name, "Hypnotic Grifter");
+        assert_eq!(
+            restored.card_types.core_types,
+            vec![CoreType::Artifact, CoreType::Creature]
+        );
+        assert_eq!(
+            restored.card_types.subtypes,
+            vec!["Equipment".to_string(), "Rogue".to_string()]
+        );
+        assert_eq!(restored.color, vec![ManaColor::Blue]);
+        assert!(restored.keywords.contains(&Keyword::Flying));
+        assert_eq!(restored.power, Some(3));
+        assert_eq!(restored.toughness, Some(4));
     }
 
     // CR 113.6b + CR 408: SourceInZone evaluator — used by the Eminence /

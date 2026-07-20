@@ -8915,6 +8915,7 @@ fn apply_where_x_continuous_modification(
         // forces a deliberate where-X decision.
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
@@ -9012,6 +9013,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::SetStartingLoyalty { .. } => {}
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }

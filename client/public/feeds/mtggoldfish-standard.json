@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-07-19T00:00:00Z",
+  "updated": "2026-07-20T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -746,24 +746,12 @@
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 10,
+          "count": 8,
           "name": "Swamp"
         },
         {
           "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 3,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 2,
-          "name": "Day of Black Sun"
+          "name": "Deceit"
         },
         {
           "count": 3,
@@ -771,15 +759,35 @@
         },
         {
           "count": 4,
-          "name": "Requiting Hex"
+          "name": "Superior Spider-Man"
+        },
+        {
+          "count": 2,
+          "name": "Bitter Triumph"
         },
         {
           "count": 3,
-          "name": "Stock Up"
+          "name": "Emeritus of Ideation"
         },
         {
           "count": 4,
-          "name": "Superior Spider-Man"
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 4,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 2,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 2,
+          "name": "Undercity Sewers"
         },
         {
           "count": 4,
@@ -787,27 +795,23 @@
         },
         {
           "count": 4,
-          "name": "Duress"
-        },
-        {
-          "count": 4,
-          "name": "Deceit"
-        },
-        {
-          "count": 1,
-          "name": "Deadly Cover-Up"
+          "name": "Watery Grave"
         },
         {
           "count": 1,
           "name": "Strategic Betrayal"
         },
         {
-          "count": 2,
-          "name": "Emeritus of Ideation"
+          "count": 3,
+          "name": "Duress"
         },
         {
-          "count": 4,
-          "name": "Gloomlake Verge"
+          "count": 3,
+          "name": "Day of Black Sun"
+        },
+        {
+          "count": 3,
+          "name": "Bender's Waterskin"
         },
         {
           "count": 1,
@@ -815,49 +819,49 @@
         },
         {
           "count": 1,
-          "name": "M.O.D.O.K."
-        },
-        {
-          "count": 3,
-          "name": "Hidden Lair"
+          "name": "Stock Up"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Negate"
-        },
-        {
-          "count": 4,
-          "name": "Preacher of the Schism"
+          "count": 1,
+          "name": "Quantum Riddler"
         },
         {
           "count": 1,
-          "name": "Doomsday Excruciator"
+          "name": "Duress"
         },
         {
-          "count": 1,
-          "name": "Emeritus of Ideation"
+          "count": 3,
+          "name": "Qarsi Revenant"
+        },
+        {
+          "count": 3,
+          "name": "Flashfreeze"
         },
         {
           "count": 1,
           "name": "Strategic Betrayal"
         },
         {
-          "count": 1,
-          "name": "Shoot the Sheriff"
+          "count": 2,
+          "name": "Stab"
         },
         {
           "count": 1,
-          "name": "Deadly Cover-Up"
+          "name": "Spell Pierce"
         },
         {
           "count": 1,
-          "name": "M.O.D.O.K."
+          "name": "Negate"
         },
         {
-          "count": 3,
-          "name": "Malcolm, Alluring Scoundrel"
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "Petrified Hamlet"
         }
       ]
     },
@@ -960,6 +964,265 @@
         {
           "count": 2,
           "name": "Eumidian Terrabotanist"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Lessons",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 5,
+          "name": "Island"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Gran-Gran"
+        },
+        {
+          "count": 4,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 4,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 4,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 4,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 4,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 1,
+          "name": "Fire Magic"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 2,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 4,
+          "name": "Monument to Endurance"
+        },
+        {
+          "count": 4,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Impractical Joke"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 2,
+          "name": "Agna Qel'a"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Three Steps Ahead"
+        },
+        {
+          "count": 2,
+          "name": "Return the Favor"
+        },
+        {
+          "count": 1,
+          "name": "Pit of Offerings"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 2,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 4,
+          "name": "Colorstorm Stallion"
+        },
+        {
+          "count": 2,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Ideation"
+        }
+      ]
+    },
+    {
+      "name": "4c Gearhulk",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "G",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 4,
+          "name": "Bloom Tender"
+        },
+        {
+          "count": 4,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Cryogen Relic"
+        },
+        {
+          "count": 4,
+          "name": "Nature's Rhythm"
+        },
+        {
+          "count": 1,
+          "name": "Hushwood Verge"
+        },
+        {
+          "count": 1,
+          "name": "Mockingbird"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 2,
+          "name": "Nurturing Pixie"
+        },
+        {
+          "count": 2,
+          "name": "Breeding Pool"
+        },
+        {
+          "count": 3,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 4,
+          "name": "Sewer-veillance Cam"
+        },
+        {
+          "count": 4,
+          "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Willowrush Verge"
+        },
+        {
+          "count": 4,
+          "name": "Botanical Sanctum"
+        },
+        {
+          "count": 2,
+          "name": "Floodfarm Verge"
+        },
+        {
+          "count": 1,
+          "name": "The Jolly Balloon Man"
+        },
+        {
+          "count": 4,
+          "name": "Brightglass Gearhulk"
+        },
+        {
+          "count": 1,
+          "name": "Shardmage's Rescue"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 3,
+          "name": "Erode"
+        },
+        {
+          "count": 1,
+          "name": "Meltstrider's Resolve"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Sage of the Skies"
+        },
+        {
+          "count": 1,
+          "name": "Shardmage's Rescue"
+        },
+        {
+          "count": 2,
+          "name": "Aang, Swift Savior"
         }
       ]
     },
@@ -1095,244 +1358,6 @@
         },
         {
           "count": 2,
-          "name": "Voice of Victory"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Lessons",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 6,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 4,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 4,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 4,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 3,
-          "name": "Improvisation Capstone"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Lindblum, Industrial Regency"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 1,
-          "name": "Fire Magic"
-        },
-        {
-          "count": 3,
-          "name": "Thor, God of Thunder"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 2,
-          "name": "Three Steps Ahead"
-        },
-        {
-          "count": 4,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 2,
-          "name": "Pit of Offerings"
-        },
-        {
-          "count": 3,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        }
-      ]
-    },
-    {
-      "name": "Selesnya Landfall",
-      "author": "MTGGoldfish",
-      "colors": [
-        "G",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Erode"
-        },
-        {
-          "count": 2,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 1,
-          "name": "Lumbering Worldwagon"
-        },
-        {
-          "count": 2,
-          "name": "Bushwhack"
-        },
-        {
-          "count": 4,
-          "name": "Earthbender Ascension"
-        },
-        {
-          "count": 7,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Sazh's Chocobo"
-        },
-        {
-          "count": 1,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 2,
-          "name": "Icetill Explorer"
-        },
-        {
-          "count": 1,
-          "name": "Keen-Eyed Curator"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 2,
-          "name": "Dyadrine, Synthesis Amalgam"
-        },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
-          "count": 4,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 4,
-          "name": "Mightform Harmonizer"
-        },
-        {
-          "count": 4,
-          "name": "Escape Tunnel"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 3,
-          "name": "Ba Sing Se"
-        },
-        {
-          "count": 1,
-          "name": "Mossborn Hydra"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 3,
-          "name": "Sheltered by Ghosts"
-        },
-        {
-          "count": 1,
-          "name": "Kutzil, Malamet Exemplar"
-        },
-        {
-          "count": 1,
-          "name": "Ba Sing Se"
-        },
-        {
-          "count": 2,
-          "name": "Mossborn Hydra"
-        },
-        {
-          "count": 3,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 2,
-          "name": "Snakeskin Veil"
-        },
-        {
-          "count": 1,
           "name": "Voice of Victory"
         }
       ]

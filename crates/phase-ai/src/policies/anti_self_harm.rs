@@ -547,7 +547,7 @@ fn is_useful_removal_target(ctx: &PolicyContext<'_>, id: ObjectId, effects: &[&E
     if let Some(object) = ctx.state.objects.get(&id) {
         for keyword in &object.keywords {
             if let Keyword::Ward(ward) = keyword {
-                if !can_pay_ward_cost(ctx, ward) {
+                if !can_pay_ward_cost(ctx, ward, object) {
                     return false;
                 }
                 break;
@@ -778,12 +778,15 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
             // layer never double-scores that case.
             for keyword in &object.keywords {
                 if let Keyword::Ward(ward_cost) = keyword {
-                    if !can_pay_ward_cost(ctx, ward_cost) {
+                    if !can_pay_ward_cost(ctx, ward_cost, object) {
                         break;
                     }
                     let severity = match ward_cost {
                         WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                         WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                        WardCost::PayLifeEqualToPower => {
+                            (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                        }
                         WardCost::DiscardCard => 1.5,
                         WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                         WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
@@ -793,6 +796,9 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                             .map(|c| match c {
                                 WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                                 WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                                WardCost::PayLifeEqualToPower => {
+                                    (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                                }
                                 WardCost::DiscardCard => 1.5,
                                 WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                                 WardCost::Waterbend(cost) => {

@@ -5,6 +5,59 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 
+/// CR 611.3a + CR 613.1d/f + CR 613.4b: an inverted conditional type change
+/// whose base P/T follows the type name and is followed by granted abilities.
+/// Goddric's Celebration is the type specimen; quoted pump text must not be
+/// mistaken for a modification of the source itself.
+pub(crate) fn parse_inverted_base_pt_type_grant(
+    text: &str,
+    raw_lower: &str,
+) -> Option<StaticDefinition> {
+    let body = super::oracle_modal::strip_ability_word_with_name(text)
+        .filter(|(word, _)| super::oracle_modal::is_known_ability_word(word))
+        .map_or_else(|| text.to_string(), |(_, body)| body);
+    let lower = body.to_lowercase();
+    let split = super::shared::try_split_inverted_as_long_as(&TextPair::new(&body, &lower))?;
+
+    let effect_lower = split.effect_text.to_lowercase();
+    let effect = TextPair::new(&split.effect_text, &effect_lower);
+    let typed = nom_tag_tp(&effect, "~ is a ").or_else(|| nom_tag_tp(&effect, "~ is an "))?;
+    let (type_text, base_text) = typed.split_around(" with base power and toughness ")?;
+    let (tail, (power, toughness)) =
+        super::grammar::parse_pt_mod_with_remainder(base_text.original).ok()?;
+
+    let mut modifications = Vec::new();
+    if nom_primitives::scan_contains(raw_lower, "loses all other creature types") {
+        modifications.push(ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        });
+    }
+    modifications.extend(
+        super::oracle_effect::animation::parse_becomes_type_modifications(type_text.original),
+    );
+    modifications.push(ContinuousModification::SetPower { value: power });
+    modifications.push(ContinuousModification::SetToughness { value: toughness });
+
+    let grants = tail.trim().trim_start_matches(',').trim();
+    if !grants.is_empty() {
+        modifications.extend(super::keyword_grant::parse_continuous_modifications(
+            &format!("has {grants}"),
+        ));
+    }
+    if modifications.is_empty() {
+        return None;
+    }
+
+    let condition = super::shared::parse_static_condition(&split.condition_text)?;
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(modifications)
+            .condition(condition)
+            .description(text.to_string()),
+    )
+}
+
 /// CR 607.2d: Parse a self-chosen type static ability line.
 pub(crate) fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeKind> {
     let (input, kind) = alt((
@@ -1051,14 +1104,29 @@ pub(crate) fn parse_enchanted_is_type(
         (type_part, None)
     };
 
-    // Parse optional color
-    let (type_part, opt_color) = if let Ok((rest, color)) = nom_primitives::parse_color(type_part) {
-        (rest.trim(), Some(color))
+    // CR 105.2 + CR 613.1e: Parse every color in a color list. Witness
+    // Protection's "green and white Citizen creature" must preserve both
+    // colors before the type phrase is parsed.
+    let mut color_rest = type_part;
+    let mut colors = Vec::new();
+    while let Ok((rest, color)) = nom_primitives::parse_color(color_rest) {
+        colors.push(color);
+        let rest = rest.trim_start();
+        let (candidate, _) = opt(tag::<_, _, VE>("and ")).parse(rest).ok()?;
+        if nom_primitives::parse_color(candidate).is_ok() {
+            color_rest = candidate;
+        } else {
+            color_rest = rest;
+            break;
+        }
+    }
+    let (type_part, colors) = if !colors.is_empty() {
+        (color_rest.trim(), colors)
     } else if let Ok((rest, _)) = tag::<_, _, VE>("colorless ").parse(type_part) {
         // "colorless" removes all colors — handled via SetColor([])
-        (rest.trim(), None)
+        (rest.trim(), Vec::new())
     } else {
-        (type_part, None)
+        (type_part, Vec::new())
     };
     let is_colorless = nom_primitives::scan_contains(is_rest_lower, "colorless");
 
@@ -1155,9 +1223,9 @@ pub(crate) fn parse_enchanted_is_type(
                 mods.push(ContinuousModification::SetCardTypes {
                     core_types: granted_core_types,
                 });
-                if let Some(color) = opt_color {
+                if !colors.is_empty() {
                     mods.push(ContinuousModification::SetColor {
-                        colors: vec![color],
+                        colors: colors.clone(),
                     });
                 } else if is_colorless {
                     mods.push(ContinuousModification::SetColor { colors: vec![] });
@@ -1253,12 +1321,17 @@ pub(crate) fn parse_enchanted_is_type(
         // CR 105.3 + CR 613.1e (Layer 5): a new color replaces all previous
         // colors unless the effect is "in addition"; additive "in addition to
         // its other types" appends via AddColor.
-        if let Some(color) = opt_color {
+        if !colors.is_empty() {
             if is_additive {
-                modifications.push(ContinuousModification::AddColor { color });
+                modifications.extend(
+                    colors
+                        .iter()
+                        .copied()
+                        .map(|color| ContinuousModification::AddColor { color }),
+                );
             } else {
                 modifications.push(ContinuousModification::SetColor {
-                    colors: vec![color],
+                    colors: colors.clone(),
                 });
             }
         } else if is_colorless {
@@ -1298,6 +1371,23 @@ pub(crate) fn parse_enchanted_is_type(
         //    RemoveAllSubtypes wipe.
         for sub in granted_subtypes {
             modifications.push(ContinuousModification::AddSubtype { subtype: sub });
+        }
+
+        // CR 612.8 + CR 613.1c: "named X" on a continuous type-changing
+        // effect replaces the enchanted object's name in Layer 3. Preserve
+        // printed capitalization from the original description.
+        let lower_description = description.to_ascii_lowercase();
+        if let Some((_, name)) = super::oracle_nom::bridge::split_once_on_lower(
+            description,
+            &lower_description,
+            " named ",
+        ) {
+            let name = name.trim().trim_end_matches('.').trim();
+            if !name.is_empty() {
+                modifications.push(ContinuousModification::SetTextName {
+                    name: name.to_string(),
+                });
+            }
         }
 
         if modifications.is_empty() {

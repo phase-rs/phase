@@ -1649,7 +1649,10 @@ pub fn matches_target_filter_on_lki_snapshot(
         // never answer this for a source that is already gone.
         attachments: lki.attachments.clone(),
         linked_exile_snapshot: vec![],
-        is_token: false,
+        is_token: state
+            .objects
+            .get(&object_id)
+            .is_some_and(|object| object.is_token),
         combat_status: Default::default(),
         co_departed: Vec::new(),
         attached_to: None,
