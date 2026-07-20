@@ -12,6 +12,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
+import { CardArtFallback } from "./CardArtFallback.tsx";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
@@ -83,11 +84,26 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     }
   }
 
-  if (!obj.face_down && (isLoading || !src)) {
+  // Genuinely still resolving art — pulse until the async lookup settles.
+  if (!obj.face_down && isLoading) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
           <div className="w-full h-full rounded-[4.5px] bg-[#222] animate-pulse" />
+        </div>
+      </div>
+    );
+  }
+
+  // Resolution finished with no image (issue #6156 — a token with no official
+  // paper printing, e.g. Kibo, Uktabi Prince's Banana). This is the *default*
+  // battlefield renderer, so collapsing it into the pulse branch above is what
+  // made artless tokens show as featureless dark squares for most players.
+  if (!obj.face_down && !src) {
+    return (
+      <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
+        <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
+          <CardArtFallback name={cardName} variant="artCrop" className="w-full h-full rounded-[4.5px]" />
         </div>
       </div>
     );

@@ -1,5 +1,4 @@
-import { useState } from "react";
-import type { CSSProperties } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
@@ -7,8 +6,8 @@ import type { TokenSearchFilters } from "../../services/scryfall.ts";
 import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
+import { CardArtFallback } from "./CardArtFallback.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
-import { RichLabel } from "../mana/RichLabel.tsx";
 
 interface CardImageProps {
   cardName: string;
@@ -43,43 +42,6 @@ interface CardImageProps {
   oracleText?: string;
 }
 
-interface CardArtFallbackProps {
-  /** Card/token name, shown as the tile heading and `aria-label`. */
-  name: string;
-  /** Oracle text rendered below the name when the engine knows it. */
-  oracleText?: string;
-  /** Sizing/border/tap-rotation classes shared with the loaded `<img>`. */
-  className: string;
-  /** Color-derived bevel border (or the neutral default). */
-  style?: CSSProperties;
-}
-
-/**
- * Deliberate text tile shown when a card/token has no renderable art — either
- * because art resolution produced no src (issue #6156: tokens with no official
- * paper printing) or because the resolved image failed to load. Naming both
- * failure modes in one place keeps the "no art" and "broken art" renders
- * identical, and guarantees an artless token is still identifiable by name
- * rather than showing as a blank/black square.
- */
-function CardArtFallback({ name, oracleText, className, style }: CardArtFallbackProps) {
-  return (
-    <div
-      className={`${className} bg-gray-800 shadow-md overflow-hidden flex flex-col p-2`}
-      style={style}
-      role="img"
-      aria-label={name}
-    >
-      <div className="text-xs font-semibold text-gray-100 mb-1 truncate">{name}</div>
-      {oracleText && (
-        <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
-          <RichLabel text={oracleText} size="xs" />
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function CardImage({
   cardName,
   size = "normal",
@@ -108,6 +70,11 @@ export function CardImage({
     faceName: faceDown ? undefined : faceName,
   });
   const [imageError, setImageError] = useState(false);
+  // Reset whenever the art source changes so a component instance that once saw
+  // a 404 re-tries the new image: the same instance survives a permanent turning
+  // face up or a DFC transforming, and would otherwise stay latched on the text
+  // tile forever. Mirrors `CardPreview.tsx`'s `useEffect(… , [src])`.
+  useEffect(() => setImageError(false), [src]);
   const fallbackData = useEngineCardData(!faceDown && oracleText === undefined ? cardName : null);
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
 

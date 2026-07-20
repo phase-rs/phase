@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useCardImage } from "../../../hooks/useCardImage.ts";
+import { CARD_BACK_URL } from "../../../services/scryfall.ts";
 import { CardImage } from "../CardImage.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
@@ -38,6 +39,10 @@ describe("CardImage art fallback (issue #6156)", () => {
 
     render(<CardImage cardName="Banana" isToken />);
 
+    // Positive guard first: the pulse element must actually be in the document.
+    // Without this the two negative assertions below would also pass if the
+    // loading branch rendered nothing at all, or threw.
+    expect(screen.getByLabelText("Loading Banana")).toBeInTheDocument();
     // The deliberate text tile carries role="img"; the loading pulse does not.
     expect(screen.queryByRole("img")).toBeNull();
     // No visible name text while loading — the pulse is featureless by design.
@@ -104,5 +109,56 @@ describe("CardImage art fallback (issue #6156)", () => {
 
     expect(screen.getByRole("img", { name: "Reveillark" })).toBeInTheDocument();
     expect(screen.getByText("Reveillark")).toBeInTheDocument();
+  });
+
+  it("keeps face-down cards on the card back instead of revealing a name tile", () => {
+    // Face-down cards call `useCardImage("")`, which resolves to a null src with
+    // no in-flight lookup — the same shape as an artless token. Only the
+    // `!faceDown` guards keep them on the card-back path, so this pins the one
+    // case where `src === null` must NOT produce a name tile: a regression here
+    // would leak hidden card names to opponents.
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="Grizzly Bears" faceDown />);
+
+    const img = document.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img!.getAttribute("src")).toBe(CARD_BACK_URL);
+    expect(screen.queryByRole("img", { name: "Grizzly Bears" })).toBeNull();
+    expect(screen.queryByText("Grizzly Bears")).toBeNull();
+  });
+
+  it("re-tries the image when the art source changes after a load failure", () => {
+    // A single component instance survives a permanent turning face up or a DFC
+    // transforming. Without a reset the latched `imageError` would pin the text
+    // tile in place even once a loadable face arrives.
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/front.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    const { rerender } = render(<CardImage cardName="Delver of Secrets" />);
+    fireEvent.error(document.querySelector("img")!);
+    expect(screen.getByRole("img", { name: "Delver of Secrets" })).toBeInTheDocument();
+
+    // The transformed face resolves to a different, loadable src.
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/back.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    rerender(<CardImage cardName="Insectile Aberration" />);
+
+    const img = document.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img!.getAttribute("src")).toBe("https://example.invalid/back.png");
   });
 });

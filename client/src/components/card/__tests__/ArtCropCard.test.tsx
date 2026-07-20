@@ -90,6 +90,54 @@ describe("ArtCropCard", () => {
     );
   });
 
+  it("renders a name tile for an artless token instead of a blank square (issue #6156)", () => {
+    // `art_crop` is the DEFAULT battlefield display, so this is the render path
+    // most players actually see. A token with no official paper printing (Kibo,
+    // Uktabi Prince's Banana) resolves to a null src with no in-flight lookup;
+    // collapsing that into the loading branch is what produced the reported
+    // featureless dark square.
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    const token = {
+      ...transformedPermanent(),
+      name: "Banana",
+      display_source: "Token",
+      transformed: false,
+      back_face: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Food"] },
+    };
+    useGameStore.setState({
+      gameState: {
+        objects: { [token.id]: token },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByRole("img", { name: "Banana" })).toBeInTheDocument();
+    expect(screen.getByText("Banana")).toBeInTheDocument();
+  });
+
+  it("still pulses while art is genuinely resolving", () => {
+    // The companion to the case above: an in-flight lookup must NOT jump
+    // straight to the name tile, or every card flashes text before its art.
+    mockUseCardImage.mockReturnValue({
+      src: null,
+      isLoading: true,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    const { container } = render(<ArtCropCard objectId={101} />);
+
+    expect(container.querySelector(".animate-pulse")).not.toBeNull();
+    expect(screen.queryByRole("img")).toBeNull();
+  });
+
   it("renders the card back for face-down permanents", () => {
     const permanent = {
       ...transformedPermanent(),

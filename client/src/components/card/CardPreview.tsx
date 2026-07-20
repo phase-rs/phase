@@ -671,7 +671,11 @@ function CardImagePreview({
       ? (effectiveCost ?? obj?.mana_cost)
       : null;
 
-  if (isLoading || !src) {
+  // Only a genuinely in-flight lookup pulses. A finished lookup with no art
+  // (issue #6156) falls through to the named placeholder below — previously it
+  // was collapsed in here, which left this component's own placeholder dead
+  // code for artless tokens and pulsed forever in the hover preview.
+  if (isLoading) {
     return (
       <div
         className={`${frameClass} ${isRotated ? "" : "aspect-[5/7]"} rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`}
@@ -682,7 +686,7 @@ function CardImagePreview({
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
       <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
-        {imgError ? (
+        {imgError || !src ? (
           <div
             className={`${frameClass} flex items-center justify-center rounded-[4%] border border-gray-600 bg-gray-800 p-4 text-center`}
           >
