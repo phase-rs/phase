@@ -93,12 +93,11 @@ fn grant_dies_draw_trigger(obj: &mut GameObject) {
             .iter_all()
             .any(|entry| is_blitz_dies_draw(entry.definition()))
         {
-            obj.trigger_definitions.push(build_dies_draw_trigger());
+            obj.relive_printed_trigger(is_blitz_dies_draw);
         }
         return;
     }
-    let trigger = build_dies_draw_trigger();
-    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
+    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(build_dies_draw_trigger());
     obj.materialize_base_trigger_definitions();
 }
 
