@@ -4759,7 +4759,7 @@ mod tests {
         // Only `milled` carries a Library->Graveyard record this turn.
         state
             .zone_changes_this_turn
-            .push(ZoneChangeRecord::test_minimal(
+            .push_back(ZoneChangeRecord::test_minimal(
                 milled,
                 Some(Zone::Library),
                 Zone::Graveyard,

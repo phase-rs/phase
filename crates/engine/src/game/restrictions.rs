@@ -371,7 +371,7 @@ pub fn record_token_created(state: &mut crate::types::game_state::GameState, obj
             .insert(obj.controller);
         state
             .created_tokens_this_turn
-            .push(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
+            .push_back(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
     }
 }
 
@@ -385,7 +385,11 @@ pub fn record_sacrifice(
     };
     state
         .sacrificed_permanents_this_turn
-        .push(obj.snapshot_for_zone_change(object_id, Some(Zone::Battlefield), Zone::Graveyard));
+        .push_back(obj.snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        ));
     if obj.card_types.core_types.contains(&CoreType::Artifact) {
         state
             .players_who_sacrificed_artifact_this_turn
@@ -527,7 +531,7 @@ pub fn record_zone_change(
     let to_zone = record.to_zone;
     let turn_zone_change_index = state.zone_changes_this_turn.len();
     record.turn_zone_change_index = turn_zone_change_index;
-    state.zone_changes_this_turn.push(record);
+    state.zone_changes_this_turn.push_back(record);
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);
@@ -3207,7 +3211,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Grizzly Bears".to_string(),
                 core_types: vec![CoreType::Creature],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
@@ -3326,7 +3330,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Skeleton".to_string(),
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Skeleton".to_string()],
@@ -3347,7 +3351,7 @@ mod tests {
 
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Vampire".to_string(),
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Vampire".to_string()],
@@ -3401,7 +3405,7 @@ mod tests {
         for i in 0..3 {
             state
                 .zone_changes_this_turn
-                .push(crate::types::game_state::ZoneChangeRecord {
+                .push_back(crate::types::game_state::ZoneChangeRecord {
                     name: format!("Card {}", i),
                     ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                         ObjectId(100 + i),

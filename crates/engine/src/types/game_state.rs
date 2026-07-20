@@ -11688,8 +11688,8 @@ pub struct GameState {
     pub players_who_created_token_this_turn: HashSet<PlayerId>,
     /// CR 111.2: Token creation snapshots this turn, preserving creation-time
     /// characteristics for filtered "tokens you created this turn" quantities.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub created_tokens_this_turn: Vec<ZoneChangeRecord>,
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub created_tokens_this_turn: im::Vector<ZoneChangeRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub counter_added_this_turn: Vec<CounterAddedRecord>,
     #[serde(default)]
@@ -11701,11 +11701,11 @@ pub struct GameState {
     /// CR 701.21a: Sacrificed permanent snapshots this turn, preserving
     /// event-time characteristics for filtered "you sacrificed [quality] this
     /// turn" conditions and quantities.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sacrificed_permanents_this_turn: Vec<ZoneChangeRecord>,
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub sacrificed_permanents_this_turn: im::Vector<ZoneChangeRecord>,
     /// CR 400.7: Zone-change snapshots this turn, enabling data-driven condition queries.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub zone_changes_this_turn: Vec<ZoneChangeRecord>,
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub zone_changes_this_turn: im::Vector<ZoneChangeRecord>,
     /// CR 603.2c: Batched zone-change triggers already collected for
     /// `(definition_ref, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
@@ -12506,8 +12506,8 @@ pub struct GameState {
     /// CR 400.7: Last Known Information cache.
     /// Populated before zone changes for objects leaving the battlefield.
     /// Cleared on phase/step transitions via `advance_phase()`.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub lki_cache: HashMap<ObjectId, LKISnapshot>,
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    pub lki_cache: im::HashMap<ObjectId, LKISnapshot>,
     /// CR 608.2h + CR 707.2: Full copiable-values LKI for objects that leave a
     /// public zone. Ordinary `LKISnapshot` is intentionally filter-shaped and
     /// does not carry ability definitions; copy effects need the complete
@@ -12520,8 +12520,8 @@ pub struct GameState {
     /// resolution paths that carry an incarnation use this history so a later
     /// departure of a re-entered object cannot overwrite the earlier object's LKI.
     /// Cleared with `lki_cache` on phase/step transitions.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub lki_by_incarnation: HashMap<ObjectId, HashMap<u64, LKISnapshot>>,
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    pub lki_by_incarnation: im::HashMap<ObjectId, im::HashMap<u64, LKISnapshot>>,
 
     /// CR 607.2b + CR 603.10e: Last-known "cards exiled with [source]" linkage,
     /// captured when a source with `TrackedBySource` exile links leaves the
@@ -14218,13 +14218,13 @@ impl GameState {
             attacker_declarations_this_turn: Vec::new(),
             creatures_blocked_this_turn: HashSet::new(),
             players_who_created_token_this_turn: HashSet::new(),
-            created_tokens_this_turn: Vec::new(),
+            created_tokens_this_turn: im::Vector::new(),
             counter_added_this_turn: Vec::new(),
             players_who_discarded_card_this_turn: HashSet::new(),
             cards_discarded_this_turn_by_player: HashMap::new(),
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
-            sacrificed_permanents_this_turn: Vec::new(),
-            zone_changes_this_turn: Vec::new(),
+            sacrificed_permanents_this_turn: im::Vector::new(),
+            zone_changes_this_turn: im::Vector::new(),
             batched_zone_change_trigger_fired: HashSet::new(),
             battlefield_entries_this_turn: Vec::new(),
             damage_dealt_this_turn: im::Vector::new(),
@@ -14318,9 +14318,9 @@ impl GameState {
             current_trigger_events: Vec::new(),
             last_discover_value: None,
             stack_trigger_event_batches: HashMap::new(),
-            lki_cache: HashMap::new(),
+            lki_cache: im::HashMap::new(),
             lki_copiable_values: HashMap::new(),
-            lki_by_incarnation: HashMap::new(),
+            lki_by_incarnation: im::HashMap::new(),
             linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
             pending_taps_for_mana_overrides: std::collections::HashMap::new(),
@@ -15008,12 +15008,15 @@ impl GameState {
             }
         }
 
-        clone.lki_by_incarnation.retain(|object_id, history| {
-            history.retain(|incarnation, _| {
-                referenced_lki.contains(&ObjectIncarnationRef::of(*object_id, *incarnation))
-            });
-            !history.is_empty()
-        });
+        clone.lki_by_incarnation = std::mem::take(&mut clone.lki_by_incarnation)
+            .into_iter()
+            .filter_map(|(object_id, mut history)| {
+                history.retain(|incarnation, _| {
+                    referenced_lki.contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+                });
+                (!history.is_empty()).then_some((object_id, history))
+            })
+            .collect();
         clone
     }
 

@@ -11898,7 +11898,7 @@ mod tests {
             .push(CoreType::Artifact);
         state
             .zone_changes_this_turn
-            .push(ZoneChangeRecord::test_minimal(
+            .push_back(ZoneChangeRecord::test_minimal(
                 card,
                 Some(Zone::Battlefield),
                 Zone::Graveyard,

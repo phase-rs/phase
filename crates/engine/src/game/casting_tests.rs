@@ -48208,7 +48208,7 @@ fn push_cards_to_graveyard_this_turn(state: &mut GameState, owner: PlayerId, cou
     for i in 0..count {
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: format!("Milled Card {i}"),
                 core_types: vec![CoreType::Creature],
                 mana_value: 1,

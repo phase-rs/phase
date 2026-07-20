@@ -431,7 +431,7 @@ fn apply_pending_counter_post_action(
             }) {
                 state
                     .zone_changes_this_turn
-                    .push(zone_change_record.clone());
+                    .push_back(zone_change_record.clone());
                 events.push(GameEvent::ZoneChanged {
                     object_id,
                     from: None,

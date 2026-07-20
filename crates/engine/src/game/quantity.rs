@@ -6148,14 +6148,14 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        state.sacrificed_permanents_this_turn.push(
+        state.sacrificed_permanents_this_turn.push_back(
             state.objects[&artifact].snapshot_for_zone_change(
                 artifact,
                 Some(Zone::Battlefield),
                 Zone::Graveyard,
             ),
         );
-        state.sacrificed_permanents_this_turn.push(
+        state.sacrificed_permanents_this_turn.push_back(
             state.objects[&creature].snapshot_for_zone_change(
                 creature,
                 Some(Zone::Battlefield),
