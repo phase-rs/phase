@@ -3006,6 +3006,13 @@ export const AdapterErrorCode = {
    * correctly refused a stale action. Dispatch treats it as a no-op rather
    * than surfacing it as a crash.
    */
+  /**
+   * The engine refused the submitted action. Long used as a bare string literal
+   * by the remote adapters; registered here so `actionRejectionError` — and any
+   * future caller — can reference it type-safely. Same wire value, so existing
+   * string comparisons are unaffected.
+   */
+  ACTION_REJECTED: "ACTION_REJECTED",
   STALE_ACTION: "STALE_ACTION",
 } as const;
 

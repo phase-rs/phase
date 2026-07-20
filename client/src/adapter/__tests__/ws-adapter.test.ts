@@ -276,7 +276,7 @@ describe("WebSocketAdapter", () => {
     // error the local-WASM seat no longer sees.
     it("classifies a stale ReorderHand rejection from the server as STALE_ACTION", async () => {
       const pending = adapter.submitAction(
-        { type: "ReorderHand", data: { order: [1, 2, 3] as never } },
+        { type: "ReorderHand", data: { order: [1, 2, 3] } },
         0,
       );
       ws.dispatchSynthetic(
