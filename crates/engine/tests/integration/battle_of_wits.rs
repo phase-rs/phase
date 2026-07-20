@@ -1,8 +1,9 @@
-//! Battle of Wits production-pipeline regression (CR 401.1 + CR 603.4 + CR 104.2b).
+//! Battle of Wits production-pipeline regression (CR 401.3 + CR 603.4 + CR 104.2b).
 //!
-//! The controller's live library count gates the upkeep trigger both when it
-//! would fire and when it resolves. The fixtures deliberately give the opponent
-//! the opposite threshold so a controller/scope regression is observable.
+//! CR 401.3 makes each player's remaining library-card count countable. The
+//! controller's live library count gates the upkeep trigger both when it would
+//! fire and when it resolves. The fixtures deliberately give the opponent the
+//! opposite threshold so a controller/scope regression is observable.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
