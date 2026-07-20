@@ -1293,6 +1293,58 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
   });
 
+  // Issue #5913: the host relays the engine's verdict verbatim, so a guest must
+  // classify a stale ReorderHand exactly as the local-WASM seat does. Before the
+  // shared classifier this path built a generic ACTION_REJECTED, and
+  // `dispatchAction` — which suppresses only STALE_ACTION — still surfaced the
+  // red error to P2P guests.
+  it("guest classifies a stale ReorderHand rejection from the host as STALE_ACTION", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await adapter.initialize();
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+    });
+    await adapter.initializeGame();
+
+    const stale = adapter.submitAction(
+      { type: "ReorderHand", data: { order: [1, 2, 3] } } as unknown as GameAction,
+      1,
+    );
+    await conn.simulateData({
+      type: "action_rejected",
+      reason: "Engine error: ReorderHand: expected 6 ids, got 5",
+    });
+    await expect(stale).rejects.toMatchObject({
+      code: "STALE_ACTION",
+      recoverable: false,
+    });
+
+    // A genuine rejection must still surface as a recoverable ACTION_REJECTED.
+    const real = adapter.submitAction({ type: "PassPriority" }, 1);
+    await conn.simulateData({
+      type: "action_rejected",
+      reason: "Engine error: Something genuinely wrong",
+    });
+    await expect(real).rejects.toMatchObject({
+      code: "ACTION_REJECTED",
+      recoverable: true,
+    });
+  });
+
   it("guest snapshots stay coherent and strictly ordered across successive state updates", async () => {
     const { peer } = createFakePeer();
     const conn = new FakeDataConnection();

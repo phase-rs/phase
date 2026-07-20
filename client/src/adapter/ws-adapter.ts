@@ -12,7 +12,7 @@ import type {
   PersistedGameState,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -777,7 +777,7 @@ export class WebSocketAdapter implements EngineAdapter {
         this.emit({ type: "actionPendingChanged", pending: false });
         if (this.pendingReject) {
           this.pendingReject(
-            new AdapterError("ACTION_REJECTED", data.reason, true),
+            actionRejectionError(data.reason),
           );
           this.pendingResolve = null;
           this.pendingReject = null;
@@ -800,7 +800,7 @@ export class WebSocketAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("ACTION_REJECTED", data.reason, true));
+          pending.reject(actionRejectionError(data.reason));
         }
         break;
       }

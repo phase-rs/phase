@@ -3031,6 +3031,35 @@ export function isStaleActionMessage(message: string): boolean {
 }
 
 /**
+ * Transport-neutral test for "the engine rejected this action, but nothing
+ * changed and nothing needs recovering". Single authority for what counts as a
+ * benign stale rejection, so every transport agrees.
+ */
+export function isStaleRejectionMessage(message: string): boolean {
+  return isStaleActionMessage(message) || isStaleReorderMessage(message);
+}
+
+/**
+ * Build the `AdapterError` for an engine action rejection, classified the same
+ * way regardless of which transport delivered it.
+ *
+ * The rejection reason originates in the ENGINE, so its classification cannot
+ * depend on whether the verdict arrived from a local WASM call, a WebSocket
+ * server, or a P2P host. Routing every rejection path through here is what lets
+ * `dispatchAction` suppress the benign stale race (issue #5913) for remote
+ * players too, instead of only for the local-WASM seat.
+ *
+ * Stale rejections are NOT recoverable-by-retry: the action is void and the
+ * caller should drop it, not re-submit. Every other rejection stays a
+ * recoverable `ACTION_REJECTED` so existing retry/surface behavior is unchanged.
+ */
+export function actionRejectionError(reason: string): AdapterError {
+  return isStaleRejectionMessage(reason)
+    ? new AdapterError(AdapterErrorCode.STALE_ACTION, reason, false)
+    : new AdapterError(AdapterErrorCode.ACTION_REJECTED, reason, true);
+}
+
+/**
  * Detect the engine's rejection of a `ReorderHand` whose order no longer names
  * the current hand. `apply_action` formats
  * `EngineError::InvalidAction("ReorderHand: expected {n} ids, got {m}")` as
