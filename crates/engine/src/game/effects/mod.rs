@@ -1486,13 +1486,15 @@ pub(crate) fn append_to_pending_continuation(
 }
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
-    if state.active_per_category_zone_choice().is_some() {
+    if state.active_per_player_zone_choice().is_some()
+        || state.active_per_category_zone_choice().is_some()
+    {
         state
             .insert_ability_continuation_parent_of_active(PendingContinuation::new(
                 Box::new(head),
                 state,
             ))
-            .expect("per-category zone choice must retain its continuation as an immediate parent");
+            .expect("zone-choice iteration must retain its continuation as an immediate parent");
         return;
     }
 

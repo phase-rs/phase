@@ -3237,4 +3237,118 @@ mod tests {
             "the prior producer's set must be untouched, never inherited by the iteration"
         );
     }
+
+    /// CR 101.4 + CR 608.2c: An initial each-player zone choice that pauses
+    /// before its trailing instruction is discovered must retain that prompt as
+    /// the active child. The continuation is its immediate parent, so the real
+    /// SelectCards path drains both players before the tracked-set rider runs.
+    ///
+    /// REVERT PROBE: pushing the continuation above the active per-player frame
+    /// makes the first action take the ordinary choice path instead, leaving the
+    /// second player's frame orphaned and these hand assertions false.
+    #[test]
+    fn per_player_zone_choice_keeps_continuation_below_active_prompt() {
+        use crate::types::actions::GameAction;
+        use crate::types::resolution::{FrameKind, ResolutionFrame, ResolutionStateWire};
+
+        let mut state = GameState::new_two_player(19);
+        let first = create_object(
+            &mut state,
+            CardId(19),
+            PlayerId(0),
+            "First graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "Second graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let continuation = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility {
+            sub_ability: Some(Box::new(continuation)),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Graveyard,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::EachPlayer,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: false,
+                    constraint: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::AbilityContinuation,
+                FrameKind::PerPlayerZoneChoice,
+            ],
+            "the per-player prompt must remain active above its deferred continuation"
+        );
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("real per-player prompt serializes as v2");
+        assert!(
+            v2.get("pending_per_player_zone_choice").is_none(),
+            "v2 state must retain the per-player owner only in resolution_frames"
+        );
+        state = serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("real per-player prompt round-trips through the v2 wire")
+            .into_game_state();
+
+        for expected in [first, second] {
+            match &state.waiting_for {
+                WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                    assert_eq!(cards, &vec![expected]);
+                }
+                other => panic!("expected per-player ChooseFromZoneChoice, got {other:?}"),
+            }
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::SelectCards {
+                    cards: vec![expected],
+                },
+            )
+            .expect("the production choice action must advance the per-player iteration");
+        }
+
+        assert!(state.active_per_player_zone_choice().is_none());
+        assert!(state.active_ability_continuation().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects.get(&first).unwrap().zone, Zone::Hand);
+        assert_eq!(state.objects.get(&second).unwrap().zone, Zone::Hand);
+    }
 }
