@@ -11,7 +11,7 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -667,9 +667,19 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as { reason: string };
         this.emit({ type: "actionPendingChanged", pending: false });
         if (this.pendingReject) {
-          this.pendingReject(
-            new AdapterError("ACTION_REJECTED", data.reason, true),
-          );
+          // Game-phase action rejection. `ServerDraftAdapter` is a full
+          // `EngineAdapter` once the pod's game starts, so it must classify the
+          // engine's stale verdicts exactly as the WebSocket and P2P transports
+          // do — otherwise a stale `ReorderHand` in a server-hosted draft game
+          // still surfaces as the red recoverable error this PR removes
+          // everywhere else.
+          //
+          // Deliberately NOT applied to the other two `ACTION_REJECTED` sites in
+          // this file: `DraftActionRejected` carries a pick/pass rejection (no
+          // `GameAction`, so no stale-action verdict is possible) and
+          // `ManaPaymentPreviewRejected` answers a preview query rather than an
+          // action submission. Both stay plain recoverable rejections.
+          this.pendingReject(actionRejectionError(data.reason));
           this.pendingResolve = null;
           this.pendingReject = null;
         }
