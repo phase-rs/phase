@@ -1148,8 +1148,12 @@ fn move_counter_with_replacement_entry(
 }
 
 pub(crate) fn drain_pending_counter_moves(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.pending_counter_moves.take() {
+    while let Some(mut queue) = state.active_counter_moves().cloned() {
         let Some(next) = queue.remaining.first().cloned() else {
+            state
+                .take_active_counter_moves()
+                .expect("settled counter-moves queue must own the active frame")
+                .expect("settled counter-moves frame must exist");
             events.push(GameEvent::EffectResolved {
                 kind: queue.effect_kind,
                 source_id: queue.source_id,
@@ -1158,7 +1162,9 @@ pub(crate) fn drain_pending_counter_moves(state: &mut GameState, events: &mut Ve
             continue;
         };
         queue.remaining.remove(0);
-        state.pending_counter_moves = Some(queue);
+        state
+            .replace_active_counter_moves(queue)
+            .expect("re-parked counter-moves queue must own the active frame");
         if !move_counter_with_replacement_entry(state, next, events) {
             return;
         }
@@ -2035,7 +2041,7 @@ pub(crate) fn validate_and_queue_counter_move_distribution(
         }
     }
 
-    state.pending_counter_moves = Some(PendingCounterMoveQueue {
+    state.push_counter_moves(PendingCounterMoveQueue {
         remaining: moves,
         effect_kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,
@@ -2430,15 +2436,18 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         ControllerRef, FilterProp, QuantityExpr, QuantityModification, ReplacementDefinition,
         TargetChoiceTiming, TargetFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
     use crate::types::zones::Zone;
 
     fn make_counter_ability(effect: Effect, target: ObjectId) -> ResolvedAbility {
@@ -4034,6 +4043,118 @@ mod tests {
         )));
     }
 
+    /// CR 616.1 + CR 122.5: a selected CounterMoves queue remains the sole
+    /// runtime owner while each move's add stage chooses among noncommuting
+    /// counter replacements. The queue re-parks for every prompt and v2 restores
+    /// that real prompt boundary before production replacement actions resume it.
+    #[test]
+    fn counter_moves_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let destination_id = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .expect("counter source exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        install_noncommuting_counter_replacements(&mut state);
+        state.push_counter_moves(PendingCounterMoveQueue {
+            remaining: vec![
+                PendingCounterMove {
+                    actor: PlayerId(0),
+                    source_id,
+                    destination_id,
+                    counter_type: CounterType::Plus1Plus1,
+                    remove_count: 1,
+                    add_count: 1,
+                },
+                PendingCounterMove {
+                    actor: PlayerId(0),
+                    source_id,
+                    destination_id,
+                    counter_type: CounterType::Plus1Plus1,
+                    remove_count: 1,
+                    add_count: 1,
+                },
+            ],
+            effect_kind: EffectKind::MoveCounters,
+            source_id,
+        });
+
+        drain_pending_counter_moves(&mut state, &mut Vec::new());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CounterMoves(_))
+        ));
+        assert_eq!(
+            state
+                .active_counter_moves()
+                .expect("counter queue remains active at its prompt")
+                .remaining
+                .len(),
+            1
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("paused CounterMoves prompt serializes as v2");
+        assert_eq!(saved["resolution_state_version"], 2);
+        assert!(saved.get("pending_counter_moves").is_none());
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("v2 CounterMoves prompt restores");
+        let mut state = restored.into_game_state();
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("production replacement action resumes the counter queue");
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                assert!(matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::CounterMoves(_))
+                ));
+            }
+        }
+
+        assert!(state.active_counter_moves().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.objects[&source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert!(
+            state.objects[&destination_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                > 2,
+            "both counter moves must complete through the chosen replacement paths"
+        );
+    }
+
     #[test]
     fn atomic_move_counter_add_stage_prevention_cancels_whole_move() {
         let mut state = GameState::new_two_player(42);
@@ -4378,7 +4499,7 @@ mod tests {
         )
         .unwrap();
 
-        let queued = state.pending_counter_moves.as_ref().unwrap();
+        let queued = state.active_counter_moves().unwrap();
         assert_eq!(queued.remaining.len(), 2);
     }
 

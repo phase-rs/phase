@@ -876,7 +876,7 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
-                && state.pending_counter_moves.is_some()
+                && state.active_counter_moves().is_some()
             {
                 effects::counters::drain_pending_counter_moves(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
