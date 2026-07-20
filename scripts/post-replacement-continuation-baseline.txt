@@ -31,6 +31,7 @@ crates/engine/src/game/effects/deal_damage.rs	resolve_each_source_deals_damage	c
 crates/engine/src/game/effects/deal_damage.rs	resolve_each_target_power_damage	consumer	1
 crates/engine/src/game/effects/draw.rs	draw_through_replacement_with_applied	consumer	1
 crates/engine/src/game/effects/life.rs	drain_substitution_continuation	consumer	1
+crates/engine/src/game/effects/mod.rs	resume_resolution_frames	consumer	1
 crates/engine/src/game/effects/scry.rs	resolve	consumer	1
 crates/engine/src/game/effects/token_copy.rs	apply_copy_token_after_replacement_with_created_ids	consumer	1
 crates/engine/src/game/engine.rs	handle_play_land	consumer	1
