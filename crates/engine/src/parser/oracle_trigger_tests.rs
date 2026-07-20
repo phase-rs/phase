@@ -14420,7 +14420,7 @@ fn phase_trigger_exactly_thirteen_cards_in_hand_win_the_game() {
     }
 }
 
-/// CR 401.1 + CR 603.4 + CR 104.2b: Battle of Wits' full Oracle text must
+/// CR 401.3 + CR 603.4 + CR 104.2b: Battle of Wits' full Oracle text must
 /// preserve its controller-library threshold as an intervening-if on the upkeep
 /// trigger, then execute the ordinary controller-scoped win effect.
 #[test]
