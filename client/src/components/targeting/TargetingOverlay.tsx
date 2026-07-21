@@ -65,6 +65,12 @@ export function TargetingOverlay() {
     : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
+  // CR 601.2c: display-only hint that this slot is announced by a non-controller
+  // ("of an opponent's choice", e.g. Volcanic Offering). The engine routes the
+  // prompt's `WaitingFor.player` to that announcer — who is exactly the viewer of
+  // this overlay — so the slot is labelled whenever it carries any `chooser`.
+  // This only labels the slot; no game logic in the client.
+  const isOpponentChosenSlot = activeSlot?.chooser != null;
   const sourceId = boardChoice?.sourceId ?? (
     waitingFor?.type === "TriggerTargetSelection"
       ? waitingFor.data.source_id
@@ -201,6 +207,11 @@ export function TargetingOverlay() {
           <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
             <RichLabel text={overlayPrompt} />
           </div>
+          {isOpponentChosenSlot && (
+            <div className="rounded-md bg-gray-800/90 px-3 py-1 text-xs font-medium text-amber-300 shadow">
+              {t("targeting.opponentChoice")}
+            </div>
+          )}
           {enginePrompt && (
             <div className="max-w-md rounded-md bg-gray-800/90 px-4 py-1 text-center text-xs text-gray-300 shadow">
               <RichLabel text={enginePrompt} size="xs" />

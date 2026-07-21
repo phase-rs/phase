@@ -5,7 +5,10 @@ import {
   openPhaseSocket,
   withReconnect,
 } from "../openPhaseSocket";
-import { PROTOCOL_VERSION } from "../../adapter/ws-adapter";
+import {
+  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
+  PROTOCOL_VERSION,
+} from "../../adapter/ws-adapter";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -92,6 +95,7 @@ describe("openPhaseSocket", () => {
   });
 
   it("accepts the previous protocol version for LobbyOnly brokers", async () => {
+    expect(LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL).toBe(PROTOCOL_VERSION - 1);
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(
@@ -104,6 +108,19 @@ describe("openPhaseSocket", () => {
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining(`"protocol_version":${PROTOCOL_VERSION - 1}`),
     );
+  });
+
+  it("rejects LobbyOnly brokers older than the derived one-version window", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(
+      helloFrame({ protocol_version: PROTOCOL_VERSION - 2, mode: "LobbyOnly" }),
+    );
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
   });
 
   it("times out and closes the socket when ServerHello never arrives", async () => {

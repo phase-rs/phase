@@ -21,6 +21,7 @@ declare const __SCRYFALL_PRINTINGS_URL__: string;
 declare const __SCRYFALL_SETS_URL__: string;
 declare const __GIT_REPO_URL__: string;
 declare const __PREVIEW_SITE_URL__: string;
+declare const __RELEASE_SITE_URL__: string;
 declare const __IS_RELEASE_BUILD__: boolean;
 declare const __SUPABASE_URL__: string;
 declare const __SUPABASE_ANON_KEY__: string;

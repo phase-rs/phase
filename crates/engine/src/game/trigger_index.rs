@@ -459,7 +459,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 
     match event {
         // CR 732.2: a halted-resolution notification produces no trigger keys.
-        GameEvent::GameStarted | GameEvent::ResolutionHalted { .. } => {}
+        GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::ResolutionHalted { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
@@ -846,6 +848,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
+        | EffectKind::ArrangePlanarDeckTop
         | EffectKind::Planeswalk
         | EffectKind::ChaosEnsues
         // Redistribute emits LifeChanged handled by that event's own arm; no
@@ -994,8 +997,12 @@ pub fn reindex_object_triggers(state: &mut GameState, object_id: ObjectId) {
         state.trigger_index.remove(object_id);
         return;
     }
-    let defs: SmallVec<[TriggerDefinition; 4]> =
-        obj.trigger_definitions.as_slice().iter().cloned().collect();
+    let defs: SmallVec<[TriggerDefinition; 4]> = obj
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .map(|entry| entry.definition.clone())
+        .collect();
     let synthetic = has_synthetic_keyword_trigger_for(obj);
     state.trigger_index.remove(object_id);
     state.trigger_index.add(object_id, &defs, synthetic);
@@ -1068,10 +1075,29 @@ impl TriggerIndex {
                 // matcher gating in `active_trigger_definitions` runs at
                 // consult time — classification can register on the full set.
                 let synthetic = has_synthetic_keyword_trigger_for(obj);
-                fresh.add(obj_id, obj.trigger_definitions.as_slice(), synthetic);
+                let defs: SmallVec<[TriggerDefinition; 4]> = obj
+                    .trigger_definitions
+                    .as_slice()
+                    .iter()
+                    .map(|entry| entry.definition.clone())
+                    .collect();
+                fresh.add(obj_id, &defs, synthetic);
             }
         }
         state.trigger_index = fresh;
+    }
+}
+
+/// CR 603.2 + CR 611.2e: Ensure the serde-skipped candidate index is available
+/// before a consult. The layer pipeline remains the authoritative rebuild path
+/// for live granted and removed definitions; this only restores the empty
+/// derived index after deserialize when battlefield state is already present.
+pub fn ensure_ready(state: &mut GameState) {
+    if state.trigger_index.by_key.is_empty()
+        && state.trigger_index.unclassified.is_empty()
+        && !state.battlefield.is_empty()
+    {
+        TriggerIndex::rebuild_from_battlefield(state);
     }
 }
 
@@ -1112,9 +1138,12 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::GameObject;
     use crate::types::ability::{TargetFilter, TypedFilter};
     use crate::types::game_state::ZoneChangeRecord;
-    use crate::types::triggers::TriggerEventKey;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::triggers::{TriggerEventKey, TriggerMode};
 
     fn etb_creature_def() -> TriggerDefinition {
         TriggerDefinition::new(TriggerMode::ChangesZone)
@@ -1243,5 +1272,120 @@ mod tests {
 
         let candidates = candidates_for_event(&state, &event);
         assert!(candidates.contains(&watcher));
+    }
+
+    #[test]
+    fn rebuild_preserves_materialized_trigger_occurrence_refs() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(77);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(77),
+            PlayerId(0),
+            "Indexed Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions = std::sync::Arc::new(vec![etb_creature_def()]);
+        object.materialize_base_trigger_definitions();
+        let before = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let object = &state.objects[&object_id];
+        assert_eq!(
+            before,
+            object.trigger_definition_ref(&object.trigger_definitions[0]),
+            "index rebuild is classification-only and must not reallocate trigger identity"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_rebuilds_deserialized_taps_for_mana_index() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(78);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(78),
+            PlayerId(0),
+            "Deserialized Mana Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+        object.materialize_base_trigger_definitions();
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        let serialized = serde_json::to_value(&state).expect("state serializes");
+        let mut restored: GameState = serde_json::from_value(serialized).expect("state restores");
+        assert!(restored.trigger_index.by_key.is_empty());
+        assert!(restored.trigger_index.unclassified.is_empty());
+
+        ensure_ready(&mut restored);
+
+        let event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: ObjectId(79),
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        };
+        assert_eq!(
+            candidates_for_event(&restored, &event).as_slice(),
+            &[object_id],
+            "the first post-deserialize inline-mana consult must restore its candidate"
+        );
+    }
+
+    #[test]
+    fn tapped_for_mana_candidates_exclude_irrelevant_battlefield_objects() {
+        let mut state = GameState::new_two_player(42);
+        for id in 0..64 {
+            let object_id = ObjectId(id);
+            state.objects.insert(
+                object_id,
+                GameObject::new(
+                    object_id,
+                    CardId(id),
+                    PlayerId(0),
+                    format!("Irrelevant {id}"),
+                    Zone::Battlefield,
+                ),
+            );
+            state.battlefield.push_back(object_id);
+        }
+        let relevant = [ObjectId(100), ObjectId(101)];
+        for object_id in relevant {
+            let mut object = GameObject::new(
+                object_id,
+                CardId(object_id.0),
+                PlayerId(0),
+                format!("Mana Trigger {}", object_id.0),
+                Zone::Battlefield,
+            );
+            object.base_trigger_definitions =
+                std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+            object.materialize_base_trigger_definitions();
+            state.objects.insert(object_id, object);
+            state.battlefield.push_back(object_id);
+        }
+        TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: ObjectId(999),
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        };
+        let candidates = candidates_for_event(&state, &event);
+
+        assert_eq!(state.battlefield.len(), 66);
+        assert_eq!(candidates.as_slice(), &relevant);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "only TapsForMana candidates are visited"
+        );
     }
 }

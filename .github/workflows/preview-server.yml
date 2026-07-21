@@ -1,0 +1,403 @@
+name: Preview Server Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      fingerprint:
+        description: Engine fingerprint (16 hex characters)
+        required: true
+        type: string
+      commit:
+        description: Commit whose server source is compiled
+        required: true
+        type: string
+      card_data_sha256:
+        description: SHA-256 of uncompressed card-data.json
+        required: true
+        type: string
+      card_data_hash16:
+        description: First 16 hex characters of card-data.json SHA-256
+        required: true
+        type: string
+      draft_pools_sha256:
+        description: SHA-256 of uncompressed draft-pools.json
+        required: true
+        type: string
+      draft_pools_hash16:
+        description: First 16 hex characters of draft-pools.json SHA-256
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-server-${{ inputs.fingerprint }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Skip published fingerprint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      already_published: ${{ steps.gate.outputs.already_published }}
+    steps:
+      - name: Check manifest membership
+        id: gate
+        env:
+          FINGERPRINT: ${{ inputs.fingerprint }}
+          COMMIT: ${{ inputs.commit }}
+          CARD_DATA_SHA256: ${{ inputs.card_data_sha256 }}
+          CARD_DATA_HASH16: ${{ inputs.card_data_hash16 }}
+          DRAFT_POOLS_SHA256: ${{ inputs.draft_pools_sha256 }}
+          DRAFT_POOLS_HASH16: ${{ inputs.draft_pools_hash16 }}
+        run: |
+          set -euo pipefail
+
+          for value in "$FINGERPRINT" "$CARD_DATA_HASH16" "$DRAFT_POOLS_HASH16"; do
+            if ! [[ "$value" =~ ^[0-9a-f]{16}$ ]]; then
+              echo "::error::Expected a 16-character lowercase hex fingerprint, got: $value"
+              exit 1
+            fi
+          done
+          for value in "$CARD_DATA_SHA256" "$DRAFT_POOLS_SHA256"; do
+            if ! [[ "$value" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Expected a 64-character lowercase SHA-256, got: $value"
+              exit 1
+            fi
+          done
+          if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Expected a 40-character lowercase commit SHA, got: $COMMIT"
+            exit 1
+          fi
+
+          manifest=$(mktemp)
+          status=$(curl -sS -o "$manifest" -w '%{http_code}' \
+            --connect-timeout 5 --max-time 30 \
+            https://data.phase-rs.dev/desktop/preview-server.json || true)
+          case "$status" in
+            200)
+              jq -e 'type == "object" and (.fingerprints | type == "object")' "$manifest" >/dev/null
+              if jq -e --arg fingerprint "$FINGERPRINT" '.fingerprints | has($fingerprint)' "$manifest" >/dev/null; then
+                echo "already_published=true" >> "$GITHUB_OUTPUT"
+                echo "Preview fingerprint $FINGERPRINT is already published."
+              else
+                echo "already_published=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            404)
+              echo "already_published=false" >> "$GITHUB_OUTPUT"
+              echo "Preview manifest does not exist yet."
+              ;;
+            *)
+              echo "::error::Could not fetch preview manifest (HTTP ${status:-curl failure})."
+              exit 1
+              ;;
+          esac
+
+  build:
+    name: Build preview server (${{ matrix.os }})
+    needs: [gate]
+    if: needs.gate.outputs.already_published != 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 55
+    env:
+      PHASE_CHANNEL: preview
+      PHASE_ENGINE_FINGERPRINT: ${{ inputs.fingerprint }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            triple: x86_64-unknown-linux-musl
+            extension: ""
+          - os: macos
+            runner: macos-latest
+            triple: aarch64-apple-darwin
+            extension: ""
+          - os: windows
+            runner: windows-latest
+            triple: x86_64-pc-windows-msvc
+            extension: .exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-server-${{ matrix.os }}
+
+      - name: Install musl tools and target
+        if: matrix.triple == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build phase-server
+        run: cargo build --profile server-release --bin phase-server --target ${{ matrix.triple }}
+
+      - name: Prepare preview server binary (Unix)
+        if: matrix.os != 'windows'
+        run: |
+          cp "target/${{ matrix.triple }}/server-release/phase-server" "phase-server-${{ matrix.triple }}"
+          chmod +x "phase-server-${{ matrix.triple }}"
+        shell: bash
+
+      - name: Prepare preview server binary (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          Copy-Item "target/${{ matrix.triple }}/server-release/phase-server.exe" "phase-server-${{ matrix.triple }}.exe"
+        shell: pwsh
+
+      - name: Upload preview server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-server-${{ matrix.triple }}
+          path: phase-server-${{ matrix.triple }}${{ matrix.extension }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Sign, publish, and retain preview servers
+    needs: [gate, build]
+    if: needs.gate.outputs.already_published != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: preview-server-manifest
+      cancel-in-progress: false
+    env:
+      FINGERPRINT: ${{ inputs.fingerprint }}
+      COMMIT: ${{ inputs.commit }}
+      CARD_DATA_SHA256: ${{ inputs.card_data_sha256 }}
+      CARD_DATA_HASH16: ${{ inputs.card_data_hash16 }}
+      DRAFT_POOLS_SHA256: ${{ inputs.draft_pools_sha256 }}
+      DRAFT_POOLS_HASH16: ${{ inputs.draft_pools_hash16 }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
+    steps:
+      - name: Re-check manifest membership under publication lock
+        id: publication-gate
+        run: |
+          set -euo pipefail
+
+          manifest=$(mktemp)
+          trap 'rm -f "$manifest"' EXIT
+          status=$(curl -sS -o "$manifest" -w '%{http_code}' \
+            --connect-timeout 5 --max-time 30 \
+            https://data.phase-rs.dev/desktop/preview-server.json || true)
+          case "$status" in
+            200)
+              jq -e 'type == "object" and (.fingerprints | type == "object")' "$manifest" >/dev/null
+              if jq -e --arg fingerprint "$FINGERPRINT" '.fingerprints | has($fingerprint)' "$manifest" >/dev/null; then
+                echo "already_published=true" >> "$GITHUB_OUTPUT"
+                echo "Preview fingerprint $FINGERPRINT was published while this job waited for the publication lock."
+              else
+                echo "already_published=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            404)
+              echo "already_published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Could not fetch preview manifest after acquiring publication lock (HTTP ${status:-curl failure})."
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/setup-node@v4
+        if: steps.publication-gate.outputs.already_published != 'true'
+        with:
+          node-version: 22
+
+      - name: Download Linux binary
+        if: steps.publication-gate.outputs.already_published != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: preview-server-x86_64-unknown-linux-musl
+          path: artifacts/x86_64-unknown-linux-musl
+
+      - name: Download macOS binary
+        if: steps.publication-gate.outputs.already_published != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: preview-server-aarch64-apple-darwin
+          path: artifacts/aarch64-apple-darwin
+
+      - name: Download Windows binary
+        if: steps.publication-gate.outputs.already_published != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: preview-server-x86_64-pc-windows-msvc
+          path: artifacts/x86_64-pc-windows-msvc
+
+      - name: Sign binaries, publish manifest, and garbage-collect old pairs
+        if: steps.publication-gate.outputs.already_published != 'true'
+        # The manifest is written last: nothing refers to a binary until its
+        # detached signature exists. R2 retention tracks exactly its current and
+        # previous fingerprint entries.
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+          umask 077
+          key_file=$(mktemp)
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY" > "$key_file"
+
+          sign() {
+            printf '\n' | minisign -S -s "$key_file" -m "$1" -x "$1.minisig"
+          }
+
+          binaries=(
+            artifacts/x86_64-unknown-linux-musl/phase-server-x86_64-unknown-linux-musl
+            artifacts/aarch64-apple-darwin/phase-server-aarch64-apple-darwin
+            artifacts/x86_64-pc-windows-msvc/phase-server-x86_64-pc-windows-msvc.exe
+          )
+          for binary in "${binaries[@]}"; do
+            test -s "$binary"
+            sign "$binary"
+          done
+
+          prefix="desktop/preview-server/$FINGERPRINT"
+          for binary in "${binaries[@]}"; do
+            name=$(basename "$binary")
+            npx wrangler r2 object put "phase-rs-data/$prefix/$name" --file "$binary" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
+            npx wrangler r2 object put "phase-rs-data/$prefix/$name.minisig" --file "$binary.minisig" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
+          done
+
+          existing_manifest=$(mktemp)
+          status=$(curl -sS -o "$existing_manifest" -w '%{http_code}' \
+            --connect-timeout 5 --max-time 30 \
+            https://data.phase-rs.dev/desktop/preview-server.json || true)
+          case "$status" in
+            200)
+              jq -e 'type == "object" and (.fingerprints | type == "object")' "$existing_manifest" >/dev/null
+              ;;
+            404)
+              printf '{}\n' > "$existing_manifest"
+              ;;
+            *)
+              echo "::error::Could not fetch preview manifest for update (HTTP ${status:-curl failure})."
+              exit 1
+              ;;
+          esac
+
+          manifest=preview-server.json
+          generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # sha256 is over UNCOMPRESSED bytes; R2 serves these objects with Content-Encoding: br unconditionally — consumers MUST brotli-decode before hashing.
+          jq -n \
+            --slurpfile existing "$existing_manifest" \
+            --arg fingerprint "$FINGERPRINT" \
+            --arg commit "$COMMIT" \
+            --arg generated_at "$generated_at" \
+            --arg card_data_sha256 "$CARD_DATA_SHA256" \
+            --arg card_data_hash16 "$CARD_DATA_HASH16" \
+            --arg draft_pools_sha256 "$DRAFT_POOLS_SHA256" \
+            --arg draft_pools_hash16 "$DRAFT_POOLS_HASH16" \
+            '($existing[0] // {}) as $old
+             | ($old.current // null) as $old_current
+             | (if $old_current != null and ($old.fingerprints[$old_current] != null)
+                then $old_current
+                else null
+                end) as $previous
+             | {
+                 schema: 1,
+                 channel: "preview",
+                 generated_at: $generated_at,
+                 current: $fingerprint,
+                 previous: $previous,
+                 fingerprints: (
+                   {
+                     ($fingerprint): {
+                       commit: $commit,
+                       binaries: {
+                         "x86_64-unknown-linux-musl": {
+                           url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl",
+                           sig_url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl.minisig"
+                         },
+                         "aarch64-apple-darwin": {
+                           url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin",
+                           sig_url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin.minisig"
+                         },
+                         "x86_64-pc-windows-msvc": {
+                           url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe",
+                           sig_url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe.minisig"
+                         }
+                       },
+                       data: [
+                         {
+                           name: "card-data.json",
+                           sha256: $card_data_sha256,
+                           url: "https://data.phase-rs.dev/staging/card-data-" + $card_data_hash16 + ".json"
+                         },
+                         {
+                           name: "draft-pools.json",
+                           sha256: $draft_pools_sha256,
+                           url: "https://data.phase-rs.dev/staging/draft-pools-" + $draft_pools_hash16 + ".json"
+                         }
+                       ]
+                     }
+                   }
+                   + if $previous == null then {} else {($previous): $old.fingerprints[$previous]} end
+                 )
+               }' > "$manifest"
+          sign "$manifest"
+
+          # Signature first; the JSON manifest PUT is the atomic publish point.
+          npx wrangler r2 object put "phase-rs-data/desktop/preview-server.json.minisig" --file "$manifest.minisig" --remote --content-type application/octet-stream --cache-control "max-age=60, must-revalidate"
+          npx wrangler r2 object put "phase-rs-data/desktop/preview-server.json" --file "$manifest" --remote --content-type application/json --cache-control "max-age=60, must-revalidate"
+
+          # Wrangler supports individual object deletion but not prefix listing;
+          # list through Cloudflare's R2 API, then delete each unreferenced key
+          # with the same Wrangler/R2 credentials used for publication.
+          list_prefix='desktop/preview-server/'
+          api_url="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/phase-rs-data/objects"
+          object_keys=$(mktemp)
+          cursor=''
+          while :; do
+            curl_args=(
+              --fail --silent --show-error --get "$api_url"
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+              --data-urlencode "prefix=$list_prefix"
+              --data-urlencode 'per_page=1000'
+            )
+            if [ -n "$cursor" ]; then
+              curl_args+=(--data-urlencode "cursor=$cursor")
+            fi
+            page=$(curl "${curl_args[@]}")
+            jq -e '.success == true and (.result | type == "array")' <<<"$page" >/dev/null
+            jq -r '.result[]?.key' <<<"$page" >> "$object_keys"
+            if [ "$(jq -r '.result_info.is_truncated // false' <<<"$page")" != true ]; then
+              break
+            fi
+            cursor=$(jq -r '.result_info.cursor // empty' <<<"$page")
+            test -n "$cursor"
+          done
+
+          keep_prefixes=("$list_prefix$FINGERPRINT/")
+          previous=$(jq -r '.previous // empty' "$manifest")
+          if [ -n "$previous" ]; then
+            keep_prefixes+=("$list_prefix$previous/")
+          fi
+
+          while IFS= read -r key; do
+            keep=false
+            for keep_prefix in "${keep_prefixes[@]}"; do
+              if [[ "$key" == "$keep_prefix"* ]]; then
+                keep=true
+                break
+              fi
+            done
+            if [ "$keep" = false ]; then
+              echo "Deleting expired preview binary object: $key"
+              npx wrangler r2 object delete "phase-rs-data/$key" --remote --force
+            fi
+          done < "$object_keys"

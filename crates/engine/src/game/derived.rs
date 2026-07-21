@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::casting;
 use crate::game::combat::has_summoning_sickness;
 use crate::game::coverage::unimplemented_mechanics;
 use crate::game::devotion::count_devotion;
@@ -7,7 +8,7 @@ use crate::game::functioning_abilities::game_active_statics;
 use crate::game::mana_abilities;
 use crate::game::mana_sources::display_land_mana_pips;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
-use crate::types::ability::StaticCondition;
+use crate::types::ability::{AbilityBlockEntry, AbilityKind, StaticCondition};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -179,6 +180,50 @@ pub fn derive_display_state(state: &mut GameState) {
         for (id, tax) in commander_taxes {
             if let Some(obj) = state.objects.get_mut(&id) {
                 obj.commander_tax = Some(tax);
+            }
+        }
+    }
+
+    // CR 602.5: per-ability activation-block read-out (display only — no
+    // enforcement authority). Iterates `activated_ability_definitions` — the
+    // single authority for the ability index space (printed `0..printed_len` +
+    // runtime-granted at `printed_len + offset`; the same `usize` candidates.rs
+    // emits as `ActivateAbility.ability_index`). The unconditional per-object
+    // assign clears stale entries when a prohibiting source leaves the
+    // battlefield. Note: PhaseChanged is a dirty no-op (public_state.rs), which
+    // is acceptable because the parser emits only turn-axis `CantActivateDuring`
+    // conditions today.
+    if dirty.all_objects_dirty || dirty.battlefield_display_dirty {
+        let object_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        for obj_id in object_ids {
+            let Some(controller) = state.objects.get(&obj_id).map(|o| o.controller) else {
+                continue;
+            };
+            let mut entries = Vec::new();
+            for (ability_index, def) in casting::activated_ability_definitions(state, obj_id) {
+                // CR 603.2a: only activated abilities are subject to activation
+                // prohibitions — triggered abilities are unaffected.
+                if !matches!(def.kind, AbilityKind::Activated) {
+                    continue;
+                }
+                // CR 702.170b + CR 116.2k: Plot is a special action, zone-gated
+                // off-battlefield today; guard kept for exact parity with the
+                // enforcement gates (which skip the activation-prohibition checks
+                // for plot).
+                if casting::is_plot_special_action(&def) {
+                    continue;
+                }
+                if let Some(reason) =
+                    casting::activation_prohibition_reason(state, controller, obj_id, &def)
+                {
+                    entries.push(AbilityBlockEntry {
+                        ability_index,
+                        reason,
+                    });
+                }
+            }
+            if let Some(obj) = state.objects.get_mut(&obj_id) {
+                obj.blocked_abilities = entries;
             }
         }
     }

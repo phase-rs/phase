@@ -32,14 +32,13 @@ import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
-import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
+import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
-import { ensureCardDatabase } from "../services/cardData";
 import { loadDraftRun } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
@@ -51,6 +50,7 @@ import {
   loadActiveGame,
   loadGame,
   loadP2PHostSession,
+  nextGameSessionGeneration,
   saveActiveGame,
   useGameStore,
 } from "../stores/gameStore";
@@ -227,6 +227,7 @@ type ExpandedDeckWithTier = {
   planar_deck: string[];
   scheme_deck: string[];
   signature_spell: string[];
+  companion: string[];
   sticker_sheets: string[];
   bracket_tier: CommanderBracketTier;
 };
@@ -289,6 +290,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     },
@@ -318,6 +320,7 @@ async function buildLocalAiDeckList(
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     });
@@ -517,9 +520,9 @@ export function GameProvider({
 }: GameProviderProps) {
   const { t } = useTranslation("game");
 
-  // Sync the persistent phaseStops preference into engine-owned state so the
-  // engine remains the single authority for auto-pass / empty-blocker decisions.
-  usePhaseStopsSync();
+  // Sync persistent gameplay preferences into engine-owned state so the
+  // engine remains the single authority for priority recommendations.
+  useGameplayPreferencesSync();
 
   // Refs for callback props — these are notifications that should never
   // cause the game setup effect to re-run.
@@ -1152,10 +1155,10 @@ export function GameProvider({
 
       if (savedState) {
         try {
-          // Load card DB before restore so the engine can rehydrate objects
-          // and handle token creation / effects after resume.
-          await ensureCardDatabase().catch(() => {/* card DB is best-effort */});
-          if (cancelled) return;
+          // WasmAdapter.restoreState() loads the card DB into its shared worker
+          // before rehydrating. Do not also initialize the main-thread runtime:
+          // that duplicates both the WASM module and full card corpus, which can
+          // exceed the WebContent memory budget on iOS.
           await resumeGame(gameId, adapter, savedState);
           if (cancelled) return;
           // Derive player count from the restored state — the URL param may be
@@ -1276,6 +1279,7 @@ export function GameProvider({
               scheme_deck: [] as string[],
               sticker_sheets: [] as string[],
               signature_spell: [] as string[],
+              companion: [] as string[],
             },
             opponent: {
               main_deck: run.opponentDeck,
@@ -1285,6 +1289,7 @@ export function GameProvider({
               scheme_deck: [] as string[],
               sticker_sheets: [] as string[],
               signature_spell: [] as string[],
+              companion: [] as string[],
             },
             ai_decks: [],
           };
@@ -1395,6 +1400,7 @@ export function GameProvider({
             logHistory: [],
             nextLogSeq: 0,
             adapter: null,
+            gameSessionGeneration: nextGameSessionGeneration(),
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,

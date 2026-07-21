@@ -32,6 +32,16 @@ pub(crate) struct EffectChainIr {
     pub(crate) clauses: Vec<ClauseIr>,
     /// The ability kind (Spell, Activated, etc.).
     pub(crate) kind: AbilityKind,
+    /// Kind to retain on definitions linked as this chain's continuations.
+    ///
+    /// Ordinary clause assembly normalizes linked definitions to `Spell`: they
+    /// resolve with their parent rather than becoming independently activatable
+    /// abilities. Whole-body recognizers that already constructed every link
+    /// with the enclosing kind can opt into preserving that serialized shape
+    /// while still routing through the shared chain assembly.
+    pub(crate) continuation_kind: Option<AbilityKind>,
+    /// Whether assembly applies the ordinary player-scope reference rewrites.
+    pub(crate) player_scope_rewrite: PlayerScopeRewrite,
     /// CR 107.1a: Chain-level rounding annotation ("Round down/up each time").
     pub(crate) chain_rounding: Option<RoundingMode>,
     /// CR 701.21a: Actor context threaded from ParseContext (per D-07).
@@ -51,6 +61,58 @@ pub(crate) struct EffectChainIr {
     /// this process" directive is recognized. Lowering applies it to the root
     /// `AbilityDefinition` so the resolver re-follows the whole chain.
     pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
+}
+
+/// Whether `lower_effect_chain_ir` rewrites player-scoped references after
+/// assembling a chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum PlayerScopeRewrite {
+    /// Apply the shared player-scope rewrites used by ordinary parsed clauses.
+    Apply,
+    /// Preserve the recognizer's explicit scoped fields as parsed.
+    Preserve,
+}
+
+impl EffectChainIr {
+    /// Build a one-clause chain while retaining every field represented by
+    /// `ParsedEffectClause` plus the clause-level player iteration scope.
+    ///
+    /// Whole-body recognizers use this instead of reconstructing an
+    /// `AbilityDefinition`: `ParsedEffectClause` carries nested sub-abilities and
+    /// durations, while `ClauseIr` carries `player_scope`. The actor and trigger
+    /// context match the ordinary chain parser's output.
+    pub(crate) fn single_clause(
+        source_text: &str,
+        kind: AbilityKind,
+        parsed: ParsedEffectClause,
+        player_scope: Option<PlayerFilter>,
+        actor: Option<ControllerRef>,
+        in_trigger: bool,
+    ) -> Self {
+        let mut builder = ClauseIrBuilder::new(source_text);
+        builder
+            .clause(
+                source_text,
+                parsed,
+                None,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .player_scope(player_scope)
+            .push();
+        Self {
+            clauses: builder.finish(),
+            kind,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
+            chain_rounding: None,
+            actor,
+            in_trigger,
+            repeat_until: None,
+        }
+    }
 }
 
 /// Root-level `AbilityDefinition` metadata that no `ClauseIr` can express.
@@ -75,7 +137,7 @@ pub(crate) struct AbilityShellIr {
     /// it, which is required because the root clause has no *previous* boundary:
     /// `lower.rs` derives `sub_link` from `prev_boundary`, and `None` maps
     /// unconditionally to `ContinuationStep`. A recognizer whose root is three
-    /// independent steps (`try_parse_balance_equalization`) therefore cannot say so
+    /// independent steps (`parse_balance_equalization_ir`) therefore cannot say so
     /// through the chain, only through the shell.
     ///
     /// `Option<SubAbilityLink>` rather than a bare `SubAbilityLink`: the latter's
@@ -758,13 +820,15 @@ impl ClauseDraft<'_> {
 mod tests {
     use super::*;
     use crate::parser::oracle_ir::ast::parsed_clause;
-    use crate::types::ability::Effect;
+    use crate::types::ability::{Duration, Effect};
 
     #[test]
     fn effect_chain_ir_empty_construction() {
         let ir = EffectChainIr {
             clauses: vec![],
             kind: AbilityKind::Spell,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
             chain_rounding: None,
             actor: None,
             in_trigger: false,
@@ -880,6 +944,8 @@ mod tests {
         let ir = EffectChainIr {
             clauses: b.finish(),
             kind: AbilityKind::Spell,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
             chain_rounding: None,
             actor: None,
             in_trigger: false,
@@ -887,5 +953,32 @@ mod tests {
         };
         assert_eq!(ir.clauses.len(), 1);
         assert_eq!(ir.kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn single_clause_preserves_parsed_fields_and_player_scope() {
+        let mut parsed = parsed_clause(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        });
+        parsed.duration = Some(Duration::Permanent);
+        parsed.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::NoOp,
+        )));
+
+        let ir = EffectChainIr::single_clause(
+            "draw a card",
+            AbilityKind::Spell,
+            parsed,
+            Some(PlayerFilter::All),
+            None,
+            false,
+        );
+
+        let clause = &ir.clauses[0];
+        assert_eq!(clause.player_scope, Some(PlayerFilter::All));
+        assert_eq!(clause.parsed.duration, Some(Duration::Permanent));
+        assert!(clause.parsed.sub_ability.is_some());
     }
 }

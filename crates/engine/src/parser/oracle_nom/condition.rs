@@ -18,8 +18,8 @@ use super::primitives::{
 };
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{
-    cast_capable_zones_except, parse_type_phrase, parse_zone_suffix, parse_zone_word,
-    peek_zone_boundary,
+    cast_capable_zones_except, parse_shared_quality, parse_type_phrase, parse_zone_suffix,
+    parse_zone_word, peek_zone_boundary,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -265,16 +265,27 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_no_opponent_comparison_conditions,
         parse_triggering_player_has_unattacked_opponent,
         parse_opponent_comparison_conditions,
+        parse_a_graveyard_size_condition,
         parse_life_conditions,
         parse_offered_card_mana_value_comparison,
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
+        // Must precede `parse_card_exiled_with_source_condition` — both share
+        // the "... exiled with [source]" tail, but this arm's leading "cards
+        // with N or more different <quality>" noun phrase is the longer,
+        // more specific match.
+        parse_cards_distinct_quality_exiled_with_source_condition,
         parse_card_exiled_with_source_condition,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
         parse_subject_first_zone_count,
+        // CR 603.4 + CR 113.6b: "~ is the only <type> [card] in <zone>" —
+        // self-referential count-equals-one gate (Nether Spirit). Anchored on
+        // the self-token + literal " is the only ", so it never mis-claims the
+        // non-self "a <type> card is in a graveyard" phrase below.
+        parse_source_is_only_type_in_zone,
         // CR 611.3a + CR 702: "a <type> card [with <keyword>] is in a graveyard"
         // — graveyard-presence gate for conditional continuous statics
         // (Tarmogoyf, Cairn Wanderer). Guarded by the "is in a graveyard"
@@ -644,6 +655,7 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_source_qualified_mana_spent_condition,
         parse_source_qualified_mana_spent_threshold,
         parse_mana_spent_vs_source_pt,
+        parse_colors_of_mana_spent_threshold,
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_put_onto_battlefield_this_way,
@@ -1862,6 +1874,23 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
     Ok((rest, condition))
 }
 
+/// CR 702.171b + CR 508.1m: Bare elided-subject participle state gate
+/// ("Whenever this creature attacks while saddled" — Alacrian Jaguar). The
+/// printed while-gate elides the subject; the participle is part of the trigger
+/// EVENT (a property of the attacking creature at declaration), so
+/// `strip_while_state_clause` folds it into the trigger subject filter
+/// (`valid_card`) evaluated once when attackers are declared (CR 508.1m) — it
+/// is NOT an intervening-`if` and is never rechecked at resolution. Intervening-
+/// if text always prints an explicit subject, so this leaf is composed ONLY at
+/// the while-gate seam (`strip_while_state_clause`), NOT added to
+/// `parse_inner_condition`. Future bare-state participles join as `alt()` arms
+/// here.
+pub(crate) fn parse_elided_subject_state_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    value(StaticCondition::SourceIsSaddled, tag("saddled")).parse(input)
+}
+
 /// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature [you control]"
 /// → SourceAttachedToCreature.
 ///
@@ -2091,6 +2120,36 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
     }
 }
 
+/// CR 603.8 / CR 122.1: Existential surface form of the counter-has condition —
+/// "there are [quantity] [type] counter(s) on [source]". Produces the SAME
+/// `StaticCondition::HasCounters` as [`parse_source_has_counters`]; differs only
+/// in the leading "there are" existential-there and the trailing source subject
+/// ("on ~"/"on it"). Covers every "when there are N or more [type] counters on
+/// [source]" state trigger (Mazemind Tome and its class), not a single card.
+///
+/// The input is PRE-NORMALIZED: `parse_oracle_text` runs
+/// `normalize_card_name_refs` (oracle_util.rs) before trigger dispatch, so a
+/// self-referential subject such as Mazemind Tome's "this artifact" arrives as
+/// `~` here (do not write an un-normalized unit test against this combinator).
+pub(crate) fn parse_source_counters_exist(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("there are ").parse(input)?;
+    let (rest, (minimum, maximum)) = parse_has_counters_quantity(rest)?;
+    let (rest, counters) = parse_counter_noun_match(rest)?;
+    let (rest, _) = tag(" on ").parse(rest)?;
+    // Source-referential subject only: `~` (normalized self-ref) or bound `it`.
+    // A non-source subject ("that creature") is not a source state trigger and
+    // correctly falls through (recoverable Err → the enclosing `alt()` moves on).
+    let (rest, _) = alt((tag("~"), tag("it"))).parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        },
+    ))
+}
+
 /// Recipient-bound counterpart to [`parse_source_has_counters`] for
 /// `Duration::ForAsLongAs` clauses. CR 122.1 + CR 611.2b: in "for as long as it
 /// has a shield counter" (Shield Broker) the bound pronoun "it" is the object
@@ -2118,6 +2177,21 @@ pub(crate) fn parse_recipient_has_counters(input: &str) -> OracleResult<'_, Stat
     Ok((rest, condition))
 }
 
+/// CR 122.1: Counter-noun axis shared by the counter-has condition family — a
+/// typed `<type> counter[s]` (→ `CounterMatch::OfType`) or a bare `counter[s]`
+/// (→ `CounterMatch::Any`). Single authority for both the possessive
+/// (`parse_has_counters_axes`) and existential (`parse_source_counters_exist`)
+/// surface forms.
+fn parse_counter_noun_match(input: &str) -> OracleResult<'_, CounterMatch> {
+    alt((
+        // Typed noun: `<type> counter[s]` (e.g. "a loyalty counter on it").
+        parse_typed_counter_noun,
+        // Bare noun → any counter type (CR 122.1 "a counter on it").
+        value(CounterMatch::Any, alt((tag("counters"), tag("counter")))),
+    ))
+    .parse(input)
+}
+
 /// Shared grammar axes for the counter-has condition family: subject × quantity
 /// × counter-type noun × `"counter[s]"` × `"on it"`. Each axis is a single
 /// `alt()` so new variants add one arm rather than enumerating permutations.
@@ -2134,13 +2208,7 @@ fn parse_has_counters_axes(
     // "loyalty counter" shares no prefix with bare "counter", so branch
     // order is semantic-only (no longest-match dependency), but trying the
     // more specific alternative first is the conventional pattern.
-    let (rest, counters) = alt((
-        // Typed noun: `<type> counter[s]` (e.g. "a loyalty counter on it").
-        parse_typed_counter_noun,
-        // Bare noun → any counter type (CR 122.1 "a counter on it").
-        value(CounterMatch::Any, alt((tag("counters"), tag("counter")))),
-    ))
-    .parse(rest)?;
+    let (rest, counters) = parse_counter_noun_match(rest)?;
 
     // CR 122.1: "on him/her/them" — animate/gendered possessive of the
     // counter-bearing source, identical semantics to "on it". Marvel cards use
@@ -4117,6 +4185,62 @@ fn parse_creature_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> 
 /// Graveyard }` (plus any `FilterProp::WithKeyword` the type phrase's "with
 /// <keyword>" clause supplies).
 ///
+/// CR 603.4 + CR 113.6 + CR 113.6b: "~ is the only <type> [card] in <zone>" —
+/// self-referential count-equals-one gate (Nether Spirit's intervening-if:
+/// "if this card is the only creature card in your graveyard, ...").
+///
+/// Composes existing building blocks only:
+///   - `parse_source_self_token` — the self-reference subject (`~` /
+///     `this card`; "this card" is a parse-only self-reference not yet
+///     normalized to `~`, so the literal `tag("this card")` arm in that
+///     combinator is required here).
+///   - `parse_type_phrase` — folds the informational " card" qualifier and the
+///     attached "in your <zone>" clause into one `TargetFilter` (the same
+///     grammar shape `parse_card_in_graveyard` relies on).
+///   - `make_quantity_comparison` — the shared `ObjectCount == N` shape.
+///
+/// When the filter carries an explicit non-battlefield zone
+/// (graveyard/hand/library/exile), conjoin an explicit `SourceInZone` predicate
+/// so the EXISTING `trigger_condition_source_zones` walker (oracle_trigger.rs)
+/// derives `trigger_zones` and `ChangeZone.origin` automatically — the CR
+/// 113.6/113.6b off-battlefield self-function class. Precedent: Jocasta,
+/// Automaton Avenger (issue #4566), whose `{SourceInZone, Graveyard}` condition
+/// already drives this exact derivation with zero special-casing (see
+/// `stamp_self_return_origin_from_trigger_condition`'s doc comment). A
+/// battlefield-only "the only <type> you control" static omits the redundant
+/// `SourceInZone` conjunct since `trigger_zones` already defaults to
+/// battlefield-only.
+fn parse_source_is_only_type_in_zone(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, ()) = parse_source_self_token(input)?;
+    let (rest, _) = tag(" is the only ").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let quantity = make_quantity_comparison(
+        QuantityRef::ObjectCount {
+            filter: filter.clone(),
+        },
+        Comparator::EQ,
+        1,
+    );
+    // CR 113.6b: an ability that states which zone it functions in functions
+    // only from that zone. Wrapping the count gate in `And{SourceInZone, ...}`
+    // for an explicit non-battlefield zone lets the trigger's zone derivation
+    // (oracle_trigger.rs) hoist that zone into `trigger_zones` and the return
+    // effect's `ChangeZone.origin` — mirroring Jocasta, Automaton Avenger.
+    let condition = match filter.extract_in_zone() {
+        Some(zone) if zone != Zone::Battlefield => StaticCondition::And {
+            conditions: vec![StaticCondition::SourceInZone { zone }, quantity],
+        },
+        _ => quantity,
+    };
+    Ok((remainder, condition))
+}
+
 /// Graveyard-presence sibling of `parse_creature_has_keyword`: instead of a "has
 /// <keyword>" battlefield predicate, the subject's presence is checked in a
 /// graveyard. This is the gate half of a conditional continuous static (CR
@@ -6181,14 +6305,13 @@ fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, 
     ))
 }
 
-/// CR 106.3 + CR 601.2h + CR 603.4: Parse
-/// "[N] or more mana from <source-filter> was spent to cast <self>" and
-/// "at least [N] mana from <source-filter> was spent to cast <self>".
-///
-/// CR 400.7d: the subject anaphora selects the scope (see
-/// `parse_source_qualified_mana_spent_condition`).
-fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, (n, comparator)) = alt((
+/// Parse the shared amount-threshold prefix that opens several mana-spent
+/// conditions: `"at least N"` → `(N, GE)` and `"N or more/fewer/less"` →
+/// `(N, GE/LE)`. Factored from the byte-identical closures that previously
+/// duplicated this grammar in `parse_source_qualified_mana_spent_threshold`
+/// and `parse_mana_spent_threshold`; output is pinned by existing tests.
+fn parse_amount_threshold(input: &str) -> OracleResult<'_, (u32, Comparator)> {
+    alt((
         // "at least N " → GE
         |i| {
             let (rest, _) = tag("at least ").parse(i)?;
@@ -6207,7 +6330,17 @@ fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, 
             Ok((rest, (n, cmp)))
         },
     ))
-    .parse(input)?;
+    .parse(input)
+}
+
+/// CR 106.3 + CR 601.2h + CR 603.4: Parse
+/// "[N] or more mana from <source-filter> was spent to cast <self>" and
+/// "at least [N] mana from <source-filter> was spent to cast <self>".
+///
+/// CR 400.7d: the subject anaphora selects the scope (see
+/// `parse_source_qualified_mana_spent_condition`).
+fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (n, comparator)) = parse_amount_threshold(input)?;
     let (rest, _) = tag(" mana from ").parse(rest)?;
     let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
     let (rest, _) = tag(" was spent to cast ").parse(rest)?;
@@ -6348,26 +6481,7 @@ fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> 
     //   "N or more mana was spent to cast …"
     //   "at least N mana was spent to cast …"
     // Plus the inverse: "N or less/fewer mana was spent to cast …"
-    let (rest, (n, comparator)) = alt((
-        // "at least N " → GE
-        |i| {
-            let (rest, _) = tag("at least ").parse(i)?;
-            let (rest, n) = parse_number(rest)?;
-            Ok((rest, (n, Comparator::GE)))
-        },
-        // "N or more/less/fewer"
-        |i| {
-            let (rest, n) = parse_number(i)?;
-            let (rest, cmp) = alt((
-                value(Comparator::GE, tag(" or more")),
-                value(Comparator::LE, tag(" or fewer")),
-                value(Comparator::LE, tag(" or less")),
-            ))
-            .parse(rest)?;
-            Ok((rest, (n, cmp)))
-        },
-    ))
-    .parse(input)?;
+    let (rest, (n, comparator)) = parse_amount_threshold(input)?;
     // Fixed tail: " mana was spent to cast " + subject anaphora.
     let (rest, _) = tag(" mana was spent to cast ").parse(rest)?;
     let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
@@ -6378,6 +6492,43 @@ fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> 
                 qty: QuantityRef::ManaSpentToCast {
                     scope,
                     metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 106.3 + CR 601.2h: Parse "[N] or more colors of mana were spent to cast
+/// <self>" and the singular "one color of mana was spent to cast <self>"
+/// (Steel Exemplar's "unless two or more colors of mana were spent to cast
+/// it"). Measures `CastManaSpentMetric::DistinctColors` — how many distinct
+/// colors of mana paid the cost — against a fixed threshold. CR 400.7d: the
+/// subject anaphora selects the scope (mirrors `parse_mana_spent_threshold`).
+fn parse_colors_of_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    // "two or more colors" / "at least two colors" carry an explicit comparator;
+    // the singular "one color" is a bare count that reads as `>= 1` (any colored
+    // mana spent). The comparator branch is tried first so "N or more" is not
+    // consumed as a bare N.
+    let (rest, (n, comparator)) = alt((
+        parse_amount_threshold,
+        map(parse_number, |n| (n, Comparator::GE)),
+    ))
+    .parse(input)?;
+    // "color" / "colors" — singular ("one color") and plural ("two or more colors").
+    let (rest, _) = (tag(" color"), opt(tag("s"))).parse(rest)?;
+    let (rest, _) = tag(" of mana ").parse(rest)?;
+    let (rest, _) = alt((tag("were"), tag("was"))).parse(rest)?;
+    let (rest, _) = tag(" spent to cast ").parse(rest)?;
+    let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope,
+                    metric: CastManaSpentMetric::DistinctColors,
                 },
             },
             comparator,
@@ -7032,18 +7183,15 @@ fn parse_another_spell_cast_this_turn(
     parse_another_spell_this_turn(rest, minimum)
 }
 
-fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, StaticCondition> {
+/// Parse the tail that follows "cast another " / "you('ve) cast another ":
+/// `"spell this turn"` → `None` (any spell); `"<filter> spell this turn"` →
+/// `Some(filter)` via `parse_spell_history_filter`. Shared by
+/// `parse_another_spell_this_turn` (trigger/GE-N context) and
+/// `parse_you_cast_another_spell_filter_this_turn` (replacement "unless"
+/// context) so both derive the "another" spell-history filter identically.
+fn parse_another_spell_tail(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell this turn").parse(input) {
-        return Ok((
-            rest,
-            make_quantity_ge(
-                QuantityRef::SpellsCastThisTurn {
-                    scope: CountScope::Controller,
-                    filter: None,
-                },
-                minimum,
-            ),
-        ));
+        return Ok((rest, None));
     }
     let (rest, type_text) = take_until(" this turn").parse(input)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
@@ -7053,16 +7201,37 @@ fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, 
             nom::error::ErrorKind::Fail,
         )));
     };
+    Ok((rest, Some(filter)))
+}
+
+fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, StaticCondition> {
+    let (rest, filter) = parse_another_spell_tail(input)?;
     Ok((
         rest,
         make_quantity_ge(
             QuantityRef::SpellsCastThisTurn {
                 scope: CountScope::Controller,
-                filter: Some(filter),
+                filter,
             },
             minimum,
         ),
     ))
+}
+
+/// CR 614.1c (replacement classification) + CR 109.1 (identity basis for
+/// "another"): Parse "you('ve) cast another [<filter>] spell this turn" and
+/// return the controller-scoped spell-history filter (`None` = any spell).
+/// Used by the ETB "unless" replacement parser to build the own-cast-excluding
+/// `SpellsCastThisTurn` reference; the exclusion marker is injected by the
+/// caller via `TargetFilter::with_own_cast_exclusion`.
+pub(crate) fn parse_you_cast_another_spell_filter_this_turn(
+    input: &str,
+) -> OracleResult<'_, Option<TargetFilter>> {
+    preceded(
+        alt((tag("you cast another "), tag("you've cast another "))),
+        parse_another_spell_tail,
+    )
+    .parse(input)
 }
 
 fn parse_spell_history_filter_with_optional_article(type_text: &str) -> Option<TargetFilter> {
@@ -7659,10 +7828,10 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
 }
 
-fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("a card is "), tag("one or more cards are "))).parse(input)?;
-    let (rest, _) = tag("exiled with ").parse(rest)?;
-    let (rest, _) = alt((
+/// Self-referential source alternatives shared by the "exiled with [source]"
+/// condition family below — "~" / "it" / a typed self noun.
+fn parse_exiled_with_source_self_ref(input: &str) -> OracleResult<'_, &str> {
+    alt((
         tag("~"),
         tag("it"),
         tag("this artifact"),
@@ -7670,8 +7839,51 @@ fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, Stat
         tag("this land"),
         tag("this permanent"),
     ))
-    .parse(rest)?;
+    .parse(input)
+}
+
+fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("a card is "), tag("one or more cards are "))).parse(input)?;
+    let (rest, _) = tag("exiled with ").parse(rest)?;
+    let (rest, _) = parse_exiled_with_source_self_ref(rest)?;
     Ok((rest, make_quantity_ge(QuantityRef::CardsExiledBySource, 1)))
+}
+
+/// CR 202.3 + CR 607.2a: Parse
+/// "cards with N or more different <quality> are exiled with [source]" →
+/// `QuantityComparison { ObjectCountDistinct[quality](ExiledBySource) >= N }`.
+///
+/// Azor's Gateway: "If cards with five or more different mana values are
+/// exiled with Azor's Gateway, ...". Structural mirror of
+/// `parse_control_count_ge_distinct_quality` (Field of the Dead / Coven's
+/// "you control N or more [type] with different [quality]"): both read a GE
+/// threshold plus a "different <quality>" suffix into the same
+/// `ObjectCountDistinct` quantity, but here the population is the source's
+/// exile-linked pool (`ExiledBySource`) rather than a `you control` filter,
+/// and the threshold sits inside the leading "cards with N or more different
+/// quality" noun phrase instead of after "you control".
+fn parse_cards_distinct_quality_exiled_with_source_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("cards with ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let (rest, _) = tag("different ").parse(rest)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let (rest, _) = tag(" are exiled with ").parse(rest)?;
+    let (rest, _) = parse_exiled_with_source_self_ref(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCountDistinct {
+                    filter: TargetFilter::ExiledBySource,
+                    qualities: vec![quality],
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
 }
 
 /// Parse "there is a/an X card and a/an Y card in your <zone>" as two
@@ -8330,6 +8542,28 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
         input,
         nom::error::ErrorKind::Fail,
     )))
+}
+
+/// CR 404.1 + CR 608.2c: "a graveyard has N or more cards in it" checks
+/// whether any single player's graveyard reaches the threshold. Jace, the
+/// Perfected Mind evaluates this after milling; summing graveyards would
+/// incorrectly turn two smaller graveyards into a successful check.
+fn parse_a_graveyard_size_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("a graveyard has ").parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" or more cards in it").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::GraveyardSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            },
+            n,
+        ),
+    ))
 }
 
 fn parse_opponent_controls_at_least_more_than_you(
@@ -9073,6 +9307,31 @@ mod tests {
         }
     }
 
+    /// CR 702.171b + CR 603.4: the bare elided-subject "saddled" participle
+    /// (Alacrian Jaguar's "attacks while saddled") parses to `SourceIsSaddled`
+    /// with empty remainder.
+    #[test]
+    fn parse_elided_subject_state_condition_saddled() {
+        let (rest, cond) =
+            parse_elided_subject_state_condition("saddled").expect("bare 'saddled' must parse");
+        assert_eq!(
+            rest, "",
+            "bare 'saddled' must fully consume, remainder {rest:?}"
+        );
+        assert_eq!(cond, StaticCondition::SourceIsSaddled);
+    }
+
+    /// A superstring like "saddledness" parses the "saddled" prefix but leaves a
+    /// nonempty remainder — the caller's full-consumption guard
+    /// (`strip_while_state_clause`) is the rejection authority, not this leaf.
+    #[test]
+    fn parse_elided_subject_state_condition_superstring_leaves_remainder() {
+        let (rest, cond) =
+            parse_elided_subject_state_condition("saddledness").expect("prefix 'saddled' parses");
+        assert_eq!(rest, "ness", "remainder is the unconsumed suffix");
+        assert_eq!(cond, StaticCondition::SourceIsSaddled);
+    }
+
     /// CR 603.12 + CR 701.21a: the active-voice reflexive sacrifice gate
     /// ("you sacrifice [quantifier] [type] this way") parses to its filter for
     /// every quantifier form, mirroring the discard/put combinators.
@@ -9797,6 +10056,85 @@ mod tests {
                 zone: crate::types::zones::Zone::Graveyard
             }
         ));
+    }
+
+    /// CR 603.4 + CR 113.6b: Nether Spirit's intervening-if. The off-battlefield
+    /// zone must be hoisted into an explicit `SourceInZone` conjunct so
+    /// `trigger_condition_source_zones` can derive `trigger_zones == [Graveyard]`
+    /// and `ChangeZone.origin == Graveyard` (Jocasta, Automaton Avenger precedent).
+    #[test]
+    fn parse_condition_source_is_only_creature_card_in_graveyard() {
+        let (rest, c) =
+            parse_condition("if ~ is the only creature card in your graveyard").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::And { conditions } = c else {
+            panic!("expected And, got {c:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(
+            matches!(
+                conditions[0],
+                StaticCondition::SourceInZone {
+                    zone: crate::types::zones::Zone::Graveyard
+                }
+            ),
+            "first conjunct must be SourceInZone(Graveyard): {:?}",
+            conditions[0]
+        );
+        let StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } = &conditions[1]
+        else {
+            panic!("expected QuantityComparison, got {:?}", conditions[1]);
+        };
+        assert_eq!(*comparator, Comparator::EQ);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected ObjectCount ref, got {lhs:?}");
+        };
+        // The count is scoped to your graveyard by the folded zone suffix.
+        assert_eq!(
+            filter.extract_in_zone(),
+            Some(crate::types::zones::Zone::Graveyard)
+        );
+    }
+
+    /// A battlefield-scoped "the only <type> you control" omits the redundant
+    /// `SourceInZone` conjunct — `trigger_zones` already defaults to battlefield.
+    #[test]
+    fn parse_condition_source_is_only_creature_you_control_omits_source_in_zone() {
+        let (rest, c) = parse_condition("if ~ is the only creature you control").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } = c
+        else {
+            panic!("expected bare QuantityComparison (no And/SourceInZone), got {c:?}");
+        };
+        assert_eq!(comparator, Comparator::EQ);
+        assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("expected ObjectCount ref, got {lhs:?}");
+        };
+        assert_eq!(filter.extract_in_zone(), None);
+    }
+
+    /// Rejection guard: without "only" the arm must not spuriously fire.
+    #[test]
+    fn parse_source_is_only_type_in_zone_rejects_without_only() {
+        assert!(
+            parse_source_is_only_type_in_zone("~ is a creature card in your graveyard").is_err()
+        );
     }
 
     #[test]
@@ -10745,6 +11083,43 @@ mod tests {
             }
             other => panic!("expected ObjectCountDistinct Power GE 3, got {other:?}"),
         }
+    }
+
+    /// CR 202.3 + CR 607.2a: Azor's Gateway — "cards with five or
+    /// more different mana values are exiled with ~" reads as an
+    /// `ObjectCountDistinct[ManaValue]` threshold over the exiled-with-source
+    /// pool, the `ExiledBySource` mirror of the "you control N or more with
+    /// different <quality>" family above.
+    #[test]
+    fn test_cards_with_n_or_more_different_mana_values_exiled_with_source() {
+        let (rest, c) = parse_inner_condition(
+            "cards with five or more different mana values are exiled with ~",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCountDistinct {
+                        filter: TargetFilter::ExiledBySource,
+                        qualities: vec![SharedQuality::ManaValue],
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }
+        );
+    }
+
+    /// The plain existence check ("a card is exiled with ~") must still route
+    /// to `CardsExiledBySource >= 1` — the distinct-quality arm above must not
+    /// shadow it for cards without a "with different <quality>" clause.
+    #[test]
+    fn test_bare_card_exiled_with_source_still_parses() {
+        let (rest, c) = parse_inner_condition("a card is exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, make_quantity_ge(QuantityRef::CardsExiledBySource, 1));
     }
 
     #[test]
@@ -15737,6 +16112,100 @@ mod tests {
         }
     }
 
+    /// CR 106.3 + CR 601.2h: "two or more colors of mana were spent to cast it"
+    /// → DistinctColors GE 2 (Steel Exemplar's unless clause).
+    #[test]
+    fn colors_of_mana_spent_threshold_two_or_more() {
+        let (rest, c) =
+            parse_inner_condition("two or more colors of mana were spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope,
+                                metric: CastManaSpentMetric::DistinctColors,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => assert_eq!(scope, CastManaObjectScope::SelfObject),
+            other => panic!("expected DistinctColors GE 2, got {other:?}"),
+        }
+    }
+
+    /// CR 106.3: singular "one color of mana was spent to cast it" → DistinctColors GE 1.
+    #[test]
+    fn colors_of_mana_spent_threshold_singular() {
+        let (rest, c) = parse_inner_condition("one color of mana was spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: CastManaSpentMetric::DistinctColors,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        ));
+    }
+
+    /// CR 400.7d: the subject anaphora "that spell" selects `TriggeringSpell` scope.
+    #[test]
+    fn colors_of_mana_spent_threshold_that_spell_scope() {
+        let (rest, c) =
+            parse_inner_condition("two or more colors of mana were spent to cast that spell")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::DistinctColors,
+                    },
+                },
+                ..
+            }
+        ));
+    }
+
+    /// Negative sibling: "spent to activate this ability" must NOT parse via the
+    /// colors-spent-to-cast arm (it lacks the "spent to cast <subject>" tail).
+    /// Reach-guard: the parseable "…to cast it" sibling in
+    /// `colors_of_mana_spent_threshold_singular` proves the arm is live.
+    #[test]
+    fn colors_of_mana_spent_threshold_rejects_activate_ability() {
+        let parsed =
+            parse_inner_condition("two or more colors of mana were spent to activate this ability");
+        let is_colors_metric = matches!(
+            parsed,
+            Ok((
+                _,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentToCast {
+                            metric: CastManaSpentMetric::DistinctColors,
+                            ..
+                        },
+                    },
+                    ..
+                }
+            ))
+        );
+        assert!(
+            !is_colors_metric,
+            "activate-ability text must not parse as colors-spent-to-cast"
+        );
+    }
+
     #[test]
     fn test_parse_condition_mana_spent_vs_self_power_only() {
         let (rest, c) = parse_condition(
@@ -17608,6 +18077,89 @@ mod tests {
         // quantity the axis recognizes, so the whole predicate fails rather than
         // misreading "three" as an implicit-one quantity with a "three" type.
         assert!(parse_source_has_counters("~ has three counters on it").is_err());
+    }
+
+    /// CR 603.8 / CR 122.1: existential surface form of the source
+    /// counter-threshold condition — "there are [N or more] [type] counter(s) on
+    /// [source]" (Mazemind Tome) produces the SAME `StaticCondition::HasCounters`
+    /// as the possessive form. Input is PRE-NORMALIZED: `parse_oracle_text` runs
+    /// `normalize_card_name_refs` (turning Mazemind Tome's "this artifact" into
+    /// `~`) before trigger dispatch, so these fixtures use `~` directly.
+    ///
+    /// Discriminating: reverting `parse_source_counters_exist` (or its `alt` arm
+    /// in `oracle_trigger`) makes the mazemind trigger line Unimplemented, so the
+    /// positive parse below flips to `Err`.
+    #[test]
+    fn parse_source_counters_exist_threshold_form() {
+        // POSITIVE reach-guard: the exact Mazemind Tome condition parses to a
+        // typed threshold on the source (minimum 4, no maximum).
+        let (rest, cond) = parse_source_counters_exist("there are four or more page counters on ~")
+            .expect("existential threshold form must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("page".to_string())),
+                minimum: 4,
+                maximum: None,
+            }
+        );
+
+        // The bound pronoun "it" is equally source-referential.
+        assert!(matches!(
+            parse_source_counters_exist("there are four or more page counters on it"),
+            Ok((
+                _,
+                StaticCondition::HasCounters {
+                    minimum: 4,
+                    maximum: None,
+                    ..
+                }
+            ))
+        ));
+
+        // NEG 1: no comparator word ("three counters", not "three or more") is
+        // ambiguous — the quantity axis rejects it, mirroring the possessive
+        // guard `~ has three counters on it` → Err.
+        assert!(parse_source_counters_exist("there are three counters on ~").is_err());
+
+        // NEG 2: a non-source subject ("that creature") is NOT a source state
+        // trigger — the subject axis rejects it, proving the binding is to the
+        // source and not an arbitrary demonstrative recipient.
+        assert!(parse_source_counters_exist(
+            "there are four or more +1/+1 counters on that creature"
+        )
+        .is_err());
+
+        // Bare-any acceptance: "there are counters on ~" → HasCounters{Any, 1}.
+        let (_, any) = parse_source_counters_exist("there are counters on ~")
+            .expect("bare existential 'there are counters on ~' should parse");
+        assert_eq!(
+            any,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::Any,
+                minimum: 1,
+                maximum: None,
+            }
+        );
+    }
+
+    /// Non-regression: factoring the counter-noun axis into
+    /// `parse_counter_noun_match` must leave the possessive form's parse
+    /// byte-identical (Darksteel Reactor / Mazemind-class shared authority).
+    #[test]
+    fn parse_source_has_counters_possessive_unchanged_after_factoring() {
+        let (rest, cond) = parse_source_has_counters("~ has four or more page counters on it")
+            .expect("possessive threshold form must still parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cond,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("page".to_string())),
+                minimum: 4,
+                maximum: None,
+            }
+        );
     }
 
     /// CR 122.1: the recipient-side counter path (`parse_recipient_has_counters`,

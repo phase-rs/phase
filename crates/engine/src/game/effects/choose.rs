@@ -7,8 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{
+    GameState, NamedChoiceSource, NamedChoiceSourceBinding, TriggerSourceContext, WaitingFor,
+};
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
@@ -72,29 +73,21 @@ pub fn resolve(
         return Ok(());
     }
 
-    let source_id = if persist || choice_type.needs_choice_source_context() {
-        Some(ability.source_id)
-    } else {
-        None
-    };
-    let persist_player = if persist && matches!(choice_type, ChoiceType::Labeled { .. }) {
-        ability.scoped_player
-    } else {
-        None
-    };
+    let (source, persist_player) = named_choice_authority(state, ability, persist, &choice_type);
+    register_exact_named_choice_source(state, source.as_ref());
 
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
         choice_type,
         options,
-        source_id,
+        source,
         // CR 607.2d / CR 607.2m (by analogy): `persist_player` is an INDEPENDENT
-        // routing discriminator, not a repurposing of `source_id`. During a
+        // routing discriminator, not a repurposing of source authority. During a
         // `player_scope: All` fan-out (effects/mod.rs `set_scoped_player_recursive`),
         // `ability.scoped_player` names the fanned per-player value, so a
         // persisting choice records the anchor onto that exact player. Outside a
         // fan-out (Khans Siege), `scoped_player` is `None`, so this stays `None`
-        // and the object-scoped `source_id` binding is preserved unchanged.
+        // and the exact-object source binding is preserved unchanged.
         persist_player,
     };
 
@@ -167,16 +160,18 @@ pub(crate) fn resolve_random_in_chain(
     let index = state.rng.random_range(0..options.len());
     let chosen = options[index].clone();
 
-    let source_id = if persist || choice_type.needs_choice_source_context() {
-        Some(ability.source_id)
-    } else {
-        None
-    };
-    // Anchor choices are never random-selected today, so the random path keeps
-    // object-scoped behavior; `persist_player: None` makes that a deliberate
-    // decision. A future per-player random anchor would compute
-    // `ability.scoped_player` here explicitly.
-    bind_named_choice(state, &choice_type, &chosen, source_id, None);
+    let (mut source, persist_player) =
+        named_choice_authority(state, ability, persist, &choice_type);
+    register_exact_named_choice_source(state, source.as_ref());
+    if let Some(context) = bind_named_choice(
+        state,
+        &choice_type,
+        &chosen,
+        source.as_mut(),
+        persist_player,
+    ) {
+        ability.update_trigger_source_context_in_resolution_segment(context);
+    }
 
     // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)` answer binds a
     // resolution-scoped chosen player. Append it to the resolving ability's
@@ -208,9 +203,10 @@ pub(crate) fn resolve_random_in_chain(
 /// layer-recompute, and `last_named_choice` paths stay byte-identical.
 ///
 /// Faithfully reproduces the state-side binding the interactive handler
-/// performs (`engine_resolution_choices.rs`): when `source_id` is `Some`, a
-/// persistable choice is pushed onto the source's `chosen_attributes` and (for
-/// the layer-affecting choice kinds) layers are recomputed. Resolution-scoped
+/// performs (`engine_resolution_choices.rs`): an exact-object source binding
+/// permits a persistable choice to be pushed onto that source's
+/// `chosen_attributes` and (for the layer-affecting choice kinds) layers are
+/// recomputed. Resolution-scoped
 /// land/nonland choices intentionally keep only `last_named_choice` so the
 /// chosen kind or guess can drive the current resolution without rendering a
 /// lasting source-card badge. The resolution-scoped `chosen_players` append for
@@ -221,16 +217,39 @@ pub(crate) fn resolve_random_in_chain(
 /// CR 607.2d / CR 607.2m (by analogy): when `persist_player` is `Some(pid)`, the
 /// answer is a PER-PLAYER anchor label — it is pushed onto
 /// `state.players[pid].chosen_attributes` ONLY and the object-push branch is
-/// SKIPPED entirely, so no `Label` lands on `source_id`'s object (an
+/// SKIPPED entirely, so no `Label` lands on an exact-object source (an
 /// object-scoped `ChosenLabelIs` must never read a per-player anchor). The two
 /// destinations are mutually exclusive.
 pub(crate) fn bind_named_choice(
     state: &mut GameState,
     choice_type: &ChoiceType,
     choice: &str,
-    source_id: Option<ObjectId>,
+    mut source: Option<&mut NamedChoiceSource>,
     persist_player: Option<PlayerId>,
-) {
+) -> Option<TriggerSourceContext> {
+    // CR 608.2c + CR 122.1: `PutChosenCounter` consumes this explicit
+    // resolution-local result, rather than re-reading an object or LKI source.
+    // The counter-kind resolver clears it before every instruction, including
+    // an impossible zero-kind choice; this write therefore covers identical
+    // interactive and auto-selected answer paths.
+    if matches!(choice_type, ChoiceType::CounterKind { .. }) {
+        state.chosen_counter_kind_this_resolution = ChoiceValue::from_choice(choice_type, choice)
+            .and_then(|value| match value {
+                ChoiceValue::Counter(kind) => Some(kind),
+                _ => None,
+            });
+    }
+    let updated_context = source.as_deref_mut().and_then(|source| {
+        let context = source.context.as_mut()?;
+        if !choice_type.is_resolution_scoped_card_predicate_choice() {
+            apply_choice_attributes(&mut context.lki.chosen_attributes, choice_type, choice);
+        }
+        Some(context.clone())
+    });
+    let exact_object_source = source
+        .as_deref()
+        .filter(|source| source.is_exact_object_and_resolution())
+        .cloned();
     if let Some(pid) = persist_player {
         // CR 607.2d / CR 607.2m (by analogy): per-player anchor label. The
         // `Player` axis only ever stores `ChosenAttribute::Label`, so no
@@ -248,11 +267,9 @@ pub(crate) fn bind_named_choice(
             crate::game::layers::mark_layers_full(state);
         }
         state.last_named_choice = ChoiceValue::from_choice(choice_type, choice);
-        return;
+        return updated_context;
     }
-    if let Some(obj_id) =
-        source_id.filter(|_| !choice_type.is_resolution_scoped_card_predicate_choice())
-    {
+    if let Some(source) = exact_object_source {
         // CR 608.2d: A multi-keyword choice (`ChoiceType::Keyword { count > 1 }`,
         // e.g. Greymond's "choose two abilities from among ...") arrives as one
         // comma-joined answer ("First Strike, Vigilance"). Split it on ',' and
@@ -261,53 +278,9 @@ pub(crate) fn bind_named_choice(
         // chosen ability is independently readable by the `AddChosenKeyword`
         // plural grant. The single-keyword path (count == 1, and every other
         // choice type) produces a single attribute, byte-identical to before.
-        let attrs: Vec<ChosenAttribute> = match choice_type {
-            ChoiceType::Keyword { options, count } if *count > 1 => choice
-                .split(',')
-                .filter_map(|token| {
-                    ChosenAttribute::from_choice(
-                        ChoiceType::Keyword {
-                            options: options.clone(),
-                            count: 1,
-                        },
-                        token.trim(),
-                    )
-                })
-                .collect(),
-            // CR 607.2d + CR 508.1c: The directional "choose left or right"
-            // prompt (Pramikon, Sky Rampart; Mystic Barrier; Teyo, Geometric
-            // Tactician) arrives as a two-option `ChoiceType::Labeled`. Hijack
-            // ONLY the exact 2-option {left, right} set (case-insensitive, both
-            // present) into a typed `ChosenAttribute::Direction` so the CR
-            // 508.1c gate can read the seat direction. A Labeled choice that
-            // merely includes "Left" among other options (e.g.
-            // ["Left", "Center", "Right"]) is NOT a directional choice — it
-            // falls through to the generic `Label` path below.
-            ChoiceType::Labeled { options }
-                if options.len() == 2
-                    && options
-                        .iter()
-                        .all(|o| SeatDirection::from_choice_label(o).is_some())
-                    && options.iter().any(|o| {
-                        SeatDirection::from_choice_label(o) == Some(SeatDirection::Left)
-                    })
-                    && options.iter().any(|o| {
-                        SeatDirection::from_choice_label(o) == Some(SeatDirection::Right)
-                    }) =>
-            {
-                match SeatDirection::from_choice_label(choice) {
-                    Some(dir) => vec![ChosenAttribute::Direction(dir)],
-                    None => ChosenAttribute::from_choice(choice_type.clone(), choice)
-                        .into_iter()
-                        .collect(),
-                }
-            }
-            _ => ChosenAttribute::from_choice(choice_type.clone(), choice)
-                .into_iter()
-                .collect(),
-        };
-        if !attrs.is_empty() {
-            if let Some(obj) = state.objects.get_mut(&obj_id) {
+        if let Some(obj) = source.source_mut_exact_for_resolution(state) {
+            let attrs = chosen_attributes_for_choice(choice_type, choice);
+            if !attrs.is_empty() {
                 // CR 608.2d: A keyword choice represents the CURRENT answer set,
                 // not an accumulation. A source that makes a fresh keyword choice
                 // each time its effect resolves (Angelic Skirmisher — "At the
@@ -320,32 +293,7 @@ pub(crate) fn bind_named_choice(
                 // every other chosen-attribute kind (Color, Subtype, CardName,
                 // Label, …) is untouched so RemoveChosenKeyword/Urborg and the
                 // anchor-word/Morophon cards keep accumulating per their own rules.
-                if matches!(choice_type, ChoiceType::Keyword { .. }) {
-                    obj.chosen_attributes
-                        .retain(|a| !matches!(a, ChosenAttribute::Keyword(_)));
-                }
-                // CR 608.2d + CR 122.1: A per-iteration counter-kind choice (The
-                // Caves of Androzani) represents the CURRENT answer only —
-                // replace the prior `Counter` so `PutChosenCounter` reads this
-                // iteration's kind, not an accumulation across permanents.
-                if matches!(choice_type, ChoiceType::CounterKind { .. }) {
-                    obj.chosen_attributes
-                        .retain(|a| !matches!(a, ChosenAttribute::Counter(_)));
-                }
-                // CR 607.2d "the last chosen direction": a re-choice (Mystic
-                // Barrier's upkeep re-selection) REPLACES the prior direction.
-                // Clear only `ChosenAttribute::Direction`, mirroring the Keyword
-                // retain above, so exactly one direction (the last) survives.
-                if attrs
-                    .iter()
-                    .any(|a| matches!(a, ChosenAttribute::Direction(_)))
-                {
-                    obj.chosen_attributes
-                        .retain(|a| !matches!(a, ChosenAttribute::Direction(_)));
-                }
-                for attr in attrs {
-                    obj.chosen_attributes.push(attr);
-                }
+                apply_choice_attributes(&mut obj.chosen_attributes, choice_type, choice);
                 // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card name,
                 // creature type, card type, color, etc.) can gate
                 // source-dependent continuous or rule effects. Layer evaluation
@@ -378,6 +326,119 @@ pub(crate) fn bind_named_choice(
     }
 
     state.last_named_choice = ChoiceValue::from_choice(choice_type, choice);
+    updated_context
+}
+
+pub(crate) fn named_choice_authority(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    persist: bool,
+    choice_type: &ChoiceType,
+) -> (Option<NamedChoiceSource>, Option<PlayerId>) {
+    let persist_player = (persist && matches!(choice_type, ChoiceType::Labeled { .. }))
+        .then_some(ability.scoped_player)
+        .flatten();
+    let needs_context =
+        choice_type.needs_choice_source_context() || (persist && persist_player.is_none());
+    if !needs_context {
+        return (None, persist_player);
+    }
+
+    let context = ability.trigger_source.clone().or_else(|| {
+        state
+            .objects
+            .get(&ability.source_id)
+            .map(|source| crate::game::triggers::trigger_source_context_for_latch(state, source))
+    });
+    let binding = if persist && persist_player.is_none() {
+        NamedChoiceSourceBinding::ExactObjectAndResolution
+    } else {
+        NamedChoiceSourceBinding::ResolutionContext
+    };
+    (
+        context.map(|context| NamedChoiceSource::from_trigger_source(context, binding)),
+        persist_player,
+    )
+}
+
+fn register_exact_named_choice_source(state: &mut GameState, source: Option<&NamedChoiceSource>) {
+    let Some(source) = source.filter(|source| source.is_exact_object_and_resolution()) else {
+        return;
+    };
+    let Some(context) = source.context.clone() else {
+        return;
+    };
+    let Some(ability) = state
+        .resolving_stack_entry
+        .as_mut()
+        .and_then(|entry| entry.ability_mut())
+        .filter(|ability| ability.source_id == context.identity.reference.object_id)
+    else {
+        return;
+    };
+    ability.set_trigger_source_recursive(context);
+}
+
+fn chosen_attributes_for_choice(choice_type: &ChoiceType, choice: &str) -> Vec<ChosenAttribute> {
+    match choice_type {
+        ChoiceType::Keyword { options, count } if *count > 1 => choice
+            .split(',')
+            .filter_map(|token| {
+                ChosenAttribute::from_choice(
+                    ChoiceType::Keyword {
+                        options: options.clone(),
+                        count: 1,
+                    },
+                    token.trim(),
+                )
+            })
+            .collect(),
+        ChoiceType::Labeled { options }
+            if options.len() == 2
+                && options
+                    .iter()
+                    .all(|option| SeatDirection::from_choice_label(option).is_some())
+                && options.iter().any(|option| {
+                    SeatDirection::from_choice_label(option) == Some(SeatDirection::Left)
+                })
+                && options.iter().any(|option| {
+                    SeatDirection::from_choice_label(option) == Some(SeatDirection::Right)
+                }) =>
+        {
+            SeatDirection::from_choice_label(choice)
+                .map(ChosenAttribute::Direction)
+                .or_else(|| ChosenAttribute::from_choice(choice_type.clone(), choice))
+                .into_iter()
+                .collect()
+        }
+        _ => ChosenAttribute::from_choice(choice_type.clone(), choice)
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn apply_choice_attributes(
+    destination: &mut Vec<ChosenAttribute>,
+    choice_type: &ChoiceType,
+    choice: &str,
+) {
+    let attrs = chosen_attributes_for_choice(choice_type, choice);
+    if attrs.is_empty() {
+        return;
+    }
+    if matches!(choice_type, ChoiceType::Keyword { .. }) {
+        destination.retain(|attribute| !matches!(attribute, ChosenAttribute::Keyword(_)));
+    }
+    if matches!(choice_type, ChoiceType::CounterKind { .. }) {
+        destination.retain(|attribute| !matches!(attribute, ChosenAttribute::Counter(_)));
+    }
+    if attrs
+        .iter()
+        .any(|attribute| matches!(attribute, ChosenAttribute::Direction(_)))
+    {
+        destination.retain(|attribute| !matches!(attribute, ChosenAttribute::Direction(_)));
+    }
+    destination.extend(attrs);
 }
 
 const FALLBACK_CREATURE_TYPES: &[&str] = &[
@@ -700,6 +761,17 @@ mod tests {
         )
     }
 
+    fn exact_choice_source(state: &GameState, object_id: ObjectId) -> NamedChoiceSource {
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            state,
+            state.objects.get(&object_id).unwrap(),
+        );
+        NamedChoiceSource::from_trigger_source(
+            context,
+            NamedChoiceSourceBinding::ExactObjectAndResolution,
+        )
+    }
+
     /// CR 607.2d / CR 607.2m (by analogy): `bind_named_choice` routes an anchor
     /// label to the PLAYER when `persist_player` is set (never to the object),
     /// to the OBJECT otherwise, and replaces on re-choose per player.
@@ -720,11 +792,13 @@ mod tests {
         };
 
         // Per-player: Label lands on players[0], object stays empty.
+        let mut player_source = exact_choice_source(&state, obj_id);
+        player_source.binding = NamedChoiceSourceBinding::ResolutionContext;
         bind_named_choice(
             &mut state,
             &labeled,
             "Green anchor",
-            Some(obj_id),
+            Some(&mut player_source),
             Some(PlayerId(0)),
         );
         assert!(crate::game::players::player_last_chose_label(
@@ -747,7 +821,7 @@ mod tests {
             &mut state,
             &labeled,
             "Red waterfall",
-            Some(obj_id),
+            Some(&mut player_source),
             Some(PlayerId(0)),
         );
         assert!(crate::game::players::player_last_chose_label(
@@ -761,8 +835,15 @@ mod tests {
             "Green anchor"
         ));
 
-        // Object-scoped (persist_player None): Label lands on the object.
-        bind_named_choice(&mut state, &labeled, "Green anchor", Some(obj_id), None);
+        // Exact-object persistence: Label lands on the captured object.
+        let mut object_source = exact_choice_source(&state, obj_id);
+        bind_named_choice(
+            &mut state,
+            &labeled,
+            "Green anchor",
+            Some(&mut object_source),
+            None,
+        );
         assert!(state
             .objects
             .get(&obj_id)
@@ -770,6 +851,39 @@ mod tests {
             .chosen_attributes
             .iter()
             .any(|a| matches!(a, ChosenAttribute::Label(l) if l == "Green anchor")));
+    }
+
+    #[test]
+    fn exact_named_choice_never_mutates_a_same_id_higher_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(501);
+        state.objects.insert(
+            object_id,
+            crate::game::game_object::GameObject::new(
+                object_id,
+                crate::types::identifiers::CardId(501),
+                PlayerId(0),
+                "Exact Choice Source".to_string(),
+                crate::types::zones::Zone::Command,
+            ),
+        );
+        let mut source = exact_choice_source(&state, object_id);
+        state.objects.get_mut(&object_id).unwrap().incarnation += 1;
+
+        bind_named_choice(
+            &mut state,
+            &ChoiceType::Labeled {
+                options: vec!["One".to_string()],
+            },
+            "One",
+            Some(&mut source),
+            None,
+        );
+
+        assert!(
+            state.objects[&object_id].chosen_attributes.is_empty(),
+            "an exact prompt source must not mutate a same-id higher incarnation"
+        );
     }
 
     #[test]
@@ -786,12 +900,15 @@ mod tests {
                 player,
                 choice_type,
                 options,
-                ..
+                source,
+                persist_player,
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(*choice_type, ChoiceType::creature_type());
                 assert!(options.contains(&"Elf".to_string()));
                 assert!(options.contains(&"Goblin".to_string()));
+                assert!(source.is_none());
+                assert_eq!(*persist_player, None);
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -1068,6 +1185,16 @@ mod tests {
     #[test]
     fn land_nonland_guess_carries_source_context_without_persisting() {
         let mut state = GameState::new_two_player(42);
+        state.objects.insert(
+            ObjectId(100),
+            crate::game::game_object::GameObject::new(
+                ObjectId(100),
+                crate::types::identifiers::CardId(100),
+                PlayerId(1),
+                "Guess Source".to_string(),
+                crate::types::zones::Zone::Battlefield,
+            ),
+        );
         let ability = ResolvedAbility::new(
             Effect::Choose {
                 choice_type: ChoiceType::CardPredicateGuess {
@@ -1089,7 +1216,7 @@ mod tests {
                 player,
                 choice_type,
                 options,
-                source_id,
+                source,
                 persist_player,
             } => {
                 assert_eq!(*player, PlayerId(1));
@@ -1105,7 +1232,13 @@ mod tests {
                         &ChoiceType::land_or_nonland_card_predicate_options()
                     )
                 );
-                assert_eq!(*source_id, Some(ObjectId(100)));
+                assert!(matches!(
+                    source,
+                    Some(NamedChoiceSource {
+                        binding: NamedChoiceSourceBinding::ResolutionContext,
+                        ..
+                    })
+                ));
                 assert_eq!(*persist_player, None);
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
@@ -1481,7 +1614,8 @@ mod tests {
         let choice_type = ChoiceType::Labeled {
             options: vec!["Left".into(), "Center".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &choice_type, "Left", Some(src), None);
+        let mut source = exact_choice_source(&state, src);
+        bind_named_choice(&mut state, &choice_type, "Left", Some(&mut source), None);
 
         let obj = &state.objects[&src];
         assert_eq!(
@@ -1514,7 +1648,8 @@ mod tests {
             options: vec!["Left".into(), "Right".into()],
         };
         // Lowercase answer proves case-insensitive typing via from_choice_label.
-        bind_named_choice(&mut state, &choice_type, "left", Some(src), None);
+        let mut source = exact_choice_source(&state, src);
+        bind_named_choice(&mut state, &choice_type, "left", Some(&mut source), None);
 
         let obj = &state.objects[&src];
         assert_eq!(obj.chosen_direction(), Some(SeatDirection::Left));
@@ -1537,8 +1672,9 @@ mod tests {
         let choice_type = ChoiceType::Labeled {
             options: vec!["Left".into(), "Right".into()],
         };
-        bind_named_choice(&mut state, &choice_type, "Left", Some(src), None);
-        bind_named_choice(&mut state, &choice_type, "Right", Some(src), None);
+        let mut source = exact_choice_source(&state, src);
+        bind_named_choice(&mut state, &choice_type, "Left", Some(&mut source), None);
+        bind_named_choice(&mut state, &choice_type, "Right", Some(&mut source), None);
 
         let obj = &state.objects[&src];
         let directions: Vec<_> = obj

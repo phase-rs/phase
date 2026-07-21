@@ -5,12 +5,17 @@ use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::format::{GameFormat, SideboardPolicy};
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{
+    CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice, GameState,
+    ManaAbilityResume, PlayerDeckPool, WaitingFor,
+};
 use crate::types::keywords::{CompanionCondition, Keyword};
-use crate::types::mana::ManaCostShard;
+use crate::types::mana::{ManaCost, ManaCostShard, SpecialAction};
 use crate::types::player::{CompanionInfo, PlayerId};
 use crate::types::zones::Zone;
 
+use super::casting::{self, SpecialActionManaPayment};
+use super::engine::EngineError;
 use super::zones;
 
 /// CR 702.139: Companion costs {3} generic mana to move to hand.
@@ -163,51 +168,114 @@ fn has_repeated_mana_symbols(face: &CardFace) -> bool {
 
 // ── Pre-game Reveal Flow ────────────────────────────────────────────────
 
-/// CR 702.139a: Find sideboard cards with companion keyword whose condition
-/// is met by the main deck.
-pub fn find_eligible_companions(
-    sideboard: &[DeckEntry],
+/// Builds the starting deck a companion condition evaluates. Commander-family
+/// games include the commander but never the prospective companion (CR
+/// 702.139b); other formats evaluate their main deck only.
+pub fn companion_starting_deck(
     main_deck: &[DeckEntry],
-) -> Vec<(String, usize)> {
-    sideboard
+    commanders: &[DeckEntry],
+    format: GameFormat,
+) -> Vec<DeckEntry> {
+    let mut starting = main_deck.to_vec();
+    if format.uses_commander() {
+        starting.extend_from_slice(commanders);
+    }
+    starting
+}
+
+fn commander_allows_companion(
+    companion: &DeckEntry,
+    starting_deck: &[DeckEntry],
+    commanders: &[DeckEntry],
+    format: GameFormat,
+) -> bool {
+    if !format.uses_commander() {
+        return true;
+    }
+
+    // CR 903.11a: a card brought in from outside the game cannot share a
+    // name with the starting deck and must fit its commander's color identity.
+    if starting_deck
         .iter()
-        .enumerate()
-        .filter_map(|(idx, entry)| {
-            let condition = entry.card.keywords.iter().find_map(|kw| {
-                if let Keyword::Companion(ref cond) = kw {
-                    Some(cond)
-                } else {
-                    None
+        .any(|entry| entry.card.name.eq_ignore_ascii_case(&companion.card.name))
+    {
+        return false;
+    }
+    let commander_colors: HashSet<_> = commanders
+        .iter()
+        .flat_map(|entry| entry.card.color_identity.iter().copied())
+        .collect();
+    companion
+        .card
+        .color_identity
+        .iter()
+        .all(|color| commander_colors.contains(color))
+}
+
+/// Tests one candidate against a complete starting deck. This is the shared
+/// authority used by construction validation, pre-game offers, and response
+/// revalidation so the UI never has to duplicate companion or Commander rules.
+pub fn is_eligible_companion(
+    companion: &DeckEntry,
+    starting_deck: &[DeckEntry],
+    commanders: &[DeckEntry],
+    format: GameFormat,
+) -> bool {
+    // allow-raw-authority: DeckEntry carries a printed CardFace snapshot; deck validation has no GameState or live object to query.
+    let Some(condition) = companion.card.keywords.iter().find_map(|keyword| {
+        if let Keyword::Companion(condition) = keyword {
+            Some(condition)
+        } else {
+            None
+        }
+    }) else {
+        return false;
+    };
+
+    validate_companion_condition(condition, starting_deck)
+        && commander_allows_companion(companion, starting_deck, commanders, format)
+}
+
+fn companion_offers(pool: &PlayerDeckPool, format: GameFormat) -> Vec<CompanionRevealChoice> {
+    let starting = companion_starting_deck(&pool.current_main, &pool.current_commander, format);
+    let candidates: Vec<(CompanionChoiceSource, &DeckEntry)> = if format.uses_commander() {
+        pool.current_companion
+            .first()
+            .map(|entry| (CompanionChoiceSource::Dedicated, entry))
+            .into_iter()
+            .collect()
+    } else if !matches!(format.sideboard_policy(), SideboardPolicy::Forbidden) {
+        pool.current_sideboard
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (CompanionChoiceSource::Sideboard { index }, entry))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    candidates
+        .into_iter()
+        .filter_map(|(source, entry)| {
+            is_eligible_companion(entry, &starting, &pool.current_commander, format).then(|| {
+                CompanionRevealChoice {
+                    name: entry.card.name.clone(),
+                    source,
                 }
-            })?;
-            if validate_companion_condition(condition, main_deck) {
-                Some((entry.card.name.clone(), idx))
-            } else {
-                None
-            }
+            })
         })
         .collect()
 }
 
-/// CR 702.139a: Check if a player has eligible companions from their sideboard.
+/// CR 702.139a: Check if a player has eligible companions from their permitted
+/// outside-game source.
 /// Returns CompanionReveal WaitingFor if eligible companions exist, otherwise None.
 pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<WaitingFor> {
-    // CR 702.139a: Companions are revealed from the sideboard. Formats with no
-    // sideboard (Commander, Duel Commander, Pauper Commander, Brawl, Historic
-    // Brawl) categorically cannot use companions. Rather than enumerate the
-    // format list here — which has drifted in the past as commander variants
-    // were added — defer to the engine's single authority for sideboard rules.
-    if matches!(
-        state.format_config.format.sideboard_policy(),
-        SideboardPolicy::Forbidden
-    ) {
-        return None;
-    }
-
     let pool = state.deck_pools.iter().find(|p| p.player == player)?;
-    let mut eligible = find_eligible_companions(&pool.current_sideboard, &pool.current_main);
+    let mut eligible = companion_offers(pool, state.format_config.format);
     if state.format_config.format == GameFormat::TinyLeaders {
-        eligible.retain(|(name, _)| !super::deck_validation::tiny_leaders_companion_banned(name));
+        eligible
+            .retain(|choice| !super::deck_validation::tiny_leaders_companion_banned(&choice.name));
     }
 
     if eligible.is_empty() {
@@ -233,68 +301,113 @@ pub fn check_all_companion_reveals(state: &GameState) -> Option<WaitingFor> {
 
 /// CR 702.139a: Handle companion declaration or decline.
 /// `eligible_companions` is the pre-computed list from `WaitingFor::CompanionReveal`,
-/// ensuring the index the player chose maps to the same card that was presented.
+/// ensuring the typed response exactly matches a card that was presented.
 /// Returns the next WaitingFor state (next player's reveal or mulligans).
 pub fn handle_declare_companion(
     state: &mut GameState,
     player: PlayerId,
-    card_index: Option<usize>,
+    choice: CompanionDeclaration,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
-    if let Some(idx) = card_index {
-        // Retrieve the eligible list from the WaitingFor state that was presented to the player
+) -> Result<WaitingFor, String> {
+    if let CompanionDeclaration::Reveal(choice) = choice {
         let eligible = match &state.waiting_for {
             WaitingFor::CompanionReveal {
                 eligible_companions,
                 ..
             } => eligible_companions.clone(),
-            _ => vec![],
+            _ => return Err("Companion response without an active offer".to_string()),
         };
 
-        if let Some((card_name, sb_idx)) = eligible.get(idx) {
-            let pool = state
-                .deck_pools
-                .iter_mut()
-                .find(|p| p.player == player)
-                .expect("player deck pool exists");
-
-            // Validate the sideboard index is still valid
-            if *sb_idx < pool.current_sideboard.len() {
-                // Remove the companion from the sideboard
-                let card_entry = pool.current_sideboard[*sb_idx].clone();
-                // CR 702.139: Companion promotion mutates the sideboard; first
-                // mutation of the shared Arc triggers copy-on-write via make_mut.
-                let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
-                if sideboard[*sb_idx].count > 1 {
-                    sideboard[*sb_idx].count -= 1;
-                } else {
-                    sideboard.remove(*sb_idx);
-                }
-
-                // Set companion on the player
-                let player_data = state
-                    .players
-                    .iter_mut()
-                    .find(|p| p.id == player)
-                    .expect("player exists");
-                player_data.companion = Some(CompanionInfo {
-                    card: DeckEntry {
-                        card: card_entry.card,
-                        count: 1,
-                    },
-                    used: false,
-                });
-
-                events.push(GameEvent::CompanionRevealed {
-                    player,
-                    card_name: card_name.clone(),
-                });
-            }
+        if !eligible.contains(&choice) {
+            return Err("Companion choice was not offered".to_string());
         }
+
+        if state
+            .players
+            .iter()
+            .find(|player_data| player_data.id == player)
+            .is_some_and(|player_data| player_data.companion.is_some())
+        {
+            return Err("Companion was already revealed".to_string());
+        }
+
+        let pool = state
+            .deck_pools
+            .iter_mut()
+            .find(|pool| pool.player == player)
+            .ok_or_else(|| "Player deck pool does not exist".to_string())?;
+        let starting = companion_starting_deck(
+            &pool.current_main,
+            &pool.current_commander,
+            state.format_config.format,
+        );
+        let selected = match choice.source {
+            CompanionChoiceSource::Sideboard { index } => {
+                let entry = pool
+                    .current_sideboard
+                    .get(index)
+                    .filter(|entry| entry.card.name == choice.name)
+                    .cloned()
+                    .ok_or_else(|| "Companion sideboard offer is stale".to_string())?;
+                if !is_eligible_companion(
+                    &entry,
+                    &starting,
+                    &pool.current_commander,
+                    state.format_config.format,
+                ) {
+                    return Err("Companion is no longer eligible".to_string());
+                }
+                let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
+                if sideboard[index].count > 1 {
+                    sideboard[index].count -= 1;
+                } else {
+                    sideboard.remove(index);
+                }
+                entry
+            }
+            CompanionChoiceSource::Dedicated => {
+                let entry = pool
+                    .current_companion
+                    .first()
+                    .filter(|entry| entry.card.name == choice.name)
+                    .cloned()
+                    .ok_or_else(|| "Dedicated companion offer is stale".to_string())?;
+                if !state.format_config.format.uses_commander()
+                    || !is_eligible_companion(
+                        &entry,
+                        &starting,
+                        &pool.current_commander,
+                        state.format_config.format,
+                    )
+                {
+                    return Err("Companion is no longer eligible".to_string());
+                }
+                std::sync::Arc::make_mut(&mut pool.current_companion).clear();
+                entry
+            }
+        };
+
+        let player_data = state
+            .players
+            .iter_mut()
+            .find(|entry| entry.id == player)
+            .ok_or_else(|| "Player does not exist".to_string())?;
+        player_data.companion = Some(CompanionInfo {
+            card: DeckEntry {
+                card: selected.card,
+                count: 1,
+            },
+            used: false,
+        });
+
+        events.push(GameEvent::CompanionRevealed {
+            player,
+            card_name: choice.name,
+        });
     }
 
     // Advance to next player's companion reveal in seat order
-    advance_companion_reveal(state, player, events)
+    Ok(advance_companion_reveal(state, player, events))
 }
 
 /// Move to the next player's companion reveal, or start mulligans if all done.
@@ -322,101 +435,161 @@ fn advance_companion_reveal(
 
 // ── Special Action: Pay {3} to Move Companion to Hand ───────────────────
 
-/// CR 702.139a: Check if a player can pay {3} to put their companion into hand.
-/// Returns true if all conditions are met (sorcery speed, has companion, not used, enough mana).
-pub fn can_activate_companion(state: &GameState, player: PlayerId) -> bool {
-    let player_data = &state.players[player.0 as usize];
-    let has_unused_companion = player_data.companion.as_ref().is_some_and(|c| !c.used);
+/// CR 116.2g + CR 702.139a: Derive the companion special action's final cost.
+/// Cost adjustments apply before payment, and this concrete result is retained
+/// by a paused mana-ability continuation rather than recomputed later.
+fn companion_to_hand_cost(state: &GameState, player: PlayerId) -> ManaCost {
+    casting::apply_special_action_cost_reduction(
+        state,
+        player,
+        SpecialAction::CompanionToHand,
+        ManaCost::generic(COMPANION_COST as u32),
+    )
+}
 
-    if !has_unused_companion {
-        return false;
+/// CR 116.2g + CR 702.139a: Validate the non-payment preconditions for moving
+/// a companion to hand. Kept separate from payment so a forged direct action
+/// fails before auto-tapping any mana source.
+fn validate_companion_to_hand_action(
+    state: &GameState,
+    player: PlayerId,
+) -> Result<(), EngineError> {
+    let player_data = &state.players[player.0 as usize];
+    let companion = player_data
+        .companion
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidAction("No companion declared".to_string()))?;
+    if companion.used {
+        return Err(EngineError::InvalidAction(
+            "Companion has already been put into hand this game".to_string(),
+        ));
     }
 
-    // Sorcery-speed timing check
     let is_sorcery_speed = matches!(
         state.phase,
         crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
     ) && state.stack.is_empty()
         && state.active_player == player;
-
     if !is_sorcery_speed {
-        return false;
+        return Err(EngineError::InvalidAction(
+            "Companion can only be put into hand at sorcery speed".to_string(),
+        ));
     }
 
-    // Mana pool has at least {3} unrestricted mana (restricted mana can't pay special action costs)
-    player_data
-        .mana_pool
-        .mana
-        .iter()
-        .filter(|m| m.restrictions.is_empty())
-        .count()
-        >= COMPANION_COST
+    Ok(())
 }
 
-/// CR 702.139a: Pay {3} as a special action to put companion into hand.
-pub fn handle_companion_to_hand(
+/// CR 702.139a: Check whether the player can legally take the companion special
+/// action now, including payment after automatic mana-source activation.
+pub fn can_activate_companion(state: &GameState, player: PlayerId) -> bool {
+    validate_companion_to_hand_action(state, player).is_ok()
+        && casting::can_pay_special_action_mana_cost_after_auto_tap(
+            state,
+            player,
+            None,
+            &companion_to_hand_cost(state, player),
+            SpecialAction::CompanionToHand,
+        )
+}
+
+/// CR 116.2g + CR 702.139a: Pay the companion special action's already-derived
+/// cost. A paused mana-source replacement leaves the companion outside the game
+/// and returns that prompt; only a completed payment commits the move.
+fn pay_companion_to_hand_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<SpecialActionManaPayment, EngineError> {
+    let resume = ManaAbilityResume::CompanionToHand {
+        player,
+        cost: cost.clone(),
+    };
+    casting::pay_special_action_mana_cost_with_resume(
+        state,
+        player,
+        None,
+        cost,
+        SpecialAction::CompanionToHand,
+        Some(&resume),
+        events,
+    )
+}
+
+/// CR 116.2g + CR 702.139a: Commit the once-per-game companion action only
+/// after its full payment succeeds. This is also the sole point that clears the
+/// player's undoable mana-tap record for this non-mana action.
+fn commit_companion_to_hand(
     state: &mut GameState,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, String> {
-    let player_data = &state.players[player.0 as usize];
-
-    // Validate companion exists and is unused
-    let companion_info = player_data
+) -> WaitingFor {
+    let card_face = state.players[player.0 as usize]
         .companion
         .as_ref()
-        .ok_or("No companion declared")?;
-    if companion_info.used {
-        return Err("Companion has already been put into hand this game".to_string());
-    }
-
-    // Validate sorcery-speed timing
-    let is_sorcery_speed = matches!(
-        state.phase,
-        crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
-    ) && state.stack.is_empty()
-        && state.active_player == player;
-    if !is_sorcery_speed {
-        return Err("Companion can only be put into hand at sorcery speed".to_string());
-    }
-
-    // Validate and deduct mana
-    {
-        let player_data = &mut state.players[player.0 as usize];
-        if !player_data.mana_pool.spend_generic(COMPANION_COST) {
-            return Err("Not enough mana to pay companion cost ({3})".to_string());
-        }
-    }
-    state.layers_dirty.mark_full();
-
-    // Take the companion card data and mark as used
-    let player_data = &mut state.players[player.0 as usize];
-    let card_face = player_data
-        .companion
-        .as_ref()
-        .expect("validated above")
+        .expect("a paid companion continuation retains its declared companion")
         .card
         .card
         .clone();
     let card_name = card_face.name.clone();
-    player_data
+    state.players[player.0 as usize]
         .companion
         .as_mut()
-        .expect("validated above")
+        .expect("a paid companion continuation retains its declared companion")
         .used = true;
 
-    // Create a GameObject from the companion's CardFace and put it into hand
     let card_id = crate::types::identifiers::CardId(state.next_object_id);
     let obj_id = zones::create_object(state, card_id, player, card_face.name.clone(), Zone::Hand);
-
-    // Apply the full card face data to the new object
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         super::printed_cards::apply_card_face_to_object(obj, &card_face);
     }
 
     events.push(GameEvent::CompanionMovedToHand { player, card_name });
+    state.lands_tapped_for_mana.remove(&player);
+    WaitingFor::Priority { player }
+}
 
-    Ok(WaitingFor::Priority { player })
+/// CR 116.2g + CR 702.139a: Initiate the companion special action. Preflight
+/// occurs before automatic mana activation, so an unaffordable forged action
+/// cannot mutate mana, waiting state, companion state, hand, or undo tracking.
+pub fn handle_companion_to_hand(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    validate_companion_to_hand_action(state, player)?;
+    let cost = companion_to_hand_cost(state, player);
+    if !casting::can_pay_special_action_mana_cost_after_auto_tap(
+        state,
+        player,
+        None,
+        &cost,
+        SpecialAction::CompanionToHand,
+    ) {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot pay companion cost".to_string(),
+        ));
+    }
+
+    match pay_companion_to_hand_cost(state, player, &cost, events)? {
+        SpecialActionManaPayment::Paid => Ok(commit_companion_to_hand(state, player, events)),
+        SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+    }
+}
+
+/// CR 116.2g + CR 702.139a + CR 605.3b + CR 616.1: Resume a companion payment
+/// after a mana-source cost replacement choice. `cost` was locked at initiation,
+/// and a second pause retains the same typed root for another resumption.
+pub(crate) fn resume_companion_to_hand_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match pay_companion_to_hand_cost(state, player, &cost, events)? {
+        SpecialActionManaPayment::Paid => Ok(commit_companion_to_hand(state, player, events)),
+        SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+    }
 }
 
 #[cfg(test)]
@@ -741,5 +914,37 @@ mod tests {
             &CompanionCondition::NoRepeatedManaSymbols,
             &deck
         ));
+    }
+
+    #[test]
+    fn commander_starting_deck_includes_commander_but_not_companion() {
+        let main = vec![creature("Main Card", 2, vec![])];
+        let commanders = vec![creature("Commander", 3, vec![])];
+
+        let commander_starting = companion_starting_deck(
+            &main,
+            &commanders,
+            crate::types::format::GameFormat::Commander,
+        );
+        assert_eq!(
+            commander_starting
+                .iter()
+                .map(|entry| entry.card.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Main Card", "Commander"]
+        );
+
+        let standard_starting = companion_starting_deck(
+            &main,
+            &commanders,
+            crate::types::format::GameFormat::Standard,
+        );
+        assert_eq!(
+            standard_starting
+                .iter()
+                .map(|entry| entry.card.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Main Card"]
+        );
     }
 }

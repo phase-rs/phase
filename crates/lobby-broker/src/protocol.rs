@@ -31,6 +31,13 @@ use serde::{Deserialize, Serialize};
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 20 — Actor-scoped priority-passing settings and filtered per-player state.
+/// 19 — Connive's exact `EventObjectSnapshot` subject and resident paused
+///      post-replacement drains changed serialized full-game state. Phase 4
+///      later pinned the existing v2 resolution wire shape; it did not add a
+///      second protocol change.
+/// 18 — Serialized GameState trigger provenance and paused logical zone-change
+///      owners are now wire-visible.
 /// 16 — Meld pair/attacking-entry choices after mana-payment preview variants.
 /// 15 — Mana-payment preview request/response variants.
 /// 14 — `PrecastCopyShortcut` action and its two `WaitingFor` variants.
@@ -38,7 +45,7 @@ use serde::{Deserialize, Serialize};
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -363,9 +370,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_version_tracks_meld_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 16);
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 15);
+    fn protocol_version_tracks_priority_passing_wire_additions() {
+        assert_eq!(PROTOCOL_VERSION, 20);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 19);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::game::combat::AttackTarget;
 use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, LKISnapshot};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::triggers::AttackTargetFilter;
@@ -27,6 +27,22 @@ pub(crate) fn counter_condition_matches(
     let count: u32 = match counters {
         CounterMatch::Any => obj.counters.values().sum(),
         CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
+    };
+    count >= minimum && maximum.is_none_or(|max| count <= max)
+}
+
+/// CR 122.1 + CR 608.2h: LKI counterpart to [`counter_condition_matches`]
+/// for a triggered source that no longer has an exact live object. Both
+/// helpers deliberately share the same CounterMatch/count semantics.
+pub(crate) fn counter_condition_matches_lki(
+    lki: &LKISnapshot,
+    counters: &CounterMatch,
+    minimum: u32,
+    maximum: Option<u32>,
+) -> bool {
+    let count: u32 = match counters {
+        CounterMatch::Any => lki.counters.values().sum(),
+        CounterMatch::OfType(counter_type) => lki.counters.get(counter_type).copied().unwrap_or(0),
     };
     count >= minimum && maximum.is_none_or(|max| count <= max)
 }

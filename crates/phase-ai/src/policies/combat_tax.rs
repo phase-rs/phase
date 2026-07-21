@@ -281,7 +281,7 @@ mod tests {
     use super::*;
     use crate::features::DeckFeatures;
     use engine::types::game_state::{CombatTaxPending, WaitingFor};
-    use engine::types::identifiers::ObjectId;
+    use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
 
@@ -317,13 +317,15 @@ mod tests {
             total_cost: ManaCost::generic(4),
             per_creature: vec![(ObjectId(1), ManaCost::generic(2))],
             pending: CombatTaxPending::Attack {
+                // `total_declared_count` reads only `.len()`, so the incarnation
+                // value is arbitrary here (0 = fresh-object epoch).
                 attacks: vec![
                     (
-                        ObjectId(1),
+                        ObjectIncarnationRef::of(ObjectId(1), 0),
                         engine::game::combat::AttackTarget::Player(PlayerId(1)),
                     ),
                     (
-                        ObjectId(2),
+                        ObjectIncarnationRef::of(ObjectId(2), 0),
                         engine::game::combat::AttackTarget::Player(PlayerId(1)),
                     ),
                 ],

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { AdditionalCost, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
+import type { AdditionalCost, GameAction, GameObject, Keyword, ManaCost } from "../../adapter/types.ts";
 import { buildGameObject } from "../../test/factories/gameObjectFactory.ts";
 import {
   abilityChoiceLabel,
@@ -8,6 +8,7 @@ import {
   additionalCostChoices,
   formatAbilityCost,
   formatCost,
+  spellCostDisplay,
 } from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
@@ -273,5 +274,47 @@ describe("formatAbilityCost", () => {
         { type: "PayLife", amount: { type: "Fixed", value: 2 } },
       ],
     })).toBe("{1} or Pay 2 life");
+  });
+});
+
+describe("spellCostDisplay", () => {
+  const cost = (generic: number, shards: string[] = []): ManaCost => ({
+    type: "Cost",
+    generic,
+    shards,
+  });
+  const noCost: ManaCost = { type: "NoCost" };
+
+  it("shows the printed cost, not reduced, when the engine reports no override", () => {
+    const printed = cost(7, ["Blue", "Blue", "Blue"]);
+    const { displayCost, isReduced } = spellCostDisplay(undefined, printed);
+    expect(displayCost).toBe(printed);
+    expect(isReduced).toBe(false);
+  });
+
+  it("flags a smaller effective Cost as reduced", () => {
+    const { displayCost, isReduced } = spellCostDisplay(cost(3, ["Blue"]), cost(5, ["Blue"]));
+    expect(displayCost).toEqual(cost(3, ["Blue"]));
+    expect(isReduced).toBe(true);
+  });
+
+  // CR 118.9: Omniscience reports the effective cost as NoCost against a real
+  // printed cost — a reduction to {0}, so the pips must render (green {0}).
+  it("flags a NoCost effective cost against a real printed cost as reduced (Omniscience)", () => {
+    const { displayCost, isReduced } = spellCostDisplay(noCost, cost(7, ["Blue", "Blue", "Blue"]));
+    expect(displayCost).toEqual(noCost);
+    expect(isReduced).toBe(true);
+  });
+
+  // A naturally-free card (token, Ancestral Vision) has no printed cost and must
+  // never be flagged reduced — no {0} overlay.
+  it("does not flag a naturally-free card (no printed cost) as reduced", () => {
+    const { isReduced } = spellCostDisplay(noCost, noCost);
+    expect(isReduced).toBe(false);
+  });
+
+  it("does not flag an unchanged effective cost as reduced", () => {
+    const { isReduced } = spellCostDisplay(cost(5, ["Blue"]), cost(5, ["Blue"]));
+    expect(isReduced).toBe(false);
   });
 });

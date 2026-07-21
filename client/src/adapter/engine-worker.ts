@@ -37,6 +37,9 @@ import init, {
   replay_seek_js,
   clear_replay_playback,
   preview_mana_payment_js,
+  get_card_face_data,
+  get_card_parse_details,
+  get_card_rulings,
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
@@ -86,6 +89,9 @@ type EngineRequest =
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
+  | { type: "getCardFaceData"; id: number; cardName: string }
+  | { type: "getCardParseDetails"; id: number; cardName: string }
+  | { type: "getCardRulings"; id: number; cardName: string }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
@@ -183,6 +189,21 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         }
         const data = evaluate_deck_compatibility_js(msg.request);
         result(msg.id, data);
+        break;
+      }
+
+      case "getCardFaceData": {
+        result(msg.id, get_card_face_data(msg.cardName));
+        break;
+      }
+
+      case "getCardParseDetails": {
+        result(msg.id, get_card_parse_details(msg.cardName));
+        break;
+      }
+
+      case "getCardRulings": {
+        result(msg.id, get_card_rulings(msg.cardName));
         break;
       }
 

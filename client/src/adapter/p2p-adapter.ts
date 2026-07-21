@@ -19,7 +19,7 @@ import type {
 } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
@@ -100,6 +100,8 @@ interface DeckSeatPayload {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  companion?: string[];
+  signature_spell?: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
   bracket_tier?: string;
@@ -958,6 +960,8 @@ export class P2PHostAdapter implements EngineAdapter {
           main_deck: deck.main_deck,
           sideboard: deck.sideboard,
           commander: deck.commander ?? [],
+          companion: deck.companion ?? [],
+          signature_spell: deck.signature_spell ?? [],
           selected_format: this.formatConfig!.format,
         }) as { selected_format_compatible?: boolean | null; selected_format_reasons: string[] };
 
@@ -1990,7 +1994,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "action_rejected": {
         if (this.pendingReject) {
           this.pendingReject(
-            new AdapterError("ACTION_REJECTED", msg.reason, true),
+            actionRejectionError(msg.reason),
           );
           this.pendingResolve = null;
           this.pendingReject = null;
@@ -2009,7 +2013,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(msg.requestId);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(msg.requestId);
-          pending.reject(new AdapterError("ACTION_REJECTED", msg.reason, true));
+          pending.reject(actionRejectionError(msg.reason));
         }
         break;
       }

@@ -11,7 +11,7 @@ use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter
 use engine::types::game_state::{ResolutionSourceRelatch, StackEntry, StackEntryKind};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
-use engine::types::ObjectId;
+use engine::types::{CardId, ObjectId};
 
 const P0: PlayerId = PlayerId(0);
 
@@ -26,7 +26,7 @@ fn drawing_ability(source: ObjectId, stamp: u64) -> ResolvedAbility {
         source,
         P0,
     );
-    a.set_source_incarnation_recursive(Some(stamp));
+    a.set_test_trigger_source_recursive(stamp, CardId(0));
     a
 }
 

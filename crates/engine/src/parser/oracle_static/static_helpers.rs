@@ -53,6 +53,41 @@ fn parse_bare_supertype_spell_filter(base: &str) -> Option<TargetFilter> {
     ])))
 }
 
+/// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: Resolve a BARE-word spell-subject
+/// filter for a cost modifier — a color or color-CATEGORY ("white", "colorless",
+/// "monocolored", "multicolored"), "historic", or a supertype ("legendary").
+/// `parse_type_phrase` declines all of these because they carry no trailing type
+/// noun (it needs "white creature", not a lone "white"), so without this the
+/// whole restriction dropped and the cost modifier (mis)applied to EVERY spell.
+///
+/// The color word routes through the single [`nom_filter::parse_color_property`]
+/// authority, so the color-CATEGORY axis resolves identically to the noun-bearing
+/// path: colorless → `ColorCount { EQ, 0 }`, monocolored → `{ EQ, 1 }`,
+/// multicolored → `{ GE, 2 }`, a named color → `HasColor`. The prior fallback
+/// hand-rolled only the five named colors via `parse_named_color`, so it dropped
+/// the category axis (Herald of Kozilek, Ugin, Urza's Filter, It That Heralds the
+/// End) and "historic" (Jhoira's Familiar) — all of which then cheapened every spell.
+fn parse_bare_spell_subject_filter(base: &str) -> Option<TargetFilter> {
+    let lower = base.trim().to_ascii_lowercase();
+    // CR 105.2: color / color-category, via the single color-property authority.
+    if let Ok((_, prop)) = all_consuming(nom_filter::parse_color_property).parse(lower.as_str()) {
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![prop]),
+        ));
+    }
+    // CR 700.6: "historic" = legendary supertype, artifact card type, or Saga subtype.
+    if all_consuming(tag::<_, _, OracleError<'_>>("historic"))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some(TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::Historic]),
+        ));
+    }
+    // CR 205.4a: a lone supertype word ("legendary", "snow", ...).
+    parse_bare_supertype_spell_filter(&lower)
+}
+
 /// CR 202.3: Nom parse of a trailing "with/of mana value N or greater/less"
 /// (also "or more"/"or fewer") qualifier — returns the prefix BEFORE the
 /// qualifier plus the `FilterProp::Cmc` it selects. Fails (nom `Err`) when no
@@ -197,17 +232,14 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             TargetFilter::Or { filters } if !filters.is_empty() && remainder.is_empty() => {
                 Some(filter)
             }
-            // Bare color words ("white", "red") and bare supertype words
-            // ("legendary") are not consumed by parse_type_phrase, which requires
-            // a trailing type noun ("white creature", "legendary permanent").
+            // Bare color/color-category words ("white", "colorless",
+            // "multicolored"), "historic", and bare supertype words ("legendary")
+            // are not consumed by parse_type_phrase, which requires a trailing type
+            // noun ("white creature", "legendary permanent"). Route them through
+            // the single bare-subject authority so the color-category axis is not
+            // dropped (CR 105.2 + CR 700.6 + CR 205.4a).
             _ if remainder.is_empty() || remainder.eq_ignore_ascii_case(base_part) => {
-                parse_named_color(base_part)
-                    .map(|color| {
-                        TargetFilter::Typed(
-                            TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
-                        )
-                    })
-                    .or_else(|| parse_bare_supertype_spell_filter(base_part))
+                parse_bare_spell_subject_filter(base_part)
             }
             _ => None,
         }
@@ -316,9 +348,31 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
     stripped.trim()
 }
 
+/// CR 604.1: Parse a LEADING "during your turn, " / "during turns other than
+/// yours, " turn-scope clause into its `StaticCondition`. Shares the negated-turn
+/// vocabulary the CDA / dispatch / type-change static parsers already recognize
+/// (`nom_tag_tp("during turns other than yours, ")`), and the affirmative form
+/// mirrors the trailing suffix arm below. `peel_leading_cost_modifier_condition`
+/// consumes this before self-spell and first-qualified dispatch, so every
+/// cost-modifier branch retains the scope.
+fn parse_leading_turn_scope(text: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        value(
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+            tag("during turns other than yours, "),
+        ),
+        value(StaticCondition::DuringYourTurn, tag("during your turn, ")),
+    ))
+    .parse(text)
+}
+
 /// CR 604.1 + CR 601.2f: Strip an inline "during your turn" timing clause from
 /// a cost-modification subject before type parsing. Paladin Class: "Spells your
-/// opponents cast during your turn cost {1} more to cast."
+/// opponents cast during your turn cost {1} more to cast." The LEADING clause
+/// (affirmative + negated) is handled once for every branch before dispatch by
+/// `peel_leading_cost_modifier_condition`.
 fn strip_cost_mod_during_your_turn_scope(text: &str) -> (&str, Option<StaticCondition>) {
     if let Ok((_, prefix)) = terminated(
         take_until(" during your turn"),
@@ -339,7 +393,7 @@ fn strip_cost_mod_during_your_turn_scope(text: &str) -> (&str, Option<StaticCond
     (text, None)
 }
 
-fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
+pub(super) fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
     let (_, stripped) = all_consuming(alt((
         value("", terminated(tag::<_, _, OracleError<'_>>("spells"), eof)),
         value("", terminated(tag("spell"), eof)),
@@ -511,7 +565,7 @@ pub(crate) fn try_parse_cost_modification(
         None
     };
 
-    let first_qualified_spell = match parse_first_qualified_spell_filter(lower) {
+    let nth_qualified_spell = match parse_nth_qualified_spell_filter(lower) {
         // CR 601.2f: A recognized "the first … spell <timing> costs …" subject
         // whose qualifier/timing can't be lowered to a filter + once-per-turn
         // gate (e.g. "the first kicked spell you cast each turn costs {1} less").
@@ -519,11 +573,15 @@ pub(crate) fn try_parse_cost_modification(
         // cost-modifier path would emit a filterless, conditionless reducer that
         // drops both the printed "first … each turn" restriction and the
         // qualifier, reducing every spell the controller casts.
-        FirstQualifiedSpell::UnsupportedQualifier => return None,
-        FirstQualifiedSpell::NotApplicable => None,
-        FirstQualifiedSpell::Supported(filter, timing) => Some((filter, timing)),
+        NthQualifiedSpell::UnsupportedQualifier => return None,
+        NthQualifiedSpell::NotApplicable => None,
+        NthQualifiedSpell::Supported {
+            filter,
+            timing,
+            ordinal,
+        } => Some((filter, timing, ordinal)),
     };
-    let first_qualified_spell_filter = first_qualified_spell.as_ref().map(|(filter, _)| filter);
+    let nth_qualified_spell_filter = nth_qualified_spell.as_ref().map(|(filter, _, _)| filter);
     let target_cost_filter = parse_cost_modifier_target_filter(lower);
 
     // Extract "from [zone(s)]" clause between player scope and "cost".
@@ -568,7 +626,7 @@ pub(crate) fn try_parse_cost_modification(
     let mut during_your_turn_scope = None;
     let spell_filter = if is_self_spell {
         parse_self_spell_target_cost_filter(lower)
-    } else if let Some(filter) = first_qualified_spell_filter.cloned() {
+    } else if let Some(filter) = nth_qualified_spell_filter.cloned() {
         Some(filter)
     // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     } else if let Some(cost_idx) = lower.find(" cost") {
@@ -843,14 +901,19 @@ pub(crate) fn try_parse_cost_modification(
     if is_self_spell {
         definition.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
     }
-    if let Some((filter, timing)) = first_qualified_spell.as_ref() {
-        definition.condition = Some(first_qualified_spell_condition(filter, timing));
-    } else if let Some(during_your_turn_scope) = during_your_turn_scope {
-        definition.condition = Some(during_your_turn_scope);
-    }
-    if definition.condition.is_none() {
-        definition.condition = leading_condition;
-    }
+    let branch_condition = if let Some((filter, timing, ordinal)) = nth_qualified_spell.as_ref() {
+        Some(nth_qualified_spell_condition(filter, timing, *ordinal))
+    } else {
+        during_your_turn_scope
+    };
+    definition.condition = match (leading_condition, branch_condition) {
+        (Some(leading), Some(branch)) => Some(StaticCondition::And {
+            conditions: vec![leading, branch],
+        }),
+        (Some(leading), None) => Some(leading),
+        (None, Some(branch)) => Some(branch),
+        (None, None) => None,
+    };
 
     // Extract trailing "if [condition]" / "as long as [condition]" clause from
     // cost modification lines.
@@ -914,21 +977,6 @@ pub(crate) fn try_parse_cost_modification(
         }
     }
 
-    // CR 102.1 + CR 601.2f: Leading "During your turn," timing restriction —
-    // the cost modification functions only on the static controller's turn
-    // (Tithe Taker: "During your turn, spells your opponents cast cost {1} more
-    // to cast ..."). The trailing/`if` scans above miss this because it is a
-    // comma-separated timing prefix, not an "if"/"as long as" clause. The cost
-    // resolver gates on `StaticCondition::DuringYourTurn`, which is evaluated
-    // against the source permanent's controller (CR 102.1: active player).
-    if definition.condition.is_none()
-        && tag::<_, _, OracleError<'_>>("during your turn, ")
-            .parse(lower)
-            .is_ok()
-    {
-        definition.condition = Some(StaticCondition::DuringYourTurn);
-    }
-
     // CR 601.2f + CR 702.34a: Caller-proven casting variant (e.g. Flashback from
     // the compound-line parser) gates self-spell cost modifiers — never inferred
     // from generic "cast this way" wording alone.
@@ -948,6 +996,18 @@ fn peel_leading_cost_modifier_condition<'a>(
     pair: TextPair<'a>,
 ) -> (TextPair<'a>, Option<StaticCondition>) {
     let trimmed = pair.trim_start();
+    if let Ok((remainder, condition)) = parse_leading_turn_scope(trimmed.lower) {
+        let consumed = trimmed.lower.len() - remainder.len();
+        let cost_clause = trimmed.slice(consumed, trimmed.lower.len()).trim_start();
+        if nom_primitives::scan_contains(cost_clause.lower, "less to cast")
+            || nom_primitives::scan_contains(cost_clause.lower, "more to cast")
+            || nom_primitives::scan_contains(cost_clause.lower, "less to activate")
+            || nom_primitives::scan_contains(cost_clause.lower, "more to activate")
+        {
+            return (cost_clause, Some(condition));
+        }
+    }
+
     let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(trimmed.lower) else {
         return (pair, None);
     };

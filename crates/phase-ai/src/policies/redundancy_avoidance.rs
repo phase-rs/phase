@@ -385,6 +385,7 @@ fn redundancy_delta(
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }
         | Effect::Scry { .. }
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::PumpAll { .. }
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }

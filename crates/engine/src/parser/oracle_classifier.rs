@@ -9,7 +9,9 @@ use nom::Parser;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
 use super::oracle_util::parse_mana_symbols;
-use crate::parser::oracle_effect::{split_leading_conditional, try_parse_named_choice};
+use crate::parser::oracle_effect::{
+    split_leading_conditional, try_parse_named_choice, try_parse_named_choice_conjunction,
+};
 
 pub(crate) fn is_cant_win_lose_compound(lower: &str) -> bool {
     scan_contains(lower, "can't win the game") && scan_contains(lower, "can't lose the game")
@@ -187,6 +189,17 @@ pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {
 }
 
 pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
+    // CR 114.1: An emblem-granting instant/sorcery ("You get an emblem with
+    // \"…\"") whose quoted body contains static text (Gideon of the Trials'
+    // can't-lose/win locks) matches `is_static_pattern` on the unmasked view, so
+    // the spell IR loop would otherwise consume the whole line through the static
+    // classifier — splitting the quoted body mid-sentence. Defer it to the
+    // effect-chain parser, whose `try_parse_emblem_creation` seam produces a
+    // single `Effect::CreateEmblem`. Reuses the emblem-head prefix combinator.
+    if super::oracle_effect::sequence::is_emblem_creation_head(lower) {
+        return true;
+    }
+
     if is_self_spell_cost_modification(lower) {
         return false;
     }
@@ -485,6 +498,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return false;
     }
 
+    if super::oracle_static::is_control_players_during_own_library_search(lower) {
+        return true;
+    }
+
     if super::oracle_static::is_tiered_enters_with_additional_counters_static(lower) {
         return true;
     }
@@ -731,6 +748,10 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    if super::oracle_replacement::is_search_found_replacement_pattern(lower) {
+        return true;
+    }
+
     // CR 608.2c: reflexive "enters this way" riders on triggered abilities
     // (Winter Soldier, Reborn Avenger) contain "enters" + "counter" but are
     // not CR 614.1c ETB replacements.
@@ -769,6 +790,11 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
 
 fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
+        return true;
+    }
+    // CR 701.3a + CR 614.1: "As ~ becomes attached [to X], choose …" — the
+    // attach-time analogue of `is_as_enters_choose_pattern` (Psychic Paper).
+    if is_as_becomes_attached_choose_pattern(lower) {
         return true;
     }
     // CR 614.1c + CR 614.12: "As a [filter] enters, it becomes a [P/T] [type]
@@ -959,6 +985,29 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
     })
     .is_some();
     has_as && has_enters && has_choose
+}
+
+/// CR 701.3a + CR 614.1: the attach-time analogue of `is_as_enters_choose_pattern`
+/// (Psychic Paper: "As this Equipment becomes attached to a creature, choose a
+/// creature card name and a creature type."). Accepts both a single choice and
+/// a conjunction ("choose X and Y") sharing one "choose".
+fn is_as_becomes_attached_choose_pattern(lower: &str) -> bool {
+    let has_as = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("as ").parse(i)
+    })
+    .is_some();
+    let has_becomes_attached = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("becomes attached").parse(i)
+    })
+    .is_some();
+    let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
+            try_parse_named_choice(i).is_some() || try_parse_named_choice_conjunction(i).is_some()
+        })
+        .parse(i)
+    })
+    .is_some();
+    has_as && has_becomes_attached && has_choose
 }
 
 /// CR 603.2 vs CR 614.1c: "Whenever <subject> enters with a counter on it, <consequence>"

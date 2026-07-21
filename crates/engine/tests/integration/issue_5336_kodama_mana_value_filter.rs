@@ -297,6 +297,7 @@ fn kodama_natures_lore_forest_limits_hand_to_zero_mana_value() {
         "Kodama must have exactly one parsed ETB trigger"
     );
     let cond = runner.state().objects[&kodama_id].trigger_definitions[0]
+        .definition
         .condition
         .as_ref()
         .expect("Kodama trigger must carry intervening-if");
@@ -325,7 +326,7 @@ fn kodama_natures_lore_forest_limits_hand_to_zero_mana_value() {
         runner.state().waiting_for,
         runner.state().deferred_triggers.len(),
         runner.state().stack.len(),
-        runner.state().pending_continuation.is_some(),
+        runner.state().active_ability_continuation().is_some(),
     );
     resolve_optional_and_stack(&mut runner, true);
 

@@ -48,6 +48,7 @@ fn resolve_imprint_exile(
 ) {
     let trigger = &runner.state().objects[&labyrinth].trigger_definitions[0];
     let execute = trigger
+        .definition
         .execute
         .as_ref()
         .expect("imprint trigger must carry an execute ability");

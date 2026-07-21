@@ -31,6 +31,11 @@ struct CardExportEntry {
     /// `LayoutKind` when loading from the export (where `CardRules` is not available).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layout: Option<String>,
+    /// Original zero-based position of this face within MTGJSON's multi-face
+    /// record. Used by runtime loaders to choose the card's front face
+    /// deterministically after flattening the JSON object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    face_index: Option<usize>,
     /// Set codes the card has been printed in (from MTGJSON `printings`).
     /// Used by the coverage dashboard to group supported/gap cards by set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -442,6 +447,7 @@ fn build_card_work<'a>(
                     face,
                     legalities,
                     layout: None,
+                    face_index: None,
                     printings: source.printings.clone(),
                     rulings: source.rulings.clone(),
                     rarities,
@@ -507,6 +513,7 @@ fn build_card_work<'a>(
                     face,
                     legalities,
                     layout: layout_str,
+                    face_index: Some(face_idx),
                     printings: faces[0].printings.clone(),
                     rulings,
                     rarities,
@@ -543,6 +550,7 @@ fn build_card_work<'a>(
                 face,
                 legalities,
                 layout: None,
+                face_index: None,
                 printings: faces[0].printings.clone(),
                 rulings: faces[0].rulings.clone(),
                 rarities,
@@ -1808,6 +1816,7 @@ mod tests {
     use engine::types::ability::TargetFilter;
     use engine::types::card::CardFace;
     use engine::types::keywords::Keyword;
+    use serde_json::json;
 
     use super::*;
 
@@ -1831,11 +1840,23 @@ mod tests {
                 .map(|(format, status)| (format.to_string(), status.to_string()))
                 .collect(),
             layout: layout.map(|s| s.to_string()),
+            face_index: None,
             printings: printings.iter().map(|s| s.to_string()).collect(),
             rulings: Vec::new(),
             rarities: BTreeSet::new(),
             bracket_signals: BracketSignals::default(),
         }
+    }
+
+    #[test]
+    fn card_export_entry_serializes_multiface_face_index() {
+        let mut entry = make_entry("ordered-oracle", &["TST"], Some("transform"));
+        entry.face.name = "Back Face".to_string();
+        entry.face_index = Some(1);
+
+        let value = serde_json::to_value(&entry).expect("entry should serialize");
+
+        assert_eq!(value["face_index"], json!(1));
     }
 
     fn atomic_single(name: &str, oracle_id: Option<&str>) -> AtomicCard {

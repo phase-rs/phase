@@ -101,7 +101,7 @@ fn intruder_alarm_trigger_is_changes_zone_untap_all() {
     let runner = scenario.build();
 
     let trigger = &runner.state().objects[&alarm].trigger_definitions[0];
-    match &*trigger.execute.as_ref().expect("execute").effect {
+    match &*trigger.definition.execute.as_ref().expect("execute").effect {
         Effect::SetTapState {
             scope: engine::types::ability::EffectScope::All,
             state: engine::types::ability::TapStateChange::Untap,

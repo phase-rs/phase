@@ -106,7 +106,7 @@ fn mana_echoes_parse_binds_shares_type_to_triggering_source() {
         .id();
     let runner = scenario.build();
     let trigger = &runner.state().objects[&mana_echoes].trigger_definitions[0];
-    let execute = trigger.execute.as_ref().expect("execute");
+    let execute = trigger.definition.execute.as_ref().expect("execute");
     let engine::types::ability::Effect::Mana {
         produced: engine::types::ability::ManaProduction::Colorless { count },
         ..

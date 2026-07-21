@@ -1185,6 +1185,7 @@ mod cast_pipeline {
     use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
+    use crate::types::resolution::ResolutionStateWire;
     use crate::types::zones::Zone;
 
     const P0: PlayerId = PlayerId(0);
@@ -1349,7 +1350,7 @@ mod cast_pipeline {
             "CR 702.140b: mutate form reverted"
         );
         assert!(
-            state.pending_mutate_merge.is_none(),
+            state.active_mutate_merge_frame().is_none(),
             "no merge choice is pending after an illegal-target revert"
         );
     }
@@ -1392,7 +1393,7 @@ mod cast_pipeline {
             "CR 608.2b: presence-only check would have merged; re-validation must NOT"
         );
         assert!(
-            state.pending_mutate_merge.is_none(),
+            state.active_mutate_merge_frame().is_none(),
             "no merge choice pending when the target is illegal at resolution"
         );
         // The (now noncreature) former target is untouched on the battlefield.
@@ -1421,7 +1422,16 @@ mod cast_pipeline {
             "legal target pauses for the merge choice; got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_mutate_merge.is_some());
+        assert!(state.active_mutate_merge_frame().is_some());
+
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("actual mutate-merge prompt serializes through the v2 wire boundary");
+        assert_eq!(v2["resolution_state_version"], 2);
+        assert!(v2.get("pending_mutate_merge").is_none());
+        let restored: ResolutionStateWire =
+            serde_json::from_value(v2).expect("actual mutate-merge prompt restores from v2");
+        state = restored.into_game_state();
+        assert!(state.active_mutate_merge_frame().is_some());
 
         // Controller chooses TOP via the real engine action.
         apply_as_current(
@@ -1431,6 +1441,7 @@ mod cast_pipeline {
             },
         )
         .expect("ChooseMutateMergeSide(Top) must be accepted");
+        assert!(state.active_mutate_merge_frame().is_none());
 
         // CR 730.2c: exactly ONE battlefield object survives at that slot, keeping
         // the TARGET's id.

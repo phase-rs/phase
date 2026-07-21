@@ -47,15 +47,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=binary /phase-server /usr/local/bin/phase-server
 COPY docker/phase-server-entrypoint.sh /usr/local/bin/phase-server-entrypoint
 
-RUN --mount=type=bind,source=data,target=/context-data,readonly \
-    mkdir -p /usr/share/phase-server \
-    && cp /context-data/card-data.json /usr/share/phase-server/card-data.json \
-    && if [ -f /context-data/draft-pools.json ]; then \
-        cp /context-data/draft-pools.json /usr/share/phase-server/draft-pools.json; \
-    else \
-        printf '{}\n' > /usr/share/phase-server/draft-pools.json; \
-    fi
-
 RUN mkdir -p /var/lib/phase-server \
     && chown -R phase:phase /var/lib/phase-server \
     && chmod +x /usr/local/bin/phase-server /usr/local/bin/phase-server-entrypoint

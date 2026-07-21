@@ -16,13 +16,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
-    GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
-    TargetRef,
+    ContinuousModification, GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry,
+    RestrictionPlayerScope, TargetRef,
 };
 use crate::types::card::TokenImageRef;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -197,6 +199,10 @@ pub struct TurnOrderSlotView {
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// The sole player currently authorized to answer the live prompt. Omitted
+    /// when there is no actor or multiple distinct authorized submitters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_authorized_submitter: Option<PlayerId>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -204,6 +210,27 @@ pub struct DerivedViews {
     /// keyword.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+
+    /// CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
+    /// currently supplied by a copy effect (Layer 1a) — Clone, Phantasmal
+    /// Image, Vesuvan Doppelganger, and every "enters as a copy" permanent.
+    ///
+    /// Such a permanent renders pixel-identical to what it copied (the copy
+    /// effect overrides `printed_ref`, so even image lookup follows the copied
+    /// card), leaving the player unable to tell the copy from the original on
+    /// the board. Nothing already serialized distinguishes them: `is_copy`
+    /// means "not represented by a card" (CR 707.10) and is cleared once a copy
+    /// resolves onto the battlefield, and the copy modification lives on a
+    /// transient continuous effect rather than the object. So the engine
+    /// classifies it here rather than leaving the client to infer it.
+    ///
+    /// CR 708.2: face-down permanents are excluded — their characteristics are
+    /// only those the face-down rules grant, so surfacing "copy" on one would
+    /// leak hidden information.
+    ///
+    /// Sorted for stable serialization; absent when nothing is a copy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied_permanents: Vec<ObjectId>,
 
     /// Commander damage grouped by the attacking commander's current
     /// controller. Each inner entry preserves per-commander identity so
@@ -293,6 +320,30 @@ pub struct DerivedViews {
     /// family. Empty (and omitted) in the dominant case where no loop is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unbounded_resources: Vec<UnboundedResourceView>,
+
+    /// CR 732.2a / CR 110.1: the battlefield objects forming an accepted
+    /// object-growth loop's "∞ pile" — the winning controller's tapped fodder-class
+    /// members (projected from `GameState::unbounded_loop_pile`, filtered to objects
+    /// still on the battlefield). A per-object membership channel mirroring
+    /// `battlefield_keyword_badges`: the frontend renders `∞` (not `×N`) on any
+    /// battlefield group whose members are all in this set. Public board state — no
+    /// viewer filtering. Empty (and omitted) when no object-growth loop is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbounded_pile: Vec<ObjectId>,
+
+    /// CR 732.2a / CR 701.34a: the per-object `∞` COUNTER channel — for each
+    /// battlefield object, the counter types whose preserved `Generic` counters an
+    /// accepted counter-growth loop (proliferate charge on Pentad Prism, burden on
+    /// The One Ring) pumps unboundedly (projected from
+    /// `GameState::unbounded_counter_targets`, filtered to objects still on the
+    /// battlefield). The counter analog of `unbounded_pile`: object-growth marks whole
+    /// objects, but a counter-growth loop's unbounded axis is object-agnostic, so this
+    /// keys the specific pumped counter so the frontend renders `∞` (not `×N`) on that
+    /// counter pill and nothing else. Keyed by ObjectId; DISPLAY-only (the real counter
+    /// count is unchanged). Public board state — no viewer filtering. Empty (and
+    /// omitted) when no counter-growth loop is active — the dominant case.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unbounded_counters: HashMap<ObjectId, Vec<CounterType>>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -306,13 +357,27 @@ pub struct ClientGameStateRef<'a> {
 }
 
 impl<'a> ClientGameStateRef<'a> {
-    /// Wrap a borrowed `GameState` with its derived projections.
-    /// Invoke AFTER any viewer-side filtering (e.g. `filter_state_for_player`)
-    /// so the derived shape reflects what the viewer will actually see.
+    /// Wrap an unfiltered borrowed `GameState` with its derived projections.
+    /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
+    /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
         Self {
             state,
             derived: derive_views(state, viewer),
+        }
+    }
+
+    /// Wrap a viewer-filtered state while deriving rules-authoritative fields
+    /// from the pre-filter state. Filtering may redact control/session records;
+    /// it must not change who can submit the current decision.
+    pub fn wrap_filtered(
+        authoritative_state: &GameState,
+        filtered_state: &'a GameState,
+        viewer: Option<PlayerId>,
+    ) -> Self {
+        Self {
+            state: filtered_state,
+            derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
         }
     }
 }
@@ -401,8 +466,53 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     ))
 }
 
+/// CR 613.2a + CR 707.2: true when a live copy effect is currently supplying
+/// `object_id`'s copiable values.
+///
+/// A copy of a permanent is expressed as a transient continuous effect carrying
+/// `ContinuousModification::CopyValues`, applied in Layer 1a — never as a flag
+/// on the object — so membership is decided by asking the same question the
+/// layer engine asks: does this effect's `affected` filter match the object?
+/// Reusing `matches_target_filter` (rather than special-casing the
+/// `SpecificObject` filter copy effects usually carry) keeps the projection
+/// correct for any filter shape a future copy effect might use.
+fn object_has_copy_effect(state: &GameState, object_id: ObjectId) -> bool {
+    let merge_layer_effect_id = state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.merge_layer_effect_id);
+
+    state.transient_continuous_effects.iter().any(|effect| {
+        // A lapsed effect stays stored until it is swept, so "is it in the list"
+        // is not the same question as "is it applying". Zygon Infiltrator's copy
+        // ends the instant its target untaps while the effect remains stored —
+        // badging that permanent would claim a copy the layer engine has already
+        // stopped applying. Gated on the layer engine's own predicate so the two
+        // cannot drift apart.
+        crate::game::layers::transient_effect_is_live(state, effect)
+            // CR 730.2a: merge uses a private Layer 1 `CopyValues` effect to
+            // represent its top component, but a merged permanent is not a
+            // copy. Exclude only that recorded representation: a merged object
+            // may still acquire an independent copy effect.
+            && Some(effect.id) != merge_layer_effect_id
+            && effect
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::CopyValues { .. }))
+            && matches_target_filter(
+                state,
+                object_id,
+                &effect.affected,
+                &FilterContext::from_source(state, effect.source_id),
+            )
+    })
+}
+
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
-    let mut views = DerivedViews::default();
+    let mut views = DerivedViews {
+        unique_authorized_submitter: unique_authorized_submitter(state),
+        ..DerivedViews::default()
+    };
 
     // JIT short-circuit: grouping an empty stack is free, but this also
     // avoids the per-entry allocation path entirely for the dominant case
@@ -435,6 +545,14 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         if !badges.is_empty() {
             views.battlefield_keyword_badges.insert(obj_id, badges);
         }
+        // CR 613.2a + CR 707.2 / CR 708.2: see `copied_permanents`. Matched
+        // through the same `matches_target_filter` the layer engine uses to
+        // pick a continuous effect's recipients, so this projection and the
+        // effect that actually rewrote the object's characteristics can never
+        // disagree about who is a copy.
+        if !obj.face_down && object_has_copy_effect(state, obj_id) {
+            views.copied_permanents.push(obj_id);
+        }
         if let Some(AttachTarget::Player(host)) = obj.attached_to {
             views
                 .auras_attached_to_player
@@ -443,6 +561,11 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                 .push(obj_id);
         }
     }
+    // Collected in `state.battlefield` order above, which reorders as permanents
+    // enter and leave; sort so the serialized payload depends only on WHICH
+    // permanents are copies, not on battlefield churn that never changed the
+    // answer.
+    views.copied_permanents.sort_unstable();
 
     // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
     if let Some(viewer) = viewer {
@@ -529,6 +652,36 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
 
+    // CR 732.2a / CR 110.1: project the accepted object-growth loop's ∞ pile — the
+    // winning controller's tapped fodder-class members — dropping any that have since
+    // left the battlefield (stale member). Public board state (no viewer filtering);
+    // the frontend renders `∞` on any group whose members are all pile members.
+    for ids in state.unbounded_loop_pile.values() {
+        for id in ids {
+            if state.battlefield.contains(id) {
+                views.unbounded_pile.push(*id);
+            }
+        }
+    }
+
+    // CR 732.2a / CR 701.34a: project the accepted counter-growth loop's per-object ∞
+    // counter targets — the objects whose PRESERVED Generic counters (charge / burden)
+    // the certified-unbounded loop pumps each cycle — dropping any that have since left
+    // the battlefield (stale member). Display-only per-object channel mirroring
+    // `unbounded_pile`; the frontend renders `∞` (not `×N`) on any counter pill whose
+    // type is in this set. Runs in every format (BEFORE the Commander short-circuit).
+    for targets in state.unbounded_counter_targets.values() {
+        for (id, ct) in targets {
+            if state.battlefield.contains(id) {
+                views
+                    .unbounded_counters
+                    .entry(*id)
+                    .or_default()
+                    .push(ct.clone());
+            }
+        }
+    }
+
     if state.format_config.commander_damage_threshold.is_none() {
         return views;
     }
@@ -550,6 +703,26 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
     views
+}
+
+/// Derive a viewer-safe presentation from `filtered_state`, retaining only the
+/// decision-authority projection from the pre-filter rules state. This keeps
+/// rules state pure and makes repeated filtering idempotent.
+pub fn derive_filtered_views(
+    authoritative_state: &GameState,
+    filtered_state: &GameState,
+    viewer: Option<PlayerId>,
+) -> DerivedViews {
+    let mut views = derive_views(filtered_state, viewer);
+    views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views
+}
+
+fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
+    let mut submitters = crate::game::turn_control::authorized_submitters(state);
+    submitters.sort_unstable_by_key(|player| player.0);
+    submitters.dedup();
+    (submitters.len() == 1).then(|| submitters[0])
 }
 
 fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
@@ -723,6 +896,10 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
             // CR 116.2a: "can't play cards from <zone>" is enforced at the cast
             // and play-land gates; no dedicated HUD badge yet, so no status row.
             ProhibitedActivity::ProhibitPlayFromZone { .. } => continue,
+            // CR 305.1: "can't play [matching] lands" is enforced at the
+            // play-land gate; no dedicated HUD badge yet, so no status row —
+            // mirrors `ProhibitPlayFromZone` above.
+            ProhibitedActivity::PlayLands { .. } => continue,
         };
         for pid in restriction_affected_players(state, affected_players, *source) {
             views.push(PlayerStatusView {
@@ -982,6 +1159,7 @@ fn stack_trigger_context(state: &GameState, entry: &StackEntry) -> Vec<TriggerCo
 
 fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<TriggerContextDisplay> {
     match event {
+        GameEvent::HiddenSearchViewed { .. } => None,
         GameEvent::ZoneChanged {
             object_id,
             record,
@@ -1104,9 +1282,11 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::DisplaySource;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, TargetRef,
+        Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, StaticCondition,
+        TargetFilter, TargetRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
@@ -1156,6 +1336,256 @@ mod tests {
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
         );
+    }
+
+    #[test]
+    fn derive_views_flags_a_permanent_under_a_live_copy_effect() {
+        // CR 613.2a + CR 707.2: a copy of a permanent is expressed as a Layer 1a
+        // `CopyValues` continuous effect, not a flag on the object — so the
+        // projection has to read the effect list. Issue #5932: a Phantasmal
+        // Image copying a Reveillark renders identically to the real one, and
+        // nothing already serialized told the client which was which.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let original = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Reveillark".into(),
+            Zone::Battlefield,
+        );
+        let clone = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Phantasmal Image".into(),
+            Zone::Battlefield,
+        );
+
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&original).unwrap(),
+        );
+        state.add_transient_continuous_effect(
+            clone,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: clone },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.copied_permanents,
+            vec![clone],
+            "only the permanent the copy effect applies to is a copy; the \
+             original it copied is not"
+        );
+    }
+
+    #[test]
+    fn derive_views_drops_the_copy_flag_once_a_temporary_copy_effect_lapses() {
+        // CR 611.2b: a `ForAsLongAs` copy ends the moment its condition goes
+        // false, but the effect stays STORED until it is swept. Zygon
+        // Infiltrator copies "for as long as that creature remains tapped", so
+        // untapping the target ends the copy while the TCE is still in the list.
+        // Reading membership alone would keep badging a permanent that is no
+        // longer a copy, so the projection asks the layer engine's own
+        // liveness predicate instead.
+        use crate::types::ability::ObjectScope;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tapped Bear".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target).unwrap().tapped = true;
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Zygon".into(),
+            Zone::Battlefield,
+        );
+
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&target).unwrap(),
+        );
+        let tce_id = state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::ForAsLongAs {
+                condition: StaticCondition::IsTapped {
+                    scope: ObjectScope::Target,
+                },
+            },
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        // CR 611.2b: the duration tracks the copy TARGET's tap state, not the
+        // source's — the same binding the layer engine uses.
+        state.set_transient_duration_subject(tce_id, target);
+
+        assert_eq!(
+            derive_views(&state, None).copied_permanents,
+            vec![source],
+            "while the target is tapped the copy applies, so the badge shows"
+        );
+
+        // Untap the target: the duration ends and the copy lapses, but the
+        // effect is still stored.
+        state.objects.get_mut(&target).unwrap().tapped = false;
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|t| t.id == tce_id),
+            "precondition: the lapsed effect is still stored, so this test is \
+             exercising liveness rather than removal"
+        );
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a lapsed copy must not keep the badge (CR 611.2b)"
+        );
+    }
+
+    #[test]
+    fn derive_views_does_not_flag_a_merged_permanent_as_a_copy() {
+        // CR 730.2a: merge represents the top component with a private
+        // `CopyValues` Layer-1 effect, but the resulting permanent is merged,
+        // not a copy. The projection must exclude that exact effect while
+        // continuing to admit independent copy effects on the same object.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".into(),
+            Zone::Battlefield,
+        );
+        let rider = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rider".into(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            rider,
+            host,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+
+        let merge_effect_id = state
+            .objects
+            .get(&host)
+            .and_then(|object| object.merge_layer_effect_id);
+        assert!(
+            merge_effect_id.is_some(),
+            "precondition: merge is represented by a CopyValues layer effect"
+        );
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a merge representation must not produce a Copy badge"
+        );
+
+        // The exclusion is effect-scoped, not object-scoped: a merged
+        // permanent can still acquire an independent copy effect.
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&host).unwrap(),
+        );
+        let independent_copy_effect_id = state.add_transient_continuous_effect(
+            host,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: host },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        assert_ne!(
+            Some(independent_copy_effect_id),
+            merge_effect_id,
+            "precondition: the independent copy effect is distinct from merge's representation"
+        );
+        assert_eq!(
+            derive_views(&state, None).copied_permanents,
+            vec![host],
+            "a later independent copy effect on a merged permanent must still produce a badge"
+        );
+    }
+
+    #[test]
+    fn derive_views_omits_copy_flag_for_a_face_down_permanent() {
+        // CR 708.2: a face-down permanent's characteristics are only those the
+        // face-down rules grant. Surfacing "copy" on one would leak hidden
+        // information about what it really is.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Face-Down Copy".into(),
+            Zone::Battlefield,
+        );
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&hidden).unwrap(),
+        );
+        state.objects.get_mut(&hidden).unwrap().face_down = true;
+        state.add_transient_continuous_effect(
+            hidden,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: hidden },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a face-down permanent must never be reported as a copy (CR 708.2)"
+        );
+    }
+
+    #[test]
+    fn derive_views_omits_copy_flag_when_no_copy_effect_is_live() {
+        // Discriminating guard: an ordinary board must report nothing, so the
+        // projection cannot degenerate into "every permanent is a copy".
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".into(),
+            Zone::Battlefield,
+        );
+        assert!(derive_views(&state, None).copied_permanents.is_empty());
     }
 
     #[test]
@@ -1674,8 +2104,12 @@ mod tests {
         };
 
         let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
-        let json = serde_json::to_string(&ClientGameStateRef::wrap(&filtered, Some(PlayerId(1))))
-            .expect("serialize filtered opponent view");
+        let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(1)),
+        ))
+        .expect("serialize filtered opponent view");
         let client: ClientGameState = serde_json::from_str(&json).expect("deserialize client view");
         let details = client
             .derived
@@ -1760,6 +2194,7 @@ mod tests {
                 supertypes: Vec::new(),
                 keywords: Vec::new(),
                 trigger_definitions: Vec::new(),
+                trigger_source_context: None,
                 power: None,
                 toughness: None,
                 base_power: None,
@@ -2309,6 +2744,93 @@ mod tests {
         );
     }
 
+    /// DESIGN STEP 4 (∞-pile projection): `GameState::unbounded_loop_pile` projects into
+    /// `DerivedViews::unbounded_pile`, filtered to objects still on the battlefield — a
+    /// registered member that has since left is dropped (stale).
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → `unbounded_pile` is empty
+    /// → the two positive `contains` assertions fail.
+    #[test]
+    fn derive_views_projects_unbounded_pile() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        // A registered id that is NOT on the battlefield (already left) — must be dropped.
+        let gone = ObjectId(9999);
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([a, b, gone]));
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_pile.contains(&a),
+            "on-battlefield pile member projects"
+        );
+        assert!(
+            views.unbounded_pile.contains(&b),
+            "on-battlefield pile member projects"
+        );
+        assert!(
+            !views.unbounded_pile.contains(&gone),
+            "a member no longer on the battlefield is dropped (stale)"
+        );
+
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&empty, None).unbounded_pile.is_empty(),
+            "no object-growth loop → no pile (field omitted)"
+        );
+    }
+
+    /// DESIGN STEP 4 (serde wire shape + omission): `unbounded_pile` serializes through
+    /// `ClientGameStateRef` → JSON → `ClientGameState` as an ObjectId array, and the empty
+    /// case omits the key entirely (`skip_serializing_if = "Vec::is_empty"`).
+    #[test]
+    fn unbounded_pile_round_trip_through_wire() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([a]));
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            json.contains("unbounded_pile"),
+            "pile key present when non-empty"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            round.derived.unbounded_pile,
+            vec![a],
+            "the pile ObjectId survives the wire round-trip"
+        );
+
+        // Empty case: skip_serializing_if omits the key entirely.
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&empty, None))
+            .expect("serialize empty");
+        assert!(
+            !empty_json.contains("unbounded_pile"),
+            "empty pile → key omitted"
+        );
+    }
+
     /// PR-6 tests 4+5 (serde wire shape + round-trip): the `unbounded_resources`
     /// projection serializes through `ClientGameStateRef` → JSON → `ClientGameState`
     /// with the externally-tagged `ResourceAxis` shapes the TS mirror depends on
@@ -2378,5 +2900,117 @@ mod tests {
             !empty_json.contains("unbounded_resources"),
             "empty unbounded resources must omit the wire key"
         );
+    }
+
+    #[test]
+    fn unique_submitter_projection_uses_search_latch_and_omits_no_actor() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::game_state::{
+            ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, WaitingFor,
+        };
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        state.turn_decision_controller = Some(PlayerId(2));
+
+        assert_eq!(
+            derive_views(&state, None).unique_authorized_submitter,
+            Some(PlayerId(1))
+        );
+
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        assert_eq!(derive_views(&state, None).unique_authorized_submitter, None);
+    }
+
+    #[test]
+    fn filtered_search_views_preserve_latched_submitter_for_every_audience_role() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::game_state::{
+            ActiveLibrarySearch, ActiveSearchDecisionAuthority, ActiveSearchDecisionControl,
+            WaitingFor,
+        };
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        state.active_library_searches.insert(
+            ActiveLibrarySearch::try_new(
+                PlayerId(0),
+                PlayerId(0),
+                Some(PlayerId(0)),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("valid search"),
+        );
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        // Live turn control has changed since the search decision was latched.
+        state.turn_decision_controller = Some(PlayerId(2));
+
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+            let filtered_twice =
+                crate::game::visibility::filter_state_for_viewer(&filtered, viewer);
+            assert_eq!(filtered_twice, filtered, "filtering must be idempotent");
+            assert_eq!(
+                derive_filtered_views(&state, &filtered, Some(viewer)).unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "searcher, latched controller, and observer must share one authority projection"
+            );
+            let mut mutated_filtered = filtered.clone();
+            mutated_filtered
+                .active_search_decision_controls
+                .remove(&PlayerId(0));
+            mutated_filtered.turn_decision_controller = Some(PlayerId(2));
+            assert_eq!(
+                derive_filtered_views(&state, &mutated_filtered, Some(viewer))
+                    .unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "filtered-state mutation must not alter authoritative submission rights"
+            );
+            let wire = serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &filtered,
+                Some(viewer),
+            ))
+            .expect("serialize filtered search view");
+            assert_eq!(wire["derived"]["unique_authorized_submitter"], 1);
+        }
     }
 }

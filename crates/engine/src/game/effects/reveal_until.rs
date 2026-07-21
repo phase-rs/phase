@@ -232,6 +232,7 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
                                     clear_markers,
@@ -281,6 +282,7 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
                                     clear_markers,
@@ -313,6 +315,7 @@ pub fn resolve(
                                 state,
                                 BatchCompletion::RevealRestPile {
                                     player: revealing_player,
+                                    source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
                                     clear_markers,
@@ -352,6 +355,7 @@ pub fn resolve(
                 state,
                 BatchCompletion::RevealRestPile {
                     player: revealing_player,
+                    source_id: Some(ability.source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
                     clear_markers,
