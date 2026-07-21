@@ -273,4 +273,30 @@ mod tests {
             "https://phase-rs.dev"
         );
     }
+
+    #[test]
+    fn connect_without_a_running_engine_returns_not_running() {
+        let channel = Channel::new(|_| Ok(()));
+        let result = tauri::async_runtime::block_on(connect_native_engine(channel));
+
+        assert!(matches!(
+            result,
+            Err(NativeEngineBridgeError::NotRunning { detail })
+                if detail == "no native engine is running"
+        ));
+    }
+
+    #[test]
+    fn send_and_close_unknown_bridge_return_unknown_bridge() {
+        let unknown_bridge_id = u64::MAX;
+
+        assert!(matches!(
+            native_engine_bridge_send(unknown_bridge_id, "frame".to_owned()),
+            Err(NativeEngineBridgeError::UnknownBridge { .. })
+        ));
+        assert!(matches!(
+            native_engine_bridge_close(unknown_bridge_id),
+            Err(NativeEngineBridgeError::UnknownBridge { .. })
+        ));
+    }
 }
