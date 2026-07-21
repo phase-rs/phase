@@ -23,7 +23,10 @@ WORKDIR /app
 
 COPY . .
 
-RUN cargo build --profile server-release --bin phase-server \
+# -p scopes feature unification to phase-server's own graph: unscoped, the
+# workspace unifies feed-scraper's native-tls reqwest features in, dynamically
+# linking OpenSSL — which the slim runtime image does not ship.
+RUN cargo build -p phase-server --profile server-release --bin phase-server \
     && cp target/server-release/phase-server /phase-server
 
 # Prebuilt path: expects ./phase-server (a static musl binary) in the build
@@ -46,15 +49,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=binary /phase-server /usr/local/bin/phase-server
 COPY docker/phase-server-entrypoint.sh /usr/local/bin/phase-server-entrypoint
-
-RUN --mount=type=bind,source=data,target=/context-data,readonly \
-    mkdir -p /usr/share/phase-server \
-    && cp /context-data/card-data.json /usr/share/phase-server/card-data.json \
-    && if [ -f /context-data/draft-pools.json ]; then \
-        cp /context-data/draft-pools.json /usr/share/phase-server/draft-pools.json; \
-    else \
-        printf '{}\n' > /usr/share/phase-server/draft-pools.json; \
-    fi
 
 RUN mkdir -p /var/lib/phase-server \
     && chown -R phase:phase /var/lib/phase-server \

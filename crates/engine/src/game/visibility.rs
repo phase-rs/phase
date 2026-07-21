@@ -75,6 +75,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // The replacement-resume cursor is server authority and can retain private
     // object IDs and last-known snapshots from a cost payment.
     filtered.pending_cost_move_resume = None;
+    // Resolution frames are server-authoritative continuations. They can carry
+    // private object identities, trigger source contexts, and resolved ability
+    // payloads; the separately projected `WaitingFor` prompt is the complete
+    // viewer-facing interaction surface.
+    filtered.resolution_stack = Default::default();
     let replacement_candidate_source_ids = match &state.waiting_for {
         WaitingFor::ReplacementChoice { candidates, .. } => Some(
             candidates
@@ -311,6 +316,21 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     } else {
         HashSet::new()
     };
+    let effect_zone_library_visible: HashSet<ObjectId> = if let WaitingFor::EffectZoneChoice {
+        player,
+        zone: Zone::Library,
+        ref cards,
+        ..
+    } = filtered.waiting_for
+    {
+        if can_view_private_for_player(player) {
+            cards.iter().copied().collect()
+        } else {
+            HashSet::new()
+        }
+    } else {
+        HashSet::new()
+    };
     let drawn_choice_hand_cards: HashSet<ObjectId> =
         if let WaitingFor::DrawnThisTurnTopdeckChoice { ref cards, .. } = filtered.waiting_for {
             cards.iter().copied().collect()
@@ -384,6 +404,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             || dig_visible.contains(&obj_id)
             || private_look_visible.contains(&obj_id)
             || search_visible.contains(&obj_id)
+            || effect_zone_library_visible.contains(&obj_id)
             // Heist (and any ChooseFromZoneChoice over a hidden zone) — see
             // `choose_from_zone_hidden_visible` above.
             || choose_from_zone_hidden_visible.contains(&obj_id)
@@ -895,7 +916,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                     ..
                 }),
             ..
-        }) = filtered.pending_batch_deliveries.as_mut()
+        }) = filtered.active_batch_delivery_mut()
         {
             *object_id = ObjectId(0);
         }
@@ -904,7 +925,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // undelivered hidden-zone suffix across a replacement pause. Scrub both
     // the generic batch tail and the typed search-specific continuation unless
     // this viewer may inspect every searcher's private choice.
-    if let Some(pending) = filtered.pending_batch_deliveries.as_mut() {
+    if let Some(pending) = filtered.active_batch_delivery_mut() {
         match pending.completion.as_mut() {
             Some(crate::types::game_state::BatchCompletion::SearchPartitionPrimaryDelivered {
                 rest_ids,
@@ -1199,7 +1220,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         enters_modified_if: _,
     } = state.waiting_for
     {
-        if !can_view_private_for_player(player) && zone == Zone::Hand {
+        // `open_private_zone_cast_selection` is the sole Library producer and
+        // always writes `library_position: None`, so this pattern redacts every
+        // private library cast-choice payload for non-prompt viewers.
+        if !can_view_private_for_player(player) && matches!(zone, Zone::Hand | Zone::Library) {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
@@ -1855,6 +1879,90 @@ mod tests {
             cost_paid_object: None,
             batch_siblings: Vec::new(),
         })
+    }
+
+    #[test]
+    fn viewer_projection_omits_resolution_frames_and_preserves_named_choice_authority() {
+        use crate::types::ability::ChoiceType;
+        use crate::types::game_state::{NamedChoiceSource, NamedChoiceSourceBinding};
+        use crate::types::resolution::PendingProliferateActions;
+
+        let mut state = GameState::new_two_player(42);
+        state.push_proliferate_frame(PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(9_504),
+            remaining: 1,
+        });
+        let choice_type = ChoiceType::Labeled {
+            options: vec!["Anchor".to_string()],
+        };
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: choice_type.clone(),
+            options: vec!["Anchor".to_string()],
+            source: None,
+            persist_player: Some(PlayerId(1)),
+        };
+
+        let source_less_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert!(source_less_view.resolution_stack.is_empty());
+        assert!(matches!(
+            source_less_view.waiting_for,
+            WaitingFor::NamedChoice {
+                player: PlayerId(0),
+                ref choice_type,
+                ref options,
+                source: None,
+                persist_player: Some(PlayerId(1)),
+            } if *choice_type == ChoiceType::Labeled {
+                options: vec!["Anchor".to_string()]
+            } && options == &vec!["Anchor".to_string()]
+        ));
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Choice source".to_string(),
+            Zone::Battlefield,
+        );
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source_id).unwrap(),
+        );
+        let source = NamedChoiceSource::from_trigger_source(
+            context,
+            NamedChoiceSourceBinding::ResolutionContext,
+        );
+        let expected_prompt = source.prompt.clone();
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type,
+            options: vec!["Anchor".to_string()],
+            source: Some(source),
+            persist_player: None,
+        };
+
+        let source_bound_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(source_bound_view.resolution_stack.is_empty());
+        match source_bound_view.waiting_for {
+            WaitingFor::NamedChoice {
+                source: Some(source),
+                persist_player,
+                ..
+            } => {
+                assert_eq!(source.prompt, expected_prompt);
+                assert_eq!(source.binding, NamedChoiceSourceBinding::ResolutionContext);
+                assert!(source.context.is_none());
+                assert_eq!(persist_player, None);
+            }
+            other => panic!("expected source-bound NamedChoice, got {other:?}"),
+        }
+
+        assert!(
+            !state.resolution_stack.is_empty(),
+            "filtering must not mutate the authoritative continuation"
+        );
     }
 
     #[test]
@@ -4767,6 +4875,8 @@ mod tests {
             &state,
             state.objects.get(&source).unwrap(),
         );
+        let expected_prompt =
+            crate::types::game_state::PromptSourceBinding::from_trigger_source(&source_context);
         state.waiting_for = WaitingFor::OpponentGuess {
             player: PlayerId(0),
             options: vec!["greater".to_string(), "not greater".to_string()],
@@ -4774,9 +4884,7 @@ mod tests {
                 options: vec!["greater".to_string(), "not greater".to_string()],
             },
             source: crate::types::game_state::OpponentGuessSource {
-                prompt: crate::types::game_state::PromptSourceBinding::from_trigger_source(
-                    &source_context,
-                ),
+                prompt: expected_prompt.clone(),
             },
             owner: Some(crate::types::game_state::OpponentGuessOwner {
                 context: source_context,
@@ -4789,11 +4897,18 @@ mod tests {
             let filtered = filter_state_for_viewer(&state, viewer);
             match filtered.waiting_for {
                 WaitingFor::OpponentGuess {
-                    proposition_truth, ..
-                } => assert_eq!(
-                    proposition_truth, None,
-                    "proposition_truth must be stripped for viewer {viewer:?}"
-                ),
+                    proposition_truth,
+                    source,
+                    owner,
+                    ..
+                } => {
+                    assert_eq!(
+                        proposition_truth, None,
+                        "proposition_truth must be stripped for viewer {viewer:?}"
+                    );
+                    assert_eq!(source.prompt, expected_prompt);
+                    assert_eq!(owner, None);
+                }
                 other => panic!("expected OpponentGuess, got {other:?}"),
             }
         }

@@ -7,7 +7,9 @@ const mocks = vi.hoisted(() => ({
   whenMultiplayerGameEnds: vi.fn<(cb: () => void) => () => void>(),
   trackEvent: vi.fn(),
   flushNow: vi.fn(),
+  claimUpdateStatus: vi.fn(() => true),
   pushUpdateDebug: vi.fn(),
+  releaseUpdateStatus: vi.fn(),
   setUpdateError: vi.fn(),
   setUpdateStatus: vi.fn(),
 }));
@@ -17,7 +19,9 @@ vi.mock("../multiplayerGuard", () => ({
   whenMultiplayerGameEnds: mocks.whenMultiplayerGameEnds,
 }));
 vi.mock("../updateStatus", () => ({
+  claimUpdateStatus: mocks.claimUpdateStatus,
   pushUpdateDebug: mocks.pushUpdateDebug,
+  releaseUpdateStatus: mocks.releaseUpdateStatus,
   setUpdateError: mocks.setUpdateError,
   setUpdateStatus: mocks.setUpdateStatus,
 }));

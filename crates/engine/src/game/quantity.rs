@@ -3128,25 +3128,94 @@ fn resolve_ref(
             usize_to_i32_saturating(found.len())
         }
         // CR 117.1: Count spells cast this turn by the scoped players, optionally filtered.
-        QuantityRef::SpellsCastThisTurn { scope, ref filter } => usize_to_i32_saturating(
-            scoped_players(state, scope, ctx, controller)
-                .filter_map(|player| state.spells_cast_this_turn_by_player.get(&player.id))
-                .map(|list| match filter {
-                    None => list.len(),
-                    Some(filter) => list
-                        .iter()
-                        .filter(|record| {
-                            spell_record_matches_filter(
-                                record,
-                                filter,
-                                controller,
-                                &state.all_creature_types,
-                            )
+        QuantityRef::SpellsCastThisTurn { scope, ref filter } => {
+            // CR 109.1 + CR 614.12: When the filter carries the own-cast
+            // exclusion marker (`FilterProp::Another`), count records matching
+            // the PEELED filter, then subtract the source's own pending cast.
+            // Two production emitters share this marker and this arm, and both
+            // mean "excluding this object's own cast event":
+            //   - the ETB "enters with … unless you've cast another spell"
+            //     replacement (`with_own_cast_exclusion`, oracle_replacement.rs);
+            //   - the pre-existing "number of OTHER spells you've cast this turn"
+            //     EFFECT quantity (Thunder Salvo's DealDamage amount, Lock and
+            //     Load's draw count), whose parser stamps `FilterProp::Another`
+            //     onto the spell-history filter directly.
+            //
+            // CR 400.7: a prior same-id cast record denotes a distinct previous
+            // object (id is stable storage identity; incarnation bumps on
+            // battlefield entry) — it counts as "another" spell; only the
+            // pending cast's own record (the LAST same-id record) is excluded.
+            let exclusion = filter.as_ref().and_then(|f| f.peel_own_cast_exclusion());
+            if let Some(peeled) = exclusion {
+                // CR 601.2i: the source's own pending cast is excluded in either
+                // of the two shapes it takes at quantity-resolution time:
+                //   - a resolving instant/sorcery is still on the Stack (its
+                //     effect, e.g. Thunder Salvo, runs before the spell leaves —
+                //     CR 608.2n) and carries NO `cast_from_zone` (that provenance
+                //     is stamped only onto placeholder permanent-spell objects at
+                //     cast and permanents at resolution);
+                //   - an ETB replacement evaluates against the placeholder
+                //     permanent-spell object, which DOES carry `cast_from_zone`.
+                // A reanimated / put-onto-battlefield permanent is neither on the
+                // stack nor carries `cast_from_zone` → nothing is excluded.
+                let source_id = ctx.source;
+                let own_is_cast = state.objects.get(&source_id).is_some_and(|o| {
+                    o.cast_from_zone.is_some() || o.zone == crate::types::zones::Zone::Stack
+                });
+                let matches =
+                    |record: &crate::types::game_state::SpellCastRecord| match peeled.as_ref() {
+                        None => true,
+                        Some(f) => spell_record_matches_filter(
+                            record,
+                            f,
+                            controller,
+                            &state.all_creature_types,
+                        ),
+                    };
+                let total: usize = scoped_players(state, scope, ctx, controller)
+                    .filter_map(|player| state.spells_cast_this_turn_by_player.get(&player.id))
+                    .map(|list| {
+                        let count = list.iter().filter(|r| matches(r)).count();
+                        // Per-list own-cast exclusion: `im::Vector` is
+                        // double-ended, push_back order → rev() = most-recent
+                        // first, so the first same-id hit is the pending cast.
+                        if own_is_cast {
+                            if let Some(own) = list
+                                .iter()
+                                .rev()
+                                .find(|r| r.spell_object_id == Some(source_id))
+                            {
+                                if matches(own) {
+                                    return count.saturating_sub(1);
+                                }
+                            }
+                        }
+                        count
+                    })
+                    .sum();
+                usize_to_i32_saturating(total)
+            } else {
+                usize_to_i32_saturating(
+                    scoped_players(state, scope, ctx, controller)
+                        .filter_map(|player| state.spells_cast_this_turn_by_player.get(&player.id))
+                        .map(|list| match filter {
+                            None => list.len(),
+                            Some(filter) => list
+                                .iter()
+                                .filter(|record| {
+                                    spell_record_matches_filter(
+                                        record,
+                                        filter,
+                                        controller,
+                                        &state.all_creature_types,
+                                    )
+                                })
+                                .count(),
                         })
-                        .count(),
-                })
-                .sum(),
-        ),
+                        .sum(),
+                )
+            }
+        }
         // Count permanents matching filter that entered the battlefield this turn.
         // Uses `entered_battlefield_turn` field on GameObject.
         QuantityRef::EnteredThisTurn { ref filter } => usize_to_i32_saturating(
@@ -3601,14 +3670,15 @@ fn resolve_ref(
             })
             .unwrap_or(0),
         // CR 603.12a: Number of times the controller paid the repeated optional
-        // cost during THIS resolution. Resolution-local transient on the
-        // GameState (cleared at the depth==0 prelude of resolve_ability_chain,
-        // incremented once per successful payment); never read from an object,
-        // never snapshotted. Sizes the reflexive "choose up to that many" modal
-        // cap (CR 700.2d clamps it to mode_count).
-        QuantityRef::TimesCostPaidThisResolution => {
-            u32_to_i32_saturating(state.optional_cost_payments_this_resolution)
-        }
+        // cost during THIS resolution. The active repeated-payment frame keeps
+        // it through the reflexive prompt; it is never read from an object.
+        // Sizes the reflexive "choose up to that many" modal cap (CR 700.2d
+        // clamps it to mode_count).
+        QuantityRef::TimesCostPaidThisResolution => u32_to_i32_saturating(
+            state
+                .active_repeated_optional_payment_frame()
+                .map_or(0, |frame| frame.optional_cost_payments_this_resolution),
+        ),
         // CR 603.10a + CR 603.6e: Count attachments present on the leaving object
         // at zone-change time (look-back). Reads the `attachments` snapshot on
         // the `ZoneChanged` event in `current_trigger_event`, filtered by kind
@@ -10628,6 +10698,7 @@ mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -10641,6 +10712,7 @@ mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
             ]),
         );
@@ -10699,6 +10771,7 @@ mod tests {
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
+                spell_object_id: None,
             }
         }
 
@@ -10736,6 +10809,203 @@ mod tests {
             resolve_quantity(&state, &controller_only, PlayerId(0), ObjectId(1)),
             0,
             "Controller scope must not count opponent spells"
+        );
+    }
+
+    // --- SpellsCastThisTurn own-cast exclusion marker (CR 400.7 / CR 601.2i) ---
+
+    fn red_exclusion_expr() -> QuantityExpr {
+        let red = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+            color: ManaColor::Red,
+        }]));
+        QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::with_own_cast_exclusion(Some(red))),
+            },
+        }
+    }
+
+    fn cast_record(color: Option<ManaColor>, owner: Option<ObjectId>) -> SpellCastRecord {
+        SpellCastRecord {
+            colors: color.into_iter().collect(),
+            spell_object_id: owner,
+            ..SpellCastRecord::default()
+        }
+    }
+
+    /// CR 400.7 / CR 601.2i: the pending cast's own record is identified
+    /// positionally as the LAST same-id record, and is subtracted ONLY when it
+    /// itself matches the peeled filter. Hand-built list [R1 own+red (matches),
+    /// R2 own+colorless (fails filter)] → own = R2 fails filter → subtract
+    /// nothing → count 1. Flips to 0 under a cap-based "subtract per own record"
+    /// regression.
+    #[test]
+    fn spells_cast_this_turn_own_exclusion_last_record_filter_gated() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Hotheaded Giant".to_string(),
+            Zone::Stack,
+        );
+        // The entering object was itself cast → own exclusion is armed.
+        state.objects.get_mut(&source).unwrap().cast_from_zone = Some(Zone::Hand);
+
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                cast_record(Some(ManaColor::Red), Some(source)),
+                cast_record(None, Some(source)),
+            ]),
+        );
+
+        assert_eq!(
+            resolve_quantity(&state, &red_exclusion_expr(), PlayerId(0), source),
+            1,
+            "own = last same-id record (colorless) fails the red filter, so nothing is subtracted"
+        );
+    }
+
+    /// CR 400.7: a prior same-id record (a distinct earlier object) DOES count as
+    /// "another"; only the pending cast's own matching record is excluded.
+    /// [R_foreign red, R_own red] → count 2, own matches → subtract 1 → 1.
+    #[test]
+    fn spells_cast_this_turn_own_excluded_prior_same_id_counts() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Hotheaded Giant".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&source).unwrap().cast_from_zone = Some(Zone::Hand);
+
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                cast_record(Some(ManaColor::Red), Some(ObjectId(999))),
+                cast_record(Some(ManaColor::Red), Some(source)),
+            ]),
+        );
+
+        assert_eq!(
+            resolve_quantity(&state, &red_exclusion_expr(), PlayerId(0), source),
+            1,
+            "foreign red counts; only the pending own red cast is excluded"
+        );
+    }
+
+    /// No-identity negative (CR 400.7): a record with `spell_object_id: None`
+    /// (legacy snapshot) is never identified as own, so it is never excluded.
+    /// Reach-guard: the `Some(source)` sibling below DOES get excluded.
+    #[test]
+    fn spells_cast_this_turn_no_provenance_never_excluded() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Hotheaded Giant".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&source).unwrap().cast_from_zone = Some(Zone::Hand);
+
+        // Provenance-less red record → not own → counted.
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![cast_record(Some(ManaColor::Red), None)]),
+        );
+        assert_eq!(
+            resolve_quantity(&state, &red_exclusion_expr(), PlayerId(0), source),
+            1,
+            "a provenance-less record is never excluded"
+        );
+
+        // Reach-guard: the same record carrying provenance IS excluded → 0.
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![cast_record(Some(ManaColor::Red), Some(source))]),
+        );
+        assert_eq!(
+            resolve_quantity(&state, &red_exclusion_expr(), PlayerId(0), source),
+            0,
+            "the own pending red cast is excluded"
+        );
+    }
+
+    /// CR 400.7: when the entering object was NOT cast (reanimation —
+    /// `cast_from_zone` is None), no own-cast exclusion is armed, so a prior red
+    /// record counts in full.
+    #[test]
+    fn spells_cast_this_turn_reanimated_source_excludes_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Hotheaded Giant".to_string(),
+            Zone::Graveyard,
+        );
+        // Reanimated: never cast → cast_from_zone stays None.
+        assert!(state.objects.get(&source).unwrap().cast_from_zone.is_none());
+
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![cast_record(Some(ManaColor::Red), Some(source))]),
+        );
+        assert_eq!(
+            resolve_quantity(&state, &red_exclusion_expr(), PlayerId(0), source),
+            1,
+            "reanimated permanent arms no own-cast exclusion"
+        );
+    }
+
+    /// CR 601.2i + CR 608.2n: a resolving instant/sorcery (Thunder Salvo, Lock
+    /// and Load) whose EFFECT counts "other spells you've cast this turn" is
+    /// still on the Stack and carries NO `cast_from_zone` (that provenance is
+    /// stamped only onto placeholder permanent-spell objects), yet its OWN cast
+    /// record MUST be excluded. REVERT DISCRIMINATOR for the on-stack arm: with
+    /// only the `cast_from_zone` gate this resolves 1 (own counted); the Stack
+    /// arm drops it to 0.
+    #[test]
+    fn spells_cast_this_turn_on_stack_source_excludes_own() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Thunder Salvo".to_string(),
+            Zone::Stack,
+        );
+        // Instant on the stack: cast_from_zone is never stamped on it.
+        assert!(state.objects.get(&source).unwrap().cast_from_zone.is_none());
+
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![cast_record(Some(ManaColor::Red), Some(source))]),
+        );
+        assert_eq!(
+            resolve_quantity(&state, &red_exclusion_expr(), PlayerId(0), source),
+            0,
+            "a resolving on-stack spell excludes its own cast without cast_from_zone"
+        );
+
+        // Reach-guard: a foreign prior red record still counts alongside the
+        // excluded own cast → 1.
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                cast_record(Some(ManaColor::Red), Some(ObjectId(999))),
+                cast_record(Some(ManaColor::Red), Some(source)),
+            ]),
+        );
+        assert_eq!(
+            resolve_quantity(&state, &red_exclusion_expr(), PlayerId(0), source),
+            1,
+            "foreign red counts; the on-stack own red cast is excluded"
         );
     }
 

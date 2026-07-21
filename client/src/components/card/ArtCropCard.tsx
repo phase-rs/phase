@@ -214,7 +214,12 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                   // counter unboundedly — render ∞ instead of the (still-finite) real count.
                   const isUnbounded = unboundedCounterTypes.includes(type);
                   return (
-                    <CounterTooltip key={type} type={type} count={count}>
+                    <CounterTooltip
+                      key={type}
+                      type={type}
+                      count={count}
+                      isUnbounded={isUnbounded}
+                    >
                       <span
                         className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
                         style={counterStyle}

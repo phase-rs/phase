@@ -166,7 +166,7 @@ pub fn perform_contraption_upkeep_turn_based_action(
         ObjectId(0),
         player,
     );
-    state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), state));
+    state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
     state.waiting_for = WaitingFor::ChooseObjectsSelection {
         player,
         eligible,

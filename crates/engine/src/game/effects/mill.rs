@@ -96,7 +96,7 @@ pub fn resolve(
 /// Returns `true` when every milled card was delivered, `false` when a per-card
 /// `Moved` replacement surfaced a CR 616.1 ordering choice that parked the batch
 /// (`state.waiting_for` is left set, the undelivered tail in
-/// `state.pending_batch_deliveries`). Callers that reset `state.waiting_for`
+/// the active `BatchDelivery` frame). Callers that reset `state.waiting_for`
 /// after applying an accepted event MUST early-return on `false` so they don't
 /// clobber the parked prompt (mirrors the `apply_etb_counters` early-return
 /// precedent in `handle_replacement_choice`).
@@ -143,7 +143,7 @@ pub fn apply_mill_after_replacement(
     //
     // CR 616.1: a per-card ordering choice (two simultaneous graveyard→exile
     // redirects) parks `state.waiting_for` + the undelivered tail in
-    // `state.pending_batch_deliveries`; the replacement-choice resume path
+    // the active `BatchDelivery` frame; the replacement-choice resume path
     // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the batch.
     let reqs: Vec<ZoneMoveRequest> = cards_to_mill
         .iter()
@@ -283,7 +283,7 @@ mod tests {
             "the per-card ordering prompt must be parked in waiting_for"
         );
         assert!(
-            state.pending_batch_deliveries.is_some(),
+            state.active_batch_delivery().is_some(),
             "the undelivered tail must be stashed for the resume path"
         );
     }

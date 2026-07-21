@@ -279,10 +279,22 @@ fn prompt_resolution_attachment_choice(
         _ => {
             // Replace any stale continuation (e.g. a deferred optional sub stashed
             // by the parent chain walker) with this exact attach instruction.
-            state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+            let continuation = crate::types::game_state::PendingContinuation::new(
                 Box::new(ability.clone()),
                 state,
-            ));
+            );
+            if state.active_ability_continuation().is_some() {
+                state
+                    .replace_active_ability_continuation(
+                        crate::types::resolution::AbilityContinuationFrame {
+                            pending: continuation,
+                            choose_zone_trigger_context: None,
+                        },
+                    )
+                    .expect("attach prompt replaces its active continuation");
+            } else {
+                state.park_ability_continuation(continuation);
+            }
             state.waiting_for = WaitingFor::EffectZoneChoice {
                 player: ability.controller,
                 cards: eligible,
@@ -1483,11 +1495,19 @@ mod tests {
         assert_eq!(cards.len(), 2);
         assert!(cards.contains(&first));
         assert!(cards.contains(&second));
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
 
-        let cont = state.pending_continuation.take().unwrap();
-        complete_resolution_attachment_choice(&mut state, *cont.chain, &[second], &mut events)
+        let frame = state
+            .take_active_ability_continuation()
+            .expect("attachment fixture cannot consume a buried continuation")
             .unwrap();
+        complete_resolution_attachment_choice(
+            &mut state,
+            *frame.pending.chain,
+            &[second],
+            &mut events,
+        )
+        .unwrap();
 
         assert_eq!(
             state.objects.get(&second).unwrap().attached_to,
@@ -1776,7 +1796,7 @@ mod tests {
             state.waiting_for
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "no continuation should be stashed for a no-op attach"
         );
         assert!(state.objects.get(&host).unwrap().attachments.is_empty());

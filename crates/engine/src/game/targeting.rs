@@ -2587,7 +2587,7 @@ mod tests {
         // `Dispatching`, not `Ready`: production reads this filter from inside a
         // running continuation, whose own work has already been taken out of the
         // drain but whose prevented-event context is still readable (CR 615.5).
-        state.post_replacement_drains.install(
+        state.install_post_replacement_drain(
             PostReplacementDrain {
                 status: DrainStatus::Dispatching,
                 source: None,
@@ -2633,7 +2633,7 @@ mod tests {
         let (mut state, _c0, c1) = setup_with_creatures();
         state.objects.get_mut(&c1).unwrap().controller = PlayerId(0);
         // `Dispatching` for the same reason as the sibling test above.
-        state.post_replacement_drains.install(
+        state.install_post_replacement_drain(
             PostReplacementDrain {
                 status: DrainStatus::Dispatching,
                 source: None,

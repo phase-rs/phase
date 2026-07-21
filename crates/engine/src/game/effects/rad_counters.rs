@@ -66,7 +66,7 @@ pub fn resolve(
             let ids: Vec<_> = library_before.into_iter().take(final_count).collect();
             // CR 616.1: a per-card Moved ordering choice parks the prompt
             // (`state.waiting_for` set, `pending_replacement` holding the
-            // paused card's move, tail in `pending_batch_deliveries`). Bail
+            // paused card's move, tail in the active BatchDelivery frame). Bail
             // like `mill::resolve` does: continuing into the life-loss loop
             // would propose `LifeLoss` replacement events while the parked
             // choice is pending and could overwrite `pending_replacement`,

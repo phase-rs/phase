@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use super::ability::{LibraryPosition, TargetRef};
@@ -1454,6 +1456,65 @@ impl GameAction {
         )
     }
 
+    /// The cast payment preference carried by this action, if it is one of
+    /// the cast-family variants (CR 601.2g).
+    fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
+        match self {
+            GameAction::CastSpell { payment_mode, .. }
+            | GameAction::CastSpellForFree { payment_mode, .. }
+            | GameAction::CastSpellAsMiracle { payment_mode, .. }
+            | GameAction::CastSpellAsMadness { payment_mode, .. }
+            | GameAction::CastSpellAsSneak { payment_mode, .. }
+            | GameAction::CastSpellAsWebSlinging { payment_mode, .. } => Some(payment_mode),
+            _ => None,
+        }
+    }
+
+    /// CR 601.2g: `CastPaymentMode` selects whether the engine auto-pays an
+    /// unambiguous mana cost or pauses after announcement for manual mana
+    /// activation — a per-player payment preference, not part of whether the
+    /// cast itself is legal. Candidate enumeration (`ai_support::candidates`)
+    /// emits every cast candidate with the canonical `Auto` mode, so any
+    /// membership test of a submitted action against the enumerated legal set
+    /// must erase the preference first (GH #6275: the multiplayer server's
+    /// legality gate rejected every `Manual`-mode cast). Borrows `self`
+    /// unchanged unless a `Manual` mode has to be rewritten.
+    pub fn with_canonical_payment_mode(&self) -> Cow<'_, Self> {
+        match self {
+            GameAction::CastSpell {
+                payment_mode: CastPaymentMode::Manual,
+                ..
+            }
+            | GameAction::CastSpellForFree {
+                payment_mode: CastPaymentMode::Manual,
+                ..
+            }
+            | GameAction::CastSpellAsMiracle {
+                payment_mode: CastPaymentMode::Manual,
+                ..
+            }
+            | GameAction::CastSpellAsMadness {
+                payment_mode: CastPaymentMode::Manual,
+                ..
+            }
+            | GameAction::CastSpellAsSneak {
+                payment_mode: CastPaymentMode::Manual,
+                ..
+            }
+            | GameAction::CastSpellAsWebSlinging {
+                payment_mode: CastPaymentMode::Manual,
+                ..
+            } => {
+                let mut canonical = self.clone();
+                if let Some(mode) = canonical.payment_mode_mut() {
+                    *mode = CastPaymentMode::Auto;
+                }
+                Cow::Owned(canonical)
+            }
+            _ => Cow::Borrowed(self),
+        }
+    }
+
     /// Engine-side authoritative mapping from action → permanent it acts on.
     ///
     /// Used by `legal_actions_with_costs` to group `legal_actions` by source
@@ -1606,6 +1667,81 @@ impl GameAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GH #6275: every cast-family variant must canonicalize `Manual` to
+    /// `Auto` so legality-gate membership checks match the enumerated
+    /// candidates; everything else must pass through borrowed and unchanged.
+    #[test]
+    fn with_canonical_payment_mode_erases_manual_on_every_cast_variant() {
+        use crate::types::game_state::CastPaymentMode;
+
+        let oid = ObjectId(1);
+        let cid = CardId(2);
+        let other = ObjectId(3);
+        let make = |payment_mode: CastPaymentMode| -> Vec<GameAction> {
+            vec![
+                GameAction::CastSpell {
+                    object_id: oid,
+                    card_id: cid,
+                    targets: vec![other],
+                    payment_mode,
+                },
+                GameAction::CastSpellForFree {
+                    object_id: oid,
+                    card_id: cid,
+                    source_id: other,
+                    payment_mode,
+                },
+                GameAction::CastSpellAsMiracle {
+                    object_id: oid,
+                    card_id: cid,
+                    payment_mode,
+                },
+                GameAction::CastSpellAsMadness {
+                    object_id: oid,
+                    card_id: cid,
+                    payment_mode,
+                },
+                GameAction::CastSpellAsSneak {
+                    hand_object: oid,
+                    card_id: cid,
+                    creature_to_return: other,
+                    payment_mode,
+                },
+                GameAction::CastSpellAsWebSlinging {
+                    hand_object: oid,
+                    card_id: cid,
+                    creature_to_return: other,
+                    payment_mode,
+                },
+            ]
+        };
+
+        for (manual, auto) in make(CastPaymentMode::Manual)
+            .iter()
+            .zip(&make(CastPaymentMode::Auto))
+        {
+            let canonical = manual.with_canonical_payment_mode();
+            assert!(
+                matches!(canonical, Cow::Owned(_)),
+                "Manual {} must be rewritten",
+                manual.variant_name()
+            );
+            assert_eq!(canonical.as_ref(), auto);
+
+            let unchanged = auto.with_canonical_payment_mode();
+            assert!(
+                matches!(unchanged, Cow::Borrowed(_)),
+                "Auto {} must stay borrowed",
+                auto.variant_name()
+            );
+        }
+
+        assert!(matches!(
+            GameAction::PassPriority.with_canonical_payment_mode(),
+            Cow::Borrowed(_)
+        ));
+    }
 
     #[test]
     fn pass_priority_serializes_as_tagged_union() {

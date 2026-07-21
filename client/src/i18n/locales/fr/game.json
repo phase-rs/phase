@@ -373,7 +373,14 @@
     "scopeOwnTurn": "S'arrête uniquement lors de vos tours.",
     "scopeOpponentsTurns": "S'arrête uniquement lors des tours des adversaires.",
     "tooltipCurrentPhase": "Phase actuelle.",
-    "tooltip": "Arrêt de phase : {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Arrêt de phase : {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Phase actuelle : {{phase}}. Ouvrir les réglages d'arrêts de phase.",
+    "sheetTitle": "Phases du tour",
+    "sheetSubtitle": "Touchez une étape pour changer quand la passe automatique s'y arrête.",
+    "scopeShortOff": "Désactivé",
+    "scopeShortAllTurns": "Tous les tours",
+    "scopeShortOwnTurn": "Vos tours",
+    "scopeShortOpponentsTurns": "Tours adverses"
   },
   "phaseTracker": {
     "turn": "Tour {{number}}"
@@ -413,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 marqueur {{label}}\n{{description}}",
     "summary_other": "{{count}} marqueurs {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ marqueurs {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Chaque marqueur +1/+1 donne +1/+1 au permanent.",
       "m1m1": "Chaque marqueur -1/-1 donne -1/-1 au permanent.",
@@ -580,7 +588,8 @@
     "loopCollapseTitleCounters": "Choisissez combien de fois ajouter des marqueurs",
     "loopCollapseTitleLife": "Choisissez combien de fois gagner des points de vie",
     "loopCollapseTitleMixed": "Choisissez combien de fois répéter la boucle",
-    "loopCollapseAmountTokens": "Créer {{value}} jetons",
+    "loopCollapseAmountTokens_one": "Créer {{count}} jeton",
+    "loopCollapseAmountTokens_other": "Créer {{count}} jetons",
     "loopCollapseAmountCounters": "Ajouter des marqueurs {{value}}×",
     "loopCollapseAmountLife": "Gagner des points de vie {{value}}×",
     "loopCollapseAmountMixed": "Répéter la boucle {{value}}×",
@@ -2072,6 +2081,7 @@
     "fromSideboard": "Depuis la réserve"
   },
   "phaseName": {
+    "Untap": "Dégagement",
     "Upkeep": "Entretien",
     "Draw": "Pioche",
     "PreCombatMain": "Phase principale 1",

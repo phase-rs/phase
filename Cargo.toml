@@ -9,7 +9,7 @@ members = ["crates/*"]
 exclude = ["client/src-tauri", "lobby-worker/broker-wasm"]
 
 [workspace.package]
-version = "0.31.0"
+version = "0.32.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]

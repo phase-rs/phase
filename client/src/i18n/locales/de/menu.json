@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Vorschau testen",
-      "tooltip": "Spiele den neuesten Vorschau-Build — die neuesten Karten & Fixes landen hier vor jeder Veröffentlichung."
+      "tooltip": "Spiele den neuesten Vorschau-Build — die neuesten Karten & Fixes landen hier vor jeder Veröffentlichung.",
+      "backCta": "Zurück zur stabilen Version",
+      "backTooltip": "Zur aktuellen veröffentlichten Version zurückkehren."
     },
     "coverage": {
       "title": "Abdeckungs-Dashboard öffnen",

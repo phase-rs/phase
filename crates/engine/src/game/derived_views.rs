@@ -16,11 +16,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
-    GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
-    TargetRef,
+    ContinuousModification, GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry,
+    RestrictionPlayerScope, TargetRef,
 };
 use crate::types::card::TokenImageRef;
 use crate::types::counter::CounterType;
@@ -209,6 +210,27 @@ pub struct DerivedViews {
     /// keyword.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+
+    /// CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
+    /// currently supplied by a copy effect (Layer 1a) — Clone, Phantasmal
+    /// Image, Vesuvan Doppelganger, and every "enters as a copy" permanent.
+    ///
+    /// Such a permanent renders pixel-identical to what it copied (the copy
+    /// effect overrides `printed_ref`, so even image lookup follows the copied
+    /// card), leaving the player unable to tell the copy from the original on
+    /// the board. Nothing already serialized distinguishes them: `is_copy`
+    /// means "not represented by a card" (CR 707.10) and is cleared once a copy
+    /// resolves onto the battlefield, and the copy modification lives on a
+    /// transient continuous effect rather than the object. So the engine
+    /// classifies it here rather than leaving the client to infer it.
+    ///
+    /// CR 708.2: face-down permanents are excluded — their characteristics are
+    /// only those the face-down rules grant, so surfacing "copy" on one would
+    /// leak hidden information.
+    ///
+    /// Sorted for stable serialization; absent when nothing is a copy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied_permanents: Vec<ObjectId>,
 
     /// Commander damage grouped by the attacking commander's current
     /// controller. Each inner entry preserves per-commander identity so
@@ -444,6 +466,48 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     ))
 }
 
+/// CR 613.2a + CR 707.2: true when a live copy effect is currently supplying
+/// `object_id`'s copiable values.
+///
+/// A copy of a permanent is expressed as a transient continuous effect carrying
+/// `ContinuousModification::CopyValues`, applied in Layer 1a — never as a flag
+/// on the object — so membership is decided by asking the same question the
+/// layer engine asks: does this effect's `affected` filter match the object?
+/// Reusing `matches_target_filter` (rather than special-casing the
+/// `SpecificObject` filter copy effects usually carry) keeps the projection
+/// correct for any filter shape a future copy effect might use.
+fn object_has_copy_effect(state: &GameState, object_id: ObjectId) -> bool {
+    let merge_layer_effect_id = state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.merge_layer_effect_id);
+
+    state.transient_continuous_effects.iter().any(|effect| {
+        // A lapsed effect stays stored until it is swept, so "is it in the list"
+        // is not the same question as "is it applying". Zygon Infiltrator's copy
+        // ends the instant its target untaps while the effect remains stored —
+        // badging that permanent would claim a copy the layer engine has already
+        // stopped applying. Gated on the layer engine's own predicate so the two
+        // cannot drift apart.
+        crate::game::layers::transient_effect_is_live(state, effect)
+            // CR 730.2a: merge uses a private Layer 1 `CopyValues` effect to
+            // represent its top component, but a merged permanent is not a
+            // copy. Exclude only that recorded representation: a merged object
+            // may still acquire an independent copy effect.
+            && Some(effect.id) != merge_layer_effect_id
+            && effect
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::CopyValues { .. }))
+            && matches_target_filter(
+                state,
+                object_id,
+                &effect.affected,
+                &FilterContext::from_source(state, effect.source_id),
+            )
+    })
+}
+
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
@@ -481,6 +545,14 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         if !badges.is_empty() {
             views.battlefield_keyword_badges.insert(obj_id, badges);
         }
+        // CR 613.2a + CR 707.2 / CR 708.2: see `copied_permanents`. Matched
+        // through the same `matches_target_filter` the layer engine uses to
+        // pick a continuous effect's recipients, so this projection and the
+        // effect that actually rewrote the object's characteristics can never
+        // disagree about who is a copy.
+        if !obj.face_down && object_has_copy_effect(state, obj_id) {
+            views.copied_permanents.push(obj_id);
+        }
         if let Some(AttachTarget::Player(host)) = obj.attached_to {
             views
                 .auras_attached_to_player
@@ -489,6 +561,11 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                 .push(obj_id);
         }
     }
+    // Collected in `state.battlefield` order above, which reorders as permanents
+    // enter and leave; sort so the serialized payload depends only on WHICH
+    // permanents are copies, not on battlefield churn that never changed the
+    // answer.
+    views.copied_permanents.sort_unstable();
 
     // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
     if let Some(viewer) = viewer {
@@ -1205,9 +1282,11 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::DisplaySource;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, TargetRef,
+        Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, StaticCondition,
+        TargetFilter, TargetRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
@@ -1257,6 +1336,256 @@ mod tests {
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
         );
+    }
+
+    #[test]
+    fn derive_views_flags_a_permanent_under_a_live_copy_effect() {
+        // CR 613.2a + CR 707.2: a copy of a permanent is expressed as a Layer 1a
+        // `CopyValues` continuous effect, not a flag on the object — so the
+        // projection has to read the effect list. Issue #5932: a Phantasmal
+        // Image copying a Reveillark renders identically to the real one, and
+        // nothing already serialized told the client which was which.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let original = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Reveillark".into(),
+            Zone::Battlefield,
+        );
+        let clone = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Phantasmal Image".into(),
+            Zone::Battlefield,
+        );
+
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&original).unwrap(),
+        );
+        state.add_transient_continuous_effect(
+            clone,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: clone },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.copied_permanents,
+            vec![clone],
+            "only the permanent the copy effect applies to is a copy; the \
+             original it copied is not"
+        );
+    }
+
+    #[test]
+    fn derive_views_drops_the_copy_flag_once_a_temporary_copy_effect_lapses() {
+        // CR 611.2b: a `ForAsLongAs` copy ends the moment its condition goes
+        // false, but the effect stays STORED until it is swept. Zygon
+        // Infiltrator copies "for as long as that creature remains tapped", so
+        // untapping the target ends the copy while the TCE is still in the list.
+        // Reading membership alone would keep badging a permanent that is no
+        // longer a copy, so the projection asks the layer engine's own
+        // liveness predicate instead.
+        use crate::types::ability::ObjectScope;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tapped Bear".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target).unwrap().tapped = true;
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Zygon".into(),
+            Zone::Battlefield,
+        );
+
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&target).unwrap(),
+        );
+        let tce_id = state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::ForAsLongAs {
+                condition: StaticCondition::IsTapped {
+                    scope: ObjectScope::Target,
+                },
+            },
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        // CR 611.2b: the duration tracks the copy TARGET's tap state, not the
+        // source's — the same binding the layer engine uses.
+        state.set_transient_duration_subject(tce_id, target);
+
+        assert_eq!(
+            derive_views(&state, None).copied_permanents,
+            vec![source],
+            "while the target is tapped the copy applies, so the badge shows"
+        );
+
+        // Untap the target: the duration ends and the copy lapses, but the
+        // effect is still stored.
+        state.objects.get_mut(&target).unwrap().tapped = false;
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|t| t.id == tce_id),
+            "precondition: the lapsed effect is still stored, so this test is \
+             exercising liveness rather than removal"
+        );
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a lapsed copy must not keep the badge (CR 611.2b)"
+        );
+    }
+
+    #[test]
+    fn derive_views_does_not_flag_a_merged_permanent_as_a_copy() {
+        // CR 730.2a: merge represents the top component with a private
+        // `CopyValues` Layer-1 effect, but the resulting permanent is merged,
+        // not a copy. The projection must exclude that exact effect while
+        // continuing to admit independent copy effects on the same object.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".into(),
+            Zone::Battlefield,
+        );
+        let rider = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rider".into(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            rider,
+            host,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+
+        let merge_effect_id = state
+            .objects
+            .get(&host)
+            .and_then(|object| object.merge_layer_effect_id);
+        assert!(
+            merge_effect_id.is_some(),
+            "precondition: merge is represented by a CopyValues layer effect"
+        );
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a merge representation must not produce a Copy badge"
+        );
+
+        // The exclusion is effect-scoped, not object-scoped: a merged
+        // permanent can still acquire an independent copy effect.
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&host).unwrap(),
+        );
+        let independent_copy_effect_id = state.add_transient_continuous_effect(
+            host,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: host },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        assert_ne!(
+            Some(independent_copy_effect_id),
+            merge_effect_id,
+            "precondition: the independent copy effect is distinct from merge's representation"
+        );
+        assert_eq!(
+            derive_views(&state, None).copied_permanents,
+            vec![host],
+            "a later independent copy effect on a merged permanent must still produce a badge"
+        );
+    }
+
+    #[test]
+    fn derive_views_omits_copy_flag_for_a_face_down_permanent() {
+        // CR 708.2: a face-down permanent's characteristics are only those the
+        // face-down rules grant. Surfacing "copy" on one would leak hidden
+        // information about what it really is.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Face-Down Copy".into(),
+            Zone::Battlefield,
+        );
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&hidden).unwrap(),
+        );
+        state.objects.get_mut(&hidden).unwrap().face_down = true;
+        state.add_transient_continuous_effect(
+            hidden,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: hidden },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a face-down permanent must never be reported as a copy (CR 708.2)"
+        );
+    }
+
+    #[test]
+    fn derive_views_omits_copy_flag_when_no_copy_effect_is_live() {
+        // Discriminating guard: an ordinary board must report nothing, so the
+        // projection cannot degenerate into "every permanent is a copy".
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".into(),
+            Zone::Battlefield,
+        );
+        assert!(derive_views(&state, None).copied_permanents.is_empty());
     }
 
     #[test]

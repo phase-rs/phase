@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Zatrzymuje się tylko w twoich turach.",
     "scopeOpponentsTurns": "Zatrzymuje się tylko w turach przeciwników.",
     "tooltipCurrentPhase": "Bieżąca faza.",
-    "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Bieżąca faza: {{phase}}. Otwórz ustawienia zatrzymań faz.",
+    "sheetTitle": "Fazy tury",
+    "sheetSubtitle": "Dotknij kroku, aby zmienić, kiedy automatyczne pasowanie się tam zatrzymuje.",
+    "scopeShortOff": "Wył.",
+    "scopeShortAllTurns": "Wszystkie tury",
+    "scopeShortOwnTurn": "Twoje tury",
+    "scopeShortOpponentsTurns": "Tury przeciwników"
   },
   "phaseTracker": {
     "turn": "Tura {{number}}"
@@ -413,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 znacznik {{label}}\n{{description}}",
     "summary_other": "{{count}} znaczników {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ znaczników {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Każdy znacznik +1/+1 daje permanentowi +1/+1.",
       "m1m1": "Każdy znacznik -1/-1 daje permanentowi -1/-1.",
@@ -580,7 +588,8 @@
     "loopCollapseTitleCounters": "Wybierz, ile razy dodać liczniki",
     "loopCollapseTitleLife": "Wybierz, ile razy zyskać życie",
     "loopCollapseTitleMixed": "Wybierz, ile razy powtórzyć pętlę",
-    "loopCollapseAmountTokens": "Stwórz {{value}} żetonów",
+    "loopCollapseAmountTokens_one": "Stwórz {{count}} żeton",
+    "loopCollapseAmountTokens_other": "Stwórz {{count}} żetonów",
     "loopCollapseAmountCounters": "Dodaj liczniki {{value}}×",
     "loopCollapseAmountLife": "Zyskaj życie {{value}}×",
     "loopCollapseAmountMixed": "Powtórz pętlę {{value}}×",
@@ -2072,6 +2081,7 @@
     "fromSideboard": "Z zaplecza"
   },
   "phaseName": {
+    "Untap": "Odwracanie",
     "Upkeep": "Utrzymanie",
     "Draw": "Dobieranie",
     "PreCombatMain": "Główna faza 1",

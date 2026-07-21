@@ -167,6 +167,18 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
   }
 
+  async getCardFaceData(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardFaceData", cardName });
+  }
+
+  async getCardParseDetails(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardParseDetails", cardName });
+  }
+
+  async getCardRulings(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardRulings", cardName });
+  }
+
   /**
    * Build the game-scoped AI card-DB subset for THIS game. Returns the
    * serialized `AiCardSubsetResult` tagged union (parse with `JSON.parse`).

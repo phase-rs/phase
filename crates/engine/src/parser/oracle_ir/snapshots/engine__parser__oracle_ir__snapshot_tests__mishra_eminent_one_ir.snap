@@ -134,8 +134,7 @@ expression: "&ir"
                     "condition": null,
                     "optional_targeting": false,
                     "optional": false,
-                    "forward_result": false,
-                    "sub_link": "SequentialSibling"
+                    "forward_result": false
                   },
                   "uses_tracked_set": false
                 },
@@ -147,7 +146,8 @@ expression: "&ir"
                 "condition": null,
                 "optional_targeting": false,
                 "optional": false,
-                "forward_result": false
+                "forward_result": false,
+                "sub_link": "SequentialSibling"
               },
               "duration": "UntilEndOfTurn",
               "description": null,

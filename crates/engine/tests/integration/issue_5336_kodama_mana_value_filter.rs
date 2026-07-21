@@ -326,7 +326,7 @@ fn kodama_natures_lore_forest_limits_hand_to_zero_mana_value() {
         runner.state().waiting_for,
         runner.state().deferred_triggers.len(),
         runner.state().stack.len(),
-        runner.state().pending_continuation.is_some(),
+        runner.state().active_ability_continuation().is_some(),
     );
     resolve_optional_and_stack(&mut runner, true);
 

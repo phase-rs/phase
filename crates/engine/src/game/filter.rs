@@ -3191,11 +3191,13 @@ struct SpellFilterContext<'a> {
     source_controller: PlayerId,
     /// CR 109.1 (cited as identity foundation — CR has no dedicated
     /// "another" entry): ObjectId of the spell being filtered. `None` when
-    /// the caller is matching against a historical `SpellCastRecord`
-    /// (CR 117.x turn-history queries) for which `Another` is structurally
-    /// indeterminate — those callers fail-closed on `Another`. Live
-    /// cost-modifier evaluation passes `Some(spell.id)` so "other [X]
-    /// spells you cast" excludes the static's own source.
+    /// the caller reaches this helper matching a historical `SpellCastRecord`
+    /// without provenance (pre-migration snapshots) — those callers fail-closed
+    /// on `Another`. Live cost-modifier evaluation passes `Some(spell.id)` so
+    /// "other [X] spells you cast" excludes the static's own source. Turn-history
+    /// "another" counting now carries provenance via
+    /// `SpellCastRecord.spell_object_id` and is resolved in `game::quantity`'s
+    /// own-cast exclusion arm, not through this context.
     spell_object_id: Option<ObjectId>,
 }
 
@@ -3409,12 +3411,12 @@ fn spell_object_matches_property(
         // "another" entry): "other [X] spells you cast" excludes the case
         // where the spell being cast IS the static's own source object. The
         // check is identity-only (`object_id != source_id`); two distinct
-        // copies of the same card are NOT "the same" object. Historical-
-        // record callers pass `spell_object_id: None` and fail-closed here
-        // (a turn-history "another" query needs the original cast's
-        // object_id, which is not stored in the snapshot — CR 117.x
-        // predicates that need it must route through dedicated `Another`-
-        // aware paths).
+        // copies of the same card are NOT "the same" object. Live cost-modifier
+        // callers pass `Some(spell.id)`. The turn-history "another" path now
+        // lives in `game::quantity` (the `SpellsCastThisTurn` own-cast
+        // exclusion arm), which reads `SpellCastRecord.spell_object_id`
+        // provenance directly; snapshot-record callers that reach THIS helper
+        // still pass `spell_object_id: None` and fail-closed here.
         FilterProp::Another => context.is_some_and(|ctx| {
             ctx.spell_object_id
                 .is_some_and(|spell_id| spell_id != ctx.source_id)
@@ -5425,8 +5427,7 @@ fn zone_change_record_matches_property(
                     .contains(&record.object_id)
         }
 
-        FilterProp::IsSaddled
-        | FilterProp::SaddledSource
+        FilterProp::SaddledSource
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
@@ -5460,7 +5461,13 @@ fn zone_change_record_matches_property(
         // was suspected" reads the cost-paid LKI, taken before the sacrifice
         // zone-change reset the flag).
         FilterProp::Suspected => record.is_suspected,
-        FilterProp::IsChosenColor
+        // CR 702.171b + CR 508.1m: saddled is no longer snapshotted onto
+        // zone-change records — the "attacks while saddled" attack gate is a
+        // declaration-time subject match folded into the trigger's `valid_card`
+        // (evaluated once when attackers are declared), not a resolution
+        // recheck. A departed source therefore fails closed here.
+        FilterProp::IsSaddled
+        | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
         | FilterProp::HasSingleTarget
         // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
@@ -7005,6 +7012,7 @@ mod tests {
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
+            spell_object_id: None,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -7119,6 +7127,7 @@ mod tests {
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
+            spell_object_id: None,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -7200,6 +7209,7 @@ mod tests {
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
+            spell_object_id: None,
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -8694,14 +8704,13 @@ mod tests {
                 .expect("pass priority to optional mana");
         }
 
-        let pending = runner
+        let optional_frame = runner
             .state()
-            .pending_optional_effect
-            .as_ref()
-            .expect("optional mana must stash pending ability");
-        let pending_event = runner
-            .state()
-            .pending_optional_trigger_event
+            .active_optional_effect_frame()
+            .expect("optional mana must stash its frame");
+        let pending = &optional_frame.ability;
+        let pending_event = optional_frame
+            .trigger_event
             .clone()
             .expect("optional mana must stash trigger event");
 
@@ -11463,6 +11472,7 @@ mod tests {
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
+                spell_object_id: None,
             }
         };
 
@@ -11952,6 +11962,7 @@ mod tests {
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
+            spell_object_id: None,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

@@ -2094,7 +2094,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found.
         if let Some(ref delayed_cond) = clause_ir.delayed_condition {
             for current in &mut current_defs {
-                let inner = std::mem::replace(
+                let mut inner = std::mem::replace(
                     current,
                     AbilityDefinition::new(
                         kind,
@@ -2114,6 +2114,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 let lifted_optional_for = inner.optional_for;
                 let lifted_repeat_for = inner.repeat_for.clone();
                 let lifted_player_scope = inner.player_scope.clone();
+                // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
+                // is the node that occupies this clause's slot in the parent's
+                // `sub_ability` chain, so it must carry the clause's `sub_link`
+                // (the boundary that separated it from the preceding clause). A
+                // separate sentence ("…investigate X times. Return the exiled
+                // cards…" — Disorder in the Court) stamps `SequentialSibling`, which
+                // keeps the delayed-return OUT of a preceding `repeat_for` process
+                // (it is created once after the loop, not once per iteration) and
+                // lets it resolve when an optional parent is declined. The inner
+                // payload's link is to the delayed trigger it fires from, not to the
+                // parent chain, so reset it to the default within-process step.
+                let lifted_sub_link = inner.sub_link;
+                inner.sub_link = SubAbilityLink::ContinuationStep;
                 *current = AbilityDefinition::new(
                     kind,
                     Effect::CreateDelayedTrigger {
@@ -2127,6 +2140,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 current.optional_for = lifted_optional_for;
                 current.repeat_for = lifted_repeat_for;
                 current.player_scope = lifted_player_scope;
+                current.sub_link = lifted_sub_link;
             }
         }
 
@@ -2314,22 +2328,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
     }
 
-    // CR 701.20a + CR 608.2c: A bare private "look at the top N cards" instruction
+    // CR 701.20e + CR 608.2c: A bare private "look at the top N cards" instruction
     // is only a look; it does not move a chosen card to hand. Continuations that
     // actually choose cards from among them patch destination/keep_count before this
     // pass. Anything still in the raw private-Dig shape is a pure peek: skip
     // DigChoice and only populate last_revealed_ids for downstream conditions.
     for def in &mut defs {
-        if let Effect::Dig {
-            reveal: false,
-            keep_count: None,
-            keep_count_expr: None,
-            filter: TargetFilter::Any,
-            destination: None,
-            rest_destination: None,
-            ..
-        } = &*def.effect
-        {
+        if super::effect_is_bare_private_peek(&def.effect) {
             if let Effect::Dig { keep_count, .. } = &mut *def.effect {
                 *keep_count = Some(0);
             }

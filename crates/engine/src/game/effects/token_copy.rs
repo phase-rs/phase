@@ -263,9 +263,13 @@ pub(crate) fn drain_pending_copy_token_resolution(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
-    if let Some(pending) = state.pending_copy_token_resolution.take() {
-        drain_copy_token_resolution(state, pending, events);
-    }
+    let Some(pending) = state
+        .take_active_copy_token()
+        .expect("copy-token drain may consume only the active CopyToken frame")
+    else {
+        return;
+    };
+    drain_copy_token_resolution(state, pending, events);
 }
 
 fn drain_copy_token_resolution(
@@ -277,6 +281,7 @@ fn drain_copy_token_resolution(
         if batch.count == 0 {
             continue;
         }
+        let stack_depth_before_batch = state.resolution_stack.len();
         let spec = super::token::copy_probe_spec_for(
             batch.copy.source_id,
             batch.copy.controller,
@@ -312,7 +317,7 @@ fn drain_copy_token_resolution(
                     pending
                         .created_ids
                         .extend(state.last_created_token_ids.clone());
-                    state.pending_copy_token_resolution = Some(pending);
+                    park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
                     return;
                 }
                 pending
@@ -321,7 +326,7 @@ fn drain_copy_token_resolution(
             }
             crate::game::replacement::ReplacementResult::Prevented => {}
             crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
-                state.pending_copy_token_resolution = Some(pending);
+                park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
                 state.waiting_for =
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return;
@@ -340,6 +345,25 @@ fn drain_copy_token_resolution(
         source_id: pending.source_id,
         subject: None,
     });
+}
+
+/// Park a copy-token owner as the direct paused frame, or below the complete
+/// child stack its batch raised. The captured boundary preserves the actual
+/// parent/child relationship without searching for a buried CopyToken frame.
+fn park_copy_token_after_current_batch(
+    state: &mut GameState,
+    pending: PendingCopyTokenResolution,
+    stack_depth_before_batch: usize,
+) {
+    match state.resolution_stack.len().cmp(&stack_depth_before_batch) {
+        std::cmp::Ordering::Less => {
+            panic!("copy-token batch removed a parent frame before it could be re-parked")
+        }
+        std::cmp::Ordering::Equal => state.push_copy_token(pending),
+        std::cmp::Ordering::Greater => state
+            .insert_copy_token_parent_at_child_boundary(pending, stack_depth_before_batch)
+            .expect("copy-token parent must be inserted below its complete child stack"),
+    }
 }
 
 /// CR 601.2f + CR 603.4: Triggers gated on a cast-time additional-cost payment
@@ -821,10 +845,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         state.waiting_for = crate::types::game_state::WaitingFor::Priority {
             player: state.active_player,
         };
-        if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
-            pending.created_ids = state.last_created_token_ids.clone();
+        let created_ids_for_pending = state.last_created_token_ids.clone();
+        if let Some(pending) = state.active_copy_token_mut() {
+            pending.created_ids = created_ids_for_pending;
         }
-        if state.pending_copy_token_resolution.is_some() {
+        if state.active_copy_token().is_some() {
             drain_pending_copy_token_resolution(state, events);
         }
         created_ids = state.last_created_token_ids.clone();
@@ -836,7 +861,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // waiting on a CR 616.1 replacement choice, so report Paused and let the
         // caller resume rather than double-drain it (token_copy::resolve builds a
         // multi-batch VecDeque when copy_source_ids.len() > 1).
-        let completion = if state.pending_copy_token_resolution.is_none()
+        let completion = if state.active_copy_token().is_none()
             || matches!(
                 state.waiting_for,
                 crate::types::game_state::WaitingFor::Priority { .. }
@@ -925,7 +950,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
         source_id,
     });
     state.last_created_token_ids.push(token_id);
-    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+    if let Some(pending) = state.active_copy_token_mut() {
         pending.created_ids.push(token_id);
     }
     true
@@ -1557,6 +1582,7 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::{FrameKind, ResolutionStateWire};
     use crate::types::triggers::TriggerMode;
 
     /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
@@ -2083,6 +2109,24 @@ mod tests {
         assert!(
             state.last_created_token_ids.is_empty(),
             "no copy token should be created before the replacement choice resolves"
+        );
+        assert!(
+            state.active_copy_token().is_some(),
+            "the replacement prompt must be owned by the active CopyToken frame"
+        );
+
+        let wire = ResolutionStateWire::from_game_state(state);
+        let serialized = serde_json::to_value(&wire).expect("CopyToken prompt serializes as v2");
+        assert!(
+            serialized.get("pending_copy_token_resolution").is_none(),
+            "v2 CopyToken prompts must not emit the removed v1 field"
+        );
+        let mut state = serde_json::from_value::<ResolutionStateWire>(serialized)
+            .expect("v2 CopyToken prompt roundtrips")
+            .into_game_state();
+        assert!(
+            state.active_copy_token().is_some(),
+            "roundtripped prompt keeps CopyToken as the active typed owner"
         );
 
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
@@ -3911,6 +3955,33 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![FrameKind::CopyToken, FrameKind::CounterAdditions],
+            "a counter-replacement pause must keep CopyToken below its active counter child"
+        );
+        assert!(
+            state.active_copy_token().is_none(),
+            "top-only access must not search through the active counter child"
+        );
+        let serialized = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("nested CopyToken counter prompt serializes as v2");
+        let mut state = serde_json::from_value::<ResolutionStateWire>(serialized)
+            .expect("nested CopyToken counter prompt roundtrips")
+            .into_game_state();
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![FrameKind::CopyToken, FrameKind::CounterAdditions],
+            "v2 must preserve the CopyToken parent beneath its counter child"
+        );
 
         let mut choice_events = Vec::new();
         for _ in 0..2 {

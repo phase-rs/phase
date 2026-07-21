@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Stoppt nur in deinen Zügen.",
     "scopeOpponentsTurns": "Stoppt nur in den Zügen der Gegner.",
     "tooltipCurrentPhase": "Aktuelle Phase.",
-    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Aktuelle Phase: {{phase}}. Phasenstopp-Einstellungen öffnen.",
+    "sheetTitle": "Zugphasen",
+    "sheetSubtitle": "Tippe auf einen Schritt, um festzulegen, wann das automatische Passen dort stoppt.",
+    "scopeShortOff": "Aus",
+    "scopeShortAllTurns": "Alle Züge",
+    "scopeShortOwnTurn": "Deine Züge",
+    "scopeShortOpponentsTurns": "Gegnerzüge"
   },
   "phaseTracker": {
     "turn": "Zug {{number}}"
@@ -413,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}}-Marke\n{{description}}",
     "summary_other": "{{count}} {{label}}-Marken\n{{description}}",
+    "summaryUnbounded": "∞ {{label}}-Marken\n{{description}}",
     "descriptions": {
       "p1p1": "Jede +1/+1-Marke gibt der bleibenden Karte +1/+1.",
       "m1m1": "Jede -1/-1-Marke gibt der bleibenden Karte -1/-1.",
@@ -580,7 +588,8 @@
     "loopCollapseTitleCounters": "Wähle, wie oft Marken hinzugefügt werden",
     "loopCollapseTitleLife": "Wähle, wie oft Leben dazugewonnen wird",
     "loopCollapseTitleMixed": "Wähle, wie oft die Schleife wiederholt wird",
-    "loopCollapseAmountTokens": "{{value}} Spielsteine erzeugen",
+    "loopCollapseAmountTokens_one": "{{count}} Spielstein erzeugen",
+    "loopCollapseAmountTokens_other": "{{count}} Spielsteine erzeugen",
     "loopCollapseAmountCounters": "Marken hinzufügen {{value}}×",
     "loopCollapseAmountLife": "Leben dazugewinnen {{value}}×",
     "loopCollapseAmountMixed": "Schleife wiederholen {{value}}×",
@@ -2072,6 +2081,7 @@
     "fromSideboard": "Aus dem Sideboard"
   },
   "phaseName": {
+    "Untap": "Enttappen",
     "Upkeep": "Versorgung",
     "Draw": "Ziehen",
     "PreCombatMain": "Hauptphase 1",

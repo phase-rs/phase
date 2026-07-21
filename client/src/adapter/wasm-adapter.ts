@@ -669,6 +669,32 @@ export class WasmAdapter implements EngineAdapter {
     return this.fallback!.evaluateDeckCompatibility(request);
   }
 
+  /**
+   * Display-only card queries share the authoritative engine worker and its
+   * resident card database. Keeping these off the main-thread runtime avoids a
+   * second WASM module + corpus allocation when card UI mounts during gameplay.
+   */
+  async getCardFaceData(cardName: string): Promise<unknown> {
+    await this.initialize();
+    await this.ensureCardDb();
+    if (this.engine) return this.engine.getCardFaceData(cardName);
+    return this.fallback!.getCardFaceData(cardName);
+  }
+
+  async getCardParseDetails(cardName: string): Promise<unknown> {
+    await this.initialize();
+    await this.ensureCardDb();
+    if (this.engine) return this.engine.getCardParseDetails(cardName);
+    return this.fallback!.getCardParseDetails(cardName);
+  }
+
+  async getCardRulings(cardName: string): Promise<unknown> {
+    await this.initialize();
+    await this.ensureCardDb();
+    if (this.engine) return this.engine.getCardRulings(cardName);
+    return this.fallback!.getCardRulings(cardName);
+  }
+
   dispose(): void {
     // Clear the singleton reference so getSharedAdapter() creates a fresh
     // instance if called after dispose (e.g., error recovery code paths).
@@ -773,6 +799,9 @@ interface MainThreadFallback {
   ): Promise<SubmitResult>;
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
+  getCardFaceData(cardName: string): Promise<unknown>;
+  getCardParseDetails(cardName: string): Promise<unknown>;
+  getCardRulings(cardName: string): Promise<unknown>;
 }
 
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
@@ -934,5 +963,14 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     // `ensureCardDatabase` (engineRuntime), so the query reads it directly.
     evaluateDeckCompatibility: (request: unknown) =>
       enqueue(() => wasm.evaluate_deck_compatibility_js(request)),
+
+    getCardFaceData: (cardName: string) =>
+      enqueue(() => wasm.get_card_face_data(cardName)),
+
+    getCardParseDetails: (cardName: string) =>
+      enqueue(() => wasm.get_card_parse_details(cardName)),
+
+    getCardRulings: (cardName: string) =>
+      enqueue(() => wasm.get_card_rulings(cardName)),
   };
 }

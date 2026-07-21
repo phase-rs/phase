@@ -56,7 +56,7 @@ fn normalize_legacy_attach_waiting_for(state: &mut GameState) {
         return;
     };
 
-    let Some(cont) = state.pending_continuation.as_ref() else {
+    let Some(cont) = state.active_ability_continuation() else {
         return;
     };
     if !matches!(&cont.chain.effect, Effect::Attach { .. }) || !cont.chain.targeting_is_optional() {
@@ -566,7 +566,7 @@ mod tests {
             PlayerId(0),
         );
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(ability), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(ability), &state));
         state.waiting_for = WaitingFor::EffectZoneChoice {
             enters_modified_if: None,
             player: PlayerId(0),

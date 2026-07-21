@@ -181,6 +181,47 @@ describe("PermanentCard", () => {
     cleanup();
   });
 
+  // Issue #5932: a Phantasmal Image copying a Reveillark rendered identically to
+  // the real one. The board's copy badge was gated on a TOKEN-copy heuristic
+  // (`is_token`), so a real card under a copy effect never qualified. The engine
+  // now classifies it (CR 613.2a Layer 1a + CR 707.2) and this reads that.
+  it("badges a real card that a copy effect turned into a copy", () => {
+    const gameState = makeState();
+    gameState.derived = { copied_permanents: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByText("Copy")).toBeInTheDocument();
+  });
+
+  it("shows no copy badge on an ordinary permanent", () => {
+    // Discriminating guard: without it the test above would still pass if the
+    // badge rendered unconditionally.
+    const gameState = makeState();
+    gameState.derived = { copied_permanents: [] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
+  it("never badges a face-down permanent as a copy (CR 708.2)", () => {
+    // A face-down permanent has only the characteristics its face-down rules
+    // grant, so surfacing "Copy" would leak what it really is. The engine omits
+    // it from the projection; the client keeps its own guard so neither side
+    // alone can leak it.
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.derived = { copied_permanents: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
   it("renders only the engine-classified battlefield keyword badges", () => {
     const gameState = makeState();
     gameState.objects[1].keywords = ["Flying", "Ravenous", "Evoke"];

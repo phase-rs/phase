@@ -358,7 +358,7 @@ mod tests {
                     ..
                 } if cards.is_empty()
             ));
-            assert!(state.pending_continuation.is_some());
+            assert!(state.active_ability_continuation().is_some());
             assert_eq!(
                 candidate_actions(&state).len(),
                 1,
@@ -369,7 +369,7 @@ mod tests {
 
             assert_eq!(state.objects[&bat].zone, Zone::Battlefield);
             assert!(state.battlefield.contains(&bat));
-            assert!(state.pending_continuation.is_none());
+            assert!(state.active_ability_continuation().is_none());
             assert!(events.iter().all(|event| !matches!(
                 event,
                 GameEvent::ZoneChanged { object_id, .. } if *object_id == bat
@@ -878,7 +878,7 @@ mod tests {
             PlayerId(0),
         );
         continuation.kind = AbilityKind::Spell;
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), &state));
 
         let mut events = Vec::new();
         handle_resolution_choice(
@@ -897,7 +897,7 @@ mod tests {
 
         assert_eq!(state.players[0].life, 20);
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "declining the optional card choice should skip the follow-up"
         );
         assert!(!state.revealed_cards.contains(&card));

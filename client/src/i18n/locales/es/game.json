@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Se detiene solo en tus turnos.",
     "scopeOpponentsTurns": "Se detiene solo en los turnos de los oponentes.",
     "tooltipCurrentPhase": "Fase actual.",
-    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase actual: {{phase}}. Abrir ajustes de paradas de fase.",
+    "sheetTitle": "Fases del turno",
+    "sheetSubtitle": "Toca un paso para cambiar cuándo se detiene el pase automático.",
+    "scopeShortOff": "Desactivado",
+    "scopeShortAllTurns": "Todos los turnos",
+    "scopeShortOwnTurn": "Tus turnos",
+    "scopeShortOpponentsTurns": "Turnos de oponentes"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -413,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 contador {{label}}\n{{description}}",
     "summary_other": "{{count}} contadores {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ contadores {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Cada contador +1/+1 da +1/+1 al permanente.",
       "m1m1": "Cada contador -1/-1 da -1/-1 al permanente.",
@@ -580,7 +588,8 @@
     "loopCollapseTitleCounters": "Elige cuántas veces añadir contadores",
     "loopCollapseTitleLife": "Elige cuántas veces ganar vida",
     "loopCollapseTitleMixed": "Elige cuántas veces repetir el bucle",
-    "loopCollapseAmountTokens": "Crear {{value}} fichas",
+    "loopCollapseAmountTokens_one": "Crear {{count}} ficha",
+    "loopCollapseAmountTokens_other": "Crear {{count}} fichas",
     "loopCollapseAmountCounters": "Añadir contadores {{value}}×",
     "loopCollapseAmountLife": "Ganar vida {{value}}×",
     "loopCollapseAmountMixed": "Repetir el bucle {{value}}×",
@@ -2072,6 +2081,7 @@
     "fromSideboard": "Desde el banquillo"
   },
   "phaseName": {
+    "Untap": "Enderezar",
     "Upkeep": "Mantenimiento",
     "Draw": "Robar",
     "PreCombatMain": "Fase principal 1",

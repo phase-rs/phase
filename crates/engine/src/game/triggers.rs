@@ -1876,6 +1876,49 @@ fn ward_becomes_target_suppressed(
     })
 }
 
+fn inline_tap_mana_trigger_abilities(
+    state: &GameState,
+    tap_event: &GameEvent,
+    candidate_ids: impl IntoIterator<Item = ObjectId>,
+) -> Vec<(TriggerDefinitionRef, ResolvedAbility)> {
+    let mut coupled = Vec::new();
+    for object_id in candidate_ids {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if object.zone != Zone::Battlefield {
+            continue;
+        }
+        let source_context = trigger_source_context_for_latch(state, object);
+        for active in super::functioning_abilities::active_trigger_definitions(state, object) {
+            let definition_ref = active.definition_ref.clone();
+            let trigger_definition = active.definition;
+            if !matches!(trigger_definition.mode, TriggerMode::TapsForMana) {
+                continue;
+            }
+            if !super::trigger_matchers::match_taps_for_mana(
+                tap_event,
+                trigger_definition,
+                &source_context,
+                state,
+            ) {
+                continue;
+            }
+            let mut ability = build_triggered_ability_from_context(
+                state,
+                trigger_definition,
+                &source_context,
+                Some(&definition_ref),
+            );
+            ability.ability_index = Some(active.live_index);
+            if super::mana_abilities::is_triggered_mana_ability(&ability, Some(tap_event)) {
+                coupled.push((definition_ref, ability));
+            }
+        }
+    }
+    coupled
+}
+
 /// CR 605.4a: Resolve `TapsForMana` triggered mana abilities inline, immediately
 /// after the mana abilities that triggered them.
 ///
@@ -1898,6 +1941,12 @@ pub(super) fn resolve_tap_mana_triggers_inline(
     events: &mut Vec<GameEvent>,
     events_before: usize,
 ) {
+    // CR 603.2 + CR 611.2e: Resolve against the post-layer live trigger surface,
+    // then restore the serde-skipped index if this is the first post-deserialize
+    // consult. Layer evaluation remains the authority for granted definitions.
+    super::layers::flush_layers(state);
+    super::trigger_index::ensure_ready(state);
+
     // Capture the scan bound before resolution — triggered mana abilities append
     // their own bonus `ManaAdded` events (CR 605.4a), which must not be rescanned.
     let scan_end = events.len();
@@ -1918,46 +1967,54 @@ pub(super) fn resolve_tap_mana_triggers_inline(
         // `is_triggered_mana_ability` the single CR 605.1b classifier — the same
         // predicate the post-action scan's skip guard uses, so "resolved here"
         // and "skipped there" cannot diverge.
-        let mut coupled: Vec<ResolvedAbility> = Vec::new();
-        for obj in state.objects.values() {
-            if obj.zone != Zone::Battlefield {
-                continue;
-            }
-            for active in super::functioning_abilities::active_trigger_definitions(state, obj) {
-                let trig_idx = active.live_index;
-                let trig_def = active.definition;
-                if !matches!(trig_def.mode, TriggerMode::TapsForMana) {
-                    continue;
-                }
-                let source_context = trigger_source_context_for_latch(state, obj);
-                if !super::trigger_matchers::match_taps_for_mana(
-                    &tap_event,
-                    trig_def,
-                    &source_context,
-                    state,
-                ) {
-                    continue;
-                }
-                let mut ability = build_triggered_ability_from_context(
-                    state,
-                    trig_def,
-                    &source_context,
-                    Some(&active.definition_ref),
-                );
-                ability.ability_index = Some(trig_idx);
-                if super::mana_abilities::is_triggered_mana_ability(&ability, Some(&tap_event)) {
-                    coupled.push(ability);
-                }
-            }
+        let candidates = super::trigger_index::candidates_for_event(state, &tap_event);
+        let coupled =
+            inline_tap_mana_trigger_abilities(state, &tap_event, candidates.iter().copied());
+
+        #[cfg(debug_assertions)]
+        if std::env::var_os("PHASE_TRIGGER_INDEX_AUDIT").is_some() {
+            // CR 603.2: The index is an over-approximate candidate filter. Shadow
+            // the retired full object/definition scan and require exact equality
+            // of semantic matches; extra candidate visits remain valid.
+            let indexed_matches: HashSet<_> = coupled
+                .iter()
+                .map(|(definition_ref, _)| definition_ref.clone())
+                .collect();
+            let shadow = inline_tap_mana_trigger_abilities(
+                state,
+                &tap_event,
+                state
+                    .objects
+                    .iter()
+                    .filter(|(_, object)| object.zone == Zone::Battlefield)
+                    .map(|(object_id, _)| *object_id),
+            );
+            let shadow_matches: HashSet<_> = shadow
+                .iter()
+                .map(|(definition_ref, _)| definition_ref.clone())
+                .collect();
+            let missing: Vec<_> = shadow_matches.difference(&indexed_matches).collect();
+            let unexpected: Vec<_> = indexed_matches.difference(&shadow_matches).collect();
+            assert!(
+                missing.is_empty() && unexpected.is_empty(),
+                "PHASE_TRIGGER_INDEX_AUDIT inline-mana semantic mismatch: \
+                 event={tap_event:?} missing={missing:?} unexpected={unexpected:?} \
+                 candidates={candidates:?}",
+            );
+            eprintln!(
+                "PHASE_TRIGGER_INDEX_AUDIT inline-mana probe: candidates={} matched={}",
+                candidates.len(),
+                indexed_matches.len(),
+            );
         }
-        for ability in coupled {
+        for (definition_ref, ability) in coupled {
             // Look up the color override the auto-tap planner chose for this aura's
             // triggered mana ability. Only non-None for AnyOneColor bonus triggers
             // (Fertile Ground) when called from the auto-tap path; None for manual
             // play and Fixed bonus triggers (Wild Growth already has no choice).
             let color_override = state
                 .pending_taps_for_mana_overrides
-                .get(&ability.source_id)
+                .get(&definition_ref)
                 .cloned();
             super::mana_abilities::resolve_triggered_mana_ability_inline(
                 state,
@@ -2601,17 +2658,7 @@ fn collect_pending_triggers_with_collection(
         // `evaluate_layers` rebuild at the top of `collect_pending_triggers`
         // guarantees the index reflects post-layer trigger sets.
         //
-        // Lazy-rebuild sentinel: TriggerIndex is `#[serde(skip)]` and defaults
-        // to empty after deserialize. A genuinely-empty index over a
-        // non-empty battlefield means we need to rebuild before reading; the
-        // common steady-state case (empty index, empty battlefield) is a
-        // harmless no-op.
-        if state.trigger_index.by_key.is_empty()
-            && state.trigger_index.unclassified.is_empty()
-            && !state.battlefield.is_empty()
-        {
-            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
-        }
+        super::trigger_index::ensure_ready(state);
         let candidates = crate::game::trigger_index::candidates_for_event(state, event);
 
         // CR 603.2 differential test (debug-only): run a SHADOW scan over the
@@ -6478,24 +6525,10 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     if is_pending_trigger_construction_active(state) {
         return false;
     }
-    if state.pending_continuation.is_some() {
+    if !state.resolution_stack.is_empty() {
         return false;
     }
-    if state.pending_repeat_iteration.is_some() {
-        return false;
-    }
-    if state.has_post_replacement_drain() {
-        return false;
-    }
-    if state.pending_change_zone_iteration.is_some() {
-        return false;
-    }
-    if state.pending_replacement.is_some()
-        || state.pending_batch_deliveries.is_some()
-        || state.pending_counter_additions.is_some()
-        || state.pending_counter_moves.is_some()
-        || state.pending_counter_removals.is_some()
-    {
+    if state.pending_replacement.is_some() {
         return false;
     }
     true
@@ -7890,17 +7923,67 @@ fn additional_cost_paid_matches(
     }
 }
 
+/// Rejects a `ZoneChanged` event whose independently serialized provenance
+/// authorities disagree.
+///
+/// CR 400.7: A zone move creates a new object, so a later same-storage-id
+/// incarnation must not answer for the event's pre-change object.
+fn zone_changed_condition_provenance_is_coherent(event: &GameEvent) -> bool {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return true;
+    };
+
+    if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to {
+        return false;
+    }
+
+    record.trigger_source_context().is_none_or(|context| {
+        context.identity.reference.object_id == *object_id
+            && from.is_none_or(|from| context.identity.expected_zone == from)
+    })
+}
+
 /// Check whether an intervening-if condition is satisfied.
 /// Used both at fire-time and resolution-time.
 ///
-/// Predicates check player/game state directly.
-/// Combinators (`And`/`Or`) recurse into their children.
+/// CR 603.4: An intervening-if condition is checked when the ability would
+/// trigger and again as it resolves. Invalid zone-change provenance fails the
+/// whole check before boolean combinators can invert or mask it.
 ///
 /// `source_context` is the sole source-relative authority. Its object id may
 /// still be used for event attribution, but source facts must read through
 /// `TriggerSourceContext::source_read` so a later same-id incarnation cannot
 /// answer an intervening-if check.
 pub(crate) fn check_trigger_condition_with_source(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if trigger_event.is_some_and(|event| !zone_changed_condition_provenance_is_coherent(event)) {
+        return false;
+    }
+
+    evaluate_trigger_condition_with_source(
+        state,
+        condition,
+        controller,
+        source_context,
+        trigger_event,
+    )
+}
+
+/// Evaluates a condition after the outer event-provenance boundary has accepted
+/// its input. Boolean combinators recurse here so invalid provenance cannot be
+/// reinterpreted as an ordinary false operand.
+fn evaluate_trigger_condition_with_source(
     state: &GameState,
     condition: &TriggerCondition,
     controller: PlayerId,
@@ -8793,19 +8876,14 @@ pub(crate) fn check_trigger_condition_with_source(
                 false
             }
         }
-        // CR 603.10 + CR 608.2h: "if it had counters on it" — "it" is the
+        // CR 603.10a + CR 608.2h: "if it had counters on it" — "it" is the
         // triggering object (the creature that left/died), not the trigger
         // source. Counters cease to exist when a permanent changes zones
-        // (CR 122.2), so this look-back reads the counters the object had as it
-        // left from its last-known information. For a watcher that observes
-        // OTHER permanents leaving (The Ozolith: "Whenever a creature you
-        // control leaves the battlefield, if IT had counters on it"), the
-        // triggering object is the leaving creature, extracted from the event;
-        // its LKI is keyed by its own ObjectId, not the source's. For a
-        // self-referential trigger (Undying's "When this creature dies, if it
-        // had no +1/+1 counters on it"), the triggering object IS the source.
-        // The event-less fallback reads the captured source LKI rather than a
-        // later object that happens to reuse its storage id.
+        // (CR 122.2), so a coherent ZoneChanged record owns the exact
+        // pre-change LKI. Only a legacy/defaulted record with no context may
+        // fall back to the ObjectId-keyed cache. Other event subjects retain
+        // the existing cache lookup, while an event-less condition reads the
+        // captured source LKI.
         TriggerCondition::HadCounters { counter_type } => {
             let matches_counter = |lki: &crate::types::game_state::LKISnapshot| match counter_type {
                 Some(counter_type) => lki
@@ -8814,17 +8892,28 @@ pub(crate) fn check_trigger_condition_with_source(
                     .is_some_and(|&count| count > 0),
                 None => lki.counters.values().any(|&count| count > 0),
             };
-            if let Some(event_object_id) =
-                trigger_event.and_then(crate::game::targeting::extract_source_from_event)
-            {
-                // Event-subject LKI is keyed by the triggering object.
-                state
-                    .lki_cache
-                    .get(&event_object_id)
-                    .is_some_and(matches_counter)
-            } else {
-                source_context
-                    .is_some_and(|source| matches_counter(&source.source_read(state).lki()))
+            match trigger_event {
+                Some(GameEvent::ZoneChanged {
+                    object_id, record, ..
+                }) => match record.trigger_source_context() {
+                    Some(context) => matches_counter(&context.lki),
+                    None => state.lki_cache.get(object_id).is_some_and(matches_counter),
+                },
+                Some(event) => {
+                    if let Some(event_object_id) =
+                        crate::game::targeting::extract_source_from_event(event)
+                    {
+                        state
+                            .lki_cache
+                            .get(&event_object_id)
+                            .is_some_and(matches_counter)
+                    } else {
+                        source_context
+                            .is_some_and(|source| matches_counter(&source.source_read(state).lki()))
+                    }
+                }
+                None => source_context
+                    .is_some_and(|source| matches_counter(&source.source_read(state).lki())),
             }
         }
         // CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they]
@@ -8849,15 +8938,27 @@ pub(crate) fn check_trigger_condition_with_source(
             _ => false,
         },
         TriggerCondition::And { conditions } => conditions.iter().all(|c| {
-            check_trigger_condition_with_source(state, c, controller, source_context, trigger_event)
+            evaluate_trigger_condition_with_source(
+                state,
+                c,
+                controller,
+                source_context,
+                trigger_event,
+            )
         }),
         TriggerCondition::Or { conditions } => conditions.iter().any(|c| {
-            check_trigger_condition_with_source(state, c, controller, source_context, trigger_event)
+            evaluate_trigger_condition_with_source(
+                state,
+                c,
+                controller,
+                source_context,
+                trigger_event,
+            )
         }),
         // CR 603.4 + CR 608.2c: Logical negation — invert the wrapped condition's
         // truth value. Used for "unless [phrase]" intervening-if patterns; mirrors
         // `TargetFilter::Not` and `StaticCondition::Not`.
-        TriggerCondition::Not { condition } => !check_trigger_condition_with_source(
+        TriggerCondition::Not { condition } => !evaluate_trigger_condition_with_source(
             state,
             condition,
             controller,
@@ -10073,6 +10174,7 @@ pub mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::events::{GameEvent, ManaTapState};
     use crate::types::game_state::{
         DamageRecord, DelayedTrigger, DistributionUnit, GameState, LayersDirty, LoopDetectionMode,
@@ -13267,6 +13369,7 @@ pub mod tests {
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
+            spell_object_id: None,
         };
         let current_record = SpellCastRecord {
             name: String::new(),
@@ -13280,6 +13383,7 @@ pub mod tests {
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
+            spell_object_id: None,
         };
         state.spells_cast_this_turn_by_player.insert(
             player,
@@ -17492,6 +17596,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -17505,6 +17610,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
             ]),
         );
@@ -19513,6 +19619,89 @@ pub mod tests {
             PlayerId(0),
             Some(src),
             None,
+        ));
+    }
+
+    #[test]
+    fn had_counters_without_event_uses_latched_source_context() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Countered prior incarnation".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("source exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).expect("source exists"),
+        );
+
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+        assert!(
+            state.objects[&source].counters.is_empty(),
+            "CR 122.2: the later live incarnation must be counterless"
+        );
+
+        assert!(check_trigger_condition_with_source(
+            &state,
+            &TriggerCondition::HadCounters {
+                counter_type: Some(CounterType::Plus1Plus1),
+            },
+            PlayerId(0),
+            Some(&source_context),
+            None,
+        ));
+    }
+
+    #[test]
+    fn had_counters_non_zone_event_preserves_event_subject_cache_lookup() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counterless watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let subject = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Countered event subject".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&subject)
+            .expect("subject exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let watcher_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&watcher).expect("watcher exists"),
+        );
+        move_to_zone(&mut state, subject, Zone::Graveyard, &mut Vec::new());
+        let event = GameEvent::PermanentTapped {
+            object_id: subject,
+            caused_by: None,
+        };
+
+        assert!(check_trigger_condition_with_source(
+            &state,
+            &TriggerCondition::HadCounters {
+                counter_type: Some(CounterType::Plus1Plus1),
+            },
+            PlayerId(0),
+            Some(&watcher_context),
+            Some(&event),
         ));
     }
 
@@ -22262,6 +22451,7 @@ pub mod tests {
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
+                spell_object_id: None,
             }]),
         );
         assert!(
@@ -22284,6 +22474,7 @@ pub mod tests {
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
+                spell_object_id: None,
             }]),
         );
         assert!(
@@ -22307,6 +22498,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -22320,6 +22512,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
             ]),
         );
@@ -22346,6 +22539,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -22359,6 +22553,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
             ]),
         );
@@ -22383,6 +22578,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -22396,6 +22592,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -22409,6 +22606,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
             ]),
         );
@@ -22433,6 +22631,7 @@ pub mod tests {
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
+                spell_object_id: None,
             }
         }
 
@@ -25927,7 +26126,7 @@ pub mod tests {
             make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
             make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
         ];
-        state.pending_continuation = Some(PendingContinuation::new(
+        state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
@@ -25950,6 +26149,21 @@ pub mod tests {
             "drain must be a no-op while pending_continuation is set"
         );
         assert_eq!(state.deferred_triggers.len(), 2);
+    }
+
+    #[test]
+    fn resolution_completion_requires_an_empty_resolution_stack() {
+        let mut state = setup();
+        state.push_proliferate_frame(crate::types::resolution::PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(9_502),
+            remaining: 1,
+        });
+
+        assert!(
+            !resolution_completion_can_settle(&state),
+            "deferred triggers cannot settle while any resolution frame remains active"
+        );
     }
 
     /// Issue #1793: at a true resolution boundary, 2+ same-controller deferred
@@ -31853,8 +32067,8 @@ pub mod tests {
                 &mut events,
             );
             assert!(
-                state.pending_change_zone_iteration.is_none()
-                    && state.pending_batch_deliveries.is_none(),
+                state.active_change_zone_frame().is_none()
+                    && state.active_batch_delivery().is_none(),
                 "{carrier:?} exact production evidence: no nonbattlefield-only pause was fabricated"
             );
             assert!(
@@ -31971,11 +32185,13 @@ pub mod tests {
                 );
                 match carrier {
                     LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state.pending_change_zone_iteration.is_some(),
+                        state
+                            .active_change_zone_frame()
+                            .is_some_and(|frame| frame.pending.is_some()),
                         "ChangeZone slot {paused_index} must retain its production carrier"
                     ),
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
-                        state.pending_batch_deliveries.is_some(),
+                        state.active_batch_delivery().is_some(),
                         "BatchDelivery slot {paused_index} must retain its production carrier"
                     ),
                 }
@@ -32427,11 +32643,13 @@ pub mod tests {
                 );
                 match carrier {
                     LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state.pending_change_zone_iteration.is_some(),
+                        state
+                            .active_change_zone_frame()
+                            .is_some_and(|frame| frame.pending.is_some()),
                         "ChangeZone must retain the mixed-origin owner while parked"
                     ),
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
-                        state.pending_batch_deliveries.is_some(),
+                        state.active_batch_delivery().is_some(),
                         "BatchDelivery must retain the mixed-origin owner while parked"
                     ),
                 }
@@ -32923,8 +33141,7 @@ pub mod tests {
             "positive reach guard: the provider's battlefield departure is delivered before the ordering pause"
         );
         let pending = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("positive reach guard: BatchDelivery retains the mixed-direction owner");
         assert_eq!(
             pending
@@ -33357,15 +33574,14 @@ pub mod tests {
                 let logical_group = match carrier {
                     LogicalZoneProductionCarrier::ChangeZone => {
                         &state
-                            .pending_change_zone_iteration
-                            .as_ref()
+                            .active_change_zone_frame()
+                            .and_then(|frame| frame.pending.as_ref())
                             .expect("ChangeZone suppressor owner is parked")
                             .logical_zone_change_group
                     }
                     LogicalZoneProductionCarrier::BatchDelivery => {
                         &state
-                            .pending_batch_deliveries
-                            .as_ref()
+                            .active_batch_delivery()
                             .expect("BatchDelivery suppressor owner is parked")
                             .logical_zone_change_group
                     }
@@ -33567,15 +33783,14 @@ pub mod tests {
             let logical_group = match carrier {
                 LogicalZoneProductionCarrier::ChangeZone => {
                     &state
-                        .pending_change_zone_iteration
-                        .as_ref()
+                        .active_change_zone_frame()
+                        .and_then(|frame| frame.pending.as_ref())
                         .expect("ChangeZone entering-suppressor owner is parked")
                         .logical_zone_change_group
                 }
                 LogicalZoneProductionCarrier::BatchDelivery => {
                     &state
-                        .pending_batch_deliveries
-                        .as_ref()
+                        .active_batch_delivery()
                         .expect("BatchDelivery entering-suppressor owner is parked")
                         .logical_zone_change_group
                 }

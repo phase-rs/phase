@@ -61,6 +61,15 @@ beforeEach(() => {
 });
 
 describe("openPhaseSocket", () => {
+  it("uses the browser WebSocket constructor when no factory is supplied", async () => {
+    const promise = openPhaseSocket("ws://default-transport");
+    const ws = MockWebSocket.instances[0];
+    expect(ws.url).toBe("ws://default-transport");
+    ws.deliverMessage(helloFrame());
+
+    await expect(promise).resolves.toMatchObject({ ws });
+  });
+
   it("resolves with serverInfo once ServerHello arrives and sends ClientHello", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];

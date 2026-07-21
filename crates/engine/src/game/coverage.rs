@@ -11308,11 +11308,48 @@ mod tests {
     fn analyze_token_coverage_treats_source_defined_pt_as_represented() {
         let summary = analyze_token_coverage();
 
-        assert_eq!(summary.total_tokens, 2845);
-        assert_eq!(summary.supported_tokens, 2845);
-        assert_eq!(summary.rules_text_tokens, 1480);
-        assert_eq!(summary.parsed_rules_text_tokens, 1480);
-        assert_eq!(summary.total_tokens - summary.supported_tokens, 0);
+        // The weekly MTGJSON vintage refresh (#6237) makes absolute token counts
+        // data-dependent. Provenance — that this catalog is what the reproducible
+        // pipeline produces for its vintage — is established UPSTREAM, not here: the
+        // `refresh-card-data.yml` workflow regenerates from a clean checkout and
+        // refuses to open a catalog PR unless `fetch-token-sets.sh` reports every
+        // token-bearing set downloaded (`failed 0`). That fetch-completeness gate,
+        // not these asserts, is what catches a partial regen at its source.
+        //
+        // So these floors are CATASTROPHIC-LOSS BACKSTOPS with deliberate headroom,
+        // not exact ratchets. The invariants below (full parse coverage) are the
+        // strong guards; the floors only fail if the catalog is grossly gutted
+        // (a truncated/empty `known-tokens.toml`), which no headroom should tolerate.
+        //
+        // Basis: a clean, complete pipeline run for vintage 2026-07-21 yields
+        // total_tokens=2858, rules_text_tokens>=1490, source_card_refs=8644. The
+        // count reflects the reproducible fetch scope (`SetList.json` token-bearing
+        // sets). An earlier hand-committed catalog carried source_card_refs=9821 from
+        // a developer's local `data/mtgjson/sets/` dir that had accumulated extra
+        // reprint set files beyond that scope — inflated printings a clean CI fetch
+        // does not reproduce. Do NOT re-pin a floor to a hand-regen count; the
+        // reproducible pipeline output is the reference. Reproduce with:
+        //
+        //     ./scripts/fetch-token-sets.sh   # populates the gitignored input
+        //     cargo run --bin tokens-gen -- --input data/mtgjson/sets --output /tmp/kt.toml
+        //     cmp /tmp/kt.toml crates/engine/data/known-tokens.toml
+        assert_eq!(summary.supported_tokens, summary.total_tokens);
+        assert_eq!(summary.parsed_rules_text_tokens, summary.rules_text_tokens);
+        assert!(
+            summary.total_tokens >= 2700,
+            "token catalog gutted: {} presets < 2700",
+            summary.total_tokens
+        );
+        assert!(
+            summary.rules_text_tokens >= 1400,
+            "token catalog gutted: {} rules-text presets < 1400",
+            summary.rules_text_tokens
+        );
+        assert!(
+            summary.source_card_refs >= 8000,
+            "token catalog gutted: {} source_card_refs < 8000",
+            summary.source_card_refs
+        );
         assert!(!summary.top_gaps.iter().any(|gap| {
             gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
         }));

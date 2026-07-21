@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const EXPECTED_PROTOCOL_VERSION = 20;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);
@@ -70,6 +71,16 @@ requirePattern(
 if (rustVersion !== clientVersion) {
   console.error(
     `Protocol version mismatch: Rust=${rustVersion}, client=${clientVersion}`,
+  );
+  process.exit(1);
+}
+
+if (
+  rustVersion !== EXPECTED_PROTOCOL_VERSION ||
+  clientVersion !== EXPECTED_PROTOCOL_VERSION
+) {
+  console.error(
+    `Protocol version must remain ${EXPECTED_PROTOCOL_VERSION}: Rust=${rustVersion}, client=${clientVersion}`,
   );
   process.exit(1);
 }

@@ -1010,21 +1010,27 @@ pub(crate) fn scale_pt_quantity(amount: i32, quantity: &QuantityExpr) -> Quantit
     }
 }
 
-/// A member of a "loses all [other] abilities, card types, and creature types"
-/// enumeration. Parser-local — maps to one `ContinuousModification` each.
+/// A member of a "loses all [other] abilities, card types, creature types, and
+/// land types" enumeration. Parser-local — maps to one `ContinuousModification`
+/// each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LossMember {
     Abilities,
     CardTypes,
     CreatureTypes,
+    /// CR 205.3i: land types (Alpine Moon, Lithoform Blight, Ultima, Origin of
+    /// Oblivion — "loses all land types and abilities").
+    LandTypes,
 }
 
-/// CR 205.1a + CR 613.1d/f: Parse a "loses all [other] <list>" enumeration at
-/// the start of `input` (lowercase). The list is a comma-and enumeration of
-/// `abilities` / `card types` / `creature types` in any subset and order, so
-/// `separated_list1` over a three-way `alt` covers every combination — the
-/// literal substrings "loses all other card types" never appear contiguously
-/// in the Oxford-comma form, so whole-phrase `tag()` arms would be dead code.
+/// CR 205.1a + CR 205.3i + CR 613.1d/f: Parse a "loses all [other] <list>"
+/// enumeration at the start of `input` (lowercase). The list is a comma-and
+/// enumeration of `abilities` / `card types` / `creature types` / `land types`
+/// in any subset and order, so `separated_list1` over a four-way `alt` covers
+/// every combination — the literal substrings "loses all other card types"
+/// never appear contiguously in the Oxford-comma form, so whole-phrase `tag()`
+/// arms would be dead code. None of the four tags share a prefix, so `alt`
+/// ordering carries no hazard.
 pub(crate) fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMember>> {
     preceded(
         alt((
@@ -1041,6 +1047,7 @@ pub(crate) fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMe
                 value(LossMember::Abilities, tag("abilities")),
                 value(LossMember::CardTypes, tag("card types")),
                 value(LossMember::CreatureTypes, tag("creature types")),
+                value(LossMember::LandTypes, tag("land types")),
             )),
         ),
     )

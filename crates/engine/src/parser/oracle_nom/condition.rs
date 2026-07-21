@@ -655,6 +655,7 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_source_qualified_mana_spent_condition,
         parse_source_qualified_mana_spent_threshold,
         parse_mana_spent_vs_source_pt,
+        parse_colors_of_mana_spent_threshold,
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_put_onto_battlefield_this_way,
@@ -1871,6 +1872,23 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
         StaticCondition::SourceIsSaddled
     };
     Ok((rest, condition))
+}
+
+/// CR 702.171b + CR 508.1m: Bare elided-subject participle state gate
+/// ("Whenever this creature attacks while saddled" — Alacrian Jaguar). The
+/// printed while-gate elides the subject; the participle is part of the trigger
+/// EVENT (a property of the attacking creature at declaration), so
+/// `strip_while_state_clause` folds it into the trigger subject filter
+/// (`valid_card`) evaluated once when attackers are declared (CR 508.1m) — it
+/// is NOT an intervening-`if` and is never rechecked at resolution. Intervening-
+/// if text always prints an explicit subject, so this leaf is composed ONLY at
+/// the while-gate seam (`strip_while_state_clause`), NOT added to
+/// `parse_inner_condition`. Future bare-state participles join as `alt()` arms
+/// here.
+pub(crate) fn parse_elided_subject_state_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    value(StaticCondition::SourceIsSaddled, tag("saddled")).parse(input)
 }
 
 /// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature [you control]"
@@ -6287,14 +6305,13 @@ fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, 
     ))
 }
 
-/// CR 106.3 + CR 601.2h + CR 603.4: Parse
-/// "[N] or more mana from <source-filter> was spent to cast <self>" and
-/// "at least [N] mana from <source-filter> was spent to cast <self>".
-///
-/// CR 400.7d: the subject anaphora selects the scope (see
-/// `parse_source_qualified_mana_spent_condition`).
-fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, (n, comparator)) = alt((
+/// Parse the shared amount-threshold prefix that opens several mana-spent
+/// conditions: `"at least N"` → `(N, GE)` and `"N or more/fewer/less"` →
+/// `(N, GE/LE)`. Factored from the byte-identical closures that previously
+/// duplicated this grammar in `parse_source_qualified_mana_spent_threshold`
+/// and `parse_mana_spent_threshold`; output is pinned by existing tests.
+fn parse_amount_threshold(input: &str) -> OracleResult<'_, (u32, Comparator)> {
+    alt((
         // "at least N " → GE
         |i| {
             let (rest, _) = tag("at least ").parse(i)?;
@@ -6313,7 +6330,17 @@ fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, 
             Ok((rest, (n, cmp)))
         },
     ))
-    .parse(input)?;
+    .parse(input)
+}
+
+/// CR 106.3 + CR 601.2h + CR 603.4: Parse
+/// "[N] or more mana from <source-filter> was spent to cast <self>" and
+/// "at least [N] mana from <source-filter> was spent to cast <self>".
+///
+/// CR 400.7d: the subject anaphora selects the scope (see
+/// `parse_source_qualified_mana_spent_condition`).
+fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (n, comparator)) = parse_amount_threshold(input)?;
     let (rest, _) = tag(" mana from ").parse(rest)?;
     let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
     let (rest, _) = tag(" was spent to cast ").parse(rest)?;
@@ -6454,26 +6481,7 @@ fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> 
     //   "N or more mana was spent to cast …"
     //   "at least N mana was spent to cast …"
     // Plus the inverse: "N or less/fewer mana was spent to cast …"
-    let (rest, (n, comparator)) = alt((
-        // "at least N " → GE
-        |i| {
-            let (rest, _) = tag("at least ").parse(i)?;
-            let (rest, n) = parse_number(rest)?;
-            Ok((rest, (n, Comparator::GE)))
-        },
-        // "N or more/less/fewer"
-        |i| {
-            let (rest, n) = parse_number(i)?;
-            let (rest, cmp) = alt((
-                value(Comparator::GE, tag(" or more")),
-                value(Comparator::LE, tag(" or fewer")),
-                value(Comparator::LE, tag(" or less")),
-            ))
-            .parse(rest)?;
-            Ok((rest, (n, cmp)))
-        },
-    ))
-    .parse(input)?;
+    let (rest, (n, comparator)) = parse_amount_threshold(input)?;
     // Fixed tail: " mana was spent to cast " + subject anaphora.
     let (rest, _) = tag(" mana was spent to cast ").parse(rest)?;
     let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
@@ -6484,6 +6492,43 @@ fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> 
                 qty: QuantityRef::ManaSpentToCast {
                     scope,
                     metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 106.3 + CR 601.2h: Parse "[N] or more colors of mana were spent to cast
+/// <self>" and the singular "one color of mana was spent to cast <self>"
+/// (Steel Exemplar's "unless two or more colors of mana were spent to cast
+/// it"). Measures `CastManaSpentMetric::DistinctColors` — how many distinct
+/// colors of mana paid the cost — against a fixed threshold. CR 400.7d: the
+/// subject anaphora selects the scope (mirrors `parse_mana_spent_threshold`).
+fn parse_colors_of_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    // "two or more colors" / "at least two colors" carry an explicit comparator;
+    // the singular "one color" is a bare count that reads as `>= 1` (any colored
+    // mana spent). The comparator branch is tried first so "N or more" is not
+    // consumed as a bare N.
+    let (rest, (n, comparator)) = alt((
+        parse_amount_threshold,
+        map(parse_number, |n| (n, Comparator::GE)),
+    ))
+    .parse(input)?;
+    // "color" / "colors" — singular ("one color") and plural ("two or more colors").
+    let (rest, _) = (tag(" color"), opt(tag("s"))).parse(rest)?;
+    let (rest, _) = tag(" of mana ").parse(rest)?;
+    let (rest, _) = alt((tag("were"), tag("was"))).parse(rest)?;
+    let (rest, _) = tag(" spent to cast ").parse(rest)?;
+    let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope,
+                    metric: CastManaSpentMetric::DistinctColors,
                 },
             },
             comparator,
@@ -7138,18 +7183,15 @@ fn parse_another_spell_cast_this_turn(
     parse_another_spell_this_turn(rest, minimum)
 }
 
-fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, StaticCondition> {
+/// Parse the tail that follows "cast another " / "you('ve) cast another ":
+/// `"spell this turn"` → `None` (any spell); `"<filter> spell this turn"` →
+/// `Some(filter)` via `parse_spell_history_filter`. Shared by
+/// `parse_another_spell_this_turn` (trigger/GE-N context) and
+/// `parse_you_cast_another_spell_filter_this_turn` (replacement "unless"
+/// context) so both derive the "another" spell-history filter identically.
+fn parse_another_spell_tail(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell this turn").parse(input) {
-        return Ok((
-            rest,
-            make_quantity_ge(
-                QuantityRef::SpellsCastThisTurn {
-                    scope: CountScope::Controller,
-                    filter: None,
-                },
-                minimum,
-            ),
-        ));
+        return Ok((rest, None));
     }
     let (rest, type_text) = take_until(" this turn").parse(input)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
@@ -7159,16 +7201,37 @@ fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, 
             nom::error::ErrorKind::Fail,
         )));
     };
+    Ok((rest, Some(filter)))
+}
+
+fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, StaticCondition> {
+    let (rest, filter) = parse_another_spell_tail(input)?;
     Ok((
         rest,
         make_quantity_ge(
             QuantityRef::SpellsCastThisTurn {
                 scope: CountScope::Controller,
-                filter: Some(filter),
+                filter,
             },
             minimum,
         ),
     ))
+}
+
+/// CR 614.1c (replacement classification) + CR 109.1 (identity basis for
+/// "another"): Parse "you('ve) cast another [<filter>] spell this turn" and
+/// return the controller-scoped spell-history filter (`None` = any spell).
+/// Used by the ETB "unless" replacement parser to build the own-cast-excluding
+/// `SpellsCastThisTurn` reference; the exclusion marker is injected by the
+/// caller via `TargetFilter::with_own_cast_exclusion`.
+pub(crate) fn parse_you_cast_another_spell_filter_this_turn(
+    input: &str,
+) -> OracleResult<'_, Option<TargetFilter>> {
+    preceded(
+        alt((tag("you cast another "), tag("you've cast another "))),
+        parse_another_spell_tail,
+    )
+    .parse(input)
 }
 
 fn parse_spell_history_filter_with_optional_article(type_text: &str) -> Option<TargetFilter> {
@@ -9242,6 +9305,31 @@ mod tests {
             }
             other => panic!("expected QuantityComparison BendTypesThisTurn>=4, got {other:?}"),
         }
+    }
+
+    /// CR 702.171b + CR 603.4: the bare elided-subject "saddled" participle
+    /// (Alacrian Jaguar's "attacks while saddled") parses to `SourceIsSaddled`
+    /// with empty remainder.
+    #[test]
+    fn parse_elided_subject_state_condition_saddled() {
+        let (rest, cond) =
+            parse_elided_subject_state_condition("saddled").expect("bare 'saddled' must parse");
+        assert_eq!(
+            rest, "",
+            "bare 'saddled' must fully consume, remainder {rest:?}"
+        );
+        assert_eq!(cond, StaticCondition::SourceIsSaddled);
+    }
+
+    /// A superstring like "saddledness" parses the "saddled" prefix but leaves a
+    /// nonempty remainder — the caller's full-consumption guard
+    /// (`strip_while_state_clause`) is the rejection authority, not this leaf.
+    #[test]
+    fn parse_elided_subject_state_condition_superstring_leaves_remainder() {
+        let (rest, cond) =
+            parse_elided_subject_state_condition("saddledness").expect("prefix 'saddled' parses");
+        assert_eq!(rest, "ness", "remainder is the unconsumed suffix");
+        assert_eq!(cond, StaticCondition::SourceIsSaddled);
     }
 
     /// CR 603.12 + CR 701.21a: the active-voice reflexive sacrifice gate
@@ -16022,6 +16110,100 @@ mod tests {
             }
             other => panic!("expected ManaSpentToCast QuantityComparison, got {other:?}"),
         }
+    }
+
+    /// CR 106.3 + CR 601.2h: "two or more colors of mana were spent to cast it"
+    /// → DistinctColors GE 2 (Steel Exemplar's unless clause).
+    #[test]
+    fn colors_of_mana_spent_threshold_two_or_more() {
+        let (rest, c) =
+            parse_inner_condition("two or more colors of mana were spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope,
+                                metric: CastManaSpentMetric::DistinctColors,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => assert_eq!(scope, CastManaObjectScope::SelfObject),
+            other => panic!("expected DistinctColors GE 2, got {other:?}"),
+        }
+    }
+
+    /// CR 106.3: singular "one color of mana was spent to cast it" → DistinctColors GE 1.
+    #[test]
+    fn colors_of_mana_spent_threshold_singular() {
+        let (rest, c) = parse_inner_condition("one color of mana was spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: CastManaSpentMetric::DistinctColors,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        ));
+    }
+
+    /// CR 400.7d: the subject anaphora "that spell" selects `TriggeringSpell` scope.
+    #[test]
+    fn colors_of_mana_spent_threshold_that_spell_scope() {
+        let (rest, c) =
+            parse_inner_condition("two or more colors of mana were spent to cast that spell")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::DistinctColors,
+                    },
+                },
+                ..
+            }
+        ));
+    }
+
+    /// Negative sibling: "spent to activate this ability" must NOT parse via the
+    /// colors-spent-to-cast arm (it lacks the "spent to cast <subject>" tail).
+    /// Reach-guard: the parseable "…to cast it" sibling in
+    /// `colors_of_mana_spent_threshold_singular` proves the arm is live.
+    #[test]
+    fn colors_of_mana_spent_threshold_rejects_activate_ability() {
+        let parsed =
+            parse_inner_condition("two or more colors of mana were spent to activate this ability");
+        let is_colors_metric = matches!(
+            parsed,
+            Ok((
+                _,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentToCast {
+                            metric: CastManaSpentMetric::DistinctColors,
+                            ..
+                        },
+                    },
+                    ..
+                }
+            ))
+        );
+        assert!(
+            !is_colors_metric,
+            "activate-ability text must not parse as colors-spent-to-cast"
+        );
     }
 
     #[test]

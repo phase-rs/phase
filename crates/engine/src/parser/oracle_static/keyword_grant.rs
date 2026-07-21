@@ -1276,12 +1276,17 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
     let mut modifications = Vec::new();
 
-    // CR 205.1a + CR 613.1d/f: "loses all [other] abilities, card types, and
-    // creature types" — a comma-and enumeration parsed with nom. Each member
-    // maps to one modification. `CardTypes` requires the granted core-type
-    // list, which only the "is a [type]" caller (`parse_enchanted_is_type`)
-    // owns — in the standalone path it has no type set and is a no-op (such
-    // text does not occur outside the "is a [type]" frame).
+    // CR 205.1a + CR 205.3i + CR 613.1d/f: "loses all [other] abilities, card
+    // types, creature types, and land types" — a comma-and enumeration parsed
+    // with nom. Each member maps to one modification. `CardTypes` requires the
+    // granted core-type list, which only the "is a [type]" caller
+    // (`parse_enchanted_is_type`) owns — in the standalone path it has no type
+    // set and is a no-op (such text does not occur outside the "is a [type]"
+    // frame). `LandTypes` (Alpine Moon, Lithoform Blight, Ultima, Origin of
+    // Oblivion — "loses all land types and abilities") reuses the same
+    // `RemoveAllSubtypes` runtime the `CreatureTypes` arm already exercises;
+    // `game/layers.rs` already has a working `SubtypeSet::Land` arm, so this is
+    // pure parser wiring, no engine change.
     for member in scan_loss_enumeration(unquoted_tp.lower) {
         match member {
             LossMember::Abilities => {
@@ -1290,6 +1295,11 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             LossMember::CreatureTypes => {
                 modifications.push(ContinuousModification::RemoveAllSubtypes {
                     set: crate::types::card_type::SubtypeSet::Creature,
+                });
+            }
+            LossMember::LandTypes => {
+                modifications.push(ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Land,
                 });
             }
             LossMember::CardTypes => {}

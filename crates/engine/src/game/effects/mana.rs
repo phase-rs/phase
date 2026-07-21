@@ -1412,7 +1412,7 @@ mod tests {
             }
             other => panic!("expected AnyCombination mana choice, got {other:?}"),
         };
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
 
         handle_choose_mana_effect(
             &mut state,
@@ -1427,7 +1427,7 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
         assert_eq!(state.players[0].mana_pool.total(), 2);
         assert!(state.players[0].hand.contains(&drawn));
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
     }
 
     #[test]
