@@ -338,7 +338,10 @@ pub(crate) fn resume_draw_sequence(
         let completed = state
             .take_completed_multi_draw_frame()
             .expect("completed multi-draw frame must remain top-owned");
-        if completed.is_some() {
+        // The promoted continuation is now the paused drain's direct child;
+        // it must read the resident event context before its own completion
+        // retires that drain.
+        if completed.is_some() && state.active_ability_continuation().is_none() {
             state.finish_active_paused_post_replacement_dispatch();
         }
     }

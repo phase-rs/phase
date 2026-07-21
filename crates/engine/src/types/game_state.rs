@@ -14083,7 +14083,10 @@ impl GameState {
                 let completed = self
                     .take_completed_multi_draw_frame()
                     .expect("an empty multi-draw frame must remain top-owned");
-                if completed.is_some() {
+                // A continuation promoted out of the paused draw pair still
+                // needs this drain's CR 615.5 event context. Its own completion
+                // retires the exact resident dispatch.
+                if completed.is_some() && self.active_ability_continuation().is_none() {
                     self.finish_active_paused_post_replacement_dispatch();
                 }
             }
@@ -14161,9 +14164,12 @@ impl GameState {
         let paired_post_replacement = self
             .resolution_stack
             .has_active_post_replacement_draw_pair();
-        if let Some(super::resolution::ResolutionFrame::PostReplacement(drains)) =
-            self.resolution_stack.active_predecessor()
-        {
+        if paired_post_replacement {
+            let Some(super::resolution::ResolutionFrame::PostReplacement(drains)) =
+                self.resolution_stack.active_predecessor()
+            else {
+                unreachable!("a verified post-replacement/draw pair has its exact parent")
+            };
             debug_assert!(matches!(
                 drains.resident().map(|drain| &drain.status),
                 Some(DrainStatus::Paused | DrainStatus::Dispatching)
@@ -14173,7 +14179,10 @@ impl GameState {
             // parent to Paused. In both cases the parent remains resident until
             // its own typed dispatch lifecycle retires it. Do not drop the
             // whole parent frame as an adjacency shortcut: it may own older
-            // nested dispatch context beneath this resident entry.
+            // nested dispatch context beneath this resident entry. A newly
+            // installed Ready drain may also sit directly below a pre-existing
+            // draw; that is not this dispatch-originated pair and remains for
+            // the regular post-replacement dispatcher after the draw pops.
         }
         self.resolution_stack
             .observe_draw_sequence_frame_id(next_frame_id);
@@ -16679,6 +16688,7 @@ mod drain_stack_reentrancy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter,
@@ -18127,6 +18137,112 @@ mod tests {
         assert!(
             state.resolution_stack.is_empty(),
             "the direct life-assignment child and its paused post-replacement parent are abandoned together"
+        );
+    }
+
+    /// CR 615.5 + CR 701.50a: consuming the connive re-entry embedded in a
+    /// completed paired draw promotes its outer continuation before the paused
+    /// drain retires, so `PostReplacementSourceController` retains the
+    /// prevented event's controller.
+    #[test]
+    fn connive_reentry_keeps_paired_drain_for_promoted_context_continuation() {
+        let mut state = GameState::new_two_player(42);
+        let conniver = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Conniver".to_string(),
+            Zone::Battlefield,
+        );
+        let event_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Event source".to_string(),
+            Zone::Battlefield,
+        );
+        let context_drawn = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Context draw".to_string(),
+            Zone::Library,
+        );
+        let connive_subject = state
+            .capture_connive_subject(conniver)
+            .expect("conniver exists for the stored snapshot");
+
+        state.park_ability_continuation(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::PostReplacementSourceController,
+                },
+                Vec::new(),
+                conniver,
+                PlayerId(0),
+            )),
+            &state,
+        ));
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Resolved(Box::new(
+                ResolvedAbility::new(
+                    Effect::Connive {
+                        target: TargetFilter::SelfRef,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    Vec::new(),
+                    conniver,
+                    PlayerId(0),
+                ),
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        let (_, dispatch) = drains
+            .begin_dispatch()
+            .expect("ready drain starts its exact dispatch");
+        assert!(drains.pause_dispatch(dispatch));
+        drains
+            .resident_mut()
+            .expect("paused drain remains resident")
+            .event_source = Some(event_source);
+        state.resolution_stack.push_post_replacement(drains);
+        state.resolution_stack.push_multi_draw(MultiDrawFrame {
+            draw_sequences: DrawSequenceStack::default(),
+            connive_reentry: Some(PendingConniveReentry {
+                conniver: connive_subject.clone(),
+                count: 0,
+                applied: HashSet::new(),
+            }),
+        });
+
+        let reentry = state
+            .take_active_connive_reentry()
+            .expect("the active draw owns the connive re-entry");
+        assert_eq!(reentry.conniver, connive_subject);
+        assert!(matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::AbilityContinuation(_))
+        ));
+        assert!(matches!(
+            state
+                .active_post_replacement_drains()
+                .and_then(PostReplacementDrainStack::resident)
+                .map(|drain| &drain.status),
+            Some(DrainStatus::Paused)
+        ));
+
+        crate::game::effects::drain_pending_continuation(&mut state, &mut Vec::new());
+
+        assert!(
+            state.players[1].hand.contains(&context_drawn),
+            "the promoted continuation resolves against the paused drain's event source controller"
+        );
+        assert!(
+            state.active_post_replacement_drains().is_none(),
+            "the exact paused drain retires after its promoted continuation completes"
         );
     }
 
