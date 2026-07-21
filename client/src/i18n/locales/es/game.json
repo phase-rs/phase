@@ -413,6 +413,7 @@
   "counterTooltip": {
     "summary_one": "1 contador {{label}}\n{{description}}",
     "summary_other": "{{count}} contadores {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ contadores {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Cada contador +1/+1 da +1/+1 al permanente.",
       "m1m1": "Cada contador -1/-1 da -1/-1 al permanente.",
@@ -576,6 +577,15 @@
     "resourceMana": "maná",
     "resourceCounters": "contadores",
     "resourceSpeed": "velocidad",
+    "loopCollapseTitleTokens": "Elige cuántas fichas crear",
+    "loopCollapseTitleCounters": "Elige cuántas veces añadir contadores",
+    "loopCollapseTitleLife": "Elige cuántas veces ganar vida",
+    "loopCollapseTitleMixed": "Elige cuántas veces repetir el bucle",
+    "loopCollapseAmountTokens_one": "Crear {{count}} ficha",
+    "loopCollapseAmountTokens_other": "Crear {{count}} fichas",
+    "loopCollapseAmountCounters": "Añadir contadores {{value}}×",
+    "loopCollapseAmountLife": "Ganar vida {{value}}×",
+    "loopCollapseAmountMixed": "Repetir el bucle {{value}}×",
     "manualMana": "Manual",
     "manualManaTooltip": "Maná manual — solo esta partida. Toca tus propias tierras y maná para pagar.",
     "spendHint": "Haz clic en tu maná para gastarlo en este coste",
@@ -1765,6 +1775,13 @@
     "variantBestow": "Lanzar con Otorgar",
     "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
+    "variantMutate": "Lanzar con Mutate",
+    "variantAwaken": "Lanzar con Despertar",
+    "variantCleave": "Lanzar con Recortar",
+    "variantImpending": "Lanzar con Inminencia",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lanzar con Prototipo",
+    "variantFaceDown": "Lanzar boca abajo",
     "variantFallback": "Lanzar con {{type}}"
   },
   "categoryChoice": {

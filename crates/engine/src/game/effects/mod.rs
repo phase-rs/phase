@@ -2390,6 +2390,15 @@ pub(super) fn resolve_optional_effect_decision(
                 // chain context carries `optional_effect_performed = true` —
                 // but each opponent's own decline must read `false`).
                 resolved.context.optional_effect_performed = false;
+                // CR 608.2c: The `Not(OptionalEffectPerformed)` gate's role — run
+                // this branch only because the PARENT optional was declined — is
+                // now fulfilled by the selection above. If the branch is ITSELF an
+                // optional ("If you don't, you MAY put a land" — Kellan, the Kid),
+                // accepting its own "may" latches `optional_effect_performed = true`,
+                // which would re-trip this same gate on the accept re-entry and
+                // silently skip the branch's effect. Strip the consumed gate so the
+                // branch resolves on its own optional decision.
+                strip_consumed_decline_performed_gate(&mut resolved);
                 resolve_ability_chain(state, &resolved, events, depth)?;
             }
         }
@@ -2613,6 +2622,93 @@ fn nested_optional_decline_clause(ability: &ResolvedAbility) -> Option<&Resolved
         current = node.sub_ability.as_deref();
     }
     None
+}
+
+/// CR 608.2c: Remove a consumed `Not(OptionalEffectPerformed)` decline gate from
+/// a branch that has already been *selected* to run because its parent optional
+/// was declined. The gate's sole purpose is that selection; leaving it on a
+/// branch that is itself optional (Kellan, the Kid — "If you don't, you may put
+/// a land") is a latent bug: accepting the branch's own "may" latches
+/// `optional_effect_performed = true`, so the branch's fresh
+/// `resolve_ability_chain` re-entry re-evaluates the same `Not` gate as false and
+/// silently drops the effect.
+///
+/// Structural: the parent optional was declined, so the `Not(OptionalEffectPerformed)`
+/// selector leaf is known TRUE — its selection role is fulfilled. Substitute
+/// that value and simplify the boolean tree so the residual gates ONLY the
+/// predicates that remain independent of the parent decision (CR 608.2c). This
+/// mirrors the selector `should_resolve_subability_on_optional_decline`, which
+/// accepts any `And`/`Or` containing a performed gate — the transform must be
+/// safe for every such shape it admits, not just the bare `Not` and `And` forms:
+/// - bare `Not(OptionalEffectPerformed)` → no residual (resolves on its own may).
+/// - `And([Not(OptionalEffectPerformed), P…])` → `And([P…])` (siblings preserved;
+///   `true` is the `And` identity).
+/// - `Or([Not(OptionalEffectPerformed), P…])` → no residual (`true` absorbs the
+///   `Or`; the branch was already selected because the parent declined, so no
+///   sibling disjunct can gate it further). Leaving the raw `Not` here was a
+///   latent bug: an optional branch's own accept flips `optional_effect_performed`
+///   to true, turning the `Not` false, and `Or([false, false])` would silently
+///   drop the selected effect.
+///
+/// A positive `OptionalEffectPerformed` disjunct (Armored Kincaller-class
+/// `Or([OptionalEffectPerformed, QuantityCheck])`) carries NO consumed `Not`
+/// leaf, so it is left untouched for post-decline re-evaluation. Only runs when
+/// the branch is optional — a non-optional branch never re-enters through an
+/// accept, so its gate is harmless.
+fn strip_consumed_decline_performed_gate(ability: &mut ResolvedAbility) {
+    if !ability.optional {
+        return;
+    }
+    ability.condition = ability
+        .condition
+        .take()
+        .and_then(strip_consumed_not_optional_effect_performed);
+}
+
+/// Substitute the consumed parent-decline `Not(OptionalEffectPerformed)` leaf
+/// with its selection-time truth (`true`) and simplify. Returns `None` when the
+/// residual is trivially true (branch resolves on its own decision), else the
+/// simplified residual. A tree carrying no such leaf is returned unchanged.
+fn strip_consumed_not_optional_effect_performed(
+    condition: AbilityCondition,
+) -> Option<AbilityCondition> {
+    match condition {
+        // Consumed leaf → `true`: drop it from the residual.
+        AbilityCondition::Not { condition } if condition.is_optional_effect_performed() => None,
+        // `true` is the `And` identity: drop consumed conjuncts, keep siblings.
+        AbilityCondition::And { conditions } => {
+            let mut kept = Vec::with_capacity(conditions.len());
+            for c in conditions {
+                match strip_consumed_not_optional_effect_performed(c) {
+                    None => {}
+                    Some(AbilityCondition::And { conditions: nested }) => kept.extend(nested),
+                    Some(kept_c) => kept.push(kept_c),
+                }
+            }
+            match kept.len() {
+                0 => None,
+                1 => kept.pop(),
+                _ => Some(AbilityCondition::And { conditions: kept }),
+            }
+        }
+        // `true` absorbs an `Or`: a consumed disjunct makes the whole `Or` true.
+        AbilityCondition::Or { conditions } => {
+            let mut kept = Vec::with_capacity(conditions.len());
+            for c in conditions {
+                match strip_consumed_not_optional_effect_performed(c) {
+                    None => return None,
+                    Some(AbilityCondition::Or { conditions: nested }) => kept.extend(nested),
+                    Some(kept_c) => kept.push(kept_c),
+                }
+            }
+            match kept.len() {
+                0 => None,
+                1 => kept.pop(),
+                _ => Some(AbilityCondition::Or { conditions: kept }),
+            }
+        }
+        other => Some(other),
+    }
 }
 
 fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> bool {
@@ -5045,6 +5141,27 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // retains the original whole-ability dry-run, which keeps successful
             // zone-selection fallbacks feasible while preserving other errors.
             if matches!(mode, CardPlayMode::Cast) {
+                // CR 608.2d: An optional hand-pick cast ("you may cast a permanent
+                // spell … from your hand") with no eligible card is impossible.
+                // This only needs to be treated as infeasible up front when the
+                // ability carries a `Not(OptionalEffectPerformed)` decline fallback
+                // (Kellan's "If you don't, put a land"): declining routes that
+                // fallback through the decline authority instead of offering a cast
+                // prompt that can select nothing (issue #5945). A subless hand cast
+                // (Electrodominance) has no fallback to route to and must remain
+                // offerable — its empty pick simply resolves as a no-op — so the
+                // whole-ability dry-run below still governs it. The predicate
+                // returns `None` for pre-bound / non-hand `CastFromZone` classes.
+                if ability
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(should_resolve_subability_on_optional_decline)
+                {
+                    if let Some(true) = cast_from_zone::hand_pick_eligible_is_empty(state, ability)
+                    {
+                        return true;
+                    }
+                }
                 let bound_objects: Vec<_> = ability
                     .targets
                     .iter()
@@ -8602,6 +8719,29 @@ fn resolve_chain_body(
         // so skip it (Osteomancer Adept, The Tomb of Aclazotz).
         if matches!(&ability.effect, Effect::CastFromZone { .. })
             && cast_from_zone::is_enters_with_counter_rider_subability(sub)
+        {
+            return Ok(());
+        }
+
+        // CR 608.2c + CR 608.2g: A hand-pick `CastFromZone` (Kellan, the Kid —
+        // "you may cast a permanent spell … from your hand without paying its
+        // mana cost") installs its own resolution-time continuation: the full
+        // granting ability (INCLUDING this `sub_ability`) is stashed by
+        // `open_private_zone_cast_selection`, which raises an `EffectZoneChoice`
+        // so the chosen spell is cast during resolution once the player selects
+        // it. The generic sub-stash below would `prepend_to_pending_continuation`
+        // this ability's `sub_ability` (the "If you don't, put a land" clause)
+        // AHEAD of that head, making the sub the continuation head — the resume
+        // then feeds the wrong ability into `complete_hand_pick_cast_from_zone`
+        // and errors ("ability doesn't exist", issue #5945). Skip it, like the
+        // sibling `CastFromZone` rider skips above and the PayCost/Explore
+        // install-detection below. Fires only when `sub_ability.is_some()`, so
+        // subless hand-pick casters (Electrodominance, Baral's Expertise) are
+        // unaffected.
+        if matches!(&ability.effect, Effect::CastFromZone { .. })
+            && waits_for_resolution_choice(&state.waiting_for)
+            && state.pending_continuation.is_some()
+            && state.pending_continuation != pending_continuation_before
         {
             return Ok(());
         }
@@ -12666,6 +12806,254 @@ mod tests {
                 "accept skips decline clause C (card stays in library)"
             );
         }
+    }
+
+    /// CR 608.2c: Structural strip of a consumed `Not(OptionalEffectPerformed)`
+    /// leaf from an `And` — siblings survive for the branch's own resolution.
+    #[test]
+    fn strip_consumed_decline_gate_removes_not_leaf_from_and_keeps_sibling() {
+        let mut branch = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        branch.condition = Some(AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::effect_performed()),
+                },
+                AbilityCondition::IsYourTurn,
+            ],
+        });
+        strip_consumed_decline_performed_gate(&mut branch);
+        assert_eq!(
+            branch.condition,
+            Some(AbilityCondition::IsYourTurn),
+            "And must drop only the consumed Not leaf and keep the sibling"
+        );
+    }
+
+    /// Proven Armored Kincaller-class Or shape must not be rewritten by the
+    /// decline-gate strip — positive `OptionalEffectPerformed` disjuncts re-evaluate.
+    #[test]
+    fn strip_consumed_decline_gate_leaves_positive_or_unchanged() {
+        let or = AbilityCondition::Or {
+            conditions: vec![
+                AbilityCondition::effect_performed(),
+                AbilityCondition::IsYourTurn,
+            ],
+        };
+        let mut branch = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        branch.condition = Some(or.clone());
+        strip_consumed_decline_performed_gate(&mut branch);
+        assert_eq!(branch.condition, Some(or));
+    }
+
+    /// CR 608.2c + CR 608.2d: Production path — optional compound decline branch
+    /// `And([Not(OptionalEffectPerformed), IsYourTurn])`. Declining the parent
+    /// selects the branch; accepting the branch's own "may" must still resolve
+    /// after the consumed Not leaf is stripped (same failure mode as Kellan's
+    /// simple `Not` form, now covered for the composite And shape).
+    #[test]
+    fn optional_and_decline_branch_accepts_after_stripping_consumed_not_leaf() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        let start_life = state.players[0].life;
+
+        let mut decline = optional_gain_life(ObjectId(100), PlayerId(0), 4);
+        decline.condition = Some(AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::effect_performed()),
+                },
+                AbilityCondition::IsYourTurn,
+            ],
+        });
+        let parent = optional_gain_life(ObjectId(100), PlayerId(0), 0).sub_ability(decline);
+
+        let mut events = Vec::new();
+        resolve_optional_effect_decision(
+            &mut state,
+            parent,
+            AutoMayChoice::Decline,
+            &mut events,
+            0,
+        )
+        .expect("parent decline selects the compound branch");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "compound decline branch is itself optional, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .expect("accept the decline branch's own may");
+        assert_eq!(
+            state.players[0].life,
+            start_life + 4,
+            "accepting the compound decline branch must resolve after stripping \
+             the consumed Not(OptionalEffectPerformed) leaf"
+        );
+    }
+
+    /// CR 608.2c: Sibling conjunct still gates resolution after the consumed
+    /// decline leaf is stripped — when `IsYourTurn` is false, accepting the
+    /// parent's decline must not resolve the optional branch effect.
+    #[test]
+    fn optional_and_decline_branch_still_evaluates_sibling_conjunct() {
+        let mut state = GameState::new_two_player(42);
+        // Controller is PlayerId(0); make it not their turn so IsYourTurn fails.
+        state.active_player = PlayerId(1);
+        let start_life = state.players[0].life;
+
+        let mut decline = optional_gain_life(ObjectId(100), PlayerId(0), 4);
+        decline.condition = Some(AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::effect_performed()),
+                },
+                AbilityCondition::IsYourTurn,
+            ],
+        });
+        let parent = optional_gain_life(ObjectId(100), PlayerId(0), 0).sub_ability(decline);
+
+        let mut events = Vec::new();
+        resolve_optional_effect_decision(
+            &mut state,
+            parent,
+            AutoMayChoice::Decline,
+            &mut events,
+            0,
+        )
+        .expect("parent decline reaches the compound branch");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "false sibling conjunct must suppress the optional decline branch, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.players[0].life, start_life,
+            "sibling IsYourTurn=false must keep the decline-branch effect from resolving"
+        );
+    }
+
+    /// CR 608.2c: A consumed `Not(OptionalEffectPerformed)` disjunct is `true`
+    /// at selection (the parent declined), which absorbs the whole `Or` — the
+    /// residual is trivially true, so no sibling disjunct can gate the branch.
+    #[test]
+    fn strip_consumed_decline_gate_absorbs_negative_or_to_none() {
+        let mut branch = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        branch.condition = Some(AbilityCondition::Or {
+            conditions: vec![
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::effect_performed()),
+                },
+                AbilityCondition::IsYourTurn,
+            ],
+        });
+        strip_consumed_decline_performed_gate(&mut branch);
+        assert_eq!(
+            branch.condition, None,
+            "Or with a consumed Not leaf is absorbed to true (no residual gate)"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2d: Production path — the negative-`Or` shape the
+    /// selector admits, `Or([Not(OptionalEffectPerformed), IsYourTurn])`, with
+    /// the sibling FALSE (controller is not the active player). The parent
+    /// decline selected the branch via the true `Not` disjunct; accepting the
+    /// branch's own "may" must still resolve. Before the absorbing transform the
+    /// accept flipped `optional_effect_performed` true, leaving `Or([false,
+    /// false])` and silently dropping the effect.
+    #[test]
+    fn optional_negative_or_decline_branch_accepts_when_sibling_false() {
+        let mut state = GameState::new_two_player(42);
+        // Controller is PlayerId(0); active player is PlayerId(1) → IsYourTurn false.
+        state.active_player = PlayerId(1);
+        let start_life = state.players[0].life;
+
+        let mut decline = optional_gain_life(ObjectId(100), PlayerId(0), 4);
+        decline.condition = Some(AbilityCondition::Or {
+            conditions: vec![
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::effect_performed()),
+                },
+                AbilityCondition::IsYourTurn,
+            ],
+        });
+        let parent = optional_gain_life(ObjectId(100), PlayerId(0), 0).sub_ability(decline);
+
+        let mut events = Vec::new();
+        resolve_optional_effect_decision(
+            &mut state,
+            parent,
+            AutoMayChoice::Decline,
+            &mut events,
+            0,
+        )
+        .expect("parent decline selects the negative-Or branch");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "negative-Or decline branch is itself optional, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .expect("accept the decline branch's own may");
+        assert_eq!(
+            state.players[0].life,
+            start_life + 4,
+            "negative-Or decline branch must resolve after the consumed Not \
+             disjunct absorbs the Or — the false sibling must not drop the effect"
+        );
+    }
+
+    /// CR 608.2c: Sibling-truth companion to the negative-`Or` case — with the
+    /// sibling TRUE (controller is the active player) the branch still resolves.
+    /// The consumed `Not` disjunct already absorbs the `Or`, so the outcome is
+    /// independent of the sibling's truth value (contrast the `And` case, where
+    /// the sibling gates).
+    #[test]
+    fn optional_negative_or_decline_branch_accepts_when_sibling_true() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        let start_life = state.players[0].life;
+
+        let mut decline = optional_gain_life(ObjectId(100), PlayerId(0), 4);
+        decline.condition = Some(AbilityCondition::Or {
+            conditions: vec![
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::effect_performed()),
+                },
+                AbilityCondition::IsYourTurn,
+            ],
+        });
+        let parent = optional_gain_life(ObjectId(100), PlayerId(0), 0).sub_ability(decline);
+
+        let mut events = Vec::new();
+        resolve_optional_effect_decision(
+            &mut state,
+            parent,
+            AutoMayChoice::Decline,
+            &mut events,
+            0,
+        )
+        .expect("parent decline selects the negative-Or branch");
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .expect("accept the decline branch's own may");
+        assert_eq!(
+            state.players[0].life,
+            start_life + 4,
+            "negative-Or decline branch resolves regardless of the sibling truth value"
+        );
     }
 
     #[test]

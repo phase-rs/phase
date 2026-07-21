@@ -10298,3 +10298,57 @@ fn morph_casts_face_down_under_multiple_name_prohibitions() {
         "CR 708.2a: a face-down spell has no name"
     );
 }
+
+/// LOW-2 (CR 732.2a / CR 111.10): `derived_fodder_class` is the single-new-object gate that
+/// guarantees the boundary Tokens mint's per-cycle fodder count k ≡ 1. It returns `Some(class)`
+/// for a period that reproduced EXACTLY one new battlefield object, and `None` for a period that
+/// reproduced two+ (a non-certifiable multi-fodder shape ⇒ no `Tokens` stash ⇒ no k·N undercount).
+/// This is the structural proof behind the k≡1 annotation at the boundary mint and on the
+/// `PersistentAxisMaterialization::Tokens` variant.
+///
+/// REVERT-FAILING assertion: delete `if new_ids.next().is_some() { return None }` in
+/// `derived_fodder_class` (engine.rs) ⇒ the two-new-object case returns `Some(first)` ⇒ the
+/// `is_none()` assert below flips to FAIL. Non-vacuity: the paired one-new-object `Some` case is
+/// the positive reach-guard (the gate genuinely admits the k≡1 shape).
+#[test]
+fn derived_fodder_class_is_single_new_object_gate() {
+    let before = GameState::new_two_player(7);
+
+    // One new battlefield object across the period ⇒ Some(class) (the k≡1 certifiable shape).
+    let mut after_one = before.clone();
+    let saproling = create_object(
+        &mut after_one,
+        CardId(1),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    let class = derived_fodder_class(&before, &after_one);
+    assert!(
+        class.as_ref().is_some_and(|o| o.id == saproling),
+        "reach-guard: one new battlefield object ⇒ the reproduced fodder class; got {class:?}"
+    );
+
+    // Two new battlefield objects across the period ⇒ None: a multi-fodder period is not this
+    // shape, so no `Tokens` stash is registered and the k>1 undercount is unreachable.
+    let mut after_two = before.clone();
+    create_object(
+        &mut after_two,
+        CardId(1),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    create_object(
+        &mut after_two,
+        CardId(2),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    assert!(
+        derived_fodder_class(&before, &after_two).is_none(),
+        "single-new-object gate: two new battlefield objects ⇒ None (delete the second-`next` \
+         guard and this flips to Some)"
+    );
+}

@@ -1271,6 +1271,69 @@ impl GameObject {
         Ok(())
     }
 
+    /// Appends one trigger that belongs to this object's own printed/base set,
+    /// keeping `base_trigger_definitions` and the live list in lockstep and
+    /// stamping a real `Printed` occurrence ref for the new slot.
+    ///
+    /// This is the single authority for "this object gains a trigger that is
+    /// part of what it *is*" (CR 111.3 token abilities, CR 707.9a copiable
+    /// values, synthesized printed riders). It exists so callers never push a
+    /// bare `TriggerDefinition` into the live list: that conversion stamps
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized`, which
+    /// [`Self::validate_trigger_definitions`] rejects from an observable state
+    /// and which `#[serde(skip_serializing)]` turns into a hard serialization
+    /// failure at the WASM bridge.
+    ///
+    /// Grants from a *separate* source are not printed slots — those go through
+    /// the grant authority (`install_trigger_candidate`) so they carry a
+    /// `Granted`/`ExpandedGrant` producer key instead.
+    pub fn push_printed_trigger(&mut self, definition: TriggerDefinition) {
+        let base_set = self.trigger_base_set_instance;
+        let printed_index = {
+            let base = Arc::make_mut(&mut self.base_trigger_definitions);
+            let index = base.len();
+            base.push(definition.clone());
+            index
+        };
+        self.trigger_definitions.push(TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set,
+                printed_index,
+            },
+            definition,
+        ));
+    }
+
+    /// Refreshes the live entry for a printed slot that already exists in
+    /// `base_trigger_definitions`, reusing that slot's index so the occurrence
+    /// ref stays provable. Returns `false` when no matching base slot exists.
+    pub fn relive_printed_trigger(&mut self, matches: impl Fn(&TriggerDefinition) -> bool) -> bool {
+        let Some(printed_index) = self.base_trigger_definitions.iter().position(matches) else {
+            return false;
+        };
+        let base_set = self.trigger_base_set_instance;
+        if self.trigger_definitions.iter_all().any(|entry| {
+            matches!(
+                &entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: entry_base_set,
+                    printed_index: entry_printed_index,
+                } if *entry_base_set == base_set && *entry_printed_index == printed_index
+            )
+        }) {
+            return true;
+        }
+        let definition = self.base_trigger_definitions[printed_index].clone();
+        self.trigger_definitions.push(TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set,
+                printed_index,
+            },
+            definition,
+        ));
+        true
+    }
+
     /// Re-materializes the live base slots without changing their generation.
     /// Ordinary full/incremental layer resets and same-face rehydration use this
     /// path, preserving each printed slot's occurrence identity.
@@ -2787,6 +2850,27 @@ mod tests {
         assert_ne!(
             object.trigger_definitions[0].occurrence, object.trigger_definitions[1].occurrence,
             "repeated final slots must not collapse because their payloads match"
+        );
+    }
+
+    #[test]
+    fn reliving_a_materialized_printed_slot_does_not_duplicate_it() {
+        let mut object = trigger_test_object();
+        let trigger = TriggerDefinition::new(TriggerMode::Phase);
+        object.push_printed_trigger(trigger.clone());
+
+        assert!(object.relive_printed_trigger(|definition| definition == &trigger));
+        assert_eq!(
+            object.trigger_definitions.len(),
+            1,
+            "re-materializing an already-live printed slot must not duplicate its trigger"
+        );
+        assert_eq!(
+            object.trigger_definitions[0].occurrence,
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            }
         );
     }
 

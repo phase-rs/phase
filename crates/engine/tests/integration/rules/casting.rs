@@ -1951,6 +1951,21 @@ fn tamiyo_emblem_allows_free_cast_from_hand() {
     let bolt_id = scenario.add_bolt_to_hand(P0);
 
     let mut runner = scenario.build();
+    // CR 118.9a: the free cast is now an explicit election in the
+    // `CastingVariantChoice` menu. Give the bolt a real {R} printed cost with no
+    // red mana available so the printed `Normal` option is unaffordable and
+    // dropped — leaving the free `HandPermission` option as the sole survivor,
+    // which the menu auto-elects with no prompt (single-method degrade). This
+    // exercises the CR 118.9a free branch and keeps mana untouched.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&bolt_id)
+        .unwrap()
+        .mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 0,
+    };
     let emblem_static = engine::parser::oracle_static::parse_static_line(
         "You may cast spells from your hand without paying their mana costs.",
     )

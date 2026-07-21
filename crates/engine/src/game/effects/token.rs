@@ -1081,23 +1081,52 @@ pub(crate) fn apply_copiable_values_to_liminal_object(
     crate::game::printed_cards::install_copiable_values_as_base(object, values);
 }
 
+/// Commit ONE liminal copy-token to the battlefield WITHOUT driving the rest of
+/// the batch. Returns `false` if an ETB-counter replacement paused mid-commit (a
+/// `ContinueLiminalCopyTokenBatch` post-action was stashed to resume). The
+/// per-token batch loop in `apply_copy_token_after_replacement_with_created_ids`
+/// calls this and iterates, so minting N copies uses O(1) stack depth — the old
+/// commit->continue->apply recursion built one large `im::HashMap` COW frame per
+/// token. CR 707.2: shared by every liminal copy-token batch.
+pub(crate) fn commit_liminal_copy_token_entry(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, events)
+}
+
+fn commit_liminal_copy_token_entry_with_continuation(
+    state: &mut GameState,
+    event: ProposedEvent,
+    continuation: Option<LiminalCopyTokenContinuation>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let post_actions = continuation
+        .map(liminal_copy_token_continuation_post_action)
+        .into_iter()
+        .collect();
+    commit_liminal_token_entry_with_post_actions(
+        state,
+        event,
+        events,
+        TokenEntryEventEmission::Emit,
+        post_actions,
+    )
+}
+
 pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let continuation = liminal_copy_token_continuation_for_event(state, &event);
-    let post_actions = continuation
-        .clone()
-        .map(liminal_copy_token_continuation_post_action)
-        .into_iter()
-        .collect();
-    if !commit_liminal_token_entry_with_post_actions(
+    if !commit_liminal_copy_token_entry_with_continuation(
         state,
         event,
+        continuation.clone(),
         events,
-        TokenEntryEventEmission::Emit,
-        post_actions,
     ) {
         return false;
     }
@@ -3073,10 +3102,16 @@ fn apply_token_ability_payload(obj: &mut GameObject, materialized: TokenAbilityM
         obj.static_definitions.push(static_def);
     }
     if !materialized.trigger_definitions.is_empty() {
-        Arc::make_mut(&mut obj.base_trigger_definitions)
-            .extend(materialized.trigger_definitions.iter().cloned());
+        // CR 111.3: A token's abilities are defined as it is created, so these
+        // entries are printed slots of the token's own base set — not grants.
+        // They must carry a real `Printed` occurrence ref: pushing the bare
+        // `TriggerDefinition` would go through `From<TriggerDefinition>` and
+        // stamp `TriggerDefinitionOccurrenceRef::Unmaterialized`, which
+        // `validate_trigger_definitions` rejects from an observable state and
+        // which `#[serde(skip_serializing)]` turns into a hard serialization
+        // failure the moment the state crosses the WASM bridge.
         for trigger in materialized.trigger_definitions {
-            obj.trigger_definitions.push(trigger);
+            obj.push_printed_trigger(trigger);
         }
     }
     if !materialized.abilities.is_empty() {
@@ -4412,6 +4447,70 @@ mod tests {
             vec![Zone::Battlefield],
             "CR 603.10a LKI scans a dying token as a Battlefield source"
         );
+    }
+
+    /// CR 111.3: A catalog-materialized token ability is a printed slot of the
+    /// token's own base set, so its live entry must carry a real `Printed`
+    /// occurrence ref.
+    ///
+    /// RED before the fix: `apply_token_ability_payload` pushed the bare
+    /// `TriggerDefinition`, which `Definitions::push<U: Into<T>>` routed through
+    /// `From<TriggerDefinition> for TriggerEntry` and stamped
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized`. That variant is
+    /// `#[serde(skip_serializing)]`, so the first time the state crossed the
+    /// WASM bridge `to_js` panicked ("the enum variant
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized` cannot be serialized"),
+    /// killing the worker — the engine computed the right tokens and then died
+    /// handing them to the UI. No in-process test caught it because engine tests
+    /// never serialize.
+    #[test]
+    fn catalog_token_trigger_carries_printed_occurrence_and_serializes() {
+        use crate::types::ability::TriggerDefinitionOccurrenceRef;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(obj.trigger_definitions.len(), 1);
+
+        let entry = obj.trigger_definitions.iter_all().next().unwrap();
+        assert!(
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Printed { .. }
+            ),
+            "CR 111.3: a catalog token trigger is a printed slot of the token's own \
+             base set, got {:?}",
+            entry.occurrence
+        );
+
+        // The object-local provenance invariant must hold: `Unmaterialized` is
+        // explicitly rejected from an observable game state.
+        obj.validate_trigger_definitions()
+            .expect("catalog token trigger must have observable occurrence provenance");
+
+        // The bridge check. `engine-wasm`'s `to_js` panics on serialization
+        // failure, so an unserializable entry is fatal, not degraded.
+        serde_json::to_string(obj)
+            .expect("catalog token object must serialize for the WASM bridge");
+        serde_json::to_string(&state).expect("full game state must serialize for the WASM bridge");
     }
 
     #[test]

@@ -4894,6 +4894,134 @@ mod tests {
         );
     }
 
+    /// CR 118.9a + decision D1: the frontend's `spellCosts` map (from
+    /// `legal_actions_full`) must report a hand spell as `NoCost` while Omniscience
+    /// is on the battlefield, so the UI can overlay a {0} pip. The cost overlay is
+    /// the CHEAPEST-legal-cast floor (Display mode), independent of whether the
+    /// printed cost is affordable — the free-vs-printed election lives in the
+    /// `CastingVariantChoice` menu at cast time, not in the overlay. This test pins
+    /// both the zero-mana case and (as the discriminating extension) the ample-mana
+    /// case, so the Display-mode floor cannot silently regress to the printed cost
+    /// once a real cast becomes affordable.
+    #[test]
+    fn spell_costs_report_nocost_for_hand_spell_under_omniscience() {
+        use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+        use crate::types::mana::ManaCostShard;
+        use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
+        use crate::types::StaticDefinition;
+
+        let mut state = setup_priority();
+
+        let omniscience_id = create_object(
+            &mut state,
+            CardId(4200),
+            PlayerId(0),
+            "Omniscience".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&omniscience_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            let def = StaticDefinition {
+                mode: StaticMode::CastFromHandFree {
+                    frequency: CastFrequency::Unlimited,
+                    origin: CastFreeOrigin::Hand,
+                },
+                affected: Some(TargetFilter::Any),
+                modifications: vec![],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(
+                    "You may cast spells from your hand without paying their mana costs."
+                        .to_string(),
+                ),
+                attack_defended: None,
+                source_controller: None,
+                source_object: None,
+                bypass_beneficiary: None,
+            };
+            obj.static_definitions = vec![def].into();
+        }
+
+        // A 7UUU spell in hand — the exact class the display overlay should zero.
+        let spell_id = create_object(
+            &mut state,
+            CardId(4201),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                ],
+                generic: 7,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("Test Spell", "test spell"),
+            ));
+        }
+
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must surface the Omniscience free-cast hand spell");
+        assert!(
+            matches!(displayed, ManaCost::NoCost),
+            "Omniscience must display the hand spell as NoCost, got {displayed:?}"
+        );
+
+        // Discriminating extension (decision D1): give the caster ample mana to
+        // afford the printed {7}{U}{U}{U}. The Display-mode overlay must STILL floor
+        // to NoCost — the affordable printed cost is only surfaced as a menu option
+        // at cast time, never in the overlay. Under the Actual-mode election logic
+        // this same board would offer {Normal(printed), HandPermission({0})}; the
+        // overlay deliberately does not.
+        for _ in 0..7 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must surface the Omniscience free-cast hand spell");
+        assert!(
+            matches!(displayed, ManaCost::NoCost),
+            "Omniscience overlay must stay NoCost even when the printed cost is \
+             affordable (Display-mode floor), got {displayed:?}"
+        );
+    }
+
     /// Issue #1542: Emergence Zone must expose TapLandForMana alongside its
     /// sacrifice-for-flash activated ability.
     #[test]

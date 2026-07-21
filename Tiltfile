@@ -209,7 +209,18 @@ local_resource('check-frontend',
 local_resource('card-data',
     cmd = './scripts/gen-card-data.sh',
     deps = ENGINE_SRC,
-    ignore = TMP_IGNORE,
+    # gen-card-data.sh promotes these tracked files under crates/engine/data/, which is
+    # in ENGINE_SRC (deps). Watching card-data's own generated outputs makes every
+    # promote re-trigger card-data -> an infinite regen loop. The script already stages
+    # via a `.tmp.` infix (covered by TMP_IGNORE), but the final promote writes the real
+    # tracked file, which TMP_IGNORE can't mask. Ignoring the outputs here breaks the
+    # self-trigger without touching the engine resources, which still watch
+    # crates/engine/data/ in full so a genuine data change still rebuilds the engine.
+    ignore = TMP_IGNORE + [
+        'crates/engine/data/known-tokens.toml',
+        'crates/engine/data/oracle-subtypes.json',
+        'crates/engine/data/mtgjson-vintage',
+    ],
     auto_init = True,
     labels = ['data'],
 )
