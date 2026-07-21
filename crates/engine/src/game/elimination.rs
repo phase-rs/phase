@@ -2294,15 +2294,28 @@ mod tests {
         state.post_replacement_token_choice_applied = Some(HashSet::from([
             crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
         ]));
-        // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
-        // single-player-scoped, must clear alongside its siblings via
-        // `abandon_post_replacement_continuation` (replacement.rs).
-        state.push_draw_sequence_with_origin(
+        // Make the real atomic paused-drain/draw pair.
+        // The dispatch handle proves that the parent is Paused, rather than the
+        // Ready-parent approximation that cannot exercise child-before-parent
+        // abandonment.
+        let (_, dispatch) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::begin_dispatch)
+            .expect("the resident continuation begins its exact dispatch");
+        assert!(state
+            .active_post_replacement_drains_mut()
+            .expect("the dispatch parent remains resident")
+            .pause_dispatch(dispatch));
+        let leaving_frame = state.push_draw_sequence_with_origin(
             PlayerId(2),
             1,
             HashSet::new(),
             crate::types::game_state::DrawSequenceOrigin::Plain,
         );
+        state
+            .resolution_stack
+            .validate(&state.waiting_for)
+            .expect("the paused parent and active child form the shipped pair");
         let mut events = Vec::new();
         // Real path: X (P1) and C (P2) leave in the SAME simultaneous SBA event
         // (losers sorted by id -> [P1, P2] -> do_eliminate(P1) then do_eliminate(P2)).
@@ -2331,6 +2344,20 @@ mod tests {
             state.active_draw_sequence().is_none(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \
              cleared via abandon_post_replacement_continuation, not stranded"
+        );
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the active child must be abandoned before its paused parent can retire"
+        );
+        let later_frame = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        assert!(
+            later_frame > leaving_frame,
+            "abandoning the paired child must not rewind the draw-frame allocator"
         );
     }
 
@@ -2522,6 +2549,24 @@ mod tests {
             candidate_count: 1,
             candidates: Vec::new(),
         };
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Paused draw replacement".into(),
+            Zone::Battlefield,
+        );
+        state.install_ready_continuation(PostReplacementContinuation::Resolved(Box::new(
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0)),
+        )));
+        let (_, dispatch) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::begin_dispatch)
+            .expect("the resident continuation begins its exact dispatch");
+        assert!(state
+            .active_post_replacement_drains_mut()
+            .expect("the dispatch parent remains resident")
+            .pause_dispatch(dispatch));
         let living_frame = state.push_draw_sequence_with_origin(
             PlayerId(0),
             2,
@@ -2532,6 +2577,12 @@ mod tests {
             .draw_sequence_frame_mut(living_frame)
             .expect("the frame just pushed is active")
             .accumulated = 1;
+        state
+            .resolution_stack
+            .validate(&state.waiting_for)
+            .expect("the living chooser owns a valid paused parent/draw pair");
+        let paired_stack_before = serde_json::to_value(&state.resolution_stack)
+            .expect("the paired resolution stack serializes");
 
         eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut Vec::new());
 
@@ -2544,6 +2595,12 @@ mod tests {
             (PlayerId(0), 2, 1),
             "the living chooser's paused draw instruction must survive intact — owed units and \
              already-delivered count both preserved"
+        );
+        assert_eq!(
+            serde_json::to_value(&state.resolution_stack)
+                .expect("the surviving paired resolution stack serializes"),
+            paired_stack_before,
+            "an unrelated departure must preserve the paired parent, child, status, refs, and allocator byte-for-byte"
         );
         assert!(matches!(
             state.waiting_for,
