@@ -64,6 +64,16 @@ pub enum GameFormat {
     /// Create a token that's a copy of a creature card with mana value X chosen
     /// at random."
     Momir,
+    /// CR 809: Emperor Variant — two teams of three players each. One player
+    /// per team is the emperor (CR 809.2); the others are generals. CR
+    /// 809.5a-c: a team wins/loses/draws if and only if its emperor does — a
+    /// general's individual loss does not end their team's game, unlike Two-
+    /// Headed Giant's symmetric team-loss model. Range of influence is always
+    /// on (CR 801.1 / CR 809.3a), asymmetric by role (emperors: 2, generals:
+    /// 1). v1 ships the CR 809.1 baseline (two teams of three, individual
+    /// turns per CR 809.4); CR 804 (Deploy Creatures) and CR 809.3c
+    /// (attack-adjacency) are deferred — see `game::emperor`'s module doc.
+    Emperor,
 }
 
 /// CR 100.4 / CR 100.4a: Per-format sideboard rules.
@@ -141,6 +151,12 @@ pub struct FormatConfig {
     /// designated as the archenemy and takes the first turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy_player: Option<PlayerId>,
+    /// CR 809.2: one designated emperor per team. Empty for every format
+    /// other than Emperor. Read via `range_of_influence_for_player` (CR
+    /// 809.3a's asymmetric emperor/general split) and `game::emperor`'s
+    /// `is_emperor`/`team_elimination_cascades_from`.
+    #[serde(default)]
+    pub emperor_players: Vec<PlayerId>,
     /// Engine-derived predicate: true when the format uses a commander card
     /// and the commander-damage state-based action (CR 903.10a / CR 704.5u).
     /// Covers Commander, Duel Commander, Pauper Commander, Brawl, and
@@ -205,7 +221,8 @@ impl GameFormat {
             | GameFormat::Planechase
             // Momir's pool is the entire creature corpus — no legality restriction.
             | GameFormat::Momir
-            | GameFormat::Limited => None,
+            | GameFormat::Limited
+            | GameFormat::Emperor => None,
         }
     }
 
@@ -238,7 +255,8 @@ impl GameFormat {
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
-            | GameFormat::Limited => SideboardPolicy::Unlimited,
+            | GameFormat::Limited
+            | GameFormat::Emperor => SideboardPolicy::Unlimited,
         }
     }
 
@@ -315,6 +333,7 @@ impl GameFormat {
             GameFormat::Archenemy => "Archenemy",
             GameFormat::Planechase => "Planechase",
             GameFormat::Momir => "Momir's Madness",
+            GameFormat::Emperor => "Emperor",
         }
     }
 
@@ -501,6 +520,14 @@ impl GameFormat {
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::momir(),
             },
+            FormatMetadata {
+                format: GameFormat::Emperor,
+                label: "Emperor",
+                short_label: "EMP",
+                description: "6 players, two teams of three protecting their emperor",
+                group: FormatGroup::Multiplayer,
+                default_config: FormatConfig::emperor(),
+            },
         ]
     }
 }
@@ -517,6 +544,14 @@ impl FormatConfig {
                 archenemy: self.archenemy_player.unwrap_or(PlayerId(0)),
                 turn_structure: TurnStructure::SharedTeamTurns,
             },
+            // CR 809.1 + CR 809.4: two teams of three, individual turns (not
+            // shared team turns like Two-Headed Giant / Archenemy) — the
+            // first real consumer of `TurnStructure::IndividualTurns`.
+            GameFormat::Emperor => FormatTopology::FixedTeams {
+                team_size: 3,
+                team_count: 2,
+                turn_structure: TurnStructure::IndividualTurns,
+            },
             _ if self.team_based => FormatTopology::FixedTeams {
                 team_size: 2,
                 team_count: 2,
@@ -527,6 +562,12 @@ impl FormatConfig {
     }
 
     pub fn starting_life_for_seat(&self) -> i32 {
+        // CR 809.7: Emperor's life is NOT a shared team pool (unlike Two-
+        // Headed Giant's `FixedTeams` division below) — every player starts
+        // at the same flat `starting_life`, undivided.
+        if self.format == GameFormat::Emperor {
+            return self.starting_life;
+        }
         match self.topology() {
             FormatTopology::IndividualSeats => self.starting_life,
             FormatTopology::FixedTeams { team_size, .. } => {
@@ -537,6 +578,12 @@ impl FormatConfig {
     }
 
     pub fn starting_life_for_player(&self, player: PlayerId) -> i32 {
+        // CR 809.7: Emperor's life is NOT a shared team pool (unlike Two-
+        // Headed Giant's `FixedTeams` division below) — every player starts
+        // at the same flat `starting_life`, undivided.
+        if self.format == GameFormat::Emperor {
+            return self.starting_life;
+        }
         match self.topology() {
             FormatTopology::IndividualSeats => self.starting_life,
             FormatTopology::FixedTeams { team_size, .. } => {
@@ -552,6 +599,24 @@ impl FormatConfig {
                 }
             }
         }
+    }
+
+    /// CR 801.2 + CR 809.3a: a player's configured range of influence, or
+    /// `None` if this format/player doesn't use one. Emperor's range is
+    /// asymmetric by role (emperors: 2, generals: 1) — every other format
+    /// falls back to the flat `range_of_influence` field, so a future
+    /// non-Emperor format that wants a uniform range (CR 801.1: "often used
+    /// for games involving five or more players") can opt in by setting that
+    /// field without needing changes here.
+    pub fn range_of_influence_for_player(&self, player: PlayerId) -> Option<u8> {
+        if self.format == GameFormat::Emperor {
+            return Some(if self.emperor_players.contains(&player) {
+                2
+            } else {
+                1
+            });
+        }
+        self.range_of_influence
     }
 
     pub fn archenemy_player(&self) -> Option<PlayerId> {
@@ -592,6 +657,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -611,6 +677,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: true,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -702,6 +769,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -725,6 +793,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -761,6 +830,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: true,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -791,6 +861,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -812,6 +883,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -836,6 +908,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: false,
             supplies_fixed_deck: true,
             allow_debug_actions: false,
@@ -855,6 +928,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: true,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -877,6 +951,7 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
+            emperor_players: Vec::new(),
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -898,6 +973,38 @@ impl FormatConfig {
             range_of_influence: None,
             team_based: false,
             archenemy_player: Some(PlayerId(0)),
+            emperor_players: Vec::new(),
+            uses_commander: false,
+            supplies_fixed_deck: false,
+            allow_debug_actions: false,
+        }
+    }
+
+    /// CR 809.1-809.3: default Emperor — two teams of three, individual
+    /// turns (CR 809.4), asymmetric range of influence by role (CR 809.3a,
+    /// read via `range_of_influence_for_player` — the flat `range_of_influence`
+    /// field intentionally stays `None` for this format). Seats 0 and 3 are
+    /// the two team-anchor emperors under `team_size: 3` (`team_id() == 0`
+    /// and `team_id() == 1` respectively). CR 809.7: resources are NOT shared
+    /// (unlike Two-Headed Giant), so `team_based` stays `false` — Emperor
+    /// gets its own `topology()` arm instead of the generic
+    /// `_ if self.team_based` fallback. CR 804 (Deploy Creatures) and CR
+    /// 809.3c (attack-adjacency) are deferred — see `game::emperor`'s module
+    /// doc for why.
+    pub fn emperor() -> Self {
+        FormatConfig {
+            format: GameFormat::Emperor,
+            starting_life: 20,
+            min_players: 6,
+            max_players: 6,
+            deck_size: 60,
+            singleton: false,
+            command_zone: false,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+            archenemy_player: None,
+            emperor_players: vec![PlayerId(0), PlayerId(3)],
             uses_commander: false,
             supplies_fixed_deck: false,
             allow_debug_actions: false,
@@ -943,6 +1050,7 @@ impl FormatConfig {
             GameFormat::Archenemy => Self::archenemy(),
             GameFormat::Planechase => Self::planechase(),
             GameFormat::Momir => Self::momir(),
+            GameFormat::Emperor => Self::emperor(),
         }
     }
 }
@@ -1188,6 +1296,7 @@ mod tests {
             FormatConfig::two_headed_giant(),
             FormatConfig::archenemy(),
             FormatConfig::limited(),
+            FormatConfig::emperor(),
         ];
         for config in configs {
             let json = serde_json::to_string(&config).unwrap();
@@ -1364,5 +1473,129 @@ mod tests {
                 meta.format
             );
         }
+    }
+
+    #[test]
+    fn format_config_emperor() {
+        let config = FormatConfig::emperor();
+        assert_eq!(config.format, GameFormat::Emperor);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 6);
+        assert_eq!(config.max_players, 6);
+        assert_eq!(config.deck_size, 60);
+        assert!(!config.singleton);
+        assert!(!config.command_zone);
+        assert_eq!(config.commander_damage_threshold, None);
+        // CR 809.3a: Emperor's ROI is asymmetric by role, so the flat field
+        // intentionally stays None — range_of_influence_for_player is the
+        // real accessor.
+        assert_eq!(config.range_of_influence, None);
+        assert!(!config.team_based);
+        assert_eq!(config.emperor_players, vec![PlayerId(0), PlayerId(3)]);
+        assert!(!config.uses_commander);
+    }
+
+    /// CR 809.7: Emperor's life is NOT a shared team pool (unlike Two-Headed
+    /// Giant, where `starting_life` represents the whole team's total and is
+    /// divided by `team_size` per player) — every Emperor player starts at
+    /// the full flat `starting_life` (20), undivided by their team's size.
+    #[test]
+    fn emperor_starting_life_is_not_divided_by_team_size() {
+        let config = FormatConfig::emperor();
+        for player_idx in 0..6u8 {
+            assert_eq!(
+                config.starting_life_for_player(PlayerId(player_idx)),
+                20,
+                "P{player_idx} must start at the full 20 life, not 20/3"
+            );
+        }
+        assert_eq!(config.starting_life_for_seat(), 20);
+
+        // Regression: Two-Headed Giant's genuine shared-pool division must
+        // stay unchanged.
+        let two_hg = FormatConfig::two_headed_giant();
+        assert_eq!(two_hg.starting_life_for_seat(), 15);
+    }
+
+    #[test]
+    fn emperor_registry_entry() {
+        let registry = GameFormat::registry();
+        let entry = registry
+            .iter()
+            .find(|m| m.format == GameFormat::Emperor)
+            .expect("Emperor must be in registry");
+        assert_eq!(entry.group, FormatGroup::Multiplayer);
+        assert_eq!(entry.short_label, "EMP");
+        assert_eq!(entry.default_config, FormatConfig::emperor());
+        assert_eq!(
+            entry.default_config.topology(),
+            FormatTopology::FixedTeams {
+                team_size: 3,
+                team_count: 2,
+                turn_structure: TurnStructure::IndividualTurns,
+            }
+        );
+    }
+
+    #[test]
+    fn emperor_topology_uses_individual_turns() {
+        // CR 809.4: Emperor uses individual turns, NOT shared team turns like
+        // Two-Headed Giant / Archenemy — the key distinguishing topology bit.
+        let emperor = FormatConfig::emperor();
+        assert!(!emperor.topology().has_shared_team_turns());
+
+        let two_hg = FormatConfig::two_headed_giant();
+        assert!(two_hg.topology().has_shared_team_turns());
+        let archenemy = FormatConfig::archenemy();
+        assert!(archenemy.topology().has_shared_team_turns());
+    }
+
+    #[test]
+    fn emperor_range_of_influence_is_asymmetric_by_role() {
+        // CR 809.3a: emperors get range 2, generals get range 1.
+        let config = FormatConfig::emperor();
+        for &emperor in &config.emperor_players {
+            assert_eq!(config.range_of_influence_for_player(emperor), Some(2));
+        }
+        let generals: Vec<PlayerId> = (0..6)
+            .map(PlayerId)
+            .filter(|p| !config.emperor_players.contains(p))
+            .collect();
+        for general in generals {
+            assert_eq!(config.range_of_influence_for_player(general), Some(1));
+        }
+    }
+
+    #[test]
+    fn range_of_influence_for_player_falls_back_to_flat_field_outside_emperor() {
+        // A non-Emperor format with a flat range configured returns that
+        // range uniformly for every player.
+        let mut config = FormatConfig::free_for_all();
+        config.range_of_influence = Some(2);
+        assert_eq!(config.range_of_influence_for_player(PlayerId(0)), Some(2));
+        assert_eq!(config.range_of_influence_for_player(PlayerId(3)), Some(2));
+
+        // Unconfigured (every pre-existing format's default) returns None.
+        assert_eq!(
+            FormatConfig::standard().range_of_influence_for_player(PlayerId(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn emperor_registry_entries_have_no_legality_restriction() {
+        assert_eq!(GameFormat::Emperor.legality_format(), None);
+        assert_eq!(
+            GameFormat::Emperor.sideboard_policy(),
+            SideboardPolicy::Unlimited
+        );
+    }
+
+    #[test]
+    fn emperor_for_format_roundtrip() {
+        assert_eq!(
+            FormatConfig::for_format(GameFormat::Emperor),
+            FormatConfig::emperor()
+        );
     }
 }

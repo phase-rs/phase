@@ -137,9 +137,15 @@ pub fn resolve_win(
     }
 
     // CR 104.2b + CR 104.3e: A player wins the game — all opponents lose.
+    // CR 801.14: with a range of influence configured, only opponents WITHIN
+    // that range lose — the second `.filter` is a no-op when the winner has
+    // no configured range (every pre-existing format).
     let opponents: Vec<_> = players::opponents(state, winner)
         .into_iter()
         .filter(|&pid| players::is_alive(state, pid))
+        .filter(|&pid| {
+            crate::game::range_of_influence::within_range_of_influence(state, winner, pid)
+        })
         .collect();
 
     for pid in opponents {
@@ -320,6 +326,41 @@ mod tests {
                 winner: Some(PlayerId(0))
             }
         ));
+    }
+
+    /// CR 801.14: "If an effect states that a player wins the game, all of
+    /// that player's opponents within that player's range of influence lose
+    /// the game instead." An out-of-range opponent survives a "you win the
+    /// game" effect once ROI is configured; unconfigured ROI (every
+    /// pre-existing format) must not change the untouched behavior above.
+    #[test]
+    fn win_the_game_only_eliminates_in_range_opponents() {
+        let mut state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::free_for_all(),
+            5,
+            42,
+        );
+        state.format_config.range_of_influence = Some(1);
+        let ability = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_win(&mut state, &ability, &mut events).unwrap();
+
+        // P1 and P4 are distance 1 from P0 (in range) — eliminated.
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[4].is_eliminated);
+        // P2 and P3 are distance 2 (out of range) — survive.
+        assert!(!state.players[2].is_eliminated);
+        assert!(!state.players[3].is_eliminated);
+        assert!(!state.players[0].is_eliminated);
+        // The game continues — not every opponent lost, so P0 has not (yet)
+        // won outright per CR 104.2a's last-player-standing rule.
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
     }
 
     /// CR 104.2b: The controller of the win effect is under `CantWinTheGame`,

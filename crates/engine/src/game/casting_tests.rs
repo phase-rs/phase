@@ -30272,6 +30272,45 @@ fn add_artifact_with_activated_ability(state: &mut GameState, controller: Player
     id
 }
 
+/// CR 801.6: a player can't activate the activated abilities of an object
+/// outside their range of influence. Reach guard: the ability's
+/// `activator_filter` is set to `PlayerFilter::All` so a cross-player
+/// activation attempt is not already vacuously rejected by the ordinary
+/// controller-only activation permission (CR 602.1a) before ROI is ever
+/// consulted — this isolates the ROI guard specifically. The same activation
+/// is legal once ROI is unconfigured (the default for every pre-existing
+/// format).
+#[test]
+fn can_activate_ability_now_respects_range_of_influence() {
+    let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 5, 42);
+    let source_id = add_artifact_with_activated_ability(&mut state, PlayerId(2));
+    Arc::make_mut(&mut state.objects.get_mut(&source_id).unwrap().abilities)[0].activator_filter =
+        Some(crate::types::ability::PlayerFilter::All);
+
+    // Reach guard: any player may activate this ability per its filter —
+    // confirmed BEFORE range of influence is configured at all.
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), source_id, 0),
+        "PlayerFilter::All must permit P0 to activate P2's object absent any ROI restriction"
+    );
+
+    state.format_config.range_of_influence = Some(1);
+    assert!(
+        !can_activate_ability_now(&state, PlayerId(0), source_id, 0),
+        "P2's object is distance 2 from P0 in a 5-player table (range 1 configured) — out of range"
+    );
+    assert!(
+        can_activate_ability_now(&state, PlayerId(2), source_id, 0),
+        "activating your own object is always in range (distance 0)"
+    );
+
+    state.format_config.range_of_influence = None;
+    assert!(
+        can_activate_ability_now(&state, PlayerId(0), source_id, 0),
+        "unconfigured ROI must not restrict activation"
+    );
+}
+
 #[test]
 fn karn_blocks_opponent_artifact_activation() {
     // CR 602.5: Karn the Great Creator — activated abilities of artifacts your

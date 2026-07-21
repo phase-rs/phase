@@ -1955,9 +1955,10 @@ fn evaluate_selected_format_summary(
             format.label(),
             format,
         ),
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
-            QuickCheckResult::compatible()
-        }
+        GameFormat::FreeForAll
+        | GameFormat::TwoHeadedGiant
+        | GameFormat::Limited
+        | GameFormat::Emperor => QuickCheckResult::compatible(),
     };
 
     (
@@ -2396,7 +2397,10 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
+        GameFormat::FreeForAll
+        | GameFormat::TwoHeadedGiant
+        | GameFormat::Limited
+        | GameFormat::Emperor => true,
     };
 
     // CR 100.4 × MatchType::Bo3: BO3 requires a sideboard regardless of format.
@@ -5484,6 +5488,27 @@ mod tests {
             scheme_deck: Vec::new(),
             signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+        };
+        assert!(validate_deck_for_format(&db, &request).is_ok());
+    }
+
+    /// CR 809: Emperor has no scheme-deck/planar-deck/singleton/commander
+    /// requirement — a plain deck, exactly like FreeForAll/2HG/Limited.
+    #[test]
+    fn validate_emperor_accepts_any_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: vec!["Not Standard".to_string(); 60],
+            sideboard: vec![],
+            commander: vec![],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(GameFormat::Emperor),
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,

@@ -2189,6 +2189,17 @@ fn can_target(
     if obj.has_keyword(&Keyword::Shroud) {
         return false;
     }
+    // CR 801.4: an object outside the targeting source's controller's range
+    // of influence can't be the target of that source's spells or abilities.
+    // No-op when the source controller has no configured range (every format
+    // that doesn't opt into CR 801).
+    if !crate::game::range_of_influence::object_within_range_of_influence(
+        state,
+        source_controller,
+        obj.controller,
+    ) {
+        return false;
+    }
     // CR 702.11b: An "ignore hexproof" effect bypasses Hexproof / Hexproof from
     // [quality] only — never Shroud. Two distinct scopings:
     //   - player-scoped (Detection Tower): the targeting source's controller may
@@ -2827,6 +2838,55 @@ mod tests {
             crate::game::static_abilities::player_ignores_hexproof(&state, PlayerId(0)),
             &state
         ));
+    }
+
+    /// CR 801.4: a target outside the source controller's range of influence
+    /// can't be targeted; the same target is legal once ROI is unconfigured
+    /// (the default for every pre-existing format) — proving the guard is a
+    /// no-op unless a format opts in.
+    #[test]
+    fn can_target_respects_range_of_influence() {
+        // A 5-seat table so P0-P2 is a genuine distance-2 pair (forward 2,
+        // backward 3, min 2) — out of range under range_of_influence: Some(1).
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 5, 42);
+        let far_creature = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(2),
+            "Far Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let source_id = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.format_config.range_of_influence = Some(1);
+        assert!(
+            !can_target(
+                state.objects.get(&far_creature).unwrap(),
+                PlayerId(0),
+                source_id,
+                false,
+                &state
+            ),
+            "P2 is distance 2 from P0 in a 5-player table (range 1 configured) — out of range"
+        );
+
+        state.format_config.range_of_influence = None;
+        assert!(
+            can_target(
+                state.objects.get(&far_creature).unwrap(),
+                PlayerId(0),
+                source_id,
+                false,
+                &state
+            ),
+            "unconfigured ROI must not restrict targeting"
+        );
     }
 
     #[test]

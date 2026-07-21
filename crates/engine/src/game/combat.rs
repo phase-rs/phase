@@ -3092,6 +3092,35 @@ fn attacker_can_attack_target(
     gates: &CombatStaticGates,
     active_team: &[PlayerId],
 ) -> bool {
+    // CR 801.3: creatures can only attack opponents/planeswalkers/battles
+    // within their controller's range of influence. No-op when the attacker's
+    // controller has no configured range (every format that doesn't opt into
+    // CR 801). Resolved once here, mirroring the identical
+    // `let Some(attacker_controller) = ... else { return true; }` idiom used
+    // by `attack_passes_neighbor_restriction` / `attack_passes_temporary_prohibition`
+    // below.
+    let Some(attacker_controller) = state.objects.get(&attacker_id).map(|o| o.controller) else {
+        return true;
+    };
+    let target_controller = match target {
+        AttackTarget::Player(pid) => pid,
+        AttackTarget::Planeswalker(pw_id) => match state.objects.get(&pw_id) {
+            Some(obj) => obj.controller,
+            None => return false,
+        },
+        AttackTarget::Battle(battle_id) => match state.objects.get(&battle_id) {
+            Some(obj) => obj.protector().unwrap_or(obj.controller),
+            None => return false,
+        },
+    };
+    if !crate::game::range_of_influence::object_within_range_of_influence(
+        state,
+        attacker_controller,
+        target_controller,
+    ) {
+        return false;
+    }
+
     // CR 508.1b + CR 310.5/310.8b: target validity + active-team exclusion.
     match target {
         AttackTarget::Player(pid) => {
@@ -8822,6 +8851,48 @@ mod tests {
             )
             .is_err(),
             "attacking the far opponent P3 must be rejected (P2 is the nearest)"
+        );
+    }
+
+    /// CR 801.3: creatures can only attack opponents within their controller's
+    /// range of influence — a distance-2 opponent in a 5-player table is an
+    /// illegal attack target once `range_of_influence` is configured, and
+    /// legal again once it's unconfigured (the default for every
+    /// pre-existing format).
+    #[test]
+    fn attack_respects_range_of_influence() {
+        let mut state = setup_multiplayer_combat(5);
+        state.format_config.range_of_influence = Some(1);
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_err(),
+            "P2 is distance 2 from P0 in a 5-player table (range 1 configured) — out of range"
+        );
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(1)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "P1 is distance 1 from P0 — in range"
+        );
+
+        state.format_config.range_of_influence = None;
+        assert!(
+            declare_attackers(
+                &mut state.clone(),
+                &[(attacker, AttackTarget::Player(PlayerId(2)))],
+                &mut vec![]
+            )
+            .is_ok(),
+            "unconfigured ROI must not restrict attacking"
         );
     }
 

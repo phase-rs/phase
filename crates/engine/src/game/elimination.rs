@@ -43,7 +43,7 @@ pub fn eliminate_players_simultaneously(
             continue;
         }
         leaving_set.insert(player);
-        if super::topology::has_two_headed_giant_shared_resources(state) {
+        if super::emperor::team_elimination_cascades_from(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     leaving_set.insert(teammate);
@@ -96,7 +96,7 @@ pub fn eliminate_players_simultaneously(
         do_eliminate(state, player, &leaving_set, events);
         eliminated_any = true;
 
-        if super::topology::has_two_headed_giant_shared_resources(state) {
+        if super::emperor::team_elimination_cascades_from(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     do_eliminate(state, teammate, &leaving_set, events);
@@ -1078,6 +1078,31 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         };
         events.push(GameEvent::GameOver { winner });
         state.waiting_for = WaitingFor::GameOver { winner };
+    } else if state.format_config.format == crate::types::format::GameFormat::Emperor {
+        // CR 809.5a-c: a team's fate is its emperor's fate alone — a living
+        // team ALWAYS has a living emperor, because eliminating an emperor
+        // always cascades their whole team in the same simultaneous batch
+        // (see `team_elimination_cascades_from` in `eliminate_players_simultaneously`
+        // above), so counting living emperors (not living teammates generically,
+        // the way the Two-Headed Giant branch below does) is both sufficient
+        // and required to name the WINNER as the emperor, not an arbitrary
+        // teammate — CR 809.5a specifically credits the win to the emperor.
+        let mut living_emperors: Vec<PlayerId> = state
+            .format_config
+            .emperor_players
+            .iter()
+            .copied()
+            .filter(|e| living.contains(e))
+            .collect();
+        let winner = if living_emperors.len() == 1 {
+            Some(living_emperors.remove(0))
+        } else if living_emperors.is_empty() {
+            None // draw
+        } else {
+            return; // 2+ emperors still alive, game continues
+        };
+        events.push(GameEvent::GameOver { winner });
+        state.waiting_for = WaitingFor::GameOver { winner };
     } else if super::topology::has_two_headed_giant_shared_resources(state) {
         let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
@@ -1151,6 +1176,12 @@ mod tests {
 
     fn setup_archenemy() -> GameState {
         let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
+        state.turn_number = 1;
+        state
+    }
+
+    fn setup_emperor() -> GameState {
+        let mut state = GameState::new(FormatConfig::emperor(), 6, 42);
         state.turn_number = 1;
         state
     }
@@ -2635,6 +2666,102 @@ mod tests {
             WaitingFor::GameOver {
                 winner: Some(PlayerId(0))
             }
+        ));
+    }
+
+    // --- Emperor (CR 809.5a-c) asymmetric team elimination ---
+    // Default `FormatConfig::emperor()`: team A = {0, 1, 2}, emperor 0; team
+    // B = {3, 4, 5}, emperor 3 (see `types::format::FormatConfig::emperor`).
+
+    #[test]
+    fn emperor_general_elimination_does_not_end_team() {
+        let mut state = setup_emperor();
+        let mut events = Vec::new();
+
+        // Eliminate a general (P1), not the emperor.
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(state.players[1].is_eliminated);
+        // CR 809.5b: the emperor and the other general are unaffected — a
+        // general's individual loss does not end the team's game.
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn emperor_elimination_cascades_to_whole_team() {
+        let mut state = setup_emperor();
+        let mut events = Vec::new();
+
+        // Eliminate the emperor of team A (P0).
+        eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        // CR 809.5b: the whole team (both generals too) is eliminated.
+        assert!(state.players[0].is_eliminated);
+        assert!(state.players[1].is_eliminated);
+        assert!(state.players[2].is_eliminated);
+        // Team B's emperor (P3) is still alive, so team B wins — named by
+        // its emperor specifically (CR 809.5a).
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(3))
+            }
+        ));
+    }
+
+    /// CR 809.5a: the winner must resolve to the EMPEROR specifically, not
+    /// merely "some surviving player on the winning team" — a hostile
+    /// fixture where the emperor is NOT the lowest-`PlayerId` member of their
+    /// own team, so a naive "pick the first living player" implementation
+    /// would name the wrong player.
+    #[test]
+    fn emperor_winner_is_the_emperor_not_an_arbitrary_teammate() {
+        let mut config = FormatConfig::emperor();
+        // Team A's emperor is P2 (the highest-id member), not P0.
+        config.emperor_players = vec![PlayerId(2), PlayerId(3)];
+        let mut state = GameState::new(config, 6, 42);
+        state.turn_number = 1;
+        let mut events = Vec::new();
+
+        // Wipe team B entirely (emperor 3 cascades both its generals).
+        eliminate_player(&mut state, PlayerId(3), &mut events);
+        assert!(state.players[3].is_eliminated);
+        assert!(state.players[4].is_eliminated);
+        assert!(state.players[5].is_eliminated);
+
+        // Team A survives with its emperor P2 and general P0 alive (P1
+        // eliminated individually) — the winner must be P2 (the emperor),
+        // not P0 (which a `living[0]`-style pick would incorrectly return).
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+        assert!(!state.players[0].is_eliminated);
+        assert!(!state.players[2].is_eliminated);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(2))
+            }
+        ));
+    }
+
+    /// CR 809.5c: if both emperors are eliminated in the same simultaneous
+    /// batch, the game is a draw (`winner: None`), mirroring the non-team
+    /// path's existing simultaneous-loss draw behavior.
+    #[test]
+    fn emperor_draw_when_both_emperors_eliminated_simultaneously() {
+        let mut state = setup_emperor();
+        let mut events = Vec::new();
+
+        eliminate_players_simultaneously(&mut state, &[PlayerId(0), PlayerId(3)], &mut events);
+
+        // Both whole teams are wiped via the cascade.
+        for pid in 0..6u8 {
+            assert!(state.players[pid as usize].is_eliminated);
+        }
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver { winner: None }
         ));
     }
 

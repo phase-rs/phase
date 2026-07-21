@@ -16143,6 +16143,16 @@ pub fn can_activate_ability_now_with_restriction_gates(
     let Some(obj) = state.objects.get(&source_id) else {
         return false;
     };
+    // CR 801.6: a player can't activate the activated abilities of an object
+    // outside their range of influence. No-op when `player` has no configured
+    // range (every format that doesn't opt into CR 801).
+    if !crate::game::range_of_influence::object_within_range_of_influence(
+        state,
+        player,
+        obj.controller,
+    ) {
+        return false;
+    }
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
     else {
         return false;

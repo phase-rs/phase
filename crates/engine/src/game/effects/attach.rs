@@ -696,6 +696,23 @@ pub(crate) fn attachment_illegality(
         }
     }
 
+    // CR 801.8 / CR 801.9: an Aura/Equipment/Fortification can't attach to an
+    // object outside its controller's range of influence. No-op when the
+    // attachment's controller has no configured range (every format that
+    // doesn't opt into CR 801).
+    if let (Some(attachment_controller), Some(host_controller)) = (
+        state.objects.get(&attachment_id).map(|o| o.controller),
+        state.objects.get(&host_id).map(|o| o.controller),
+    ) {
+        if !crate::game::range_of_influence::object_within_range_of_influence(
+            state,
+            attachment_controller,
+            host_controller,
+        ) {
+            return Some(AttachIllegality::Prohibited);
+        }
+    }
+
     None
 }
 
@@ -962,6 +979,43 @@ mod tests {
             Some(AttachIllegality::Protection)
         );
         assert!(!can_attach_to_object(&state, aura, creature));
+    }
+
+    /// CR 801.8: an Aura can't attach to a host outside its controller's
+    /// range of influence; the same attachment is legal once ROI is
+    /// unconfigured (the default for every pre-existing format).
+    #[test]
+    fn attachment_illegality_respects_range_of_influence() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 5, 42);
+        let aura = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pacifism".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+        let creature = spawn_creature_for(&mut state, "Bear", PlayerId(2));
+
+        state.format_config.range_of_influence = Some(1);
+        assert_eq!(
+            attachment_illegality(&state, aura, creature),
+            Some(AttachIllegality::Prohibited),
+            "P2's creature is distance 2 from P0 in a 5-player table (range 1 configured) — out of range"
+        );
+
+        state.format_config.range_of_influence = None;
+        assert_eq!(
+            attachment_illegality(&state, aura, creature),
+            None,
+            "unconfigured ROI must not restrict attachment"
+        );
     }
 
     #[test]
