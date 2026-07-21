@@ -2750,6 +2750,12 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif local_hold and conflicts_with_base:
         action = "blocked"
         reason = "local_hold_current_head"
+    elif local_hold and parse_diff_after_local_event:
+        action = "review"
+        reason = "parse_diff_after_local_hold"
+    elif local_hold:
+        action = "hold"
+        reason = "local_hold_current_head"
     elif local_block and author_followup_after_maintainer_activity and conflicts_with_base:
         action = "update_branch_for_handler"
         reason = "conflicting_after_author_followup"
