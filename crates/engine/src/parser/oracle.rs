@@ -69,6 +69,7 @@ use super::oracle_ir::doc::{
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
+use super::oracle_ir::static_ir::StaticIr;
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -1998,7 +1999,10 @@ fn push_graveyard_keyword_same_is_true_tail(
         statics.push(new_def);
     }
     for __item in statics {
-        emitter.static_at(item_line, __item);
+        emitter.static_ir_at(
+            item_line,
+            StaticIr::from_definition(modeled_sentence, __item),
+        );
     }
     if !unqualified.is_empty() {
         emitter.ability_at(
@@ -3440,6 +3444,10 @@ impl<'a> DocEmitter<'a> {
         self.last_static = Some(def.clone());
         self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
     }
+    fn static_ir_at(&mut self, line: usize, ir: StaticIr) {
+        self.last_static = Some(lower_static_ir(&ir));
+        self.emit_at(line, OracleNodeIr::Static(ir));
+    }
 
     /// Last-emitted node per category — the read-only peeks for
     /// `parsed_result_recently_granted_flashback` (the one mid-loop reader of
@@ -3914,7 +3922,7 @@ pub(crate) fn parse_oracle_ir(
                         },
                         None => StaticCondition::AdditionalCostPaid,
                     });
-                    emitter.static_at(item_line, def);
+                    emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_text, def));
                 }
             }
             i += 1;
@@ -4049,7 +4057,10 @@ pub(crate) fn parse_oracle_ir(
                     if let Some(static_def) =
                         try_parse_graveyard_keyword_static_with_continuation(&combined_static_line)
                     {
-                        emitter.static_at(item_line, static_def);
+                        emitter.static_ir_at(
+                            item_line,
+                            StaticIr::from_definition(&combined_static_line, static_def),
+                        );
                         i += 2;
                         continue;
                     }
@@ -4080,7 +4091,8 @@ pub(crate) fn parse_oracle_ir(
                 );
             if is_self_color_cda {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 i += 1;
                 continue;
@@ -4101,7 +4113,8 @@ pub(crate) fn parse_oracle_ir(
             );
             if !defs.is_empty() {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 i += 1;
                 continue;
@@ -4163,7 +4176,10 @@ pub(crate) fn parse_oracle_ir(
                             None,
                             None,
                         ) {
-                            emitter.static_at(item_line, __item);
+                            emitter.static_ir_at(
+                                item_line,
+                                StaticIr::from_definition(&clause_dot, __item),
+                            );
                         }
                     }
                 }
@@ -4180,7 +4196,8 @@ pub(crate) fn parse_oracle_ir(
             );
             if !defs.is_empty() {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 i += 1;
                 continue;
@@ -4680,7 +4697,7 @@ pub(crate) fn parse_oracle_ir(
                     lines.get(i + 1).map(|l| l.to_lowercase())
                 })
             {
-                emitter.static_at(item_line, static_def);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&line, static_def));
                 i += if consumes_next_line { 2 } else { 1 };
                 continue;
             }
