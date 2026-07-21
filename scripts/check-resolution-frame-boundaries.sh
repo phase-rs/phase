@@ -17,7 +17,6 @@ python3 - "$ROOT" <<'PY'
 from __future__ import annotations
 
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -233,18 +232,13 @@ def fail(failures: list[str], path: Path, source: str, offset: int, message: str
     failures.append(f"  {path}:{line_number(source, offset)}: {message}")
 
 
-try:
-    legacy_key_pattern = '"(?:' + "|".join(sorted(legacy_keys)) + ')"'
-    files = subprocess.run(
-        ["rg", "-l", "-g", "*.rs", legacy_key_pattern, "crates/engine/src"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-except subprocess.CalledProcessError as error:
-    print(error.stderr, file=sys.stderr, end="")
-    raise SystemExit(error.returncode)
+# Pure-Python scan (ripgrep is not installed on CI runners).
+legacy_key_pattern = re.compile('"(?:' + "|".join(sorted(legacy_keys)) + ')"')
+files = [
+    path.relative_to(root).as_posix()
+    for path in sorted((root / "crates/engine/src").rglob("*.rs"))
+    if legacy_key_pattern.search(path.read_text())
+]
 
 failures: list[str] = []
 resolution_source = (root / resolution_path).read_text()
