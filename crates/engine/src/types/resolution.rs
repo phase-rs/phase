@@ -4945,7 +4945,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_reader_recovers_draw_allocator_from_an_active_multi_draw_frame() {
+    fn v2_reader_honors_outer_draw_allocator_and_recovers_legacy_allocator_forms() {
         let mut state = GameState::new_two_player(139);
         let captured = state.push_draw_sequence_with_origin(
             PlayerId(0),
@@ -4953,16 +4953,89 @@ mod tests {
             HashSet::new(),
             DrawSequenceOrigin::Plain,
         );
-        let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
             .expect("v2 active draw fixture serializes");
-        v2["resolution_frames"]
+        let mut with_outer_allocator = v2.clone();
+        with_outer_allocator["resolution_frames"]["next_draw_sequence_frame_id"] = Value::from(99);
+        let restored_with_outer =
+            serde_json::from_value::<ResolutionStateWire>(with_outer_allocator)
+                .expect("v2 payload with an outer allocator restores")
+                .into_game_state();
+        assert_eq!(
+            restored_with_outer
+                .resolution_stack
+                .next_draw_sequence_frame_id(),
+            99,
+            "the shipped reader must honor an explicit outer allocator"
+        );
+        assert!(
+            restored_with_outer
+                .resolution_stack
+                .next_draw_sequence_frame_id()
+                >= restored_with_outer
+                    .active_multi_draw_frame()
+                    .expect("restored multi-draw frame remains active")
+                    .draw_sequences
+                    .next_frame_id(),
+            "every successful load leaves the stack allocator at or above the active frame allocator"
+        );
+
+        let mut stale_outer_allocator = v2.clone();
+        stale_outer_allocator["resolution_frames"]["next_draw_sequence_frame_id"] = Value::from(0);
+        let restored_stale_outer =
+            serde_json::from_value::<ResolutionStateWire>(stale_outer_allocator)
+                .expect("stale outer allocator is repaired from the active frame")
+                .into_game_state();
+        assert_eq!(
+            restored_stale_outer
+                .resolution_stack
+                .next_draw_sequence_frame_id(),
+            restored_stale_outer
+                .active_multi_draw_frame()
+                .expect("restored multi-draw frame remains active")
+                .draw_sequences
+                .next_frame_id(),
+            "the shipped reader clamps an explicit stale allocator to the active frame allocator"
+        );
+        assert!(
+            restored_stale_outer
+                .resolution_stack
+                .next_draw_sequence_frame_id()
+                >= restored_stale_outer
+                    .active_multi_draw_frame()
+                    .expect("restored multi-draw frame remains active")
+                    .draw_sequences
+                    .next_frame_id(),
+            "the shipped reader clamps an explicit stale allocator to the active frame allocator"
+        );
+
+        let mut without_outer_allocator = v2;
+        without_outer_allocator["resolution_frames"]
             .as_object_mut()
             .expect("resolution frames serialize as an object")
             .remove("next_draw_sequence_frame_id");
 
-        let mut restored = serde_json::from_value::<ResolutionStateWire>(v2)
+        let mut restored = serde_json::from_value::<ResolutionStateWire>(without_outer_allocator)
             .expect("older v2 active-draw payload restores")
             .into_game_state();
+        assert_eq!(
+            restored.resolution_stack.next_draw_sequence_frame_id(),
+            restored
+                .active_multi_draw_frame()
+                .expect("restored multi-draw frame remains active")
+                .draw_sequences
+                .next_frame_id(),
+            "a missing outer allocator recovers exactly from the active frame"
+        );
+        assert!(
+            restored.resolution_stack.next_draw_sequence_frame_id()
+                >= restored
+                    .active_multi_draw_frame()
+                    .expect("restored multi-draw frame remains active")
+                    .draw_sequences
+                    .next_frame_id(),
+            "missing outer allocator recovers from the active frame"
+        );
         restored.abandon_active_replacement_tails();
         let later = restored.push_draw_sequence_with_origin(
             PlayerId(0),
@@ -5303,7 +5376,72 @@ mod tests {
             serde_json::to_value(draw.draw_sequences).expect("draw serializes");
         ambiguous_legacy_pair["resolution_state_version"] =
             Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
-        assert!(serde_json::from_value::<ResolutionStateWire>(ambiguous_legacy_pair).is_err());
+        let error = serde_json::from_value::<ResolutionStateWire>(ambiguous_legacy_pair)
+            .expect_err("a ready resident drain is ambiguous beside a legacy multi-draw");
+        assert!(
+            error
+                .to_string()
+                .contains("ambiguous without a paused resident drain"),
+            "the translated paused-drain ambiguity must reject at the legacy converter"
+        );
+
+        let ResolutionFrame::MultiDraw(draw) = active_multi_draw_frame() else {
+            unreachable!("fixture constructs a multi-draw frame")
+        };
+        let draw_sequences =
+            serde_json::to_value(draw.draw_sequences).expect("draw sequences serialize");
+
+        let mut draw_with_life_tail =
+            serde_json::to_value(GameState::new_two_player(155)).expect("v1 serializes");
+        draw_with_life_tail["draw_sequences"] = draw_sequences.clone();
+        draw_with_life_tail["pending_life_total_assignment"] =
+            serde_json::to_value(PendingLifeTotalAssignment {
+                completion_player: PlayerId(0),
+                remaining: Vec::new(),
+                completion: None,
+            })
+            .expect("legacy life-total tail serializes");
+        draw_with_life_tail["resolution_state_version"] =
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let error = serde_json::from_value::<ResolutionStateWire>(draw_with_life_tail)
+            .expect_err("legacy draw state cannot be paired with an independent life-total tail");
+        assert!(
+            error.to_string().contains(
+                "legacy multi-draw state cannot have an independent life-total assignment or spell-resolution tail"
+            ),
+            "the legacy converter must reject the translated life-total ambiguity"
+        );
+
+        let mut draw_with_spell_tail =
+            serde_json::to_value(GameState::new_two_player(156)).expect("v1 serializes");
+        draw_with_spell_tail["draw_sequences"] = draw_sequences;
+        draw_with_spell_tail["pending_spell_resolution"] =
+            serde_json::to_value(PendingSpellResolution {
+                object_id: ObjectId(156),
+                controller: PlayerId(0),
+                casting_variant: CastingVariant::Normal,
+                cast_from_zone: None,
+                cast_controller: None,
+                cast_timing_permission: None,
+                spell_targets: Vec::new(),
+                actual_mana_spent: 0,
+                kickers_paid: Vec::new(),
+                additional_cost_payment_count: 0,
+                additional_cost_payments: Vec::new(),
+                convoked_creatures: Vec::new(),
+            })
+            .expect("legacy spell-resolution tail serializes");
+        draw_with_spell_tail["resolution_state_version"] =
+            Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let error = serde_json::from_value::<ResolutionStateWire>(draw_with_spell_tail).expect_err(
+            "legacy draw state cannot be paired with an independent spell-resolution tail",
+        );
+        assert!(
+            error.to_string().contains(
+                "legacy multi-draw state cannot have an independent life-total assignment or spell-resolution tail"
+            ),
+            "the legacy converter must reject the translated spell-resolution ambiguity"
+        );
 
         let mut duplicate_draw = ResolutionStack::default();
         duplicate_draw.push_inner(active_multi_draw_frame());
