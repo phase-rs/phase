@@ -23,6 +23,9 @@ export default defineConfig(({ mode }) => {
       __SHELL_REMOTE_ORIGIN__: JSON.stringify(
         envVar("SHELL_REMOTE_ORIGIN") || "https://phase-rs.dev",
       ),
+      __SHELL_PREVIEW_ORIGIN__: JSON.stringify(
+        envVar("SHELL_PREVIEW_ORIGIN") || "https://preview.phase-rs.dev",
+      ),
     },
   };
 });

@@ -12,6 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             migration::stash_legacy_storage,
+            migration::set_channel_preference,
             migration::take_legacy_storage,
             migration::confirm_legacy_import,
             migration::mark_remote_load_ok

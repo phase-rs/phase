@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Probar versión de desarrollo",
-      "tooltip": "Ejecuta la última versión de desarrollo — las cartas y correcciones más recientes llegan aquí antes de cada lanzamiento."
+      "tooltip": "Ejecuta la última versión de desarrollo — las cartas y correcciones más recientes llegan aquí antes de cada lanzamiento.",
+      "backCta": "Volver a la versión estable",
+      "backTooltip": "Volver a la versión de lanzamiento actual."
     },
     "coverage": {
       "title": "Abrir el panel de cobertura",

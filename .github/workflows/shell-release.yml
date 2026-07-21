@@ -354,14 +354,3 @@ jobs:
             artifacts/shell-tauri-macos/*.app.tar.gz
             artifacts/shell-tauri-windows/*.exe
             artifacts/update.json
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Upload updater manifest to R2
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          npx wrangler r2 object put "phase-rs-data/desktop/update.json" --file artifacts/update.json --remote --content-type application/json --cache-control "max-age=60, must-revalidate"

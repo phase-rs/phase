@@ -399,6 +399,12 @@
           "markdownDescription": "Allows first-party remote content to mark a successful remote load."
         },
         {
+          "description": "Allows first-party remote content to persist its selected channel.",
+          "type": "string",
+          "const": "allow-set-channel-preference",
+          "markdownDescription": "Allows first-party remote content to persist its selected channel."
+        },
+        {
           "description": "Allows the bundled bootstrap page to stage legacy storage.",
           "type": "string",
           "const": "allow-stash-legacy-storage",

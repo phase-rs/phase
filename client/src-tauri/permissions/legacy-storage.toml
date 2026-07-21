@@ -4,6 +4,11 @@ description = "Allows the bundled bootstrap page to stage legacy storage."
 commands.allow = ["stash_legacy_storage"]
 
 [[permission]]
+identifier = "allow-set-channel-preference"
+description = "Allows first-party remote content to persist its selected channel."
+commands.allow = ["set_channel_preference"]
+
+[[permission]]
 identifier = "allow-take-legacy-storage"
 description = "Allows first-party remote content to read staged legacy storage."
 commands.allow = ["take_legacy_storage"]

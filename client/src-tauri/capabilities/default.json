@@ -19,6 +19,7 @@
       "process:allow-exit",
       "process:allow-restart",
       "updater:default",
+      "allow-set-channel-preference",
       "allow-take-legacy-storage",
       "allow-confirm-legacy-import",
       "allow-mark-remote-load-ok"
