@@ -186,7 +186,8 @@ describe("WebSocketAdapter", () => {
           },
         }),
       );
-      const sentFrame = nativeSocket.send.mock.calls.at(-1)?.[0];
+      const calls = nativeSocket.send.mock.calls;
+      const sentFrame = calls[calls.length - 1]?.[0];
       expect(sentFrame).toContain('"seatIndex"');
       expect(sentFrame).toContain('"deckName"');
       expect(sentFrame).not.toContain('"seat_index"');
