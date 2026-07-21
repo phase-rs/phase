@@ -897,6 +897,7 @@ mod dromokas_command_spell_prevention;
 mod duggan_private_detective_punch;
 mod dynamic_x_cost_reduction;
 mod each_player_they_control_scope;
+mod edgar_markov_eminence_command_zone;
 mod elixir_gain_life_cards_shuffled;
 mod end_blaze_epiphany_choose_exiled_this_way;
 mod end_combat_phase;
