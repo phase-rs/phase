@@ -23,6 +23,7 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::card::TokenImageRef;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -297,6 +298,30 @@ pub struct DerivedViews {
     /// family. Empty (and omitted) in the dominant case where no loop is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unbounded_resources: Vec<UnboundedResourceView>,
+
+    /// CR 732.2a / CR 110.1: the battlefield objects forming an accepted
+    /// object-growth loop's "∞ pile" — the winning controller's tapped fodder-class
+    /// members (projected from `GameState::unbounded_loop_pile`, filtered to objects
+    /// still on the battlefield). A per-object membership channel mirroring
+    /// `battlefield_keyword_badges`: the frontend renders `∞` (not `×N`) on any
+    /// battlefield group whose members are all in this set. Public board state — no
+    /// viewer filtering. Empty (and omitted) when no object-growth loop is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbounded_pile: Vec<ObjectId>,
+
+    /// CR 732.2a / CR 701.34a: the per-object `∞` COUNTER channel — for each
+    /// battlefield object, the counter types whose preserved `Generic` counters an
+    /// accepted counter-growth loop (proliferate charge on Pentad Prism, burden on
+    /// The One Ring) pumps unboundedly (projected from
+    /// `GameState::unbounded_counter_targets`, filtered to objects still on the
+    /// battlefield). The counter analog of `unbounded_pile`: object-growth marks whole
+    /// objects, but a counter-growth loop's unbounded axis is object-agnostic, so this
+    /// keys the specific pumped counter so the frontend renders `∞` (not `×N`) on that
+    /// counter pill and nothing else. Keyed by ObjectId; DISPLAY-only (the real counter
+    /// count is unchanged). Public board state — no viewer filtering. Empty (and
+    /// omitted) when no counter-growth loop is active — the dominant case.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unbounded_counters: HashMap<ObjectId, Vec<CounterType>>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -547,6 +572,36 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                 player: attribution_player(axis, controller),
                 axis,
             });
+        }
+    }
+
+    // CR 732.2a / CR 110.1: project the accepted object-growth loop's ∞ pile — the
+    // winning controller's tapped fodder-class members — dropping any that have since
+    // left the battlefield (stale member). Public board state (no viewer filtering);
+    // the frontend renders `∞` on any group whose members are all pile members.
+    for ids in state.unbounded_loop_pile.values() {
+        for id in ids {
+            if state.battlefield.contains(id) {
+                views.unbounded_pile.push(*id);
+            }
+        }
+    }
+
+    // CR 732.2a / CR 701.34a: project the accepted counter-growth loop's per-object ∞
+    // counter targets — the objects whose PRESERVED Generic counters (charge / burden)
+    // the certified-unbounded loop pumps each cycle — dropping any that have since left
+    // the battlefield (stale member). Display-only per-object channel mirroring
+    // `unbounded_pile`; the frontend renders `∞` (not `×N`) on any counter pill whose
+    // type is in this set. Runs in every format (BEFORE the Commander short-circuit).
+    for targets in state.unbounded_counter_targets.values() {
+        for (id, ct) in targets {
+            if state.battlefield.contains(id) {
+                views
+                    .unbounded_counters
+                    .entry(*id)
+                    .or_default()
+                    .push(ct.clone());
+            }
         }
     }
 
@@ -2357,6 +2412,93 @@ mod tests {
         assert!(
             derive_views(&empty, None).unbounded_resources.is_empty(),
             "no unbounded loop → no ∞ rows (field omitted)"
+        );
+    }
+
+    /// DESIGN STEP 4 (∞-pile projection): `GameState::unbounded_loop_pile` projects into
+    /// `DerivedViews::unbounded_pile`, filtered to objects still on the battlefield — a
+    /// registered member that has since left is dropped (stale).
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → `unbounded_pile` is empty
+    /// → the two positive `contains` assertions fail.
+    #[test]
+    fn derive_views_projects_unbounded_pile() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        // A registered id that is NOT on the battlefield (already left) — must be dropped.
+        let gone = ObjectId(9999);
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([a, b, gone]));
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_pile.contains(&a),
+            "on-battlefield pile member projects"
+        );
+        assert!(
+            views.unbounded_pile.contains(&b),
+            "on-battlefield pile member projects"
+        );
+        assert!(
+            !views.unbounded_pile.contains(&gone),
+            "a member no longer on the battlefield is dropped (stale)"
+        );
+
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&empty, None).unbounded_pile.is_empty(),
+            "no object-growth loop → no pile (field omitted)"
+        );
+    }
+
+    /// DESIGN STEP 4 (serde wire shape + omission): `unbounded_pile` serializes through
+    /// `ClientGameStateRef` → JSON → `ClientGameState` as an ObjectId array, and the empty
+    /// case omits the key entirely (`skip_serializing_if = "Vec::is_empty"`).
+    #[test]
+    fn unbounded_pile_round_trip_through_wire() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([a]));
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            json.contains("unbounded_pile"),
+            "pile key present when non-empty"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            round.derived.unbounded_pile,
+            vec![a],
+            "the pile ObjectId survives the wire round-trip"
+        );
+
+        // Empty case: skip_serializing_if omits the key entirely.
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&empty, None))
+            .expect("serialize empty");
+        assert!(
+            !empty_json.contains("unbounded_pile"),
+            "empty pile → key omitted"
         );
     }
 

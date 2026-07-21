@@ -25,9 +25,19 @@ const PT_COLORS: Record<PTColor, string> = {
   white: "text-[#111]",
 };
 
+// Stable empty ref so the unbounded-counter selector returns the same value when
+// absent, avoiding a spurious re-render every state tick (mirrors PermanentCard).
+const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
+
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
+  // counter-growth loop) for this object. Same channel PermanentCard's full-card pill
+  // reads — both battlefield display modes must agree, or the ∞ silently drops in one.
+  const unboundedCounterTypes = useGameStore(
+    (s) => s.gameState?.derived?.unbounded_counters?.[String(objectId)] ?? EMPTY_UNBOUNDED_COUNTERS,
+  );
   const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
   const isCompactHeight = useIsCompactHeight();
@@ -199,16 +209,21 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               {/* Top-right overlay stack: counter badges kept clear of the
                   bottom P/T and loyalty badges. */}
               <div className="absolute top-0.5 right-0.5 z-[60] flex flex-col items-end gap-0.5">
-                {counters.map(([type, count]) => (
-                  <CounterTooltip key={type} type={type} count={count}>
-                    <span
-                      className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-                      style={counterStyle}
-                    >
-                      {count}
-                    </span>
-                  </CounterTooltip>
-                ))}
+                {counters.map(([type, count]) => {
+                  // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
+                  // counter unboundedly — render ∞ instead of the (still-finite) real count.
+                  const isUnbounded = unboundedCounterTypes.includes(type);
+                  return (
+                    <CounterTooltip key={type} type={type} count={count}>
+                      <span
+                        className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                        style={counterStyle}
+                      >
+                        {isUnbounded ? "∞" : count}
+                      </span>
+                    </CounterTooltip>
+                  );
+                })}
               </div>
 
               {hasDfc && (

@@ -1081,23 +1081,52 @@ pub(crate) fn apply_copiable_values_to_liminal_object(
     crate::game::printed_cards::install_copiable_values_as_base(object, values);
 }
 
+/// Commit ONE liminal copy-token to the battlefield WITHOUT driving the rest of
+/// the batch. Returns `false` if an ETB-counter replacement paused mid-commit (a
+/// `ContinueLiminalCopyTokenBatch` post-action was stashed to resume). The
+/// per-token batch loop in `apply_copy_token_after_replacement_with_created_ids`
+/// calls this and iterates, so minting N copies uses O(1) stack depth — the old
+/// commit->continue->apply recursion built one large `im::HashMap` COW frame per
+/// token. CR 707.2: shared by every liminal copy-token batch.
+pub(crate) fn commit_liminal_copy_token_entry(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, events)
+}
+
+fn commit_liminal_copy_token_entry_with_continuation(
+    state: &mut GameState,
+    event: ProposedEvent,
+    continuation: Option<LiminalCopyTokenContinuation>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let post_actions = continuation
+        .map(liminal_copy_token_continuation_post_action)
+        .into_iter()
+        .collect();
+    commit_liminal_token_entry_with_post_actions(
+        state,
+        event,
+        events,
+        TokenEntryEventEmission::Emit,
+        post_actions,
+    )
+}
+
 pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let continuation = liminal_copy_token_continuation_for_event(state, &event);
-    let post_actions = continuation
-        .clone()
-        .map(liminal_copy_token_continuation_post_action)
-        .into_iter()
-        .collect();
-    if !commit_liminal_token_entry_with_post_actions(
+    if !commit_liminal_copy_token_entry_with_continuation(
         state,
         event,
+        continuation.clone(),
         events,
-        TokenEntryEventEmission::Emit,
-        post_actions,
     ) {
         return false;
     }

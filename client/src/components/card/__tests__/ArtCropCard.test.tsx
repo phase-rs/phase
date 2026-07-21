@@ -293,4 +293,57 @@ describe("ArtCropCard", () => {
     expect(screen.getByRole("img", { name: "4" })).toHaveStyle({ position: "absolute", bottom: "-5px", left: "-5px" });
     expect(screen.getByText("/")).toBeInTheDocument();
   });
+
+  // CR 732.2a / CR 701.34a: art-crop is a SECOND battlefield display mode; the ∞-counter
+  // render must live here too or an accepted counter-growth loop silently shows its finite
+  // count in this mode (the exact missed-render-site bug this pair guards). Matched pair:
+  // marked ⇒ ∞ (not the count); unmarked ⇒ the count (not ∞) — reverting the render flip fails (1).
+  function pentadWithCharge(): GameObject {
+    return {
+      ...transformedPermanent(),
+      id: 101,
+      name: "Pentad Prism",
+      transformed: false,
+      back_face: null,
+      counters: { charge: 2 },
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: [] },
+    };
+  }
+
+  it("renders ∞ for a counter the engine marks unbounded (CR 732.2a art-crop mode)", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: { unbounded_counters: { [permanent.id]: ["charge"] } },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText("∞")).toBeInTheDocument();
+    // display-only: the real finite count is NOT shown when the loop is accepted.
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+  });
+
+  it("renders the finite count when the counter is NOT marked unbounded (discriminator)", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: { unbounded_counters: {} },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.queryByText("∞")).not.toBeInTheDocument();
+  });
 });

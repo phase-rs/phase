@@ -90,6 +90,7 @@ toml = "0.8"
 serde_json = "1"
 
 [dev-dependencies]
+flate2 = "1"
 engine = { path = ".", features = ["test-support"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
