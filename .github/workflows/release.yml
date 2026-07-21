@@ -71,6 +71,11 @@ jobs:
     # build, stranding the release). Raised to 60m for headroom — the ceiling
     # only bills the failure case, so a normal ~30m run still ends at ~30m.
     timeout-minutes: 60
+    outputs:
+      card_data_sha256: ${{ steps.card-data-hash.outputs.card_data_sha256 }}
+      card_data_hash16: ${{ steps.card-data-hash.outputs.hash }}
+      draft_pools_sha256: ${{ steps.card-data-hash.outputs.draft_pools_sha256 }}
+      draft_pools_hash16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     steps:
@@ -201,10 +206,18 @@ jobs:
         # `card-data-<hash>.json` URL baked into the JS bundle. Old browser
         # caches keep resolving their old hash even after a new release.
         run: |
-          HASH=$(sha256sum client/public/card-data.json | awk '{print substr($1, 1, 16)}')
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-          echo "filename=card-data-$HASH.json" >> "$GITHUB_OUTPUT"
-          cp client/public/card-data.json "client/public/card-data-$HASH.json"
+          CARD_DATA_SHA256=$(sha256sum client/public/card-data.json | awk '{print $1}')
+          CARD_DATA_HASH16=${CARD_DATA_SHA256:0:16}
+          DRAFT_POOLS_SHA256=$(sha256sum client/public/draft-pools.json | awk '{print $1}')
+          DRAFT_POOLS_HASH16=${DRAFT_POOLS_SHA256:0:16}
+          echo "card_data_sha256=$CARD_DATA_SHA256" >> "$GITHUB_OUTPUT"
+          echo "hash=$CARD_DATA_HASH16" >> "$GITHUB_OUTPUT"
+          echo "filename=card-data-$CARD_DATA_HASH16.json" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_sha256=$DRAFT_POOLS_SHA256" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_hash16=$DRAFT_POOLS_HASH16" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_filename=draft-pools-$DRAFT_POOLS_HASH16.json" >> "$GITHUB_OUTPUT"
+          cp client/public/card-data.json "client/public/card-data-$CARD_DATA_HASH16.json"
+          echo "Content-addressed data: card-data-$CARD_DATA_HASH16.json, draft-pools-$DRAFT_POOLS_HASH16.json"
 
       - name: Generate Scryfall data
         run: |
@@ -269,6 +282,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
+          DRAFT_POOLS_FILENAME: draft-pools-${{ steps.card-data-hash.outputs.draft_pools_hash16 }}.json
         run: |
           # The r2.dev public endpoint does NOT compress on the fly, so these
           # JSONs were served raw. Pre-compress with brotli and store
@@ -276,9 +290,8 @@ jobs:
           # fetch(), which decodes br transparently. q9: ~90% reduction at a
           # fraction of q11's CPU.
           #
-          # Compress into a temp dir, never client/public: card-data.json /
-          # draft-pools.json are re-read after this step and baked UNCOMPRESSED
-          # into the server image (loaded from disk).
+          # Compress into a temp dir, never client/public: content hashes and
+          # release data manifests are over the original uncompressed bytes.
           command -v brotli >/dev/null || { sudo apt-get update && sudo apt-get install -y brotli; }
           BRDIR="$(mktemp -d)"
 
@@ -286,6 +299,11 @@ jobs:
           # over the uncompressed file, so the URL stays a valid content key.
           brotli -q 9 -c "client/public/$CARD_DATA_FILENAME" > "$BRDIR/card-data.br"
           npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "$BRDIR/card-data.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
+
+          # Native/server manifests must pin draft pools to immutable content,
+          # while the mutable draft-pools.json remains in the shared-file loop.
+          brotli -q 9 -c client/public/draft-pools.json > "$BRDIR/draft-pools.br"
+          npx wrangler r2 object put "phase-rs-data/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
           while IFS= read -r f; do
@@ -300,6 +318,7 @@ jobs:
       - name: Verify R2 uploads landed
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
+          DRAFT_POOLS_FILENAME: draft-pools-${{ steps.card-data-hash.outputs.draft_pools_hash16 }}.json
         run: |
           BASE="https://data.phase-rs.dev"
           fail=0
@@ -320,6 +339,7 @@ jobs:
             fi
           }
           check "$CARD_DATA_FILENAME"
+          check "$DRAFT_POOLS_FILENAME"
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON.
@@ -359,24 +379,10 @@ jobs:
           path: client/dist
           retention-days: 90
 
-      - name: Upload card data artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: card-data
-          path: client/public/card-data.json
-          retention-days: 1
-
-      - name: Upload draft pools artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: draft-pools
-          path: client/public/draft-pools.json
-          retention-days: 1
-
   # ── Server binary compile (linux musl, shared) ──────────────────────────────
   # Compiles the static musl binary ONCE per release run. Consumed by both
   # build-server-image (prebuilt Docker image) and build-server's linux leg
-  # (release archive), so neither pays a redundant ~10min compile. Needs nothing
+  # (slim server asset), so neither pays a redundant ~10min compile. Needs nothing
   # the data pipeline produces, so it starts immediately.
   build-server-binary:
     name: Build Server Binary (linux)
@@ -387,6 +393,7 @@ jobs:
       contents: read
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      PHASE_CHANNEL: release
     steps:
       - uses: actions/checkout@v4
         with:
@@ -404,7 +411,7 @@ jobs:
 
       - name: Build phase-server (static musl)
         # No chmod here: upload-artifact strips the executable bit anyway; both
-        # consumers (image build, archive packaging) re-apply it.
+        # consumers (image build, slim-asset packaging) re-apply it.
         run: |
           cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
@@ -419,7 +426,7 @@ jobs:
 
   build-server-image:
     name: Build Server Image
-    needs: [resolve-release-ref, build-wasm, build-server-binary]
+    needs: [resolve-release-ref, build-server-binary]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -434,18 +441,6 @@ jobs:
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - name: Download card data
-        uses: actions/download-artifact@v4
-        with:
-          name: card-data
-          path: data
-
-      - name: Download draft pools
-        uses: actions/download-artifact@v4
-        with:
-          name: draft-pools
-          path: data
-
       - name: Download server binary
         uses: actions/download-artifact@v4
         with:
@@ -456,8 +451,6 @@ jobs:
         run: |
           test -s phase-server
           chmod +x phase-server
-          test -s data/card-data.json
-          test -s data/draft-pools.json
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -580,7 +573,7 @@ jobs:
 
   build-server:
     name: Build Server (${{ matrix.os }})
-    needs: [resolve-release-ref, build-wasm, build-server-binary]
+    needs: [resolve-release-ref, build-server-binary]
     runs-on: ${{ matrix.runner }}
     # The Windows leg ran ~33-34 min warm against a 35-min ceiling, so any cache
     # miss tripped the timeout and cancelled the release (a timed-out job reports
@@ -591,6 +584,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      PHASE_CHANNEL: release
     strategy:
       fail-fast: false
       matrix:
@@ -598,18 +592,15 @@ jobs:
           - os: linux
             runner: ubuntu-latest
             triple: x86_64-unknown-linux-musl
-            artifact: phase-server-linux-x86_64
-            archive_ext: tar.gz
+            extension: ""
           - os: macos
             runner: macos-latest
             triple: aarch64-apple-darwin
-            artifact: phase-server-macos-arm64
-            archive_ext: tar.gz
+            extension: ""
           - os: windows
             runner: windows-latest
             triple: x86_64-pc-windows-msvc
-            artifact: phase-server-windows-x86_64
-            archive_ext: zip
+            extension: .exe
     steps:
       - uses: actions/checkout@v4
         with:
@@ -634,55 +625,25 @@ jobs:
           name: server-binary-linux
           path: target/x86_64-unknown-linux-musl/server-release
 
-      - name: Download card data
-        uses: actions/download-artifact@v4
-        with:
-          name: card-data
-          path: staging/data
-
-      - name: Download draft pools
-        uses: actions/download-artifact@v4
-        with:
-          name: draft-pools
-          path: staging/data
-
-      - name: Package server archive (Unix)
+      - name: Prepare slim server binary (Unix)
         if: matrix.os != 'windows'
         run: |
-          TAG="$RELEASE_TAG"
-          mkdir -p staging
-          cp "target/${{ matrix.triple }}/server-release/phase-server" staging/
-          chmod +x staging/phase-server
-          cd staging
-          tar czf ../${{ matrix.artifact }}.tar.gz phase-server data/card-data.json data/draft-pools.json
+          cp "target/${{ matrix.triple }}/server-release/phase-server" "phase-server-slim-${{ matrix.triple }}"
+          chmod +x "phase-server-slim-${{ matrix.triple }}"
         shell: bash
 
-      - name: Package server archive (Windows)
+      - name: Prepare slim server binary (Windows)
         if: matrix.os == 'windows'
         run: |
-          $Tag = $env:RELEASE_TAG
-          Copy-Item "target/${{ matrix.triple }}/server-release/phase-server.exe" "staging/"
-          Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json","staging/data/draft-pools.json" -DestinationPath "${{ matrix.artifact }}.zip"
+          Copy-Item "target/${{ matrix.triple }}/server-release/phase-server.exe" "phase-server-slim-${{ matrix.triple }}.exe"
         shell: pwsh
 
-      - name: Generate checksum (Unix)
-        if: matrix.os != 'windows'
-        run: shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
-
-      - name: Generate checksum (Windows)
-        if: matrix.os == 'windows'
-        run: |
-          $hash = (Get-FileHash "${{ matrix.artifact }}.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  ${{ matrix.artifact }}.zip" | Out-File -Encoding utf8 "${{ matrix.artifact }}.zip.sha256"
-        shell: pwsh
-
-      - name: Upload server archive
+      - name: Upload slim server binary
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            ${{ matrix.artifact }}.${{ matrix.archive_ext }}
-            ${{ matrix.artifact }}.${{ matrix.archive_ext }}.sha256
+          name: phase-server-slim-${{ matrix.triple }}
+          path: phase-server-slim-${{ matrix.triple }}${{ matrix.extension }}
+          if-no-files-found: error
           retention-days: 90
 
   deploy-server:
@@ -756,10 +717,17 @@ jobs:
       needs.build-server.result == 'success' &&
       needs.build-server-image.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      CARD_DATA_SHA256: ${{ needs.build-wasm.outputs.card_data_sha256 }}
+      CARD_DATA_HASH16: ${{ needs.build-wasm.outputs.card_data_hash16 }}
+      DRAFT_POOLS_SHA256: ${{ needs.build-wasm.outputs.draft_pools_sha256 }}
+      DRAFT_POOLS_HASH16: ${{ needs.build-wasm.outputs.draft_pools_hash16 }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -770,6 +738,77 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Sign slim server artifacts and publish release data manifest
+        # Sign in this Ubuntu finisher so all three OS binaries use one trusted
+        # signing path. The versioned manifest is immutable; its final PUT is
+        # performed after its detached signature exists.
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+          WORKSPACE_VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { in_workspace_package = 0 }
+            in_workspace_package && /^version = "/ {
+              gsub(/version = "|"/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+          test -n "$WORKSPACE_VERSION"
+          test "$RELEASE_TAG" = "v$WORKSPACE_VERSION"
+
+          umask 077
+          key_file=$(mktemp)
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY" > "$key_file"
+
+          sign() {
+            printf '\n' | minisign -S -s "$key_file" -m "$1" -x "$1.minisig"
+          }
+
+          for triple in \
+            x86_64-unknown-linux-musl \
+            aarch64-apple-darwin \
+            x86_64-pc-windows-msvc; do
+            binary="artifacts/phase-server-slim-$triple/phase-server-slim-$triple"
+            if [ "$triple" = x86_64-pc-windows-msvc ]; then
+              binary="$binary.exe"
+            fi
+            test -s "$binary"
+            sign "$binary"
+          done
+
+          manifest="release-server-v$WORKSPACE_VERSION.json"
+          generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          jq -n \
+            --arg version "$WORKSPACE_VERSION" \
+            --arg generated_at "$generated_at" \
+            --arg card_data_sha256 "$CARD_DATA_SHA256" \
+            --arg card_data_url "https://data.phase-rs.dev/card-data-$CARD_DATA_HASH16.json" \
+            --arg draft_pools_sha256 "$DRAFT_POOLS_SHA256" \
+            --arg draft_pools_url "https://data.phase-rs.dev/draft-pools-$DRAFT_POOLS_HASH16.json" \
+            '{
+              schema: 1,
+              channel: "release",
+              version: $version,
+              generated_at: $generated_at,
+              data: [
+                {name: "card-data.json", sha256: $card_data_sha256, url: $card_data_url},
+                {name: "draft-pools.json", sha256: $draft_pools_sha256, url: $draft_pools_url}
+              ]
+            }' > "$manifest"
+          sign "$manifest"
+
+          npx wrangler r2 object put "phase-rs-data/desktop/$manifest.minisig" --file "$manifest.minisig" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
+          npx wrangler r2 object put "phase-rs-data/desktop/$manifest" --file "$manifest" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
 
       - name: Download shell updater migration bridge
         id: shell-updater-bridge
@@ -828,12 +867,14 @@ jobs:
           body_path: changelog.md
           fail_on_unmatched_files: true
           files: |
-            artifacts/phase-server-linux-x86_64/*.tar.gz
-            artifacts/phase-server-linux-x86_64/*.sha256
-            artifacts/phase-server-macos-arm64/*.tar.gz
-            artifacts/phase-server-macos-arm64/*.sha256
-            artifacts/phase-server-windows-x86_64/*.zip
-            artifacts/phase-server-windows-x86_64/*.sha256
+            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
+            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
+            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
+            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
+            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
+            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe.minisig
+            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json
+            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json.minisig
 
       - name: Attach shell updater migration bridge
         if: steps.shell-updater-bridge.outputs.available == 'true'
