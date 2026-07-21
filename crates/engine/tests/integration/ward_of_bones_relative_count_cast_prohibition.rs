@@ -209,12 +209,11 @@ fn more_enchantments_blocks_only_enchantment_spells() {
 }
 
 /// Boundary case: P1 controls the SAME number of creatures as P0 (1 vs 1), not
-/// STRICTLY more. CR 109.4's "more than" is a strict inequality
-/// (`Comparator::GT`); the prohibition must not fire on a tie. This is the one
-/// case the per-type tests above never probe (they only ever use a strict
-/// count difference), so it's the discriminating regression guard against the
-/// comparator silently regressing to `GE` (which would wrongly block casts
-/// whenever the counts are merely equal).
+/// STRICTLY more. "More than" is a strict inequality (`Comparator::GT`); the
+/// prohibition must not fire on a tie. This is the one case the per-type tests
+/// above never probe (they only ever use a strict count difference), so it's the
+/// discriminating regression guard against the comparator silently regressing to
+/// `GE` (which would wrongly block casts whenever the counts are merely equal).
 #[test]
 fn equal_creature_count_does_not_block_cast() {
     let mut scenario = GameScenario::new();
@@ -236,8 +235,8 @@ fn equal_creature_count_does_not_block_cast() {
     runner.state_mut().layers_dirty.mark_full();
     evaluate_layers(runner.state_mut());
 
-    // CR 109.4: equal counts are not "more than" → the prohibition must not
-    // apply. FAILS if `Comparator::GT` ever regresses to `GE`.
+    // Equal counts are not "more than" → the prohibition must not apply. FAILS
+    // if `Comparator::GT` ever regresses to `GE`.
     assert!(
         can_cast_object_now(runner.state(), P1, creature_spell),
         "P1 controls the SAME number of creatures as you (1 vs 1), not more → \

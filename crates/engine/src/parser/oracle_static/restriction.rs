@@ -982,8 +982,8 @@ pub(crate) fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDe
 /// - "Each opponent who controls more lands than you can't play lands." (Ward
 ///   of Bones, line 2) → `StaticMode::Other("CantPlayLand")`, `affected` =
 ///   opponents' player scope, `per_player_condition: QuantityComparison`
-///   (`controls_more_than_you_condition` — a relative permanent-count gate,
-///   CR 109.4, rather than a turn-activity predicate).
+///   (`controls_more_than_you_condition` — a relative permanent-count gate
+///   rather than a turn-activity predicate).
 ///
 /// Ward of Bones's OTHER clause ("controls more creatures than you can't cast
 /// creature spells. The same is true for artifacts and enchantments.") is NOT
