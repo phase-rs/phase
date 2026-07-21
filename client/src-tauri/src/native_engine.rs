@@ -563,10 +563,17 @@ fn stop_native_engine_sync(app: &AppHandle) -> Result<(), NativeEngineError> {
         })?;
     if let Some(running) = state.running.take() {
         stop_running_engine(running, &files);
-    } else if let Some(record) = read_spawn_record(&files)? {
-        kill_recorded_process_if_ours(&record, &files);
+        clear_spawn_record(&files)
+    } else {
+        // This process owns no engine, so leave the shared on-disk spawn
+        // record alone: it may describe another live instance's server
+        // (single-instance secondaries hard-exit inside plugin init today,
+        // but killing a process this instance did not spawn must never be
+        // exit-path behavior). A genuine orphan already self-terminates via
+        // `--exit-on-stdin-close` when its shell dies, and any stale record
+        // is resolved by the adopt-or-kill at the next ensure_native_engine.
+        Ok(())
     }
-    clear_spawn_record(&files)
 }
 
 fn http_client() -> Result<Client, NativeEngineError> {
