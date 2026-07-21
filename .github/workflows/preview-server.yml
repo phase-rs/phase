@@ -167,6 +167,9 @@ jobs:
     if: needs.gate.outputs.already_published != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    concurrency:
+      group: preview-server-manifest
+      cancel-in-progress: false
     env:
       FINGERPRINT: ${{ inputs.fingerprint }}
       COMMIT: ${{ inputs.commit }}
@@ -178,29 +181,63 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
     steps:
+      - name: Re-check manifest membership under publication lock
+        id: publication-gate
+        run: |
+          set -euo pipefail
+
+          manifest=$(mktemp)
+          trap 'rm -f "$manifest"' EXIT
+          status=$(curl -sS -o "$manifest" -w '%{http_code}' \
+            --connect-timeout 5 --max-time 30 \
+            https://data.phase-rs.dev/desktop/preview-server.json || true)
+          case "$status" in
+            200)
+              jq -e 'type == "object" and (.fingerprints | type == "object")' "$manifest" >/dev/null
+              if jq -e --arg fingerprint "$FINGERPRINT" '.fingerprints | has($fingerprint)' "$manifest" >/dev/null; then
+                echo "already_published=true" >> "$GITHUB_OUTPUT"
+                echo "Preview fingerprint $FINGERPRINT was published while this job waited for the publication lock."
+              else
+                echo "already_published=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            404)
+              echo "already_published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Could not fetch preview manifest after acquiring publication lock (HTTP ${status:-curl failure})."
+              exit 1
+              ;;
+          esac
+
       - uses: actions/setup-node@v4
+        if: steps.publication-gate.outputs.already_published != 'true'
         with:
           node-version: 22
 
       - name: Download Linux binary
+        if: steps.publication-gate.outputs.already_published != 'true'
         uses: actions/download-artifact@v4
         with:
           name: preview-server-x86_64-unknown-linux-musl
           path: artifacts/x86_64-unknown-linux-musl
 
       - name: Download macOS binary
+        if: steps.publication-gate.outputs.already_published != 'true'
         uses: actions/download-artifact@v4
         with:
           name: preview-server-aarch64-apple-darwin
           path: artifacts/aarch64-apple-darwin
 
       - name: Download Windows binary
+        if: steps.publication-gate.outputs.already_published != 'true'
         uses: actions/download-artifact@v4
         with:
           name: preview-server-x86_64-pc-windows-msvc
           path: artifacts/x86_64-pc-windows-msvc
 
       - name: Sign binaries, publish manifest, and garbage-collect old pairs
+        if: steps.publication-gate.outputs.already_published != 'true'
         # The manifest is written last: nothing refers to a binary until its
         # detached signature exists. R2 retention tracks exactly its current and
         # previous fingerprint entries.
@@ -255,6 +292,7 @@ jobs:
 
           manifest=preview-server.json
           generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # sha256 is over UNCOMPRESSED bytes; R2 serves these objects with Content-Encoding: br unconditionally — consumers MUST brotli-decode before hashing.
           jq -n \
             --slurpfile existing "$existing_manifest" \
             --arg fingerprint "$FINGERPRINT" \

@@ -788,6 +788,7 @@ jobs:
 
           manifest="release-server-v$WORKSPACE_VERSION.json"
           generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # sha256 is over UNCOMPRESSED bytes; R2 serves these objects with Content-Encoding: br unconditionally — consumers MUST brotli-decode before hashing.
           jq -n \
             --arg version "$WORKSPACE_VERSION" \
             --arg generated_at "$generated_at" \
