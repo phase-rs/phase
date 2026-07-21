@@ -2932,8 +2932,13 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::LoyaltyActivation { .. }
             )
         ),
+        // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
+        // opponent's Solemnity would prevent the counters) must still complete the
+        // parked activation instead of wedging, so `LoyaltyActivation` is eligible
+        // at the Prevented boundary as well.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -2946,6 +2951,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::DelveManaPayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::LoyaltyActivation { .. }
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -3007,6 +3013,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::ManaAbilityPayment { .. })
     ) {
         mana_abilities::resume_mana_ability_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::LoyaltyActivation { .. })
+    ) {
+        super::planeswalker::resume_loyalty_activation(state, events)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };

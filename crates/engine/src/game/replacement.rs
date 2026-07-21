@@ -5974,20 +5974,30 @@ fn object_replacement_candidate_applies(
         }
     }
     if let ProposedEvent::AddCounter { placement, .. } = event {
+        // CR 614.1a: `valid_player` is a *relative* scope; the subject axis selects
+        // whom it is relative to. Actor-scoped replacements (Vorinclex/Halving
+        // Season — "If you/an opponent would put …") compare against
+        // `CounterPlacement::actor` (who puts the counters), per the official
+        // Vorinclex ruling. Recipient-scoped replacements (the default) compare
+        // against the affected player / affected permanent's controller.
+        use crate::types::ability::CounterReplacementSubject;
         if placement.player_id().is_some() {
             // CR 614.1a: player-counter replacements require an explicit player scope.
             let Some(valid_player) = &repl_def.valid_player else {
                 return false;
             };
-            let affected_player = placement
-                .player_id()
-                .expect("CounterPlacement::player_id is Some for player counter events");
+            let scope_player = match repl_def.counter_replacement_subject {
+                CounterReplacementSubject::Actor => placement.actor(),
+                CounterReplacementSubject::Recipient => placement
+                    .player_id()
+                    .expect("CounterPlacement::player_id is Some for player counter events"),
+            };
             let player_ok = match valid_player {
                 crate::types::ability::ReplacementPlayerScope::Opponent => {
-                    affected_player != obj.controller
+                    scope_player != obj.controller
                 }
                 crate::types::ability::ReplacementPlayerScope::You => {
-                    affected_player == obj.controller
+                    scope_player == obj.controller
                 }
                 crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
             };
@@ -5996,7 +6006,11 @@ fn object_replacement_candidate_applies(
             }
         } else if let Some(valid_player) = &repl_def.valid_player {
             // CR 614.1a: quantity-modifying counter replacements may scope by
-            // the affected permanent's controller.
+            // the affected permanent's controller (recipient) or, for
+            // actor-scoped replacements, by the player putting the counters.
+            // The quantity-mod guard is preserved verbatim: a prevention
+            // replacement (Solemnity — no `quantity_modification`) still returns
+            // false here, matching pre-existing behavior.
             if !matches!(
                 repl_def.quantity_modification,
                 Some(
@@ -6011,16 +6025,21 @@ fn object_replacement_candidate_applies(
             let Some(object_id) = placement.object_id() else {
                 return false;
             };
-            let Some(affected_controller) = state.objects.get(&object_id).map(|o| o.controller)
-            else {
-                return false;
+            let scope_player = match repl_def.counter_replacement_subject {
+                CounterReplacementSubject::Actor => placement.actor(),
+                CounterReplacementSubject::Recipient => {
+                    match state.objects.get(&object_id).map(|o| o.controller) {
+                        Some(c) => c,
+                        None => return false,
+                    }
+                }
             };
             let player_ok = match valid_player {
                 crate::types::ability::ReplacementPlayerScope::Opponent => {
-                    affected_controller != obj.controller
+                    scope_player != obj.controller
                 }
                 crate::types::ability::ReplacementPlayerScope::You => {
-                    affected_controller == obj.controller
+                    scope_player == obj.controller
                 }
                 crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
             };

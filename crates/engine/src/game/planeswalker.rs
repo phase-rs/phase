@@ -1,6 +1,8 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingCast, PendingCostMoveResume, StackEntry, StackEntryKind, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -393,12 +395,42 @@ fn finalize_loyalty_activation(
     match super::casting::pay_ability_cost_for_activation(state, player, pw_id, &cost, None, events)
         .expect("loyalty validation passed in handle_activate_loyalty")
     {
-        super::casting::PaymentOutcome::Paid => {}
-        super::casting::PaymentOutcome::Paused { .. }
-        | super::casting::PaymentOutcome::Failed { .. } => {
-            unreachable!("a loyalty cost cannot pause on a self zone move")
+        super::casting::PaymentOutcome::Paid => {
+            complete_loyalty_activation(state, player, pw_id, resolved, ability_index, events)
+        }
+        // CR 606.4 + CR 614.1a + CR 616.1: a count-modifying counter replacement
+        // (Doubling Season vs an opponent's Vorinclex) can require a CR 616.1
+        // ordering choice while the loyalty counters are placed. Park the
+        // activation tail and surface the replacement prompt the payment already
+        // set on `state.waiting_for`; the tail runs once the choice is settled.
+        super::casting::PaymentOutcome::Paused { .. } => {
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::LoyaltyActivation {
+                player,
+                pw_id,
+                resolved: Box::new(resolved),
+                ability_index,
+            });
+            state.waiting_for.clone()
+        }
+        super::casting::PaymentOutcome::Failed { .. } => {
+            unreachable!("loyalty cost cannot fail after can_activate_loyalty_ability passed")
         }
     }
+}
+
+/// CR 606.4 / CR 606.5: Post-payment tail of a loyalty activation — records the
+/// activation, emits targeting events, pushes the ability onto the stack, and
+/// returns Priority. Single authority for the tail: reached either directly (cost
+/// `Paid`) or via [`resume_loyalty_activation`] after a paused counter-replacement
+/// ordering choice. Never re-pays the loyalty cost.
+fn complete_loyalty_activation(
+    state: &mut GameState,
+    player: PlayerId,
+    pw_id: ObjectId,
+    resolved: ResolvedAbility,
+    ability_index: usize,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
     record_loyalty_activation(state, pw_id, player);
 
     let assigned_targets = flatten_targets_in_chain(&resolved);
@@ -437,6 +469,33 @@ fn finalize_loyalty_activation(
     priority::clear_priority_passes(state);
 
     WaitingFor::Priority { player }
+}
+
+/// CR 606.4 + CR 616.1: Resume a loyalty activation parked while its loyalty
+/// counter cost waited on a replacement ordering choice. The counter has already
+/// been applied by the replacement pipeline; only the activation tail remains, so
+/// this dispatches straight to [`complete_loyalty_activation`] without re-paying.
+pub(crate) fn resume_loyalty_activation(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::LoyaltyActivation {
+        player,
+        pw_id,
+        resolved,
+        ability_index,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("loyalty-activation resume requires its typed continuation")
+    };
+    Ok(complete_loyalty_activation(
+        state,
+        player,
+        pw_id,
+        *resolved,
+        ability_index,
+        events,
+    ))
 }
 
 #[cfg(test)]

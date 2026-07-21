@@ -4777,6 +4777,194 @@ mod tests {
         );
     }
 
+    /// CR 614.1a: No-regression guard for the actor/recipient subject axis. A
+    /// Doubling-Season-class doubler (`valid_card: SelfRef`, no `valid_player`,
+    /// default `Recipient` subject) must fire regardless of *who* puts the
+    /// counters — the recipient axis is orthogonal to the actor. Hostile
+    /// fixture: an opponent (P1) is the actor placing counters on a permanent
+    /// carrying the doubler, and the counters still double. This must stay green
+    /// both before and after the Vorinclex actor-scope change.
+    #[test]
+    fn selfref_doubler_fires_regardless_of_counter_actor() {
+        use crate::types::ability::{
+            CounterReplacementSubject, QuantityModification, ReplacementDefinition, TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+        repl.valid_card = Some(TargetFilter::SelfRef);
+        repl.quantity_modification = Some(QuantityModification::DOUBLE);
+        assert_eq!(
+            repl.counter_replacement_subject,
+            CounterReplacementSubject::Recipient,
+            "a hand-built AddCounter replacement must default to Recipient subject"
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .replacement_definitions
+            .push(repl);
+
+        let mut events = Vec::new();
+        // Hostile: the OPPONENT (P1) is the actor putting the counters on P0's
+        // permanent. A recipient-scoped doubler must still apply.
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(1),
+            obj_id,
+            CounterType::Plus1Plus1,
+            2,
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&obj_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(4),
+            "recipient-scoped SelfRef doubler must double regardless of the actor"
+        );
+    }
+
+    /// CR 614.1a: THE discriminating test for the actor-vs-recipient subject
+    /// axis (Step 3 runtime scoping). Vorinclex's "If you would put …, put twice
+    /// that many" doubles the counters *you* put — even on a permanent an
+    /// opponent controls (official Vorinclex, Monstrous Raider ruling). This is
+    /// the only configuration where the axis is observable: the actor (P0)
+    /// differs from the recipient's controller (P1).
+    ///
+    /// Revert-failing assertion: with `subject = Actor`, the doubler compares the
+    /// actor (P0) to Vorinclex's controller (P0) → `You` matches → doubles → 4.
+    /// Reverting to `Recipient` would compare the recipient's controller (P1) to
+    /// P0 → `You` fails → no doubling → 2.
+    #[test]
+    fn actor_scoped_doubler_applies_when_actor_differs_from_recipient() {
+        use crate::types::ability::{
+            CounterReplacementSubject, QuantityModification, ReplacementDefinition,
+            ReplacementPlayerScope, TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        // P0 controls Vorinclex: doubles the counters P0 puts, anywhere.
+        let vorinclex = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vorinclex".to_string(),
+            Zone::Battlefield,
+        );
+        let mut doubling = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Any)
+            .quantity_modification(QuantityModification::DOUBLE)
+            .counter_subject(CounterReplacementSubject::Actor);
+        doubling.valid_player = Some(ReplacementPlayerScope::You);
+        state
+            .objects
+            .get_mut(&vorinclex)
+            .unwrap()
+            .replacement_definitions
+            .push(doubling);
+
+        // P1's creature receives the counters; P0 is the actor placing them.
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0), // actor = P0 (Vorinclex's controller)
+            opp_creature,
+            CounterType::Plus1Plus1,
+            2,
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&opp_creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(4),
+            "actor-scoped You doubler must double counters P0 puts, even on P1's creature \
+             (reverting subject to Recipient scopes by P1 and yields 2)"
+        );
+    }
+
+    /// CR 614.1a: Negative sibling — an opponent (P1) putting counters on their
+    /// own creature is NOT doubled by P0's `You`-scoped Vorinclex, because the
+    /// actor (P1) is not "you" relative to Vorinclex's controller (P0).
+    #[test]
+    fn actor_scoped_you_doubler_ignores_opponent_actor() {
+        use crate::types::ability::{
+            CounterReplacementSubject, QuantityModification, ReplacementDefinition,
+            ReplacementPlayerScope, TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let vorinclex = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vorinclex".to_string(),
+            Zone::Battlefield,
+        );
+        let mut doubling = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Any)
+            .quantity_modification(QuantityModification::DOUBLE)
+            .counter_subject(CounterReplacementSubject::Actor);
+        doubling.valid_player = Some(ReplacementPlayerScope::You);
+        state
+            .objects
+            .get_mut(&vorinclex)
+            .unwrap()
+            .replacement_definitions
+            .push(doubling);
+
+        let p1_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(1), // actor = P1 (an opponent of Vorinclex's controller)
+            p1_creature,
+            CounterType::Plus1Plus1,
+            2,
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&p1_creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "a You-scoped doubler must not double the opponent's own counter placement"
+        );
+    }
+
     /// CR 614.6 + CR 614.7 + CR 122.1: Melira's Keepers class — a permanent
     /// carrying a self-targeted `AddCounter` replacement with
     /// `QuantityModification::Prevent` must fully suppress incoming

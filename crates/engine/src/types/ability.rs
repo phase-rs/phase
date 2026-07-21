@@ -19822,6 +19822,26 @@ pub enum ReplacementPlayerScope {
     AnyPlayer,
 }
 
+/// CR 614.1a: For `AddCounter` replacements, which player `valid_player` refers
+/// to. Vorinclex/Halving Season scope by the player *putting* the counters
+/// (`Actor`, per the official Vorinclex ruling). Every other counter replacement
+/// — prevention (Solemnity) and affected-controller doublers gated through
+/// `valid_card` (Doubling Season) — scopes by the recipient.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CounterReplacementSubject {
+    /// `valid_player` matches the affected player / affected permanent's controller.
+    #[default]
+    Recipient,
+    /// `valid_player` matches `CounterPlacement::actor` (who puts the counters).
+    Actor,
+}
+
+impl CounterReplacementSubject {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Recipient)
+    }
+}
+
 /// Whether a replacement effect is mandatory or offers the affected player a choice.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20039,6 +20059,12 @@ pub struct ReplacementDefinition {
     /// as before (every object-attached replacement; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 614.1a: For `AddCounter` replacements, whether `valid_player` scopes by
+    /// the counter *recipient* (default — prevention/affected-controller doublers)
+    /// or by the *actor* putting the counters (Vorinclex/Halving Season, per the
+    /// official Vorinclex ruling). Ignored by every non-`AddCounter` event.
+    #[serde(default, skip_serializing_if = "CounterReplacementSubject::is_default")]
+    pub counter_replacement_subject: CounterReplacementSubject,
 }
 
 impl ReplacementDefinition {
@@ -20138,6 +20164,7 @@ impl ReplacementDefinition {
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         }
     }
 
@@ -20283,6 +20310,13 @@ impl ReplacementDefinition {
 
     pub fn mana_replacement_scope(mut self, scope: ManaReplacementScope) -> Self {
         self.mana_replacement_scope = scope;
+        self
+    }
+
+    /// CR 614.1a: Set the counter-replacement subject axis (actor vs recipient)
+    /// for `AddCounter` replacements (Vorinclex/Halving Season → `Actor`).
+    pub fn counter_subject(mut self, subject: CounterReplacementSubject) -> Self {
+        self.counter_replacement_subject = subject;
         self
     }
 

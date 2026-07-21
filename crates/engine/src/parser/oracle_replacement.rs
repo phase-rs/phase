@@ -34,13 +34,14 @@ use super::oracle_util::{
 use crate::types::ability::CastingPermission;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
-    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
-    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaModification,
-    ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
-    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit,
+    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
+    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope, FilterProp,
+    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
+    PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -8872,10 +8873,22 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     if let Some(valid_card) = parse_counter_replacement_valid_card(lower) {
         def = def.valid_card(valid_card);
     }
+    // CR 614.1a: Vorinclex/Halving Season count doublers-and-halvers scope by the
+    // player *putting* the counters (the actor), per the official Vorinclex ruling
+    // — distinct from prevention/affected-controller doublers (Doubling Season)
+    // that scope by the recipient and gate via `valid_card`. Mark these actor-scoped
+    // so the runtime compares `valid_player` against `CounterPlacement::actor`.
     if nom_primitives::scan_contains(lower, "an opponent would put")
         || nom_primitives::scan_contains(lower, "opponent would put")
     {
         def.valid_player = Some(ReplacementPlayerScope::Opponent);
+        def.counter_replacement_subject = CounterReplacementSubject::Actor;
+    } else if nom_primitives::scan_contains(lower, "a player would put") {
+        def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        def.counter_replacement_subject = CounterReplacementSubject::Actor;
+    } else if nom_primitives::scan_contains(lower, "you would put") {
+        def.valid_player = Some(ReplacementPlayerScope::You);
+        def.counter_replacement_subject = CounterReplacementSubject::Actor;
     }
 
     // CR 122.1a + CR 614.1a: When the Oracle text names a specific counter type
@@ -19841,6 +19854,73 @@ mod tests {
         assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
         assert_eq!(def.valid_card, None);
+    }
+
+    /// CR 614.1a: Vorinclex's "If you would put …" doubling clause scopes by the
+    /// player putting the counters (the actor), not the recipient — so the
+    /// parser must mark it `CounterReplacementSubject::Actor` with a `You`
+    /// player scope, per the official Vorinclex ruling.
+    #[test]
+    fn vorinclex_you_doubling_clause_is_actor_scoped() {
+        let def = parse_replacement_line(
+            "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+            "Vorinclex, Monstrous Raider",
+        )
+        .expect("Vorinclex doubling clause must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Actor,
+            "\"you would put\" scopes by the counter actor, not the recipient"
+        );
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(def.valid_card, None);
+    }
+
+    /// CR 614.1a: Vorinclex's "If an opponent would put …" halving clause is
+    /// actor-scoped with an `Opponent` player scope.
+    #[test]
+    fn vorinclex_opponent_halving_clause_is_actor_scoped() {
+        let def = parse_replacement_line(
+            "If an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.",
+            "Vorinclex, Monstrous Raider",
+        )
+        .expect("Vorinclex halving clause must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Actor,
+            "\"an opponent would put\" scopes by the counter actor"
+        );
+        assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
+    }
+
+    /// CR 614.1a: Negative sibling — Doubling Season's "an effect would put …
+    /// on a permanent you control" gates through `valid_card`, so it must stay
+    /// `None` player-scope with the default `Recipient` subject. This proves the
+    /// new actor arms don't over-capture recipient-scoped doublers.
+    #[test]
+    fn doubling_season_you_control_stays_recipient_scoped() {
+        let def = parse_replacement_line(
+            "If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
+            "Doubling Season",
+        )
+        .expect("Doubling Season must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.valid_player, None,
+            "\"a permanent you control\" is a valid_card gate, not a player scope"
+        );
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Recipient,
+            "recipient-scoped doublers must not be marked actor-scoped"
+        );
     }
 
     #[test]

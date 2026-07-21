@@ -5717,6 +5717,17 @@ pub enum PendingCostMoveResume {
         pending: Box<PendingManaAbility>,
         cursor: ManaAbilityCostCursor,
     },
+    /// CR 606.4 + CR 614.1a + CR 616.1: A loyalty activation paused on a
+    /// counter-cost replacement-ordering choice (e.g. Doubling Season vs an
+    /// opponent's Vorinclex halving the loyalty counters). The counter is
+    /// applied by the replacement pipeline before resume; the tail only
+    /// finishes the activation (pushes the ability, records the activation).
+    LoyaltyActivation {
+        player: PlayerId,
+        pw_id: ObjectId,
+        resolved: Box<ResolvedAbility>,
+        ability_index: usize,
+    },
 }
 
 /// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement
