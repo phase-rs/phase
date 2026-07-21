@@ -426,10 +426,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     for (i, override_diff) in seat_difficulty.iter().enumerate() {
         let seat_diff = override_diff.unwrap_or(difficulty);
         println!("  P{i}  difficulty={seat_diff:?}");
-        ai_configs.insert(
-            PlayerId(i as u8),
-            create_config_for_players(seat_diff, Platform::Native, 4),
-        );
+        ai_configs.insert(PlayerId(i as u8), build_seat_config(seat_diff, seed));
     }
     println!();
 
@@ -874,6 +871,35 @@ fn build_game_state(db: &CardDatabase, payload: &DeckPayload, seed: u64) -> Game
     state
 }
 
+/// Builds one seat's `AiConfig` for a single game. Single authority for this
+/// bin's per-seat AI configuration — `play_one_game` calls it once per seat and
+/// the regression test below asserts its one load-bearing invariant.
+///
+/// EVERY seat runs in MEASUREMENT mode (`AiConfig::into_measurement`), which
+/// disables the wall-clock search deadline (`AI_SEARCH_TIME_BUDGET_MS`, default
+/// 1500ms) so search is bounded SOLELY by `max_nodes`/`max_depth`. This is
+/// required for reproducibility, not a benchmarking nicety: an interactive
+/// (wall-clock-bounded) search truncates to a degraded best-so-far result the
+/// moment `Deadline::expired()` fires, and whether it fires on a given decision
+/// depends on how fast the process happens to be running at that instant — NOT
+/// on `(seed, difficulty, feed)`. A `--games-file` batch process is measurably
+/// slower on its Nth game (warmer allocator, more resident state) than a fresh
+/// single-game process, so the SAME game played 3rd in a batch could expire the
+/// deadline on a mid-game decision that the solo run completed in full, pick a
+/// different move, and diverge — the exact cross-game non-determinism the
+/// pod-lab equivalence gate caught (a game that wins solo stalling at turn 60 in
+/// batch). Measurement mode makes every decision a pure function of the game's
+/// inputs, so batch game N is bit-identical to the same game run solo. This
+/// mirrors the established `duel_suite::run` batch harness, which builds its
+/// config with `.into_measurement(seed)` for the same "eliminate wall-clock
+/// flake" reason. `seed` is the per-game seed, itself fully determined by the
+/// game's inputs; the value inside `ExecutionMode::Measurement { seed }` only
+/// tags the mode — the search's determinization entropy is derived from game
+/// state (`search.rs`), not from this seed.
+fn build_seat_config(difficulty: AiDifficulty, seed: u64) -> AiConfig {
+    create_config_for_players(difficulty, Platform::Native, 4).into_measurement(seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,6 +1014,39 @@ mod tests {
             !actions.is_empty(),
             "NamedChoice{{CardName}} must yield candidates once all_card_names is populated"
         );
+    }
+
+    /// Regression for the cross-game state-leakage defect (pod-lab equivalence
+    /// gate; PR phase-rs/phase#6252): a game that won solo stalled at turn 60
+    /// when played 3rd in a `--games-file` batch. Root cause was NOT a leaked
+    /// counter/cache but the interactive wall-clock search deadline
+    /// (`AI_SEARCH_TIME_BUDGET_MS`): a slower Nth-in-batch process expired it on
+    /// a mid-game decision the fresh solo process completed, diverging the game.
+    /// `build_seat_config` fixes this by running every seat in MEASUREMENT mode,
+    /// which disables the wall-clock deadline (search bounded solely by
+    /// node/depth — see `search.rs` / `planner::PlannerServices::with_deadline`,
+    /// both gated on `execution_mode.is_measurement()`), making each decision a
+    /// pure function of the game's inputs. This asserts the invariant
+    /// deterministically (no card-data / no real game needed): against the
+    /// unfixed code (`ExecutionMode::Interactive`) it fails, catching any future
+    /// regression that drops measurement mode and reintroduces wall-clock flake.
+    #[test]
+    fn seat_config_runs_in_measurement_mode_for_batch_reproducibility() {
+        for difficulty in [
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+        ] {
+            let config = build_seat_config(difficulty, 95_000_004);
+            assert!(
+                config.execution_mode.is_measurement(),
+                "{difficulty:?} seat must run in measurement mode so a batched \
+                 game is bit-identical to the same game run solo; interactive \
+                 mode makes search wall-clock-dependent and non-reproducible \
+                 under batch load"
+            );
+        }
     }
 
     #[test]
