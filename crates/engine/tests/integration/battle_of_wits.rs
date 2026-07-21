@@ -181,11 +181,24 @@ fn battle_of_wits_rechecks_library_count_on_resolution() {
         "precondition: the 200-card condition enqueued the trigger"
     );
 
-    let moved_card = runner.state().players[0].library[0];
+    let moved_card = runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.id == P0)
+        .expect("controller exists")
+        .library[0];
     let mut events = Vec::new();
     move_to_zone(runner.state_mut(), moved_card, Zone::Hand, &mut events);
     assert_eq!(
-        runner.state().players[0].library.len(),
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|player| player.id == P0)
+            .expect("controller exists")
+            .library
+            .len(),
         199,
         "production zone movement must make the resolution-time condition false"
     );
