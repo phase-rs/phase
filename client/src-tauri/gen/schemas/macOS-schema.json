@@ -393,6 +393,12 @@
           "markdownDescription": "Allows first-party remote content to confirm legacy storage import."
         },
         {
+          "description": "Allows first-party remote content to prepare a signed native engine for a typed channel key.",
+          "type": "string",
+          "const": "allow-ensure-native-engine",
+          "markdownDescription": "Allows first-party remote content to prepare a signed native engine for a typed channel key."
+        },
+        {
           "description": "Allows first-party remote content to mark a successful remote load.",
           "type": "string",
           "const": "allow-mark-remote-load-ok",
@@ -409,6 +415,12 @@
           "type": "string",
           "const": "allow-stash-legacy-storage",
           "markdownDescription": "Allows the bundled bootstrap page to stage legacy storage."
+        },
+        {
+          "description": "Allows first-party remote content to stop the shell-owned native engine.",
+          "type": "string",
+          "const": "allow-stop-native-engine",
+          "markdownDescription": "Allows first-party remote content to stop the shell-owned native engine."
         },
         {
           "description": "Allows first-party remote content to read staged legacy storage.",

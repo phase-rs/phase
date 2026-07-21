@@ -22,3 +22,13 @@ commands.allow = ["confirm_legacy_import"]
 identifier = "allow-mark-remote-load-ok"
 description = "Allows first-party remote content to mark a successful remote load."
 commands.allow = ["mark_remote_load_ok"]
+
+[[permission]]
+identifier = "allow-ensure-native-engine"
+description = "Allows first-party remote content to prepare a signed native engine for a typed channel key."
+commands.allow = ["ensure_native_engine"]
+
+[[permission]]
+identifier = "allow-stop-native-engine"
+description = "Allows first-party remote content to stop the shell-owned native engine."
+commands.allow = ["stop_native_engine"]

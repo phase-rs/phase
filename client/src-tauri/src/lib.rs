@@ -1,21 +1,26 @@
-use tauri::WebviewWindowBuilder;
-// `Manager` is only needed for `app.path()` in the Windows-gated block below.
-#[cfg(target_os = "windows")]
-use tauri::Manager;
+use tauri::{Manager, WebviewWindowBuilder};
 
 mod migration;
+mod native_engine;
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             migration::stash_legacy_storage,
             migration::set_channel_preference,
             migration::take_legacy_storage,
             migration::confirm_legacy_import,
-            migration::mark_remote_load_ok
+            migration::mark_remote_load_ok,
+            native_engine::ensure_native_engine,
+            native_engine::stop_native_engine
         ])
         .setup(|app| {
             // `create: false` on the "main" window in tauri.conf.json defers
@@ -44,8 +49,13 @@ pub fn run() {
             builder.build()?;
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running phase.rs");
+    app.run(|app, event| {
+        if let tauri::RunEvent::Exit = event {
+            native_engine::stop_native_engine_on_exit(app);
+        }
+    });
 }
 
 #[cfg(test)]
